@@ -32,7 +32,8 @@ use std::{collections::HashSet, path::PathBuf, time::Duration};
 use crate::{events::*, publish::*, queue::*, sessions::*};
 
 /// What a refused resume says: the conditions `can_resume` checks, phrased for the user.
-pub(crate) const RESUME_CONFLICT: &str = "this colony can't be resumed: it has to be stopped and still have its worktree";
+pub(crate) const RESUME_CONFLICT: &str =
+    "this colony can't be resumed: it has to be stopped or parked and still have its worktree";
 
 /// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node,
 /// and takes the path policy's empty placeholders back out of the kept worktree: they were only
@@ -168,6 +169,26 @@ pub async fn recover(app: &Shared) {
             })
             .await;
             app.note_cleared_attention(&fresh.id, attention).await;
+            continue;
+        }
+        // A parked colony (issue #213) is nobody's to flip: not live, so the branches below skip it,
+        // and that is right — a park that kept its microVM (`parked.vm_kept`) must find it still
+        // running after a restart, unconnected but alive, for a later warm resume. One thing is this
+        // pass's to do: a park that says the microVM should be gone (`vm_kept: false`) but whose
+        // `colonizer-<id>` sandbox is still in `msb ls` — the crash the park's ordering exists to
+        // bound, a kill between the park record and the teardown. No watchdog watches a non-live
+        // colony, so startup is the only chance; removing it is idempotent with the teardown that
+        // already ran.
+        if fresh.status == SessionStatus::Parked {
+            if fresh.parked.as_ref().is_some_and(|p| !p.vm_kept) && running.contains(&fresh.sandbox) {
+                app.session_log(
+                    &fresh.id,
+                    "warn",
+                    "startup: removing the microVM a park left behind; the park record says it was already torn down".into(),
+                )
+                .await;
+                teardown_vm(app, &fresh).await;
+            }
             continue;
         }
         if !s.status.is_live() {
@@ -440,6 +461,108 @@ async fn stop_colony_with(
     claimed
 }
 
+/// The one way the host parks a colony on its own decision (issue #213): the provider's quota ran
+/// out (events.rs), or the colony's autopilot hold outlived its slot (queue.rs). Parking is not
+/// stopping: the status goes to `parked` with a [`Park`] record first — reason, upstream reset
+/// time, whether the microVM was kept — persisted before anything is torn down, so a crash half
+/// way leaves a Parked record whose microVM is still up rather than the reverse. The attention
+/// flag the cockpit's banner reads is stamped in the same claim, so a park and its reason cannot
+/// come apart. When the `resume` module's `discard_vm` is on (the default) the microVM is then
+/// removed — but only after the worktree was verified readable by git, since that worktree may be
+/// the only copy of the colony's unpushed work; when it cannot be verified, or the operator turned
+/// `discard_vm` off, the microVM keeps running (agent idle, slot released) and the record says so.
+/// The claim runs under the colony's lifecycle lock — the discipline of every stop, so a resume
+/// waits for the teardown instead of booting a microVM the in-flight removal takes with it.
+/// Returns whether this call did the parking.
+pub(crate) async fn park_colony(
+    app: &Shared,
+    s: &Session,
+    reason: &str,
+    resets_at: Option<String>,
+    error: String,
+    warn: String,
+) -> bool {
+    let modules = app.modules.read().await.clone();
+    let mut discard = orgs::discard_vm(&modules);
+    let mut why_kept = String::new();
+    if discard && let Err(problem) = worktree_readable(app, s).await {
+        // No verified worktree to leave the work in: the microVM is the only copy now.
+        discard = false;
+        why_kept = format!("the worktree could not be verified ({problem}), so the microVM is kept");
+        app.session_log(&s.id, "warn", format!("park: {why_kept}")).await;
+    }
+    let vm_kept = !discard;
+    let lifecycle = app.session_lock(&s.id).await;
+    let _lifecycle = lifecycle.lock().await;
+    let claimed = app
+        .update_session(&s.id, |x| {
+            // Callers filter their own candidates before calling, so only the still-live re-check
+            // stands between a concurrent claim and this park.
+            let due = x.status.is_live();
+            if due {
+                x.status = SessionStatus::Parked;
+                x.error = Some(error);
+                x.parked = Some(Park {
+                    at: Utc::now(),
+                    reason: reason.into(),
+                    resets_at: resets_at.clone(),
+                    vm_kept,
+                });
+                x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
+                // Parked by the host ends the wait outright, as a stop does: the held answer and
+                // the suspension belong to a runner this park is taking down or leaving idle, and
+                // a park is not a question's rest state (issue #562's rule, issue #213's case).
+                x.suspended = None;
+                x.pending_answer = None;
+            }
+            due
+        })
+        .await
+        .is_some_and(|(_, due)| due);
+    if !claimed {
+        return false;
+    }
+    app.session_log(&s.id, "warn", warn).await;
+    // The issue claim and the queue see the park the same way they see a stop.
+    if let Some(s) = app.session(&s.id).await {
+        crate::claims::spawn_release_if_needed(app.clone(), &s);
+    }
+    if vm_kept {
+        let setting = if orgs::discard_vm(&modules) {
+            why_kept
+        } else {
+            "the resume module's discard_vm is off".into()
+        };
+        app.session_log(
+            &s.id,
+            "info",
+            format!("park: the microVM stays running ({setting}); its slot is released, and resume is warm"),
+        )
+        .await;
+    } else {
+        teardown_vm(app, s).await;
+    }
+    true
+}
+
+/// Whether the colony's worktree is there and git can read it — the check a discarding park runs
+/// before removing the microVM, because the worktree bind-mounted into that microVM is the only
+/// copy of the colony's unpushed work. `Err` names what defeated the check, when anything did.
+async fn worktree_readable(app: &App, s: &Session) -> Result<(), String> {
+    let Some(admin) = s.git_admin_dir.as_deref() else {
+        return Err("the colony has no worktree yet".into());
+    };
+    if !std::path::Path::new(&s.worktree).is_dir() {
+        return Err("the worktree directory is gone".into());
+    }
+    let mut cmd = app.git(std::path::Path::new(admin));
+    cmd.arg("--work-tree").arg(&s.worktree).args(["status", "--porcelain"]);
+    crate::util::exec_within(Duration::from_secs(30), &mut cmd)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("{e:#}"))
+}
+
 /// The budget check and its consequence, in one place, called wherever a colony's spend can change: after
 /// the gateway records routed usage, when Claude's own cost arrives at turn end, and before the gateway
 /// serves a request. A colony past its budget — the dollar budget, the org's own if it set one, else the
@@ -619,9 +742,12 @@ pub async fn watch_host_disks(app: Shared) {
     }
 }
 
-/// A colony can be resumed while its worktree is still on disk and no microVM is running for it.
+/// A colony can be resumed while its worktree is still on disk and no microVM is running for it —
+/// or while it is parked (issue #213), whose whole point is to be resumable. A parked colony whose
+/// park record says the microVM was kept may warm-resume instead, which the handler decides; the
+/// gate here only says the state itself is resumable.
 pub(crate) fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
-    matches!(status, SessionStatus::Stopped | SessionStatus::Failed) && !cleaned_up && has_worktree
+    matches!(status, SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::Parked) && !cleaned_up && has_worktree
 }
 
 /// Whether this colony is suspended while it waits on its user (issue #562) — the only shape a
@@ -715,10 +841,19 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
+    // A parked colony whose park kept its microVM running comes back warm when it can (issue #213):
+    // prompted to continue in the machine it never left, no boot, no rotation. `None` here — no kept
+    // microVM, no live agent link, the microVM gone from `msb ls`, the discard setting back on, or
+    // no slot free — falls through to the cold path, which tears any kept microVM down before it boots.
+    if let Some(warm) = warm_resume(&app, &id, &s).await {
+        return warm;
+    }
     let previous_status = s.status;
     // What a failed rotation below puts back: the suspension as well as the status, so the colony
-    // stays restorable and `can_resume`-shaped for the retry this error asks for.
+    // stays restorable and `can_resume`-shaped for the retry this error asks for. The park record
+    // comes back with them, for the same reason.
     let suspension = s.suspended.clone();
+    let park = s.parked.clone();
     // Past the limit a colony waits its turn rather than being refused, as in `create`; `run_queue`
     // resumes it later.
     let modules = app.modules.read().await.clone();
@@ -754,7 +889,7 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         org_limit,
         repo_limit,
         |sessions, room| {
-            // Counted before the flip: the colony itself is Stopped or Failed here, so it isn't counted.
+            // Counted before the flip: the colony itself is Stopped, Failed or Parked here, so it isn't counted.
             let waiting = sessions.iter().filter(|other| other.status == SessionStatus::Queued).count();
             let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
                 return Ok(None);
@@ -775,6 +910,10 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
             // the boot; any held answer stays on the record, and the boot delivers it.
             x.suspended = None;
+            // A parked colony stops being parked here (issue #213): the record had its say — the
+            // cold path below tears down a microVM the park kept — and the resumed colony is not
+            // parked any more.
+            x.parked = None;
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
             x.updated_at = Utc::now();
@@ -824,6 +963,7 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
             .update_session(&id, |x| {
                 x.status = previous_status;
                 x.suspended = suspension.clone();
+                x.parked = park.clone();
             })
             .await
         {
@@ -839,10 +979,29 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
     }
     if admitted {
+        // A park that kept the microVM (issue #213) but could not resume warm — the link is gone
+        // after a restart, the discard setting is back on, or no slot was free — hands the machine
+        // in before the fresh boot claims the same deterministic sandbox name.
+        if park.as_ref().is_some_and(|p| p.vm_kept) {
+            app.session_log(
+                &id,
+                "info",
+                "cold resume: removing the microVM the park kept, then booting fresh".into(),
+            )
+            .await;
+            teardown_vm(&app, &s).await;
+        }
         app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into())
             .await;
         tokio::spawn(boot(app.clone(), id, true));
     } else {
+        if park.as_ref().is_some_and(|p| p.vm_kept) {
+            // A parked colony waiting in the queue must not keep a microVM running the queue's
+            // later boot would collide with under the same sandbox name.
+            app.session_log(&id, "info", "cold resume queued: removing the microVM the park kept".into())
+                .await;
+            teardown_vm(&app, &s).await;
+        }
         let ahead = if waiting == 0 {
             String::new()
         } else {
@@ -857,6 +1016,82 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         .await;
     }
     Ok(Json(s))
+}
+
+/// The warm half of resume (issue #213): a parked colony whose park kept its microVM running
+/// (`parked.vm_kept`, with the `resume` module's `discard_vm` still off) and whose machine is still
+/// in `msb ls` with a live agent link is prompted to continue where it is — no boot, no event-log
+/// rotation, the link and the agent's own transcript live the whole time. The claim takes a slot
+/// like any resume (a parked colony holds none) and re-checks the status under the colony's
+/// lifecycle lock. `None` says warm is not on the table and the caller must take the cold path: no
+/// kept microVM, no in-memory link (a restart drops it), the microVM gone from `msb ls`, the
+/// operator turned `discard_vm` back on while the colony sat parked, or no slot free right now —
+/// the cold path queues instead, after handing the kept microVM in.
+async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Session>> {
+    let park = s.parked.as_ref()?;
+    if !park.vm_kept {
+        return None;
+    }
+    let rt = app.runtimes.lock().await.get(id).cloned()?;
+    if !sandbox::running(&app.cfg.msb).await.ok()?.contains(&s.sandbox) {
+        return None;
+    }
+    let modules = app.modules.read().await.clone();
+    if orgs::discard_vm(&modules) {
+        return None;
+    }
+    let max_parallel = orgs::global_max_parallel(&modules) as usize;
+    // Resolved before the admission lock: `org_settings` reads the orgs file with blocking IO.
+    let org_settings = app.org_settings(&s.org);
+    let org_limit = orgs::org_max_parallel(&org_settings);
+    let repo_limit = crate::queue::repo_limit(&modules, &org_settings);
+    let lifecycle = app.session_lock(id).await;
+    let _lifecycle = lifecycle.lock().await;
+    let reason = park.reason.clone();
+    let claimed = with_slot(
+        &app.sessions,
+        &s.org,
+        &s.repo,
+        max_parallel,
+        org_limit,
+        repo_limit,
+        |sessions, room| {
+            let x = sessions.iter_mut().find(|x| x.id == id)?;
+            // The mesh and the local port survive on purpose: the microVM they point at never left.
+            if x.status != SessionStatus::Parked || !room {
+                return None;
+            }
+            x.status = SessionStatus::Running;
+            x.error = None;
+            x.attention = None;
+            x.parked = None;
+            x.updated_at = Utc::now();
+            Some(x.clone())
+        },
+    )
+    .await;
+    let Some(s) = claimed else {
+        // Gone, or no room: the cold path either 404s or queues (and tears the kept microVM down).
+        return None;
+    };
+    app.persist_and_broadcast(&s).await;
+    app.session_log(
+        id,
+        "info",
+        format!("warm resume: the kept microVM is still running (parked for {reason}); prompting the agent to continue"),
+    )
+    .await;
+    // The same channel the transcript's user messages take (sessions/api.rs `client_command`): the
+    // runner starts a turn on it, which is all a warm resume is.
+    let _ = rt.commands.send(json!({
+        "type": "user_message",
+        "id": format!("u-{}", crate::util::short_id()),
+        "text": format!(
+            "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
+             never stopped. Pick up where you left off and continue with the task."
+        ),
+    }));
+    Some(Ok(Json(s)))
 }
 
 /// What a stop did. A colony that is already over is the outcome a stop asks for, so a script's retry,
@@ -897,7 +1132,7 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     let Some((s, was)) = app
         .update_session(&id, |x| {
             let was = x.status;
-            if was.is_live() || was == SessionStatus::Queued {
+            if was.is_live() || was == SessionStatus::Queued || was == SessionStatus::Parked {
                 x.status = SessionStatus::Stopped;
                 attention = x.clear_attention();
                 // A suspended colony stopped by hand is just stopped (issue #562): its held answer
@@ -905,6 +1140,10 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
                 // waiting on is closed for good.
                 x.suspended = None;
                 x.pending_answer = None;
+                // A parked colony stopped by hand is just stopped too (issue #213): the park record
+                // describes a state this stop replaces, and keeping it would promise a reset or a
+                // warm resume that is no longer pending.
+                x.parked = None;
             }
             was
         })
@@ -927,6 +1166,21 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
         // locally, same as any other colony that ends without a pull request.
         crate::claims::spawn_release_if_needed(app.clone(), &session);
         return Ok(stopped(session));
+    }
+    // A parked colony may still have the microVM its park kept (issue #213), so a stop of one takes
+    // the machine in — the worktree stays, as with any stop.
+    if was == SessionStatus::Parked {
+        app.session_log(
+            &id,
+            "info",
+            "stopping a parked colony: removing the microVM it kept (the worktree is kept)".into(),
+        )
+        .await;
+        teardown_vm(&app, &s).await;
+        if let Some(s) = app.session(&id).await {
+            crate::claims::spawn_release_if_needed(app.clone(), &s);
+        }
+        return Ok(stopped(app.session(&id).await.unwrap_or(s)));
     }
     // `was` is read under the same write lock that would have claimed the colony, so the status
     // reported here is the one this stop found, not a later one.
@@ -953,11 +1207,14 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
 }
 
 /// Whether a colony in this state can be cleaned up — its worktree and local branch freed. A live or
-/// publishing colony has a microVM or a push in flight, and a queued colony is still waiting to start:
-/// cleaning one up would leave it queued with nothing left to start on, and the next queue tick would
-/// start it anyway, cleanup undone. Stop first, which takes a queued colony out of the queue.
+/// publishing colony has a microVM or a push in flight, a queued colony is still waiting to start
+/// (cleaning one up would leave it queued with nothing left to start on, and the next queue tick
+/// would start it anyway, cleanup undone), and a parked colony is paused by definition ([#213]) —
+/// its worktree is the run it may yet resume, so cleanup there reads as an end, and cleanup is not
+/// an end. Stop first, which takes a queued colony out of the queue and takes back the microVM a
+/// park kept.
 fn cleanable(status: SessionStatus) -> bool {
-    !status.is_live() && status != SessionStatus::Publishing && status != SessionStatus::Queued
+    !status.is_live() && status != SessionStatus::Publishing && status != SessionStatus::Queued && status != SessionStatus::Parked
 }
 
 /// The work of the `cleanup` handler, shared with the auto-reclaim tick: claim the colony as cleaned
@@ -1215,7 +1472,7 @@ mod tests {
     #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
         use SessionStatus::*;
-        for status in [Queued, Stopped, Failed, NoChanges, PrOpened, Merged, Closed] {
+        for status in [Queued, Parked, Stopped, Failed, NoChanges, PrOpened, Merged, Closed] {
             assert!(deletable(status), "{status:?}");
         }
         for status in [Starting, Running, WaitingForAnswer, Idle, Publishing] {
@@ -1326,11 +1583,15 @@ mod tests {
     }
 
     #[test]
-    fn only_a_stopped_colony_that_still_has_its_worktree_can_be_resumed() {
+    fn only_a_stopped_or_parked_colony_that_still_has_its_worktree_can_be_resumed() {
         assert!(can_resume(SessionStatus::Stopped, false, true));
         assert!(can_resume(SessionStatus::Failed, false, true));
+        // A parked colony is resumable — that is the whole point of parking (issue #213).
+        assert!(can_resume(SessionStatus::Parked, false, true));
         assert!(!can_resume(SessionStatus::Stopped, true, true), "cleaned up");
         assert!(!can_resume(SessionStatus::Stopped, false, false), "no worktree");
+        assert!(!can_resume(SessionStatus::Parked, true, true), "cleaned up");
+        assert!(!can_resume(SessionStatus::Parked, false, false), "no worktree");
         for status in [
             SessionStatus::Starting,
             SessionStatus::Running,
@@ -1349,7 +1610,7 @@ mod tests {
     #[test]
     fn only_a_colony_that_has_finished_can_be_cleaned_up() {
         use SessionStatus::*;
-        for status in [Starting, Running, WaitingForAnswer, Idle, Publishing, Queued] {
+        for status in [Starting, Running, WaitingForAnswer, Idle, Publishing, Queued, Parked] {
             assert!(!cleanable(status), "{status:?}");
         }
         for status in [Stopped, Failed, NoChanges, PrOpened] {
@@ -2387,6 +2648,178 @@ exit 0
         );
         assert_eq!(s.error, None, "no microVM-gone error painted over it");
         assert!(s.suspended.is_some(), "still suspended, for the restore pass to pick up");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The parks a `recover` pass must tell apart (issue #213): a colony parked with its microVM
+    /// kept finds that microVM still running after a restart — unconnected but alive, for a later
+    /// warm resume — while a park that says the microVM was torn down gets the orphan a crash left
+    /// behind reaped. Either way the pass does not flip the colony: a park is a pause, and only the
+    /// operator's resume ends it.
+    #[tokio::test]
+    async fn a_recover_leaves_a_kept_microvm_parked_alone_and_reaps_an_orphan_a_park_left_behind() {
+        use crate::tests::test_app;
+        let root = std::env::temp_dir().join(format!("colonizer-recover-parked-{}", short_id()));
+        let mut app = test_app(&root);
+        let rms = root.join("msb-rm-log");
+        // `ls` reports both parks' microVMs as running; every `rm` is logged, so the kept one's
+        // absence from that log is the assertion.
+        stand_in_msb(
+            &mut app,
+            &root,
+            &format!(
+                "if [ \"$1\" = ls ]; then printf '%s\\n' sandbox-kept sandbox-orphan; fi
+if [ \"$1\" = rm ]; then echo \"$*\" >> {rms:?}; fi
+exit 0
+"
+            ),
+        );
+        for (id, vm_kept) in [("kept", true), ("orphan", false)] {
+            let mut s = colony("acme", SessionStatus::Parked);
+            s.id = id.into();
+            s.sandbox = format!("sandbox-{id}");
+            s.parked = Some(Park {
+                at: Utc::now(),
+                reason: "hold_timeout".into(),
+                resets_at: None,
+                vm_kept,
+            });
+            app.sessions.write().await.push(s);
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        recover(&app).await;
+        let kept = app.session("kept").await.unwrap();
+        assert_eq!(
+            kept.status,
+            SessionStatus::Parked,
+            "a kept-VM park survives the restart as it was"
+        );
+        assert!(kept.parked.as_ref().is_some_and(|p| p.vm_kept), "its record too");
+        assert_eq!(kept.error, None, "the pass paints no error over it");
+        let orphan = app.session("orphan").await.unwrap();
+        assert_eq!(orphan.status, SessionStatus::Parked, "the reap does not flip the park");
+        assert!(
+            orphan.parked.as_ref().is_some_and(|p| !p.vm_kept),
+            "and its record survives it"
+        );
+        let log = std::fs::read_to_string(app.session_dir("orphan").join("harness.jsonl")).unwrap();
+        assert!(log.contains("removing the microVM a park left behind"), "{log}");
+        let removed = std::fs::read_to_string(&rms).unwrap_or_default();
+        assert!(
+            removed.contains("sandbox-orphan"),
+            "the orphan a crash left is removed: {removed}"
+        );
+        assert!(
+            !removed.contains("sandbox-kept"),
+            "the kept microVM is never touched: {removed}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The park's safety valve (issue #213): a discarding park removes the microVM only after git
+    /// read the worktree it is leaving the colony's work in — unreadable, and the microVM is kept
+    /// and the record says so. Readable, the teardown happens, and the uncommitted work survives
+    /// the discarded machine by construction: the worktree was on the host all along.
+    #[tokio::test]
+    async fn a_park_discards_only_a_worktree_git_can_read() {
+        use crate::tests::test_app;
+        let root = std::env::temp_dir().join(format!("colonizer-park-safety-{}", short_id()));
+        let mut app = test_app(&root);
+        let rms = root.join("msb-rm-log");
+        // `ls` answers nothing running; every `rm` is logged, which is what the two parks are
+        // told apart by.
+        stand_in_msb(
+            &mut app,
+            &root,
+            &format!(
+                "if [ \"$1\" = rm ]; then echo \"$*\" >> {rms:?}; fi
+exit 0
+"
+            ),
+        );
+        let run_git = |dir: &std::path::Path, args: &[&str]| {
+            std::fs::create_dir_all(dir).unwrap();
+            let out = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+
+        // `unverifiable`: a worktree holding uncommitted work, but the git dir named on the record
+        // is not a repository git can read.
+        let unverifiable_wt = root.join("wt-unverifiable");
+        std::fs::create_dir_all(&unverifiable_wt).unwrap();
+        std::fs::write(unverifiable_wt.join("half-done.txt"), "work in progress").unwrap();
+        let mut a = colony("acme", SessionStatus::Running);
+        a.id = "unverifiable".into();
+        a.git_admin_dir = Some(unverifiable_wt.join(".git").display().to_string());
+        a.worktree = unverifiable_wt.display().to_string();
+        a.sandbox = "sandbox-unverifiable".into();
+
+        // `readable`: a real repository, uncommitted changes and all.
+        let readable_wt = root.join("wt-readable");
+        run_git(&readable_wt, &["init", "-q"]);
+        std::fs::write(readable_wt.join("half-done.txt"), "work in progress").unwrap();
+        let mut b = colony("acme", SessionStatus::Running);
+        b.id = "readable".into();
+        b.git_admin_dir = Some(readable_wt.join(".git").display().to_string());
+        b.worktree = readable_wt.display().to_string();
+        b.sandbox = "sandbox-readable".into();
+
+        *app.sessions.write().await = vec![a, b];
+        for id in ["unverifiable", "readable"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        for id in ["unverifiable", "readable"] {
+            let s = app.session(id).await.unwrap();
+            assert!(
+                park_colony(
+                    &app,
+                    &s,
+                    "hold_timeout",
+                    None,
+                    "parked for the test".into(),
+                    "parked for the test".into()
+                )
+                .await,
+                "{id} was parked"
+            );
+        }
+
+        let a = app.session("unverifiable").await.unwrap();
+        assert_eq!(a.status, SessionStatus::Parked);
+        assert!(
+            a.parked.as_ref().is_some_and(|p| p.vm_kept),
+            "git could not read the worktree, so the microVM is kept"
+        );
+        let log = std::fs::read_to_string(app.session_dir("unverifiable").join("harness.jsonl")).unwrap();
+        assert!(log.contains("the worktree could not be verified"), "{log}");
+
+        let b = app.session("readable").await.unwrap();
+        assert_eq!(b.status, SessionStatus::Parked);
+        assert!(
+            b.parked.as_ref().is_some_and(|p| !p.vm_kept),
+            "a verified worktree means the microVM can go"
+        );
+        let removed = std::fs::read_to_string(&rms).unwrap_or_default();
+        assert!(
+            removed.contains("sandbox-readable"),
+            "the verified park tears down: {removed}"
+        );
+        assert!(
+            !removed.contains("sandbox-unverifiable"),
+            "the unverified park keeps the microVM: {removed}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(readable_wt.join("half-done.txt")).unwrap(),
+            "work in progress",
+            "the uncommitted work survives the discarded microVM"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

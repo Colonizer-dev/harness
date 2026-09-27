@@ -54,12 +54,13 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
         SessionStatus::NoChanges => Stacked::Refuse(format!(
             "colony `{parent_id}` made no changes, so it has no branch to build on"
         )),
-        // A stopped colony is paused rather than finished: one stopped before it published has
-        // nothing anywhere to build on, and one stopped after still owns its branch but has a story
-        // that is not over — it may be resumed and keep working. Refuse either way (the message says
-        // only what is true of both), since a resumed or published parent can be stacked on again.
-        SessionStatus::Stopped => Stacked::Refuse(format!(
-            "colony `{parent_id}` was stopped, so it cannot be stacked on; resume it and try again"
+        // A stopped or parked colony is paused rather than finished: one paused before it published
+        // has nothing anywhere to build on, and one paused after still owns its branch but has a
+        // story that is not over — it may be resumed and keep working. Refuse either way (the
+        // message says only what is true of both), since a resumed or published parent can be
+        // stacked on again.
+        SessionStatus::Stopped | SessionStatus::Parked => Stacked::Refuse(format!(
+            "colony `{parent_id}` was stopped or parked, so it cannot be stacked on; resume it and try again"
         )),
         SessionStatus::Failed => Stacked::Refuse(format!("colony `{parent_id}` failed, so it has no branch to build on")),
     }

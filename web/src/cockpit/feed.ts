@@ -3,7 +3,7 @@
 // `updated_at` moves on every housekeeping write, so it reads the activity log instead (history.ts).
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
-import { isLive, occupiesSlot, orgOf, sameOrg } from "../components/ui";
+import { isLive, occupiesSlot, orgOf, parkedLabel, sameOrg } from "../components/ui";
 import type { Session, SessionStatus } from "../types";
 
 export type FeedKind = "question" | "returned" | "failed" | "launched" | "queued" | "stopped";
@@ -30,6 +30,9 @@ export function feedKind(session: Session): FeedKind {
   switch (session.status) {
     case "failed":
       return "failed";
+    case "parked":
+      // Parked reads as stopped everywhere the inbox distinguishes only broadly; the line itself says why.
+      return "stopped";
     case "stopped":
       return "stopped";
     case "queued":
@@ -60,6 +63,8 @@ export function textFor(session: Session, kind: FeedKind): string {
       return `${at} finished with nothing to change`;
     case "failed":
       return `${at} failed`;
+    case "parked":
+      return `${at} is parked — ${parkedLabel(session.parked) || "resume to continue"}`;
     case "stopped":
       return `${at} was stopped · the worktree is kept`;
     case "queued":
@@ -115,7 +120,9 @@ export function matchesOverviewFilter(session: Session, filter: OverviewFilter):
     case "live":
       return isLive(session.status);
     case "need you":
-      return needsYou(session);
+      // A parked colony (issue #213) waits on tokens, not on a person, but it is stuck all the
+      // same — it counts as needing action so the counter and the filter cannot hide it.
+      return needsYou(session) || session.status === "parked";
     case "returned":
       return RETURNED.has(session.status);
     case "queued":

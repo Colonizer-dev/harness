@@ -527,9 +527,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     }
 }
 
-/// Parks a colony whose turn died on an exhausted provider: the same stop the budget path takes —
-/// microVM removed, worktree kept, slot released — with the quota attention reason instead of a
-/// hold. `Stopped` stands in until #213 adds `Parked`; the reason string is the #230 contract.
+/// Parks a colony whose turn died on an exhausted provider (issue #213): the slot is released, the
+/// worktree and branch kept, the park record carries the reason and the upstream reset time, and
+/// the attention flag the cockpit's banner reads is the #230 contract. What happens to the
+/// microVM — discarded, or kept idle when `resume.discard_vm` is off or the worktree could not be
+/// verified — is `park_colony`'s decision.
 async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_quota::QuotaExhaustion) {
     let providers = app.providers();
     let ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
@@ -553,21 +555,15 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
         (None, Some(reset)) => format!("provider quota exhausted (resets {reset})"),
         (None, None) => "provider quota exhausted".to_string(),
     };
-    let parked = stop_colony(
+    park_colony(
         app,
         &s,
-        |_| true,
+        provider_quota::QUOTA_EXHAUSTED_REASON,
+        hit.reset_at.clone(),
         error,
-        "provider quota exhausted; the microVM is removed and the worktree kept, so the colony resumes when the plan refills"
-            .into(),
+        "provider quota exhausted; parked, the worktree kept — the colony resumes when the plan refills".into(),
     )
     .await;
-    if parked {
-        app.update_session(id, |x| {
-            x.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "since": Utc::now(), "nudges": 0}));
-        })
-        .await;
-    }
 }
 
 /// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
@@ -1019,7 +1015,25 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut s = crate::sessions::tests::colony("acme", SessionStatus::Running);
         s.id = "parked".into();
-        s.git_admin_dir = Some("git".into());
+        // A worktree git can verify: with the `resume` module's default `discard_vm` on, the park
+        // then discards the microVM, so the auto-resume at the end is the cold path a recovered
+        // provider actually takes — and the kept-VM shape never enters it.
+        let wt = root.join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let git_ok = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(args)
+                .current_dir(&wt)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git_ok(&["init", "-q"]);
+        s.git_admin_dir = Some(wt.join(".git").display().to_string());
+        s.worktree = wt.display().to_string();
         app.sessions.write().await.push(s);
         tokio::fs::create_dir_all(app.session_dir("parked")).await.unwrap();
 
@@ -1029,7 +1043,10 @@ mod tests {
 
         let sessions = app.sessions.read().await;
         let parked = sessions.iter().find(|s| s.id == "parked").unwrap();
-        assert_eq!(parked.status, SessionStatus::Stopped, "the turn failure parks the colony");
+        assert_eq!(parked.status, SessionStatus::Parked, "the turn failure parks the colony");
+        let park = parked.parked.as_ref().expect("the park record names why and what was kept");
+        assert_eq!(park.reason, provider_quota::QUOTA_EXHAUSTED_REASON);
+        assert_eq!(park.resets_at.as_deref(), Some("7am (UTC)"), "the upstream reset rides along");
         assert_eq!(
             parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
             Some(provider_quota::QUOTA_EXHAUSTED_REASON)
@@ -1057,7 +1074,7 @@ mod tests {
         let sessions = app.sessions.read().await;
         assert_eq!(
             sessions.iter().find(|s| s.id == "parked").unwrap().status,
-            SessionStatus::Stopped,
+            SessionStatus::Parked,
             "the unnamed colony stays parked while the account record holds"
         );
         drop(sessions);

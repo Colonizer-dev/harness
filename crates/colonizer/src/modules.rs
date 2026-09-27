@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 13] = [
+pub const KINDS: [&str; 14] = [
     "source",
     "sandbox",
     "mesh",
@@ -23,6 +23,7 @@ pub const KINDS: [&str; 13] = [
     "publish",
     "memory",
     "watchdog",
+    "resume",
     "autonomy",
     "notify",
     "burn_down",
@@ -398,6 +399,15 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30}
             }}),
         )],
+        "resume" => vec![p(
+            "default",
+            "Resume",
+            "How a parked colony comes back: what parking does to its microVM, and how resuming re-enters the work",
+            json!({"type": "object", "properties": {
+                "discard_vm": {"type": "boolean", "title": "Discard the microVM when parking", "default": true,
+                    "description": "What parking does to a colony's microVM (quota exhaustion, an expired hold). On, the default, the microVM is torn down and the colony resumes cold: a fresh microVM boots on the kept worktree, re-entering the original instructions plus a compact summary of what was done. Off, the microVM keeps running while the colony parks (its slot is still released), and resume is warm: the idle agent is prompted to continue in the machine it never left. Either way the worktree, the branch and the event log are kept, and a park always persists its record before anything is torn down; if the worktree cannot be verified readable before a discard, the microVM is kept instead, never dropped blind."}
+            }}),
+        )],
         "autonomy" => vec![
             p(
                 "off",
@@ -532,7 +542,7 @@ fn yes() -> bool {
 
 /// The kinds a harness is not a harness without; every other kind may be switched off.
 fn is_required(kind: &str) -> bool {
-    matches!(kind, "source" | "sandbox" | "agent" | "publish")
+    matches!(kind, "source" | "sandbox" | "agent" | "publish" | "resume")
 }
 
 pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(req): Json<UpdateModule>) -> ApiResult<Value> {

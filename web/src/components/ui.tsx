@@ -76,6 +76,7 @@ export const SESSION_STATUS: Record<SessionStatus, { label: string; tone: Tone; 
   merged: { label: "PR merged", tone: "ok", live: false },
   closed: { label: "PR closed", tone: "neutral", live: false },
   no_changes: { label: "No changes", tone: "warn", live: false },
+  parked: { label: "Parked", tone: "warn", live: false },
   stopped: { label: "Stopped", tone: "neutral", live: false },
   failed: { label: "Failed", tone: "err", live: false },
 };
@@ -89,6 +90,28 @@ export function isLive(status: SessionStatus): boolean {
  *  restored): no live machine to pulse about, even though `status` still reads as live. */
 export function isSuspended(session: Pick<Session, "suspended" | "pending_answer">): boolean {
   return session.suspended != null || session.pending_answer != null;
+}
+
+/** The park reasons the mothership writes (issue #213), in human words; anything else shows as given. */
+const PARK_REASONS: Record<string, string> = {
+  provider_quota_exhausted: "provider quota exhausted",
+  hold_timeout: "hold timed out",
+};
+
+/** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
+export function parkedResumesAt(resetsAt: string): string {
+  const at = new Date(resetsAt);
+  return Number.isNaN(at.getTime()) ? "" : at.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Why a parked colony is parked, and when it can come back (issue #213), as one line —
+ *  "provider quota exhausted · resumes 27 Sep, 14:05". A missing or unparseable `resets_at`
+ *  drops the resume half; an unknown reason shows with its underscores spelled out. */
+export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
+  if (!parked) return "";
+  const reason = PARK_REASONS[parked.reason] ?? parked.reason.replace(/_/g, " ");
+  const when = parked.resets_at ? parkedResumesAt(parked.resets_at) : "";
+  return when ? `${reason} · resumes ${when}` : reason;
 }
 
 /** The label a colony's status reads as, suspension-aware (issue #562): a `waiting_for_answer`
@@ -123,8 +146,8 @@ export function occupiesSlot(session: Pick<Session, "status" | "suspended">): bo
   return session.suspended == null && (isLive(session.status) || session.status === "publishing");
 }
 
-/** Statuses the publish endpoint accepts: live colonies, plus stopped, failed and no-changes ones whose worktree can still be finished. */
-const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "stopped", "failed", "no_changes"];
+/** Statuses the publish endpoint accepts: live colonies, plus parked (issue #213), stopped, failed and no-changes ones whose worktree can still be finished. */
+const PUBLISHABLE: SessionStatus[] = ["running", "waiting_for_answer", "idle", "parked", "stopped", "failed", "no_changes"];
 
 /** Whether publishing this colony is possible: it kept its worktree (`git_admin_dir`, the server's own condition), its status is one the endpoint reconciles, and it is not suspended — the endpoint refuses a suspended colony, whose answer must stay restorable (issue #562). Mirrored from the server, so the button never offers a publish that would 409. */
 export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git_admin_dir" | "suspended">): boolean {

@@ -50,7 +50,7 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
              pass `stack: true` to build on its branch anyway"
         )),
         // No branch to queue for and none to stack on either: the stacked rule's own refusal.
-        SessionStatus::NoChanges | SessionStatus::Failed | SessionStatus::Stopped => {
+        SessionStatus::NoChanges | SessionStatus::Failed | SessionStatus::Stopped | SessionStatus::Parked => {
             match stack::stacked_on(parent_id, Some(parent)) {
                 Stacked::Refuse(reason) => Stacked::Refuse(reason),
                 other => panic!(

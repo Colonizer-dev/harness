@@ -5,7 +5,7 @@
 use crate::{
     App, CLAUDE_API_HOST, Shared,
     config::{ModulesConfig, setting, setting_str, setting_u64},
-    egress,
+    diagnosis, egress,
     events::start_link,
     github,
     lifecycle::teardown_vm,
@@ -73,6 +73,39 @@ async fn resolve_stack(
         log.info(message).await;
     }
     stack
+}
+
+/// What a resumed colony is told about its previous run (issue #213): a short digest of the last
+/// events of the log the resume just rotated aside — the same one-line digests the cockpit's
+/// diagnosis reads, capped at twenty lines and 64 KiB of source, so it rides in the prompt without
+/// weighing it down. `None` when there is nothing to tell (no archived log, or one that digests to
+/// nothing but deltas), which is the fresh-boot shape and asks for no block at all.
+async fn resume_digest(dir: &std::path::Path) -> Option<String> {
+    // The resume rotated `events.jsonl` into the highest slot before this boot started, so the
+    // highest-numbered archive is the run that just ended.
+    let mut highest: Option<u64> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        if let Some(n) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("events-"))
+            .and_then(|n| n.strip_suffix(".jsonl"))
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            highest = Some(highest.map_or(n, |m: u64| m.max(n)));
+        }
+    }
+    let archive = dir.join(format!("events-{}.jsonl", highest?));
+    let recent = diagnosis::recent_events(&diagnosis::tail_events_within(&archive, 64 * 1024).await)?;
+    let mut block = String::from(
+        "\n## Where your previous run left off\n\n\
+         This colony was resumed after being parked or stopped. The last events of that run, \
+         oldest first — pick up where it left off:\n",
+    );
+    for e in &recent {
+        block.push_str(&format!("- #{} {}: {}\n", e.seq, e.kind, e.summary));
+    }
+    Some(block)
 }
 
 pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
@@ -379,6 +412,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     prompt.push_str(&crate::colony_secrets::prompt_block(
         &colony_secrets.iter().map(|(meta, _)| meta).collect::<Vec<_>>(),
     ));
+    // The previous run's story (issue #213): a resumed colony's own brief carries a digest of the
+    // event log the resume just rotated aside, so the agent knows what it was doing when the park
+    // or stop interrupted it instead of reading its work cold.
+    if resume && let Some(story) = resume_digest(&dir).await {
+        prompt.push_str(&story);
+    }
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -1316,6 +1355,39 @@ exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --toke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest a cold resume rides in the prompt comes from the run the resume just rotated
+    /// aside — the highest-numbered archive, not the first — and is absent for a colony with no
+    /// previous run to tell about.
+    #[tokio::test]
+    async fn the_resume_digest_tells_the_latest_archived_run_and_skips_a_fresh_colony() {
+        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(resume_digest(&dir).await.is_none(), "no archive, no story");
+        let line = |seq: u64, text: &str| {
+            json!({"seq": seq, "ts": "2026-01-01T00:00:00Z", "type": "user_message", "text": text}).to_string()
+        };
+        std::fs::write(
+            dir.join("events-1.jsonl"),
+            format!("{}\n{}\n", line(1, "first run began"), line(2, "first run ended")),
+        )
+        .unwrap();
+        let newer = format!(
+            "{}\n{}\n{}\n",
+            json!({"seq": 1, "type": "assistant_text_delta", "text": "noise"}), // digests to nothing
+            line(2, "ran the tests"),
+            line(3, "found the failure"),
+        );
+        std::fs::write(dir.join("events-2.jsonl"), newer).unwrap();
+        std::fs::write(dir.join("events.jsonl"), line(1, "the new run, not the old one")).unwrap();
+        let story = resume_digest(&dir).await.expect("an archived run has a story");
+        assert!(story.contains("#2 user_message: ran the tests") && story.contains("#3 user_message: found the failure"));
+        assert!(!story.contains("first run"), "the older archive is not the story");
+        assert!(!story.contains("the new run"), "the live log is not the story");
+        assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_colony_is_fenced_to_public_with_only_the_host_ports_it_needs() {

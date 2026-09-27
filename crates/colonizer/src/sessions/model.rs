@@ -19,6 +19,13 @@ pub enum SessionStatus {
     /// The pull request was closed without merging; GitHub lets it be reopened, so it is still watched.
     Closed,
     NoChanges,
+    /// Parked (issue #213): the colony is set aside for a reason it may outlive — its provider's
+    /// quota ran out, or its autopilot hold timed out — with its worktree and branch kept and its
+    /// park record in `parked`. Not live: no slot is held against the parallel limit. Not
+    /// terminal either: the run is paused, not over, so no reclaim, no spend `returned` edge and
+    /// no automatic cleanup may read it as finished — the worktree may be the only copy of the
+    /// work, and the colony is expected to come back.
+    Parked,
     Stopped,
     Failed,
 }
@@ -42,6 +49,9 @@ impl SessionStatus {
     /// pull request opened, merged, closed or nothing to push. PrOpened is included: the work is
     /// out, whatever a reviewer does next. This is the status set the spend journal's `returned`
     /// edge keys on, so [`App::update_session`] can tell the first transition into one of them.
+    /// `Parked` is deliberately absent: a parked colony's run is paused, not over — it is expected
+    /// to resume, and a `returned` edge here would book the spend twice (once at the park, once at
+    /// the real end). Parked is not live either, so it holds no slot; it sits outside both sets.
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -62,6 +72,7 @@ impl SessionStatus {
             Self::Merged => "merged",
             Self::Closed => "closed",
             Self::NoChanges => "no_changes",
+            Self::Parked => "parked",
             Self::Stopped => "stopped",
             Self::Failed => "failed",
         }
@@ -158,6 +169,21 @@ pub struct Suspension {
     pub snapshot: Option<Value>,
     pub reason: String,
     pub path: String,
+}
+
+/// Why a colony is parked (issue #213), kept on the record so the park survives restarts and
+/// resumes land on their feet days later. `at` is when the colony was parked; `reason` is the
+/// machine string (`provider_quota_exhausted`, `hold_timeout`); `resets_at` is the RFC3339 moment
+/// the upstream said the block lifts, when it named one; `vm_kept` says whether the microVM was
+/// still running when the colony parked — true when the `resume` module's `discard_vm` is off, or
+/// when the park could not verify the worktree was safe to leave without the VM.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Park {
+    pub at: DateTime<Utc>,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+    pub vm_kept: bool,
 }
 
 /// A user answer that arrived while the colony was suspended and is still undelivered.
@@ -369,6 +395,12 @@ pub struct Session {
     /// holds no parallel slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended: Option<Suspension>,
+    /// The colony's park record (issue #213), set when the status moves to `parked` and cleared
+    /// when it resumes. Persisted in sessions.json, so a colony parked for a quota reset that
+    /// lands tomorrow still carries the reason, the upstream reset time and whether its microVM
+    /// was kept. `None` for a colony that has never been parked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked: Option<Park>,
     /// The agent runner's own session id, as last reported by the `agent_session` event: what a
     /// resumed boot continues. `None` until the first report, and permanently unknown to agents
     /// whose module declares no `session_resume`.
@@ -474,6 +506,7 @@ impl Default for Session {
             keep_worktree: false,
             attention: None,
             suspended: None,
+            parked: None,
             agent_session: None,
             pending_answer: None,
             last_activity_at: None,
@@ -591,6 +624,38 @@ mod tests {
         assert_eq!(wire["pending_answer"]["question_id"], json!("q1"));
     }
 
+    /// The park record (issue #213) survives the trip to the wire and back — this is the shape
+    /// sessions.json keeps across a restart, so a colony parked for tomorrow's quota reset must
+    /// read back exactly as it was written, reset time and all. And a colony that has never been
+    /// parked carries no `parked` key on the wire at all.
+    #[test]
+    fn a_park_record_round_trips_through_the_wire_and_absence_means_never_parked() {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.id = "c".into();
+        s.parked = Some(Park {
+            at: Utc::now(),
+            reason: "hold_timeout".into(),
+            resets_at: None,
+            vm_kept: true,
+        });
+        let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
+        assert_eq!(again.parked, s.parked);
+        let wire = serde_json::to_value(&s).unwrap();
+        assert_eq!(wire["parked"]["reason"], json!("hold_timeout"));
+        assert_eq!(wire["parked"]["vm_kept"], json!(true));
+        assert!(wire["parked"].get("resets_at").is_none(), "no reset, no field");
+        // A parked colony holds no slot: the queue may admit someone else until it resumes.
+        assert!(!s.holds_slot());
+        assert!(!s.status.is_terminal(), "parked is paused, not over");
+        let never: Session = serde_json::from_value(json!({
+            "id": "d", "repo": "acme/repo", "status": "running",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(never.parked, None);
+        assert!(serde_json::to_value(&never).unwrap().get("parked").is_none());
+    }
+
     /// The container-level `#[serde(default)]` is the whole contract that keeps a sessions.json from
     /// an older version loadable, so it is enforced mechanically: take a fully populated record,
     /// drop one key at a time, and the rest must still load. A field added without a usable default
@@ -632,6 +697,12 @@ mod tests {
         full.host_disk_bytes = Some(1024);
         full.cleaned_up = true;
         full.attention = Some(json!({"reason": "stalled"}));
+        full.parked = Some(Park {
+            at: Utc::now(),
+            reason: "provider_quota_exhausted".into(),
+            resets_at: Some("2026-09-28T07:00:00Z".into()),
+            vm_kept: false,
+        });
         full.last_activity_at = Some(Utc::now());
         full.boot_timing = Some(json!({"total_ms": 5}));
         full.boot_cpus = Some(4);
@@ -663,6 +734,7 @@ mod tests {
             SessionStatus::Merged,
             SessionStatus::Closed,
             SessionStatus::NoChanges,
+            SessionStatus::Parked,
             SessionStatus::Stopped,
             SessionStatus::Failed,
         ] {

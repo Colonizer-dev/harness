@@ -11,7 +11,7 @@
 import { useId, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
 
 import { Avatar, initialOf } from "../components/Avatar";
-import { SESSION_STATUS, isLive, orgOf, type Tone } from "../components/ui";
+import { SESSION_STATUS, isLive, orgOf, parkedLabel, type Tone } from "../components/ui";
 import { sessionCost } from "../spend";
 import type { Session } from "../types";
 import { colX, monotonePath, orgColorFor, RANGES, type ChartPoint, type RangeDays } from "./dash";
@@ -790,13 +790,15 @@ export function StatusDot({ session }: { session: Session }): ReactElement {
 export const COLONY_GRID = "grid grid-cols-[10px_minmax(0,1fr)_minmax(0,120px)_130px_72px_64px] items-center gap-3.5";
 
 /** One colony row: dot, title + repo#issue, org, status, age, spend. Flashes when its status just
- *  moved and lights its cost when it just rose (liveEvents). */
+ *  moved and lights its cost when it just rose (liveEvents). A parked colony (issue #213) also
+ *  shows why it parked, when it can resume, and a Resume action. */
 export function ColonyRow({
   session,
   age,
   flashed,
   bumped,
   onOpen,
+  onResume,
   showOrg = true,
   orgAvatar,
 }: {
@@ -805,12 +807,16 @@ export function ColonyRow({
   flashed: boolean;
   bumped: boolean;
   onOpen?: (id: string) => void;
+  /** Resumes a parked colony; the caller owns error surfacing (Cockpit's `act` toasts it). Absent renders no action. */
+  onResume?: (id: string) => Promise<unknown> | void;
   showOrg?: boolean;
   /** The org's logo from /api/orgs; the lettermark tile stands in without one. */
   orgAvatar?: string | null;
 }): ReactElement {
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone };
   const short = `${session.repo.split("/")[1] ?? session.repo}${session.issue != null ? `#${session.issue}` : ""}`;
+  const [resuming, setResuming] = useState(false);
+  const parkLine = session.status === "parked" ? parkedLabel(session.parked) : null;
   return (
     <div
       className={`${COLONY_GRID} -mt-px border-t border-border py-3 transition-colors duration-[1200ms] ${flashed ? "v3-flash" : ""}`}
@@ -834,8 +840,27 @@ export function ColonyRow({
           </>
         )}
       </span>
-      <span className="truncate text-[13px]" style={{ color: TONE_COLOR[meta.tone] }}>
-        {meta.label}
+      <span className="flex min-w-0 flex-col items-start gap-1 text-[13px]">
+        <span className="truncate" style={{ color: TONE_COLOR[meta.tone] }} title={parkLine ?? undefined}>
+          {meta.label}
+        </span>
+        {parkLine != null && <span className="text-[11.5px] leading-tight text-faint">{parkLine}</span>}
+        {parkLine != null && onResume && (
+          <button
+            type="button"
+            disabled={resuming}
+            title="Boot a fresh microVM on this colony's worktree and continue where it parked"
+            onClick={(e) => {
+              // A row action, not a row open: never let the click reach the colony's title button.
+              e.stopPropagation();
+              setResuming(true);
+              void Promise.resolve(onResume(session.id)).finally(() => setResuming(false));
+            }}
+            className="cursor-pointer rounded-md border border-border bg-panel px-2 py-0.5 text-[11.5px] font-medium text-text hover:border-border-strong hover:bg-panel-2 disabled:cursor-default disabled:opacity-50"
+          >
+            {resuming ? "Resuming…" : "Resume"}
+          </button>
+        )}
       </span>
       <span className="text-right text-[12.5px] text-faint">{age}</span>
       <span className={`text-right text-[13px] tabular-nums transition-colors duration-700 ${bumped ? "text-accent" : "text-text"}`}>

@@ -5,8 +5,9 @@
 //! apart from the loop that applies it.
 
 use crate::{Shared, orgs, provider_quota, providers, restack, spend, stack::Stacked};
+use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -43,9 +44,9 @@ pub(crate) fn repo_limit(modules: &crate::config::ModulesConfig, org: &orgs::Org
 /// The attention reason an autopilot hold carries, set where the hold is taken (events) and read here.
 pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
 
-/// The attention reason a colony parked for outlasting its hold carries. `Stopped` stands in until
-/// #213 adds `Parked`, the same stand-in quota parking uses — and the reason string is what keeps
-/// [`resume_quota_parked`] from requeueing these: it only matches its own reason.
+/// The attention reason a colony parked for outlasting its hold carries. The park record's status is
+/// real now (`Parked`, issue #213) — the reason string is what keeps [`resume_quota_parked`] from
+/// requeueing these: it only matches its own reason.
 pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 
 /// Whether this colony's autopilot hold has outlasted its slot (issue #217).
@@ -453,11 +454,11 @@ pub(crate) async fn start_queued(app: &Shared) {
 // agentd transport
 // ---------------------------------------------------------------------------
 
-/// Parks every autopilot hold past its timeout: the same stop quota parking takes — microVM removed,
-/// worktree kept, slot released — with the hold-timeout attention reason instead of a hold. The stop
-/// is claimed under the colony's lifecycle lock with the expiry re-checked under the admission lock,
-/// so a colony answered in the meantime is not parked. Parked-as-`Stopped` is resumable
-/// (`can_resume`), and [`resume_quota_parked`] leaves these alone — it only matches its own reason.
+/// Parks every autopilot hold past its timeout (issue #217, parked properly by #213): the slot is
+/// released, the worktree and branch kept, and the park record carries the `hold_timeout` reason —
+/// what [`resume_quota_parked`] keys its own reason on, so these are left for the operator. The
+/// expiry is re-checked under the admission lock inside [`park_colony`]'s claim, so a colony
+/// answered in the meantime is not parked, and the attention stamp lands in the same claim.
 pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) {
     let now = Utc::now();
     let ids: Vec<String> = {
@@ -472,28 +473,17 @@ pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) 
     let minutes = timeout.num_minutes();
     for id in ids {
         let Some(s) = app.session(&id).await else { continue };
-        let parked = stop_colony(
+        park_colony(
             app,
             &s,
-            |x| hold_expired(x, Utc::now(), timeout),
+            HOLD_TIMEOUT_REASON,
+            None,
             format!(
                 "autopilot hold exceeded {minutes} min with no answer; parked to release its slot — the worktree is kept, so press Resume to continue"
             ),
             format!("autopilot hold exceeded {minutes} min; parked to release its slot — worktree kept, resume to continue"),
         )
         .await;
-        if parked {
-            app.update_session(&id, stamp_hold_timeout).await;
-        }
-    }
-}
-
-/// Stamps the hold-timeout attention onto a parked colony. Conditional on purpose: a resume may have
-/// claimed the colony (Stopped→Starting) between the stop's claim and this write, now that the
-/// lifecycle lock is released — stamping unconditionally would mislabel a live colony as parked.
-fn stamp_hold_timeout(x: &mut Session) {
-    if x.status == SessionStatus::Stopped && !x.cleaned_up {
-        x.attention = Some(json!({"reason": HOLD_TIMEOUT_REASON, "since": Utc::now(), "nudges": 0}));
     }
 }
 
@@ -730,45 +720,65 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
 }
 
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
-/// worktree never left, so the normal admission loop resumes them like any operator resume. A
-/// named provider recovers when its record lapses (reset passed) or is gone (provider deleted); an
-/// unnamed one recovers when nothing is exhausted anywhere, the account record included — an
-/// account-parked colony stays parked while the account record holds and resumes when it lapses.
+/// worktree never left, so the normal admission loop resumes them like any operator resume. Both
+/// park shapes qualify: the pre-#213 `Stopped` stand-in and a real `Parked` whose park discarded
+/// the microVM. A park that kept the microVM cannot be requeued — a fresh boot would claim the
+/// sandbox name the kept machine still runs under — so its recovery is routed through the resume
+/// handler instead ([`crate::lifecycle::resume`]): warm when the idle agent link and a slot are
+/// there (the usual case while the mothership stayed up), and otherwise through that handler's own
+/// cold path, which hands the kept machine in before booting, or queues with it handed in — the
+/// same thing an operator's Resume press does. Without this a kept-VM park would sit stranded on a
+/// provider that has long since recovered. A named provider recovers when its record lapses (reset
+/// passed) or is gone (provider deleted); an unnamed one recovers when nothing is exhausted
+/// anywhere, the account record included — an account-parked colony stays parked while the account
+/// record holds and resumes when it lapses.
 pub(crate) async fn resume_quota_parked(app: &Shared) {
-    let ids: Vec<String> = {
+    let (ids, kept_ids): (Vec<String>, Vec<String>) = {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
         let any_exhausted = !app.gateway.quota_exhausted().is_empty();
-        sessions
+        let recovered = |s: &Session| {
+            s.attention
+                .as_ref()
+                .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+                && !s.cleaned_up
+                && s.git_admin_dir.is_some()
+                && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
+                    Some(pid) => !app.gateway.is_quota_exhausted(&pid),
+                    None => !any_exhausted,
+                }
+        };
+        let mut cold: Vec<String> = Vec::new();
+        let mut kept: Vec<String> = Vec::new();
+        for s in sessions
             .iter()
-            .filter(|s| {
-                s.status == SessionStatus::Stopped
-                    && s.attention
-                        .as_ref()
-                        .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
-                    && !s.cleaned_up
-                    && s.git_admin_dir.is_some()
-                    && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
-                        Some(pid) => !app.gateway.is_quota_exhausted(&pid),
-                        None => !any_exhausted,
-                    }
-            })
-            .map(|s| s.id.clone())
-            .collect()
+            .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked) && recovered(s))
+        {
+            // A kept-VM park takes the resume route; everything else is a plain requeue.
+            if s.parked.as_ref().is_some_and(|p| p.vm_kept) {
+                kept.push(s.id.clone());
+            } else {
+                cold.push(s.id.clone());
+            }
+        }
+        (cold, kept)
     };
     for id in ids {
         // Queued holds no slot, so the flip needs no admission; the loop below boots it. The status
         // is re-checked under the lock, so a concurrent operator resume wins instead of doubling.
         let flipped = app
             .update_session(&id, |x| {
-                if x.status != SessionStatus::Stopped {
-                    return false;
+                let due = x.status == SessionStatus::Stopped
+                    || (x.status == SessionStatus::Parked && x.parked.as_ref().is_some_and(|p| !p.vm_kept));
+                if due {
+                    x.status = SessionStatus::Queued;
+                    x.error = None;
+                    x.attention = None;
+                    // The park record had its say; a requeue is a resume, so it goes (issue #213).
+                    x.parked = None;
+                    x.updated_at = Utc::now();
                 }
-                x.status = SessionStatus::Queued;
-                x.error = None;
-                x.attention = None;
-                x.updated_at = Utc::now();
-                true
+                due
             })
             .await
             .is_some_and(|(_, flipped)| flipped);
@@ -780,6 +790,13 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
             app.session_log(&id, "info", "the provider's quota recovered; queued to resume".into())
                 .await;
         }
+    }
+    for id in kept_ids {
+        // The handler re-checks everything under its own locks — status, live link, running
+        // microVM, the discard setting, admission — so a colony an operator just resumed or
+        // stopped is not doubled, and one it cannot warm-resume lands on the cold path. A
+        // refusal (409, 404) means the park is no longer this tick's to recover.
+        let _ = crate::lifecycle::resume(State(app.clone()), Path(id)).await;
     }
 }
 
@@ -839,24 +856,15 @@ mod tests {
 
     #[test]
     fn the_hold_timeout_stamp_leaves_a_colony_a_resume_claimed_in_between_alone() {
-        // The ordinary case: still parked, so the stamp lands.
-        let mut parked = stopped_colony_with_worktree("acme", "parked".into());
-        stamp_hold_timeout(&mut parked);
+        // The stamp and the park are one claim now (issue #213), so the race this test covered is
+        // gone; what remains is that the record a park writes carries the reason its resume paths
+        // key on, and that a live colony never wears it.
+        let live = held_colony("acme", "acme", Utc::now());
         assert_eq!(
-            parked.attention.as_ref().and_then(|a| a["reason"].as_str()),
-            Some(HOLD_TIMEOUT_REASON)
+            live.attention.as_ref().and_then(|a| a["reason"].as_str()),
+            Some(AUTOPILOT_HELD_REASON),
+            "a held colony wears its hold, not a park reason"
         );
-        // A resume that flipped the colony back to Starting between the stop and the stamp wins:
-        // stamping hold_timeout onto a live colony would mislabel it as parked.
-        let mut resumed = stopped_colony_with_worktree("acme", "resumed".into());
-        resumed.status = SessionStatus::Starting;
-        stamp_hold_timeout(&mut resumed);
-        assert!(resumed.attention.is_none(), "a resumed colony keeps no park reason");
-        // Cleaned up in between: the worktree the reason promises is gone, so no stamp either.
-        let mut cleaned = stopped_colony_with_worktree("acme", "cleaned".into());
-        cleaned.cleaned_up = true;
-        stamp_hold_timeout(&mut cleaned);
-        assert!(cleaned.attention.is_none());
     }
 
     #[test]
@@ -898,9 +906,9 @@ mod tests {
             !has_room(&live, "acme", "acme/repo", 14, None, 32),
             "14 live colonies fill 14 slots"
         );
-        // Parking flips live colonies to Stopped, which holds nothing.
+        // Parking flips live colonies to Parked, which holds nothing (issue #213).
         for s in &mut live {
-            s.status = SessionStatus::Stopped;
+            s.status = SessionStatus::Parked;
         }
         assert_eq!(live.iter().filter(|s| s.status.busy()).count(), 0, "no parked colony is busy");
         assert!(
@@ -1287,6 +1295,21 @@ mod tests {
         s
     }
 
+    /// The same colony in the post-#213 shape: `Parked` with a park record. `vm_kept` says whether
+    /// the park left the microVM running — the difference between a cold auto-resume and one that
+    /// must wait for the operator.
+    fn quota_parked_record(id: &str, error: &str, vm_kept: bool) -> Session {
+        let mut s = quota_parked(id, error);
+        s.status = SessionStatus::Parked;
+        s.parked = Some(crate::sessions::Park {
+            at: Utc::now(),
+            reason: provider_quota::QUOTA_EXHAUSTED_REASON.into(),
+            resets_at: Some("09-23 07:54 UTC".into()),
+            vm_kept,
+        });
+        s
+    }
+
     #[tokio::test]
     async fn quota_resume_requeues_only_colonies_whose_provider_recovered() {
         let root = std::env::temp_dir().join(format!("colonizer-quota-resume-{}", crate::util::short_id()));
@@ -1313,6 +1336,70 @@ mod tests {
             "a requeue reads like a resume"
         );
         drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A recovered provider requeues a genuinely `Parked` colony whose park discarded the microVM,
+    /// and routes a kept-VM park through the resume handler rather than stranding it: with no live
+    /// agent link in this test the warm path is off the table, and with every parallel slot taken
+    /// the handler's cold path queues the colony — handing the kept microVM in first, so the
+    /// queue's later boot cannot collide with it.
+    #[tokio::test]
+    async fn quota_resume_requeues_a_cold_park_and_routes_a_kept_vm_park_through_resume() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-parked-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        // Three live colonies fill the sandbox module's default parallel limit, so the kept-VM
+        // park's resume is queued rather than admitted (and no boot is spawned under the test).
+        let fillers: Vec<Session> = (0..3)
+            .map(|i| {
+                let mut s = colony("acme", SessionStatus::Running);
+                s.id = format!("filler-{i}");
+                s
+            })
+            .collect();
+        let mut sessions = vec![
+            quota_parked_record("parked-cold", "provider quota exhausted (bailian)", false),
+            quota_parked_record("parked-warm", "provider quota exhausted (bailian)", true),
+        ];
+        sessions.extend(fillers);
+        *app.sessions.write().await = sessions;
+        for id in ["parked-cold", "parked-warm"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        // The record lapsed: both colonies' provider has recovered.
+        app.gateway
+            .mark_quota_exhausted("bailian", None, Some(Utc::now().timestamp() - 10));
+        resume_quota_parked(&app).await;
+        let sessions = app.sessions.read().await;
+        let cold = sessions.iter().find(|s| s.id == "parked-cold").unwrap();
+        assert_eq!(cold.status, SessionStatus::Queued, "a discarded-VM park rejoins the queue");
+        assert!(cold.parked.is_none(), "the park record had its say and goes");
+        let warm = sessions.iter().find(|s| s.id == "parked-warm").unwrap();
+        assert_eq!(
+            warm.status,
+            SessionStatus::Queued,
+            "a kept-VM park is recovered too, not stranded"
+        );
+        assert!(
+            warm.parked.is_none() && warm.attention.is_none(),
+            "its resume cleared the pause"
+        );
+        drop(sessions);
+        let cold_log = std::fs::read_to_string(app.session_dir("parked-cold").join("harness.jsonl")).unwrap_or_default();
+        assert!(
+            cold_log.contains("the provider's quota recovered; queued to resume"),
+            "{cold_log}"
+        );
+        let warm_log = std::fs::read_to_string(app.session_dir("parked-warm").join("harness.jsonl")).unwrap_or_default();
+        assert!(
+            warm_log.contains("cold resume queued: removing the microVM the park kept"),
+            "the kept-VM park went through resume's cold path, which hands the machine in: {warm_log}"
+        );
+        assert!(
+            !warm_log.contains("queued to resume"),
+            "not the plain requeue route: {warm_log}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1432,11 +1519,14 @@ mod tests {
         park_expired_holds(&app, timeout).await;
         let sessions = app.sessions.read().await;
         for s in sessions.iter().filter(|s| s.org == "org-a") {
-            assert_eq!(s.status, SessionStatus::Stopped, "an expired hold parks");
+            assert_eq!(s.status, SessionStatus::Parked, "an expired hold parks, for real");
+            let park = s.parked.as_ref().expect("the park record names why and what was kept");
+            assert_eq!(park.reason, HOLD_TIMEOUT_REASON);
+            assert!(park.resets_at.is_none(), "a hold timeout has no upstream reset to wait for");
             assert_eq!(
                 s.attention.as_ref().and_then(|a| a["reason"].as_str()),
                 Some(HOLD_TIMEOUT_REASON),
-                "parked-as-stopped under the hold-timeout reason"
+                "the banner's reason is stamped in the same claim as the park"
             );
             assert_eq!(s.attention.as_ref().and_then(|a| a["nudges"].as_u64()), Some(0));
             assert!(s.attention.as_ref().and_then(|a| a["since"].as_str()).is_some());
@@ -1446,7 +1536,7 @@ mod tests {
             );
             assert!(
                 can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()),
-                "a parked hold resumes like any stopped colony"
+                "a parked hold is resumable"
             );
             assert!(!s.holds_slot(), "a parked hold releases its slot");
         }
@@ -1462,7 +1552,7 @@ mod tests {
             sessions
                 .iter()
                 .filter(|s| s.org == "org-a")
-                .all(|s| s.status == SessionStatus::Stopped),
+                .all(|s| s.status == SessionStatus::Parked && s.parked.is_some()),
             "hold-timeout parks stay parked until resumed"
         );
         drop(sessions);

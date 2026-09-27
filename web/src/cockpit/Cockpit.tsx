@@ -443,6 +443,7 @@ export function Cockpit({
             onStop={onRedStop}
             onSynthesize={onRedSynthesize}
             onOpenColony={openColonyById}
+            onResume={(id) => act(id, "resume", (x) => api.resumeSession(x))}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
         );

@@ -16,7 +16,7 @@
 
 use crate::{
     ApiResult, App, Shared, client_error,
-    sessions::Session,
+    sessions::{Session, SessionStatus},
     util::{short_id, valid_repo},
 };
 use axum::{
@@ -510,14 +510,18 @@ pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, p
 
 /// The launch caps a scoped token runs under, checked in `sessions::create` before any colony is
 /// made: `Some(message)` refuses the launch. `max_concurrent` counts the token's colonies that are
-/// not yet terminal — queued ones hold a place in line, so they count; the budget sums what the
-/// token's colonies created today (UTC) have spent so far ([`Session::total_cost_usd`], Claude's
-/// own estimate plus the gateway's routed pricing). Pure, so both refusals are testable without a
-/// boot.
+/// not yet terminal — queued ones hold a place in line, so they count, but a parked one does not
+/// (issue #213): it holds no slot and may sit for days until its quota resets, and counting it
+/// would let one parked colony spend the whole cap. The budget sums what the token's colonies
+/// created today (UTC) have spent so far ([`Session::total_cost_usd`], Claude's own estimate plus
+/// the gateway's routed pricing). Pure, so both refusals are testable without a boot.
 pub(crate) fn launch_cap_error(token: &ScopedToken, sessions: &[Session], now: DateTime<Utc>) -> Option<String> {
     let mine = |s: &Session| s.launched_by_token.as_deref() == Some(token.id.as_str());
     if let Some(max) = token.max_concurrent {
-        let live = sessions.iter().filter(|s| mine(s) && !s.status.is_terminal()).count();
+        let live = sessions
+            .iter()
+            .filter(|s| mine(s) && !s.status.is_terminal() && s.status != SessionStatus::Parked)
+            .count();
         if live >= max as usize {
             return Some(format!(
                 "this API token's concurrency cap is {max} and it already has {live} colonies that are not finished; stop one or raise max_concurrent"
@@ -918,6 +922,32 @@ mod tests {
             launch_cap_error(&token, &[old], now).is_none(),
             "spend is daily, not lifetime"
         );
+    }
+
+    /// A parked colony (issue #213) is not finished, but it holds no slot and may sit for days
+    /// until its quota resets, so it does not count against `max_concurrent` — one parked colony
+    /// must not spend the token's whole cap.
+    #[test]
+    fn a_parked_colony_does_not_count_against_the_concurrency_cap() {
+        let now = Utc::now();
+        let mut token = scoped(Scope::Launch, &[], &[]);
+        token.max_concurrent = Some(1);
+        let mut parked = colony("acme", SessionStatus::Parked);
+        parked.launched_by_token = Some("tok_test".into());
+        assert!(
+            launch_cap_error(&token, &[parked.clone()], now).is_none(),
+            "a parked colony holds no concurrency"
+        );
+        // The same colony live does count: the exclusion is the park, not the record.
+        let mut running = parked.clone();
+        running.status = SessionStatus::Running;
+        let err = launch_cap_error(&token, &[running.clone()], now).unwrap();
+        assert!(err.contains("concurrency cap is 1"), "{err}");
+        // And launching under a cap of 2 with one parked and one live still passes.
+        token.max_concurrent = Some(2);
+        assert!(launch_cap_error(&token, &[parked, running.clone()], now).is_none());
+        // A second live colony would be one over.
+        assert!(launch_cap_error(&token, &[running.clone(), running], now).is_some());
     }
 
     /// `covers` is what the handlers check the launch bodies against, so it is pinned here too.
