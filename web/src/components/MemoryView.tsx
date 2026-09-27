@@ -123,8 +123,10 @@ export function MemoryView({
         </div>
       </header>
 
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto w-full max-w-3xl space-y-8 px-4 py-6">
+      {/* In the cockpit's wide frame the review queue and the notes sit side by side, each at a
+          readable width; in a narrower window they stack in one column, as before. */}
+      <div className="scroll-thin @container min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-3xl space-y-8 px-4 py-6 @min-[1400px]:grid @min-[1400px]:max-w-[1920px] @min-[1400px]:grid-cols-2 @min-[1400px]:items-start @min-[1400px]:gap-x-12 @min-[1400px]:space-y-0 @min-[1400px]:px-[var(--page-gutter,1rem)]">
           <section aria-labelledby="proposals-title" className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="proposals-title" className="text-[14.5px] font-semibold">

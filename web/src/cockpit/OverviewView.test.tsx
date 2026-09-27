@@ -443,9 +443,9 @@ describe("OverviewView org avatars", () => {
     expect(html).not.toContain("oklch(0.72");
   });
 
-  it("stands main charts 200px tall, as the v3 render does", () => {
+  it("stands main charts 200px tall on a laptop, taller as the page frame widens (--chart-h)", () => {
     const recent = new Date(Date.now() - 2 * 86_400_000).toISOString();
     const html = renderOverview([session({ id: "m1", status: "merged", created_at: recent, updated_at: recent })], [ACME]);
-    expect(html).toContain("h-[200px]");
+    expect(html).toContain("h-[var(--chart-h,200px)]");
   });
 });

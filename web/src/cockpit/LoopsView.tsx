@@ -11,6 +11,7 @@ import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, NewLoop, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { Page } from "./Page";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -103,8 +104,7 @@ export function LoopsView({
   };
 
   return (
-    <main className="cockpit scroll-thin min-h-0 flex-1 overflow-y-auto px-8 pb-24 pt-8">
-      <div className="mx-auto max-w-[1100px]">
+    <Page>
         <div className="flex flex-wrap items-end gap-4">
           <div className="min-w-0 flex-1">
             <h1 className="m-0 text-[30px] font-semibold tracking-[-0.035em] text-text">Loops</h1>
@@ -175,10 +175,9 @@ export function LoopsView({
             </ul>
           )}
         </div>
-      </div>
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
-    </main>
+    </Page>
   );
 }
 

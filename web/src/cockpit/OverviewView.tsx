@@ -14,6 +14,7 @@
 //   org-settings opener of its own.
 // - "Answer": deep-links to the colony through onOpenColony; no inline answering backend here.
 import { HackerIcon } from "./HackerIcon";
+import { Page } from "./Page";
 import { useMemo, useState, type ReactElement } from "react";
 
 import type { SectionId } from "../components/SettingsDialog";
@@ -309,23 +310,21 @@ export function OverviewView({
   const dashEntry = dashOrg ? workspaces.find((o) => sameOrg(o.org, dashOrg)) : undefined;
   if (dashEntry) {
     return (
-      <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
-        <div className="mx-auto w-full max-w-[1080px]">
-          <OrgDashboard
-            org={dashEntry}
-            sessions={visibleSessions.filter((s) => sameOrg(orgOf(s), dashEntry.org))}
-            history={spendHistory}
-            range={range}
-            compare={compare}
-            providers={providers}
-            action={colonize}
-            toolbar={rangePicker}
-            events={events}
-            onOpenColony={onOpenColony}
-            onBack={() => setDashOrg(null)}
-          />
-        </div>
-      </main>
+      <Page>
+        <OrgDashboard
+          org={dashEntry}
+          sessions={visibleSessions.filter((s) => sameOrg(orgOf(s), dashEntry.org))}
+          history={spendHistory}
+          range={range}
+          compare={compare}
+          providers={providers}
+          action={colonize}
+          toolbar={rangePicker}
+          events={events}
+          onOpenColony={onOpenColony}
+          onBack={() => setDashOrg(null)}
+        />
+      </Page>
     );
   }
 
@@ -337,8 +336,7 @@ export function OverviewView({
   };
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
-      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-10">
+    <Page frameClassName="flex flex-col gap-10">
         {quota?.paused && !quotaBannerVisible ? (
           <div role="status" className="-mb-4 border-y border-warn/40 py-2.5 text-[13px] text-warn">
             Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
@@ -479,134 +477,138 @@ export function OverviewView({
           sideFoot={hiddenOrgs.length > 0 ? `+ ${hiddenOrgs.length} hidden ${hiddenOrgs.length === 1 ? "org" : "orgs"} not counted` : "All workspaces shown"}
         />
 
-        <Section title="Workspaces" meta={String(workspaces.length)}>
-          <Rules>
-            <div className="overflow-x-auto">
-              <div className="min-w-[760px]">
-                <div className={`${WS_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
-                  <span>Name</span>
-                  <span className="text-right">Colonies</span>
-                  <span className="text-right">Need</span>
-                  <span className="text-right">Merged</span>
-                  <span className="text-right">Fail</span>
-                  <span className="text-right">Spend</span>
-                  <span>Trend</span>
-                  <span className="sr-only">Actions</span>
-                </div>
-                {compared.map((c) => (
-                  <div
-                    key={c.org}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setDashOrg(c.org)}
-                    onKeyDown={(e) => {
-                      if (e.target !== e.currentTarget) return;
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setDashOrg(c.org);
-                      }
-                    }}
-                    title={`open the ${c.org} dashboard`}
-                    className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
-                  >
-                    <span className="flex min-w-0 items-center gap-2.5">
-                      <OrgTile org={c.org} avatar={c.avatar} size={22} />
-                      <span className="truncate font-medium">{c.org}</span>
-                    </span>
-                    <span className="text-right text-muted">{c.mine.length}</span>
-                    <span className={`text-right ${c.need > 0 ? "text-warn" : "text-faint"}`}>{c.need > 0 ? `${c.need} need you` : "—"}</span>
-                    <span className="text-right">{c.merged}</span>
-                    <span
-                      className={`text-right ${c.fail.rate != null && c.fail.rate > 0.08 ? "text-err" : "text-muted"}`}
-                      title={c.fail.rate != null ? `${c.fail.failed} failed of ${c.fail.decided} decided (merged+failed)` : "nothing decided in range"}
+        {/* Side by side once the frame has room for both tables at full width (a wide desktop,
+            ≥ ~2200px window); stacked below that. */}
+        <div className="grid items-start gap-10 @min-[1800px]:grid-cols-2">
+          <Section title="Workspaces" meta={String(workspaces.length)}>
+            <Rules>
+              <div className="overflow-x-auto">
+                <div className="min-w-[760px]">
+                  <div className={`${WS_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
+                    <span>Name</span>
+                    <span className="text-right">Colonies</span>
+                    <span className="text-right">Need</span>
+                    <span className="text-right">Merged</span>
+                    <span className="text-right">Fail</span>
+                    <span className="text-right">Spend</span>
+                    <span>Trend</span>
+                    <span className="sr-only">Actions</span>
+                  </div>
+                  {compared.map((c) => (
+                    <div
+                      key={c.org}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setDashOrg(c.org)}
+                      onKeyDown={(e) => {
+                        if (e.target !== e.currentTarget) return;
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setDashOrg(c.org);
+                        }
+                      }}
+                      title={`open the ${c.org} dashboard`}
+                      className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
                     >
-                      {c.fail.rate != null ? `${(c.fail.rate * 100).toFixed(1)}%` : "—"}
-                    </span>
-                    <span className="text-right">{formatCost(c.spend)}</span>
-                    <TrendLine values={dailyCosts(current, c.org)} />
-                    <RedTeamActions
-                      org={c.org}
-                      live={runs.filter((r) => sameOrg(r.org, c.org) && ["armed", "waiting", "running", "draining"].includes(r.state)).length}
-                      onStart={() => setRedTeam({ org: c.org, view: "wizard" })}
-                      onHistory={() => setRedTeam({ org: c.org, view: "history" })}
-                    />
-                  </div>
-                ))}
-              </div>
-            </div>
-          </Rules>
-        </Section>
-
-        <Section
-          id="sec-colonies"
-          title="Colonies"
-          meta={String(tableSessions.length)}
-          right={
-            filtered ? (
-              <button type="button" onClick={clearFilters} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted underline underline-offset-[3px] hover:text-text">
-                clear filters
-              </button>
-            ) : undefined
-          }
-        >
-          {held.count > 0 && (
-            <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
-              {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
-            </div>
-          )}
-          <Rules>
-            {visibleSessions.length > 0 && (
-              <div className="overflow-x-auto">
-                <div className="min-w-[680px]">
-                  <ColonyFilterHeader
-                    filters={filters}
-                    onChange={(next) => {
-                      setFilters(next);
-                      setPage(0);
-                    }}
-                    sessions={visibleSessions}
-                    workspaces={workspaces.map((w) => ({ org: w.org, avatar: w.avatar ?? null }))}
-                    counts={counts}
-                    stalledQueue={stalled}
-                  />
-                </div>
-              </div>
-            )}
-            {tableSessions.length === 0 ? (
-              filtered ? (
-                <div className="py-3.5 text-[13px] text-muted">
-                  <div>
-                    nothing matches these filters
-                    {visibleSessions.length > 0 && <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>}
-                    {hiddenOrgs.length > 0 && <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>}
-                  </div>
-                  <button type="button" onClick={clearFilters} className="mt-1.5 cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
-                    clear filters ×
-                  </button>
-                </div>
-              ) : (
-                <div className="py-3.5 text-[13px] text-faint">No colonies in these workspaces yet.</div>
-              )
-            ) : (
-              <div className="overflow-x-auto">
-                <div className="min-w-[680px]">
-                  {tablePage.rows.map((session) => (
-                    <ColonyRow
-                      key={session.id}
-                      session={session}
-                      age={session.status === "queued" ? `queued ${formatWait(nowMs - Date.parse(session.created_at))}` : timeAgo(session.last_activity_at ?? session.updated_at)}
-                      flashed={isFlashed(events, session.id, nowMs)}
-                      bumped={isBumped(events, session.id, nowMs)}
-                      onOpen={onOpenColony}
-                      orgAvatar={workspaces.find((w) => sameOrg(w.org, orgOf(session)))?.avatar ?? null}
-                    />
+                      <span className="flex min-w-0 items-center gap-2.5">
+                        <OrgTile org={c.org} avatar={c.avatar} size={22} />
+                        <span className="truncate font-medium">{c.org}</span>
+                      </span>
+                      <span className="text-right text-muted">{c.mine.length}</span>
+                      <span className={`text-right ${c.need > 0 ? "text-warn" : "text-faint"}`}>{c.need > 0 ? `${c.need} need you` : "—"}</span>
+                      <span className="text-right">{c.merged}</span>
+                      <span
+                        className={`text-right ${c.fail.rate != null && c.fail.rate > 0.08 ? "text-err" : "text-muted"}`}
+                        title={c.fail.rate != null ? `${c.fail.failed} failed of ${c.fail.decided} decided (merged+failed)` : "nothing decided in range"}
+                      >
+                        {c.fail.rate != null ? `${(c.fail.rate * 100).toFixed(1)}%` : "—"}
+                      </span>
+                      <span className="text-right">{formatCost(c.spend)}</span>
+                      <TrendLine values={dailyCosts(current, c.org)} />
+                      <RedTeamActions
+                        org={c.org}
+                        live={runs.filter((r) => sameOrg(r.org, c.org) && ["armed", "waiting", "running", "draining"].includes(r.state)).length}
+                        onStart={() => setRedTeam({ org: c.org, view: "wizard" })}
+                        onHistory={() => setRedTeam({ org: c.org, view: "history" })}
+                      />
+                    </div>
                   ))}
                 </div>
               </div>
+            </Rules>
+          </Section>
+
+          <Section
+            id="sec-colonies"
+            title="Colonies"
+            meta={String(tableSessions.length)}
+            right={
+              filtered ? (
+                <button type="button" onClick={clearFilters} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted underline underline-offset-[3px] hover:text-text">
+                  clear filters
+                </button>
+              ) : undefined
+            }
+          >
+            {held.count > 0 && (
+              <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
+                {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
+              </div>
             )}
-            {tableSessions.length > PAGE_SIZE && <Pagination view={tablePage} onPage={setPage} noun="colonies" className="-mt-px border-t border-border py-2.5" />}
-          </Rules>
-        </Section>
+            <Rules>
+              {visibleSessions.length > 0 && (
+                <div className="overflow-x-auto">
+                  <div className="min-w-[680px]">
+                    <ColonyFilterHeader
+                      filters={filters}
+                      onChange={(next) => {
+                        setFilters(next);
+                        setPage(0);
+                      }}
+                      sessions={visibleSessions}
+                      workspaces={workspaces.map((w) => ({ org: w.org, avatar: w.avatar ?? null }))}
+                      counts={counts}
+                      stalledQueue={stalled}
+                    />
+                  </div>
+                </div>
+              )}
+              {tableSessions.length === 0 ? (
+                filtered ? (
+                  <div className="py-3.5 text-[13px] text-muted">
+                    <div>
+                      nothing matches these filters
+                      {visibleSessions.length > 0 && <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>}
+                      {hiddenOrgs.length > 0 && <> · + {hiddenParts.join(" · ")} in hidden {hiddenOrgs.length === 1 ? "org" : "orgs"} ({hiddenOrgs.join(", ")})</>}
+                    </div>
+                    <button type="button" onClick={clearFilters} className="mt-1.5 cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
+                      clear filters ×
+                    </button>
+                  </div>
+                ) : (
+                  <div className="py-3.5 text-[13px] text-faint">No colonies in these workspaces yet.</div>
+                )
+              ) : (
+                <div className="overflow-x-auto">
+                  <div className="min-w-[680px]">
+                    {tablePage.rows.map((session) => (
+                      <ColonyRow
+                        key={session.id}
+                        session={session}
+                        age={session.status === "queued" ? `queued ${formatWait(nowMs - Date.parse(session.created_at))}` : timeAgo(session.last_activity_at ?? session.updated_at)}
+                        flashed={isFlashed(events, session.id, nowMs)}
+                        bumped={isBumped(events, session.id, nowMs)}
+                        onOpen={onOpenColony}
+                        orgAvatar={workspaces.find((w) => sameOrg(w.org, orgOf(session)))?.avatar ?? null}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {tableSessions.length > PAGE_SIZE && <Pagination view={tablePage} onPage={setPage} noun="colonies" className="-mt-px border-t border-border py-2.5" />}
+            </Rules>
+          </Section>
+        </div>
 
         <div className="flex flex-wrap gap-x-6 gap-y-2 text-[12.5px] text-faint">
           {host && (
@@ -634,7 +636,6 @@ export function OverviewView({
           <FleetPanel hosts={fleetHosts} />
           <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
         </div>
-      </div>
       <RedTeamWizard
         org={redTeam?.org ?? null}
         open={redTeam?.view === "wizard"}
@@ -656,7 +657,7 @@ export function OverviewView({
         onClose={() => setRedTeam((r) => (r?.view === "history" ? null : r))}
         onNew={(org) => setRedTeam({ org, view: "wizard" })}
       />
-    </main>
+    </Page>
   );
 }
 

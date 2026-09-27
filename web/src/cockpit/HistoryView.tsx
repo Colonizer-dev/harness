@@ -4,6 +4,7 @@
 // to change") fold into one row; the list pages fifty rows at a time and loads older activity on
 // request.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { Page } from "./Page";
 
 import { errorMessage, useApi } from "../context";
 import { cx } from "../components/ui";
@@ -366,106 +367,104 @@ export function HistoryView({
   const approximate = items.some((i) => i.approximate);
 
   return (
-    <main className="cockpit min-h-0 overflow-y-auto px-6 pb-20 pt-10">
-      <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-7">
-        <div className="flex flex-wrap items-end justify-between gap-4">
-          <div className="min-w-0">
-            <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">History</h1>
-            <div className="mt-2 text-[14px] text-muted">
-              {org ?? "All workspaces"} · what your colonies did and what you changed
-              {oldest && <span className="text-faint"> · since {new Date(oldest).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
-            </div>
+    <Page frameClassName="flex flex-col gap-7">
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="min-w-0">
+          <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">History</h1>
+          <div className="mt-2 text-[14px] text-muted">
+            {org ?? "All workspaces"} · what your colonies did and what you changed
+            {oldest && <span className="text-faint"> · since {new Date(oldest).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
           </div>
         </div>
+      </div>
 
-        <div className="overflow-hidden border-y border-border">
-          <div className="grid [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
-            <Stat label="Pull requests opened" value={stats.prs} sub="colonies that returned work" tone="var(--out-pr)" active={false} onClick={() => list.setFilters({ kind: "outcomes" })} />
-            <Stat label="Merged" value={stats.merged} sub="pull requests merged" tone="var(--out-merged)" active={false} onClick={() => list.setFilters({ kind: "outcomes" })} />
-            <Stat label="Failed" value={stats.failed} sub="colonies that failed" tone="var(--err)" active={list.filters.kind === "failures"} onClick={() => setKind("failures")} />
-            <Stat
-              label="Questions"
-              value={stats.questions}
-              sub={waitingNow > 0 ? `${waitingNow} waiting on you now` : "none waiting now"}
-              tone="var(--warn)"
-              active={list.filters.kind === "questions"}
-              onClick={() => setKind("questions")}
-            />
-            <Stat label="Your actions" value={stats.yours} sub="launches, stops, settings" tone="var(--accent)" active={list.filters.kind === "yours"} onClick={() => setKind("yours")} />
+      <div className="overflow-hidden border-y border-border">
+        <div className="grid [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">
+          <Stat label="Pull requests opened" value={stats.prs} sub="colonies that returned work" tone="var(--out-pr)" active={false} onClick={() => list.setFilters({ kind: "outcomes" })} />
+          <Stat label="Merged" value={stats.merged} sub="pull requests merged" tone="var(--out-merged)" active={false} onClick={() => list.setFilters({ kind: "outcomes" })} />
+          <Stat label="Failed" value={stats.failed} sub="colonies that failed" tone="var(--err)" active={list.filters.kind === "failures"} onClick={() => setKind("failures")} />
+          <Stat
+            label="Questions"
+            value={stats.questions}
+            sub={waitingNow > 0 ? `${waitingNow} waiting on you now` : "none waiting now"}
+            tone="var(--warn)"
+            active={list.filters.kind === "questions"}
+            onClick={() => setKind("questions")}
+          />
+          <Stat label="Your actions" value={stats.yours} sub="launches, stops, settings" tone="var(--accent)" active={list.filters.kind === "yours"} onClick={() => setKind("yours")} />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Segmented label="kind" value={list.filters.kind} onChange={(kind) => list.setFilters({ kind })} options={KIND_FILTERS} />
+          <div className="ml-auto flex flex-wrap items-center gap-2">
+            <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search history…" label="search history" className="w-full sm:w-56" />
+            <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo} onChange={(repo) => list.setFilters({ repo })} options={optionsBy(items, (i) => i.repo, (r) => r.split("/")[1] ?? r)} />
+            <FilterSelect label="actor" allLabel="Anyone" value={list.filters.actor} onChange={(actor) => list.setFilters({ actor })} options={optionsBy(items, (i) => i.actor, (a) => ACTOR_LABEL[a as keyof typeof ACTOR_LABEL] ?? a)} />
           </div>
         </div>
-
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Segmented label="kind" value={list.filters.kind} onChange={(kind) => list.setFilters({ kind })} options={KIND_FILTERS} />
-            <div className="ml-auto flex flex-wrap items-center gap-2">
-              <SearchBox value={list.query} onChange={list.setQuery} placeholder="Search history…" label="search history" className="w-full sm:w-56" />
-              <FilterSelect label="repository" allLabel="All repositories" value={list.filters.repo} onChange={(repo) => list.setFilters({ repo })} options={optionsBy(items, (i) => i.repo, (r) => r.split("/")[1] ?? r)} />
-              <FilterSelect label="actor" allLabel="Anyone" value={list.filters.actor} onChange={(actor) => list.setFilters({ actor })} options={optionsBy(items, (i) => i.actor, (a) => ACTOR_LABEL[a as keyof typeof ACTOR_LABEL] ?? a)} />
-            </div>
-          </div>
-          {(filtered || log.error || log.skipped > 0 || approximate) && (
-            <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint">
-              {filtered && (
-                <span>
-                  showing {list.total} of {items.length}
-                  <button type="button" onClick={list.reset} className="ml-2 cursor-pointer border-0 bg-transparent p-0 text-muted underline underline-offset-[3px] hover:text-text">
-                    clear ×
-                  </button>
-                </span>
-              )}
-              {log.error && <span className="text-warn">The activity log did not load ({log.error}); showing colony outcomes only.</span>}
-              {log.skipped > 0 && <span className="text-warn">{log.skipped} unreadable {log.skipped === 1 ? "line" : "lines"} in the activity log skipped.</span>}
-              {approximate && !filtered && <span>~ marks a time read from a colony that finished before the activity log existed.</span>}
-            </div>
-          )}
-        </div>
-
-        {!log.loaded ? (
-          <div className="border-y border-border py-3.5 text-[13px] text-muted">Loading history…</div>
-        ) : view.total === 0 ? (
-          <div className="border-y border-border py-6 text-center text-[13px] text-muted">
-            {filtered ? "Nothing matches these filters." : "Nothing has happened here yet. Launch a colony and its story starts here."}
-          </div>
-        ) : (
-          <div className="flex flex-col">
-            {days.map(({ day, rows: dayRows }) => (
-              <section key={day} aria-label={day}>
-                <div className="sticky top-0 z-10 -mx-2 flex items-baseline gap-2 bg-bg/90 px-2 pb-2 pt-3 backdrop-blur-sm">
-                  <h2 className="m-0 text-[12px] font-semibold uppercase tracking-[0.08em] text-muted">{day}</h2>
-                  <span className="text-[12px] text-faint">
-                    {dayRows.reduce((n, r) => n + (r.type === "group" ? r.items.length : 1), 0)} events
-                  </span>
-                  <span aria-hidden="true" className="ml-2 h-px flex-1 self-center bg-border" />
-                </div>
-                <div className="relative pb-2">
-                  <div aria-hidden="true" className="absolute bottom-3 left-[77px] top-3 w-px bg-border" />
-                  {dayRows.map((row) =>
-                    row.type === "group" ? (
-                      <GroupRow key={row.key} row={row} open={open.has(row.key)} onToggle={() => toggle(row.key)} targetFor={targetFor} onOpen={openTarget} />
-                    ) : (
-                      <ItemRow key={row.key} item={row.item} target={targetFor(row.item)} onOpen={openTarget} />
-                    ),
-                  )}
-                </div>
-              </section>
-            ))}
-            <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-border pt-2.5">
-              <Pagination view={view} onPage={list.setPage} noun={view.total === 1 ? "row" : "rows"} className="flex-1" />
-              {log.next != null && !log.error && (
-                <button
-                  type="button"
-                  disabled={log.loadingOlder}
-                  onClick={() => void loadOlder()}
-                  className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50"
-                >
-                  {log.loadingOlder ? "Loading…" : "Load older activity"}
+        {(filtered || log.error || log.skipped > 0 || approximate) && (
+          <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint">
+            {filtered && (
+              <span>
+                showing {list.total} of {items.length}
+                <button type="button" onClick={list.reset} className="ml-2 cursor-pointer border-0 bg-transparent p-0 text-muted underline underline-offset-[3px] hover:text-text">
+                  clear ×
                 </button>
-              )}
-            </div>
+              </span>
+            )}
+            {log.error && <span className="text-warn">The activity log did not load ({log.error}); showing colony outcomes only.</span>}
+            {log.skipped > 0 && <span className="text-warn">{log.skipped} unreadable {log.skipped === 1 ? "line" : "lines"} in the activity log skipped.</span>}
+            {approximate && !filtered && <span>~ marks a time read from a colony that finished before the activity log existed.</span>}
           </div>
         )}
       </div>
-    </main>
+
+      {!log.loaded ? (
+        <div className="border-y border-border py-3.5 text-[13px] text-muted">Loading history…</div>
+      ) : view.total === 0 ? (
+        <div className="border-y border-border py-6 text-center text-[13px] text-muted">
+          {filtered ? "Nothing matches these filters." : "Nothing has happened here yet. Launch a colony and its story starts here."}
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          {days.map(({ day, rows: dayRows }) => (
+            <section key={day} aria-label={day}>
+              <div className="sticky top-0 z-10 -mx-2 flex items-baseline gap-2 bg-bg/90 px-2 pb-2 pt-3 backdrop-blur-sm">
+                <h2 className="m-0 text-[12px] font-semibold uppercase tracking-[0.08em] text-muted">{day}</h2>
+                <span className="text-[12px] text-faint">
+                  {dayRows.reduce((n, r) => n + (r.type === "group" ? r.items.length : 1), 0)} events
+                </span>
+                <span aria-hidden="true" className="ml-2 h-px flex-1 self-center bg-border" />
+              </div>
+              <div className="relative pb-2">
+                <div aria-hidden="true" className="absolute bottom-3 left-[77px] top-3 w-px bg-border" />
+                {dayRows.map((row) =>
+                  row.type === "group" ? (
+                    <GroupRow key={row.key} row={row} open={open.has(row.key)} onToggle={() => toggle(row.key)} targetFor={targetFor} onOpen={openTarget} />
+                  ) : (
+                    <ItemRow key={row.key} item={row.item} target={targetFor(row.item)} onOpen={openTarget} />
+                  ),
+                )}
+              </div>
+            </section>
+          ))}
+          <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-border pt-2.5">
+            <Pagination view={view} onPage={list.setPage} noun={view.total === 1 ? "row" : "rows"} className="flex-1" />
+            {log.next != null && !log.error && (
+              <button
+                type="button"
+                disabled={log.loadingOlder}
+                onClick={() => void loadOlder()}
+                className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50"
+              >
+                {log.loadingOlder ? "Loading…" : "Load older activity"}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </Page>
   );
 }

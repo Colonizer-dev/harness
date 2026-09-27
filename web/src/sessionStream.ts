@@ -584,7 +584,9 @@ export function useSessionStream(api: Api, sessionId: string | null): { stream: 
     setStream(next);
     return () => next.stop();
   }, [api, sessionId]);
-  const state = useSyncExternalStore(stream?.subscribe ?? noopSubscribe, stream?.getState ?? getEmptyState);
+  const getState = stream?.getState ?? getEmptyState;
+  // The same getter serves a server render (the cockpit's static-markup tests), where no stream runs.
+  const state = useSyncExternalStore(stream?.subscribe ?? noopSubscribe, getState, getState);
   return { stream, state };
 }
 

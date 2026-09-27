@@ -402,7 +402,7 @@ export function OrgSettingsForm({
 
   return (
     <div className={cx("flex flex-col", embedded ? "h-full min-h-0 min-w-0 flex-1" : "max-h-[calc(100dvh-24px)]")}>
-      <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
+      <div className="page-pad flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
         <Avatar name={org} src={info?.avatar_url} size={36} rounded="xl" />
         <div className="min-w-0 flex-1">
           <h2 id="org-settings-title" className="text-[16px] font-semibold [overflow-wrap:anywhere]">
@@ -424,7 +424,7 @@ export function OrgSettingsForm({
         )}
       </div>
 
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
+      <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
         <section className="border-b border-border py-3">
           <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Workspace</h3>
           <div className="divide-y divide-border">
@@ -577,7 +577,7 @@ export function OrgSettingsForm({
         ))}
       </div>
 
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
+      <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
         <span className={cx("mr-auto text-[12.5px]", error ? "text-err" : "text-muted")}>
           {error ?? (overrides === 0 ? "Everything inherits the global settings" : `${overrides} override${overrides === 1 ? "" : "s"}`)}
         </span>

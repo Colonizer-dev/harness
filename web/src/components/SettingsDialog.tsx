@@ -598,7 +598,7 @@ export function SettingsBody({
       <HeroContext.Provider value={ownFrame ? null : hero}>
         {ownFrame ? (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="shrink-0 px-5 pt-4">{hero}</div>
+            <div className="page-pad shrink-0 px-5 pt-4">{hero}</div>
             {pane}
           </div>
         ) : (
@@ -799,7 +799,7 @@ function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; active: Sect
 
   return (
     <nav aria-label="Settings sections" className="shrink-0 border-b border-border">
-      <div role="tablist" aria-label="Settings groups" className="flex gap-1 px-4 pt-2.5">
+      <div role="tablist" aria-label="Settings groups" className="page-pad flex gap-1 px-4 pt-2.5 [--pad-x:1rem]">
         {groups.map((g) => {
           const current = g.label === group?.label;
           return (
@@ -831,7 +831,7 @@ function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; active: Sect
           </p>
         )}
         {group?.error && <p className="px-5 py-2.5 text-[12.5px] text-err">{group.error}</p>}
-        <ul onKeyDown={onKeyDown} className="scroll-thin flex gap-1.5 overflow-x-auto px-4 py-2.5">
+        <ul onKeyDown={onKeyDown} className="page-pad scroll-thin flex gap-1.5 overflow-x-auto px-4 py-2.5 [--pad-x:1rem]">
           {items.map((item) => {
             const current = item.id === active;
             return (
@@ -910,7 +910,7 @@ export function Pane({
 
   return (
     <section aria-labelledby={PANE_TITLE_ID} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-start gap-2 border-b border-border px-5 py-3.5">
+      <div className="page-pad flex shrink-0 items-start gap-2 border-b border-border px-5 py-3.5">
         {back && (
           <button
             type="button"
@@ -935,11 +935,11 @@ export function Pane({
         </div>
         {aside && <div className="flex shrink-0 items-center leading-8">{aside}</div>}
       </div>
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
         {hero}
         {children}
       </div>
-      {footer && <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">{footer}</div>}
+      {footer && <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">{footer}</div>}
     </section>
   );
 }

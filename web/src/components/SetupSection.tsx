@@ -366,7 +366,7 @@ function PaneShell({
   const titleId = useId();
   return (
     <section aria-labelledby={titleId} className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="flex shrink-0 items-start gap-2 border-b border-border px-5 py-3.5">
+      <div className="page-pad flex shrink-0 items-start gap-2 border-b border-border px-5 py-3.5">
         {back && (
           <button
             type="button"
@@ -387,8 +387,8 @@ function PaneShell({
           {setup && <Badge tone={setupTone(setup)}>{setup.progress.label}</Badge>}
         </div>
       </div>
-      <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
+      <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+      <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
         <span className="mr-auto text-[12.5px] text-muted">Model providers, plugins and skills are in Settings.</span>
         <Button size="sm" onClick={onDismiss}>
           Not now
