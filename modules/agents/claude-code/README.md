@@ -25,6 +25,7 @@ lines on stdout, diagnostics on stderr.
 | `COLONIZER_EFFORT` | model default | Orchestrator effort: `low`, `medium`, `high`, `xhigh` or `max` |
 | `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
+| `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
 
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
 the VM).
@@ -95,6 +96,40 @@ One honest limit on the `pattern`: it is evaluated by the runner's own event loo
 bounds the waiting, not the regex evaluation. A pathological pattern — catastrophic backtracking,
 the classic `(a+)+$` against a long line — can freeze the runner for far longer than any timeout.
 Keep patterns simple: a literal substring or a simple regex.
+
+## Conditional instructions
+
+`CLAUDE.md`/`AGENTS.md` load once at colony start, and a compaction can summarise them away. Two
+repo files add instructions that are injected exactly when they apply, once per fragment per
+context window (`instructions.mjs`):
+
+- `FOOTGUNS.md` in any directory applies to work on files in or under it. An `AGENTS.md` in a
+  subdirectory does the same — the repo root one already loads as project instructions.
+- `.colonizer/instructions.toml` maps conditions to instruction files:
+
+  ```toml
+  [[rule]]
+  file = "docs/STYLE.md"        # relative to the repo root
+  paths = ["web/**", "*.css"]   # gitignore-style globs, single-line arrays
+  labels = ["frontend"]         # this task's labels, any-of
+  ```
+
+  Globs follow gitignore semantics: a pattern holds for a path that matches it directly or through
+  an ancestor directory (`web/*` covers `web/src/App.tsx`), and a pattern without a slash is matched
+  against the basename, so `*.css` is a file type. A rule holds while one of the last 20 distinct
+  paths the agent touched matches, or the task carries one of its labels.
+
+Conditions are watched through harness hooks: PreToolUse on the tools whose input names a path
+(`Read`, `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `Glob`, `Grep`, and `Bash`, where each
+whitespace-separated token that names a file in the worktree counts), plus `UserPromptSubmit` for
+the paths a prompt names. Injection only ever adds context — no hook here denies or rewrites
+anything. A fragment is capped at 16 KiB, resolved against the real worktree (a rule file outside
+it, including one reached through `..` or a symlink, is refused with a logged warning), and each
+load is logged to the colony log.
+
+After a compaction every fragment whose condition still holds is re-injected, and the rest are
+dropped until they are relevant again. A repo with no `FOOTGUNS.md` anywhere and no
+`instructions.toml` pays only a couple of failed stat calls per directory the agent touches.
 
 ## Develop
 
