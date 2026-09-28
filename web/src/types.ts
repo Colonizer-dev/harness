@@ -544,6 +544,8 @@ export interface ModuleProviderInfo {
   id: string;
   name: string;
   description?: string;
+  /** Agent rows only: the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643). */
+  loop_tools?: boolean;
 }
 
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */

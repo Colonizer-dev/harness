@@ -98,8 +98,10 @@ export function resolveModel(spec) {
   return { model: slash > 0 ? value.slice(slash + 1) : value };
 }
 
-/** Loopback bridge to mcp.mjs: finding_file and memory_propose arrive here and leave the colony as
- * protocol events (docs/protocol.md §6.6, §6.2), the way the opencode module's bridge does. */
+/** Loopback bridge to mcp.mjs: finding_file, memory_propose, loop_next and loop_stop arrive here
+ * and leave the colony as protocol events (docs/protocol.md §6.6, §6.2), the way the opencode
+ * module's bridge does. The loop delay was clamped in mcp.mjs; the bridge only validates the shape
+ * it must not emit malformed (§2's delay_minutes is an integer). */
 export async function createBridge({ emit, findings = false, token = randomBytes(16).toString('hex') }) {
   const server = createServer((req, res) => {
     const reply = (status, payload) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); } };
@@ -124,6 +126,20 @@ export async function createBridge({ emit, findings = false, token = randomBytes
           emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
           reply(200, { ok: true });
         }
+      } else if (req.url === '/loop_next') {
+        const minutes = Number(msg.delay_minutes);
+        if (!Number.isFinite(minutes) || minutes < 1) reply(200, { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+        else if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_next needs a reason: what the next run should find or do' });
+        else {
+          emit({ type: 'loop_next', delay_minutes: Math.round(minutes), reason: msg.reason });
+          reply(200, { ok: true });
+        }
+      } else if (req.url === '/loop_stop') {
+        if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_stop needs a reason: why the loop should stop' });
+        else {
+          emit({ type: 'loop_stop', reason: msg.reason });
+          reply(200, { ok: true });
+        }
       } else reply(404, {});
     });
   });
@@ -137,8 +153,8 @@ export async function createBridge({ emit, findings = false, token = randomBytes
 /** The `-c` overrides that register the colonizer MCP server (mcp.mjs) with codex: the upstream
  * config keys are `mcp_servers.<id>.command`, `.args` and `.env`, and `tool_timeout_sec` (default
  * 60) must cover a wait's 1800 s hard cap. The values ride as JSON, which is valid TOML for the
- * strings, the array and the inline table. Findings and memory ride through so mcp.mjs can gate
- * its tool list the way the mothership gated the runner env. */
+ * strings, the array and the inline table. Findings, memory and the loop switches ride through so
+ * mcp.mjs can gate its tool list the way the mothership gated the runner env. */
 export function mcpArgs({ url, token, env }) {
   const server = {
     command: process.execPath,
@@ -148,6 +164,8 @@ export function mcpArgs({ url, token, env }) {
       COLONIZER_BRIDGE_TOKEN: token,
       COLONIZER_FINDINGS: env.COLONIZER_FINDINGS, // undefined drops out of the JSON, and the table
       COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR,
+      COLONIZER_LOOP: env.COLONIZER_LOOP, // a loop colony's pacing tools; SELF_PACED gates loop_next
+      COLONIZER_LOOP_SELF_PACED: env.COLONIZER_LOOP_SELF_PACED,
     },
     tool_timeout_sec: 3600,
   };

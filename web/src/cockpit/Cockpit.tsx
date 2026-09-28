@@ -478,7 +478,7 @@ export function Cockpit({
           />
         );
       case "loops":
-        return <LoopsView org={selectedOrg} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
+        return <LoopsView org={selectedOrg} orgs={orgs} repos={repos} sessions={sessions} avatarFor={avatarFor} onOpenColony={openColonyById} />;
       case "secrets":
         return <SecretsView focusId={secretsRequest?.id} focusRequest={secretsRequest?.n} />;
       case "chat":

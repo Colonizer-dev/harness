@@ -8,9 +8,9 @@ import { Avatar } from "../components/Avatar";
 import { ModelPicker } from "../components/ModelPicker";
 import { Button, SESSION_STATUS, Spinner, Switch, cx } from "../components/ui";
 import { formatCost, sessionCost } from "../spend";
-import type { Loop, LoopCadence, NewLoop, Repo, Session } from "../types";
+import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
-import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { Page } from "./Page";
 
 export const LOOP_ORIGIN = "loop:";
@@ -32,12 +32,15 @@ export function LoopBadge({ session }: { session: Pick<Session, "origin"> }): Re
 
 export function LoopsView({
   org,
+  orgs,
   repos,
   sessions,
   avatarFor,
   onOpenColony,
 }: {
   org: string | null;
+  /** Every org with its settings: which agent module each org's loop colonies launch on. */
+  orgs: readonly OrgInfo[];
   repos: readonly Repo[];
   sessions: readonly Session[];
   avatarFor: (org: string) => string | null;
@@ -175,7 +178,7 @@ export function LoopsView({
             </ul>
           )}
         </div>
-      {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
+      {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
     </Page>
   );
@@ -203,19 +206,32 @@ export function bodyOf(l: Loop, change: Partial<NewLoop> = {}): NewLoop {
 function LoopDialog({
   loop,
   org,
+  orgs,
   repos,
   onSave,
   onClose,
 }: {
   loop: Loop | null;
   org: string | null;
+  orgs: readonly OrgInfo[];
   repos: readonly Repo[];
   onSave: (id: string | null, body: NewLoop) => Promise<void>;
   onClose: () => void;
 }): ReactElement {
   const ref = useRef<HTMLDialogElement>(null);
+  const api = useApi();
   const models = useModels();
   const toast = useToast();
+  // What the modules offer, so a self-paced cadence can warn when the org's agent module serves
+  // neither loop tool (issue #643). An install that never answers says nothing, not the wrong thing.
+  const [modules, setModules] = useState<ModuleInfo[]>([]);
+  useEffect(() => {
+    let live = true;
+    api.modules().then((m) => live && setModules(m), () => {});
+    return () => {
+      live = false;
+    };
+  }, [api]);
   const scoped = useMemo(() => repos.filter((r) => !org || r.full_name.split("/")[0].toLowerCase() === org.toLowerCase()), [repos, org]);
   const [repo, setRepo] = useState((loop?.repo ?? scoped[0]?.full_name ?? "").replace(/\/\*$/, ""));
   const [prompt, setPrompt] = useState(loop?.prompt ?? "");
@@ -267,6 +283,11 @@ function LoopDialog({
   // one repository needs a real repository of that org to name.
   const firstInOrg = (owner: string) =>
     repos.find((r) => r.full_name.split("/")[0].toLowerCase() === owner.toLowerCase())?.full_name ?? "";
+  // The org whose agent module will launch this loop's colonies — the repository scope's owner —
+  // warned about when its module cannot pace or stop a self-paced loop (issue #643).
+  const pacingWarning = kind === "colony" && choice.every === "self_paced" && repo.includes("/")
+    ? selfPacedWarning(repo.split("/")[0], orgs, modules)
+    : null;
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="loop-dialog-title" className="m-auto w-[min(640px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
@@ -460,9 +481,11 @@ function LoopDialog({
               <span className="text-faint">your local time</span>
             </div>
           )}
-          {choice.every === "self_paced" && (
+          {choice.every === "self_paced" && kind === "colony" && (pacingWarning ? (
+            <p className="text-[12.5px] text-warn">{pacingWarning}</p>
+          ) : (
             <p className="text-faint">Each run chooses when the next starts (15 minutes to 24 hours) with loop_next; without a choice it runs again in 24 hours.</p>
-          )}
+          ))}
         </fieldset>
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="block">
