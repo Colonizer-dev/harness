@@ -3,11 +3,15 @@
 // v2026.9.24 (v0.21.5). Implements the runner contract in docs/protocol.md §2: commands arrive as
 // JSON lines on stdin, protocol events leave as JSON lines on stdout, diagnostics go to stderr.
 // One `hermes chat -q <text> --format stream-json` process per turn, later turns --resume the
-// session id the first one reported.
+// session id the first one reported. Questions go through the colonizer MCP server's ask_user tool
+// (mcp.mjs, registered under `mcp_servers.colonizer` in the written config.yaml) and a loopback
+// bridge below, the same wire the codex and grok-build modules speak.
 
 import { execFile, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createServer } from 'node:http';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +20,9 @@ export const DEFAULT_HERMES_HOME = '/tmp/colonizer-hermes';
 export const SESSION_FILE = 'colonizer-session-id';
 export const DISABLED_TOOLSETS = ['memory', 'skills', 'delegation', 'cronjob', 'tts', 'clarify'];
 export const MAX_TOOL_OUTPUT = 20_000;
+// Hermes' mcp_servers timeout is per tool call in seconds (default 300); asks wait on a human for
+// minutes, so the colonizer server gets an hour — mcp.mjs holds the call open with progress notes.
+export const MCP_TIMEOUT_SECS = 3600;
 
 /** The full disabled-toolsets list a config carries: DISABLED_TOOLSETS plus the module.json
  * `disabled_tools` names (trimmed, empties dropped, deduplicated — the harness validated each name
@@ -109,9 +116,11 @@ export function parseRoutes(raw) {
  * Anthropic Messages wire, and the `model:` block naming the resolved pair. That block is load-bearing:
  * Hermes' first-run guard (`_has_any_provider_configured()`) ignores the top-level `providers:` map
  * and exits with "no API keys or providers found" unless `model.provider` points at one.
+ * `mcpServers` (Hermes' `mcp_servers`: command/args/env per server, `timeout` the per-tool-call cap
+ * in seconds) registers the vendored colonizer MCP server, the question channel.
  * `env`'s COLONIZER_DISABLED_TOOLS names extra whole toolsets to disable (disabledToolsets).
  */
-export function hermesConfig(routes, resolved = null, env = {}) {
+export function hermesConfig(routes, resolved = null, mcpServers = null, env = {}) {
   const providers = {};
   for (const route of routes) {
     providers[`colonizer-${route.provider}`] = { api: route.base_url, transport: 'anthropic_messages', extra_headers: route.headers };
@@ -124,8 +133,91 @@ export function hermesConfig(routes, resolved = null, env = {}) {
     agent: { disabled_toolsets: disabledToolsets(env) },
     providers,
   };
+  if (mcpServers) config.mcp_servers = mcpServers;
   if (resolved) config.model = { provider: resolved.provider, default: resolved.model };
   return config;
+}
+
+/** Loopback HTTP bridge to mcp.mjs: an ask waits for the matching `answer` command, the same wire
+ * the codex and grok-build modules speak (the vendored mcp.mjs copies are byte-identical on
+ * purpose). Interrupt, turn end and shutdown cancel the parked calls; `answer` on an unknown id is
+ * a warn. Only `/ask` is served: the runner passes no findings/memory/loop switches into the
+ * server's env block, so mcp.mjs's own gating never offers those tools here. */
+export async function createBridge({ emit, setStatus = () => {}, isWorking = () => false, token = randomBytes(16).toString('hex') }) {
+  let count = 0;
+  const pending = new Map();
+  const server = createServer((req, res) => {
+    const reply = (code, payload) => {
+      if (res.destroyed) return;
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(payload));
+    };
+    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) {
+      reply(req.method !== 'POST' ? 404 : 401, {});
+      return;
+    }
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > 1 << 20) req.destroy();
+    });
+    req.on('end', () => {
+      let msg = null;
+      try {
+        msg = JSON.parse(body || '{}');
+      } catch {
+        reply(400, {});
+        return;
+      }
+      if (req.url !== '/ask') {
+        reply(404, {});
+        return;
+      }
+      const questionId = `q-${++count}`;
+      pending.set(questionId, (answers) => reply(200, answers ?? { cancelled: true }));
+      const qs = Array.isArray(msg.questions) ? msg.questions : [];
+      emit({
+        type: 'question',
+        question_id: questionId,
+        message_id: typeof msg.message_id === 'string' ? msg.message_id : null,
+        questions: qs.map((q) => ({
+          question: String(q?.question ?? ''),
+          header: String(q?.header ?? q?.question ?? ''),
+          multi_select: Boolean(q?.multiSelect),
+          options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? ''), preview: null })),
+        })),
+      });
+      setStatus('waiting_for_answer');
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    token,
+    pending: () => pending.size,
+    answer(questionId, answers, response) {
+      const resolve = pending.get(questionId);
+      if (!resolve) return false;
+      pending.delete(questionId);
+      emit({ type: 'question_answered', question_id: questionId, answers, response });
+      if (pending.size) setStatus('waiting_for_answer');
+      else setStatus(isWorking() ? 'working' : 'idle');
+      resolve({ answers, response });
+      return true;
+    },
+    cancelAll() {
+      for (const resolve of pending.values()) resolve(null);
+      pending.clear();
+    },
+    close: () =>
+      new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections?.();
+      }),
+  };
 }
 
 /**
@@ -189,8 +281,9 @@ const truncate = (text) => {
  * @param {object} [args.env]                    the runner environment (routes, model, timeout)
  * @param {string} [args.home]                   HERMES_HOME, created and configured here
  * @param {Function} [args.spawnImpl]            child_process.spawn for the hermes turns
+ * @param {Function} [args.onReady]              called with the loopback bridge once it listens
  */
-export async function runAgent({ hermes = ['hermes'], commands, emit, env = process.env, home = env.COLONIZER_HERMES_HOME || DEFAULT_HERMES_HOME, spawnImpl = spawn } = {}) {
+export async function runAgent({ hermes = ['hermes'], commands, emit, env = process.env, home = env.COLONIZER_HERMES_HOME || DEFAULT_HERMES_HOME, spawnImpl = spawn, onReady } = {}) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status) return;
@@ -203,8 +296,24 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
   mkdirSync(home, { recursive: true });
   const timeoutSecs = Number(env.COLONIZER_HERMES_TURN_TIMEOUT_SECS) || DEFAULT_TURN_TIMEOUT_SECS;
   let model = env.COLONIZER_MODEL ?? '';
+  let child = null;
+  let markKilled = () => {};
+  // The model asks the user through the colonizer MCP server (mcp.mjs, registered in config.yaml
+  // below); its asks park on this runner's loopback bridge until the matching `answer` command.
+  // The server env carries only the bridge coordinates — mcp.mjs's own gating then hides the
+  // findings, memory and loop tools, leaving ask_user (and its self-contained `wait`).
+  const bridge = await createBridge({ emit, setStatus, isWorking: () => Boolean(child) });
+  onReady?.(bridge);
+  const mcpServers = {
+    colonizer: {
+      command: process.execPath,
+      args: [join(dirname(fileURLToPath(import.meta.url)), 'mcp.mjs')],
+      env: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token },
+      timeout: MCP_TIMEOUT_SECS,
+    },
+  };
   // Rewritten before every turn, so the file always names the model the CLI flags carry.
-  const writeConfig = (resolved) => writeFileSync(join(home, 'config.yaml'), `${JSON.stringify(hermesConfig(routes, resolved, env), null, 2)}\n`);
+  const writeConfig = (resolved) => writeFileSync(join(home, 'config.yaml'), `${JSON.stringify(hermesConfig(routes, resolved, mcpServers, env), null, 2)}\n`);
   const startup = resolveModel(model, routes);
   writeConfig(startup.ok ? startup : null);
   let announced = null; // the model clients were told about, in <provider>/<model> form
@@ -217,8 +326,6 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
   const childEnv = { ...env, HERMES_HOME: home, TERMINAL_ENV: LOCAL_BACKEND };
   const modelUsage = {}; // full model name → cumulative tokens (turn_end.model_usage)
   let turnCount = 0;
-  let child = null;
-  let markKilled = () => {};
   let turnChain = Promise.resolve();
   const queued = [];
   let closing = false;
@@ -266,6 +373,7 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
     const finish = ({ isError = false, result = null, durationMs = null, tokens = null } = {}) => {
       if (finished) return;
       finished = true;
+      bridge.cancelAll(); // a turn that ends with an unanswered ask releases the parked HTTP response
       if (tokens) {
         const usage = (modelUsage[resolved.full] ??= { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 });
         for (const [theirs, ours] of [['input', 'input_tokens'], ['output', 'output_tokens'], ['cache_read', 'cache_read_tokens'], ['cache_write', 'cache_write_tokens']]) {
@@ -318,6 +426,8 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
           if (event.text) emit({ type: 'assistant_text_delta', message_id: messageId, block_index: 0, delta: event.text });
           break;
         case 'tool_use': {
+          // A question is never also a tool_call (§2): the ask_user call rides the question event.
+          if (String(event.name ?? '').startsWith('mcp__colonizer__ask_user')) break;
           const toolCallId = `hermes-tool-${turnCount}-${(toolCount += 1)}`;
           const queue = pending.get(event.name) ?? [];
           queue.push(toolCallId);
@@ -326,6 +436,7 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
           break;
         }
         case 'tool_result': {
+          if (String(event.name ?? '').startsWith('mcp__colonizer__ask_user')) break; // answered as question_answered above
           // Hermes names the tool rather than the call, so a result pairs with the oldest unmatched call of that name.
           const paired = pending.get(event.name);
           const toolCallId = paired?.length ? paired.shift() : `hermes-tool-${turnCount}-${(toolCount += 1)}`;
@@ -396,10 +507,15 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
         drain();
         break;
       }
-      case 'answer':
-        emit({ type: 'log', level: 'warn', message: 'headless Hermes has no question channel (the clarify toolset is disabled), so there is no question to answer' });
+      case 'answer': {
+        // The model asked through ask_user and the bridge parked its HTTP response on this id.
+        const answers = command.answers && typeof command.answers === 'object' && !Array.isArray(command.answers) ? command.answers : {};
+        const response = typeof command.response === 'string' && command.response.trim() ? command.response : null;
+        if (!bridge.answer(command.question_id, answers, response)) emit({ type: 'log', level: 'warn', message: `no open question with id ${command.question_id}` });
         break;
+      }
       case 'interrupt':
+        bridge.cancelAll();
         if (child) {
           emit({ type: 'log', level: 'info', message: 'interrupt: terminating the Hermes process (SIGINT does not cancel a Hermes turn)' });
           killChild();
@@ -425,12 +541,14 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
 
   // Shutdown or stdin EOF: finish fast and leave no orphan behind.
   closing = true;
+  bridge.cancelAll(); // a parked ask is released with the runner above; the orphaned mcp.mjs drains
   killChild();
   await Promise.race([turnChain, sleep(2000)]);
   if (child) {
     child.kill('SIGKILL');
     await Promise.race([new Promise((resolve) => child.on('close', resolve)), sleep(1000)]);
   }
+  await bridge.close();
   setStatus('exited');
 }
 
@@ -461,7 +579,7 @@ async function main() {
   const probe = await probeHermes({ bin });
   if (!probe.ok) {
     fail(
-      `${probe.error}. This module needs hermes-agent v2026.9.24 in the colony image: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv, then pip install -e . Nothing stages that binary into the VM yet.`,
+      `${probe.error}. This module needs hermes-agent v2026.9.24 in the colony image: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv, then pip install -e ".[mcp]" (without the mcp extra Hermes silently loads no MCP servers). Nothing stages that binary into the VM yet.`,
     );
   }
   emit({ type: 'log', level: 'info', message: `hermes probe: ${probe.version}; terminal backend local; disabled toolsets: ${disabledToolsets(process.env).join(', ')}` });

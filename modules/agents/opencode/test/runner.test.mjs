@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { AsyncQueue, MAX_TOOL_OUTPUT, archPlatform, createBridge, defaultCacheDir, mapLine, opencodeConfig, parseRoutes, preflight, resolveOpencode, runAgent, splitModel } from '../runner.mjs';
+import { AsyncQueue, MAX_TOOL_OUTPUT, archPlatform, createBridge, defaultCacheDir, loopEnv, mapLine, opencodeConfig, parseRoutes, preflight, resolveOpencode, runAgent, splitModel } from '../runner.mjs';
 
 const ROUTES = parseRoutes(JSON.stringify([
   { provider: 'local', prefix: 'local/', base_url: 'http://gw:41750/providers/local', auth: 'none', headers: { 'x-colonizer-colony': 'tok' }, timeout_secs: 900, context_tokens: 131072 },
@@ -335,6 +335,35 @@ test('bridge files findings and proposes memory, and needs its token', async () 
   }
 });
 
+test('bridge clamps loop_next and emits loop_stop', async () => {
+  const events = [];
+  const b = await createBridge({ emit: (e) => { events.push(e); ALL.push(e); }, setStatus: () => {}, isWorking: () => false, token: 't' });
+  try {
+    const next = (body) => post(b, '/loop_next', body).then((r) => r.json());
+    assert.equal(await next({ delay_minutes: 120, reason: 'CI reruns at 11' }), 'Next run scheduled in 120 minutes.');
+    assert.deepEqual(events.at(-1), { type: 'loop_next', delay_minutes: 120, reason: 'CI reruns at 11' });
+    assert.equal(await next({ delay_minutes: 2, reason: 'soon' }), 'Next run scheduled in 15 minutes.'); // clamped up to the floor
+    assert.equal(await next({ delay_minutes: 5000, reason: 'much later' }), 'Next run scheduled in 1440 minutes.'); // and the 24 h ceiling
+    assert.equal(await next({ delay_minutes: 90.6, reason: 'and change' }), 'Next run scheduled in 91 minutes.'); // rounded like the Claude module
+    assert.match((await next({ reason: 'no delay' })).error, /delay_minutes/);
+    assert.match((await next({ delay_minutes: 'soon', reason: 'r' })).error, /delay_minutes/);
+    assert.match((await next({ delay_minutes: 30 })).error, /reason/);
+    const stop = (body) => post(b, '/loop_stop', body).then((r) => r.json());
+    assert.equal(await stop({ reason: 'all flakes fixed' }), 'The loop is stopped; this is its last run.');
+    assert.deepEqual(events.at(-1), { type: 'loop_stop', reason: 'all flakes fixed' });
+    assert.match((await stop({})).error, /reason/);
+    assert.equal(events.filter((e) => e.type === 'loop_next' || e.type === 'loop_stop').length, 5); // rejected calls emit nothing
+  } finally {
+    await b.close();
+  }
+});
+
+test('loop env reaches the MCP server only when the mothership set it', () => {
+  assert.deepEqual(loopEnv({}), {});
+  assert.deepEqual(loopEnv({ COLONIZER_LOOP: 'true', COLONIZER_MODEL: 'local/fake' }), { COLONIZER_LOOP: 'true' });
+  assert.deepEqual(loopEnv({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'false' }), { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'false' });
+});
+
 test('every emitted event carries its schema-required fields', () => {
   const schema = JSON.parse(readFileSync(new URL('../../../../docs/agent-events.schema.json', import.meta.url), 'utf8'));
   const required = new Map();
@@ -346,5 +375,5 @@ test('every emitted event carries its schema-required fields', () => {
     for (const k of keys) assert.ok(e[k] !== undefined, `${e.type} missing ${k}: ${J(e)}`);
   }
   const types = new Set(ALL.map((e) => e.type));
-  for (const t of ['status', 'user_message', 'assistant_text', 'thinking', 'tool_call', 'tool_result', 'question', 'question_answered', 'turn_end', 'log', 'model_changed', 'finding', 'memory_proposal']) assert.ok(types.has(t), `no ${t} event emitted`);
+  for (const t of ['status', 'user_message', 'assistant_text', 'thinking', 'tool_call', 'tool_result', 'question', 'question_answered', 'turn_end', 'log', 'model_changed', 'finding', 'memory_proposal', 'loop_next', 'loop_stop']) assert.ok(types.has(t), `no ${t} event emitted`);
 });

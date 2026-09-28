@@ -142,8 +142,13 @@ export interface Session {
    * reset time when it named one. Older mothership builds omit the whole field.
    */
   parked?: { at: string; reason: string; resets_at?: string; vm_kept: boolean } | null;
-  /** The stored answer between the user sending it and the re-boot; opaque to the UI (issue #562). */
-  pending_answer?: unknown;
+  /**
+   * The answer held between the user sending it and the colony's re-boot (issue #562), present only
+   * while one is stored: which question it answers, the prompt as asked, and — once the queue has
+   * it — when it was answered (RFC3339), the restore-order key. Older mothership builds omit the
+   * whole field.
+   */
+  pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
@@ -544,6 +549,8 @@ export interface ModuleProviderInfo {
   id: string;
   name: string;
   description?: string;
+  /** Agent rows only: the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643). */
+  loop_tools?: boolean;
 }
 
 /** A small JSON-Schema subset: an object whose properties are scalar settings. */
@@ -1786,6 +1793,48 @@ export interface RemotePairingRequest {
 export interface RemotePairing {
   owner: { github_login: string } | null;
   pending: RemotePairingRequest[];
+}
+
+// ---------------------------------------------------------------------------
+// Scoped API tokens (issue #646): GET/POST /api/tokens, DELETE /api/tokens/{id}
+// (docs/cli.md, "Scoped API tokens")
+// ---------------------------------------------------------------------------
+
+/** How much a token may do, ordered so `read` < `operate` < `launch` — each adds to the last. */
+export type ApiTokenScope = "read" | "operate" | "launch";
+
+/** One token's metadata, as GET /api/tokens answers: never the secret, never its hash. */
+export interface ApiTokenMeta {
+  id: string;
+  name: string;
+  scope: ApiTokenScope;
+  /** The GitHub owners the token stays inside; empty means no limit of this kind. */
+  orgs: string[];
+  /** The `owner/repo` repositories the token stays inside; empty means no limit of this kind. */
+  repos: string[];
+  /** The most colonies it may keep unfinished; absent when uncapped. */
+  max_concurrent?: number;
+  /** The most model spend its colonies may run up per UTC day; absent when uncapped. */
+  budget_usd_per_day?: number;
+  /** RFC3339. */
+  created_at: string;
+  /** RFC3339; absent until its first use, and refreshed at most once a minute, in memory only. */
+  last_used_at?: string;
+}
+
+/** POST /api/tokens: what the cockpit's create form collects. */
+export interface NewApiToken {
+  name: string;
+  scope: ApiTokenScope;
+  orgs?: string[];
+  repos?: string[];
+  max_concurrent?: number;
+  budget_usd_per_day?: number;
+}
+
+/** POST /api/tokens' answer: the plaintext, shown exactly once, next to the metadata. */
+export interface CreatedApiToken extends ApiTokenMeta {
+  token: string;
 }
 
 // ---------------------------------------------------------------------------

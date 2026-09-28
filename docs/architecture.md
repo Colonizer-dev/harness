@@ -59,7 +59,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
 | `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; `auto`, the default, reads the stack off the repository's marker files when the colony's worktree is checked out and falls back to Node when a repository names none; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
-| `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `codex`, `pi`, `hermes` and `grok-build` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
+| `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `pi` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
@@ -286,8 +286,14 @@ A colony waiting on its user holds a slot while doing nothing. Past a grace peri
 mothership tears the microVM down but keeps the worktree and the agent's own session transcript, the colony holds
 no parallel slot (the queue advances), and the status stays `waiting_for_answer` — the question stays answerable
 in the cockpit, over the events WebSocket, at `POST /api/sessions/{id}/answer`, and from the phone, exactly as
-before. The answer is persisted on the colony (`pending_answer`) before it is acknowledged, and the next queue
-tick brings the colony back ahead of new launches through the same slot admission every boot answers to: a fresh
+before. The answer is persisted on the colony (`pending_answer`, with `answered_at` recording when it arrived)
+before it is acknowledged. When a slot is free, the next queue tick brings the colony back through the same slot
+admission every boot answers to, ahead of new launches; when it is not, the colony stays `waiting_for_answer`
+with `suspended` and `pending_answer` both set — that pair, not a new status, is what "answered, waiting for a
+slot" reads as, and the answer-hold log line says whether a slot is free, how many answered colonies stand
+ahead, or that launches are paused. The restore pass takes answered colonies in answer order — `answered_at`,
+falling back to the suspension's own time for records saved before answers kept one, ties by colony id — still
+ahead of fresh launches, which the queue admits only after it. Either way the restore is a fresh
 microVM in which the runner resumes its own session — `COLONIZER_RESUME_SESSION` carries the `agent_session` id;
 the module declares where it keeps transcripts in `session_resume.dir`, and the harness mounts the colony's
 `transcripts/` directory there — with the answer as its first message. `pending_answer` is cleared only once a
@@ -552,9 +558,15 @@ Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6
 `vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
-`capability,selinux` — so Landlock pinning waits for a libkrunfw with `CONFIG_SECURITY_LANDLOCK=y`
-and landlock in its LSM list, a tracked follow-up. The guest also boots `nomodule`, with no
-debugfs, tracefs or sysrq.
+`capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the
+kernel configs at `libkrun/libkrunfw` leave `CONFIG_SECURITY_LANDLOCK` unset (x86_64's
+`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.3
+still bundles the same 5.6.1 build. Pinning stays blocked upstream (issue #638) until a libkrunfw
+ships `CONFIG_SECURITY_LANDLOCK=y` with `landlock` in its LSM list — `CONFIG_SECURITY=y` on
+aarch64 — inside a microsandbox release we pin, since an msb bump is one-way (`MSB_HOME` is
+version-locked); building our own kernel is not on the table. Once such a stack is pinned,
+harden.rs would apply the ruleset to the runner child and fail closed on `ENOSYS`. The guest also
+boots `nomodule`, with no debugfs, tracefs or sysrq.
 
 **Layer 1 — boot.sh** (`crates/colonizer/src/boot.rs`), as root before agentd is exec'd:
 `dmesg_restrict=1`, `kptr_restrict=2`; `/proc` remounted `hidepid=invisible` (fallback `hidepid=2`);
@@ -591,7 +603,8 @@ before exec, fail-closed — a step that fails fails the spawn:
   dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
 
 What it does not do: the agent stays root — DAC still gives it every file in the guest, the
-read-only `/colonizer` mounts' contents included. No Landlock yet; denials make no agentd events
+read-only `/colonizer` mounts' contents included. No Landlock yet (issue #638); denials make no
+agentd events
 yet (`EPERM` in the tool, a kernel-log line); network is [sandbox-network.md](sandbox-network.md).
 
 Verification and re-verification: `cargo test -p colonizer-agentd` runs a behavioural probe that
