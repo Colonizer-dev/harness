@@ -571,7 +571,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // would have done anyway, and a log that mostly repeats that is noise.
     if sensitivity == crate::sensitivity::Sensitivity::Restricted {
         log.info(
-            "sensitivity: this task's paths classify restricted; the gateway will refuse any provider not marked trusted in providers.json".to_string(),
+            "sensitivity: this task's paths classify restricted; the gateway will refuse any provider that does not meet this org's restricted requirement (marked trusted in providers.json, unless the org's override says otherwise)".to_string(),
         )
         .await;
     }

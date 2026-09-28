@@ -61,14 +61,16 @@ limits.
   relay is not deployed yet, and the security review filed findings R1–R3 as blockers for its
   first deployment; see [remote-access-review.md](remote-access-review.md) and
   [remote-tunnel.md](remote-tunnel.md).
-- **Security-aware routing** (#530). At boot, the paths a task names are classified `open`,
-  `standard`, `custom` or `restricted` (secrets, keys, cloud credentials, infra config), from
-  built-in defaults a repository can extend with `.colonizer/sensitivity.toml`
-  (`crates/colonizer/src/sensitivity.rs`). A `restricted` colony is refused, with a 403, any
-  gateway provider not marked `trusted` in providers.json. The gate sits in the provider gateway,
-  so it covers configured providers only: an agent's own Claude traffic goes straight to
-  `api.anthropic.com` with its host-scoped credential and does not pass through it. The other
-  classes change nothing yet.
+- **Security-aware routing** (#530, #626). At boot, the paths a task names are classified `open`,
+  `standard`, `custom`, `vetted` or `restricted` (secrets, keys, cloud credentials, infra config),
+  from built-in defaults a repository can extend with `.colonizer/sensitivity.toml`
+  (`crates/colonizer/src/sensitivity.rs`). A gateway provider must meet the class's minimum mark —
+  `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` — or the
+  request is refused with a 403. An org can move the bar per class in its workspace settings
+  (loosening `restricted` never goes below `vetted`) and pin restricted work to a list of vendors.
+  The gate sits in the provider gateway, so it covers configured providers only: an agent's own
+  Claude traffic goes straight to `api.anthropic.com` with its host-scoped credential and does not
+  pass through it.
 - **Gateway audit** (#546). Every authenticated gateway request appends one line to the colony's
   `gateway.jsonl`: provider, wire, method, path, requested and sent model, status, a typed failure
   code, durations, bytes and token counts. The record is a fixed struct, so keys, tokens and

@@ -105,3 +105,17 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
   and the colony log says why.
+- **`vetted`** — off by default, and implied by `trusted`. Paths a repository classifies `vetted`
+  in `.colonizer/sensitivity.toml` need a connection marked `vetted: true` or better; the looser
+  classes (`open`, `standard`, `custom`) run on any connection unless an org's settings raise their
+  bar. Omitted on a `PUT` — or `null`, which counts as omitted — it keeps the saved value.
+- **`vendor`** — the organisation that actually runs the model behind the endpoint (`"anthropic"`,
+  …), as the operator records it. It gates nothing on its own: an org can pin restricted work to a
+  list of vendors, and a connection with no vendor recorded never matches such a list. Omitted on a
+  `PUT` — or `null` — it keeps the saved value; only an empty string clears it.
+- **Sensitivity overrides** — an org's workspace settings can set the minimum mark per class:
+  `"sensitivity": {"standard": "vetted", "restricted": "vetted", "restricted_vendors":
+  ["anthropic"]}` in the org's `orgs.json` entry, each class one of `any`, `vetted` or `trusted`,
+  `null` inheriting the built-in default. `restricted` can be loosened to `vetted` but never to
+  `any`, and a vendor list, when set, must name at least one vendor, matched case-insensitively
+  against the recorded `vendor` (docs/audit.md, Security-aware routing).
