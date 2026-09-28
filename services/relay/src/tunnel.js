@@ -155,10 +155,16 @@ export class InstallTunnel {
     if (!s || s.responded) return; // unknown or late id
     const status = frame.status;
     if (!Number.isInteger(status) || status < 200 || status > 599) return this.#failPending(s, 502);
+    let headers;
+    try {
+      headers = stripHopByHop(frame.headers);
+    } catch {
+      // A malformed header list must fail the request, not throw past the message handler and hang it.
+      return this.#failPending(s, 502);
+    }
     clearTimeout(s.timer);
     s.responded = true;
     s.status = status;
-    const headers = stripHopByHop(frame.headers);
     if (s.method === 'HEAD' || status === 204 || status === 304) {
       this.#release(s);
       return s.resolve(new Response(null, { status, headers }));

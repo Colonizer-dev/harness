@@ -231,7 +231,7 @@ describe("mock push subscriptions (issue #516)", () => {
 describe("mock remote access (issue #535)", () => {
   it("starts off, and switching on mints the host, a live tunnel and an activity row", async () => {
     const api = createMockApi();
-    expect(await api.remote()).toEqual({ enabled: false, host: null, connected: false, since: null });
+    expect(await api.remote()).toEqual({ enabled: false, host: null, connected: false, since: null, replaced: false });
     const on = await api.setRemote(true);
     expect(on).toMatchObject({ enabled: true, connected: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev" });
     expect(on.since).toBeTruthy();

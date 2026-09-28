@@ -41,26 +41,53 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEX = /^[0-9a-f]+$/i;
 const TOKEN = /^[a-z0-9]+$/i;
 
+/** One [name, value] entry per value: an array value means repeats and is flattened. */
+function* eachValue(name, value) {
+  if (Array.isArray(value)) for (const one of value) yield [name, one];
+  else yield [name, value];
+}
+
+/** Flattens any accepted shape — Headers, [name, value] pairs, or a plain object — into single
+ * [name, value] entries. Headers iteration can join repeated set-cookie values, so those come from
+ * getSetCookie() instead when it exists. */
+function* eachHeader(headers) {
+  if (Array.isArray(headers)) {
+    for (const [name, value] of headers) yield* eachValue(name, value);
+  } else if (typeof headers?.entries === 'function') {
+    for (const [name, value] of headers.entries()) {
+      if (name !== 'set-cookie') yield* eachValue(name, value);
+    }
+    if (typeof headers.getSetCookie === 'function') {
+      for (const cookie of headers.getSetCookie()) yield ['set-cookie', cookie];
+    }
+  } else {
+    for (const [name, value] of Object.entries(headers ?? {})) yield* eachValue(name, value);
+  }
+}
+
 /** Strips hop-by-hop headers, everything named in Connection, and any x-relay-* header; for a ws_open also
- * the WebSocket handshake headers. Accepts Headers or a plain object, returns lower-cased name → value. */
+ * the WebSocket handshake headers. Accepts Headers, [name, value] pairs, or a plain object, and returns
+ * lower-cased [name, value] pairs with repeats kept — the wire shape, so repeated set-cookie survives. */
 export function stripHopByHop(headers, { ws = false } = {}) {
-  const entries = typeof headers?.entries === 'function' ? headers.entries() : Object.entries(headers ?? {});
-  const out = {};
+  const out = [];
   const connections = [];
-  for (const [rawName, rawValue] of entries) {
+  for (const [rawName, rawValue] of eachHeader(headers)) {
     const name = rawName.toLowerCase();
-    const value = Array.isArray(rawValue) ? rawValue.join(', ') : String(rawValue);
+    const value = String(rawValue);
     if (name === 'connection') {
       connections.push(value);
       continue;
     }
     if (HOP_BY_HOP.has(name) || name.startsWith('x-relay-')) continue;
     if (ws && WS_HANDSHAKE.has(name)) continue;
-    out[name] = out[name] ? `${out[name]}, ${value}` : value;
+    out.push([name, value]);
   }
   // Connection-named headers must go whether they came before or after Connection itself.
   for (const value of connections) {
-    for (const named of value.split(',')) delete out[named.trim().toLowerCase()];
+    for (const named of value.split(',')) {
+      const drop = named.trim().toLowerCase();
+      for (let at = out.length - 1; at >= 0; at--) if (out[at][0] === drop) out.splice(at, 1);
+    }
   }
   return out;
 }

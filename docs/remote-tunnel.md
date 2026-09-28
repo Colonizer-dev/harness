@@ -273,11 +273,11 @@ Both answer with the same body:
 The relay's pairing flow and the cockpit badge belong to #534/#535 and are not defined here.
 
 As built (#558), the API differs from this sketch. `GET` and `PUT /api/remote` answer
-`{"enabled", "host", "connected", "since"}` — the bare host rather than a URL, a `connected`
-boolean rather than a `state`, and no `error` field — and a third route, `POST /api/remote/reset`,
-replaces the key and the link. A failed registration is a `502` on the `PUT` and the switch stays
-off. [protocol.md §6.10](protocol.md#610-remote-access-tunnel) has the details
-(`crates/colonizer/src/remote.rs:146-160`, `:1078-1084`).
+`{"enabled", "host", "connected", "since", "replaced"}` — the bare host rather than a URL, a
+`connected` boolean rather than a `state`, and no `error` field — and a third route,
+`POST /api/remote/reset`, replaces the key and the link. A failed registration is a `502` on the
+`PUT` and the switch stays off. [protocol.md §6.10](protocol.md#610-remote-access-tunnel) has the
+details (`crates/colonizer/src/remote.rs:150-165`, `:1137-1143`).
 
 ## Test vector
 
@@ -339,8 +339,10 @@ amendment to the contract; none is decided here.
   unknown `version` with `1008`, a 17th concurrent pending handshake with `1013`, a replaced
   tunnel with `4000` and an idle one with `1000` (`tunnel.js:62-120`). An unknown `install_id` is
   an HTTP `404` before the upgrade, and a dial without `Upgrade: websocket` a `426`
-  (`worker.js:116-118`). The client does not look at close codes: every close, including a
-  replacement, is redialed with the 1–60 s backoff (`remote.rs:348-385`).
+  (`worker.js:116-118`). The client treats a replaced close — the `4000` above or the pinned
+  `4409` — as final: it does not redial, but parks waiting on the switch/reset signal, reports
+  `"replaced": true` on `GET /api/remote`, and dials again only when the operator re-enables or
+  resets. Every other close is still redialed with the 1–60 s backoff (`remote.rs:368-425`).
 
 **Registration**
 
@@ -350,12 +352,6 @@ amendment to the contract; none is decided here.
 
 **Frames and streams**
 
-- The relay sends `req` and `ws_open` headers as a JSON object of name to value, with repeated
-  headers joined by `, `, not as `[name, value]` pairs (`stripHopByHop`, `protocol.js:46-66`).
-  The client accepts either shape (`remote.rs:1027-1052`).
-- The client sends `res` headers as `[name, value]` pairs, as pinned, but the relay's
-  `stripHopByHop` iterates an array as `[index, pair]` and throws, so a tunnelled response never
-  reaches the browser. This is finding R1 in the security review, and it is still open.
 - Neither side implements `cancel`; both ignore it.
 - The client does not answer `ws_open` with a `101` `res`. It starts sending `ws_msg` at once, and
   refuses with `ws_close` instead of a `res`: `1013` when all 32 slots are busy, `1008` for a
@@ -378,8 +374,7 @@ amendment to the contract; none is decided here.
 
 **Headers**
 
-- The relay does not strip `Domain` from `set-cookie` (review finding R4), and joins repeated
-  `set-cookie` headers into one value.
+- The relay does not strip `Domain` from `set-cookie` (review finding R4).
 - The mothership never answers `400` for a wrong or repeated `host`: it drops whatever `host` the
   relay sent and sets its own tunnel host (`remote.rs:786`, `:1047`).
 - The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:134-136`;

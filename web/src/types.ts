@@ -1772,6 +1772,8 @@ export interface RemoteStatus {
   connected: boolean;
   /** RFC3339, only while connected: when the current tunnel came up. */
   since: string | null;
+  /** True when the relay closed the tunnel because a newer one took this link over; it stays that way until a re-enable or reset dials again. */
+  replaced: boolean;
 }
 
 /** One pairing code waiting at the relay (services/relay/src/worker.js `pairingView`). */

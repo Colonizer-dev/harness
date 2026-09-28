@@ -55,7 +55,7 @@ test('protocol constants hold the sizes the mothership client is built against',
   assert.equal(PING_MS, 20000);
 });
 
-test('hop-by-hop, connection-named, x-relay-* and ws handshake headers are stripped, the rest survive', () => {
+test('hop-by-hop, connection-named, x-relay-* and ws handshake headers are stripped, the rest survive as pairs', () => {
   const stripped = stripHopByHop({
     Host: 'my.colonizer.dev',
     Connection: 'keep-alive, X-Drop-Me',
@@ -71,13 +71,47 @@ test('hop-by-hop, connection-named, x-relay-* and ws handshake headers are strip
     Cookie: 'a=b',
   });
   // The handshake headers survive a plain strip: only a ws_open drops them.
-  assert.deepEqual(stripped, { host: 'my.colonizer.dev', cookie: 'a=b', 'sec-websocket-key': 'K', 'sec-websocket-version': '13' });
+  assert.deepEqual(stripped, [
+    ['host', 'my.colonizer.dev'],
+    ['sec-websocket-key', 'K'],
+    ['sec-websocket-version', '13'],
+    ['cookie', 'a=b'],
+  ]);
 
   const ws = stripHopByHop({ 'sec-websocket-key': 'K', 'sec-websocket-protocol': 'events-v1', host: 'x' }, { ws: true });
-  assert.deepEqual(ws, { host: 'x', 'sec-websocket-protocol': 'events-v1' });
+  assert.deepEqual(ws, [['sec-websocket-protocol', 'events-v1'], ['host', 'x']]);
 
   const headers = new Headers({ 'x-relay-kind': 'proxy', connection: 'close', accept: 'text/html' });
-  assert.deepEqual(stripHopByHop(headers), { accept: 'text/html' });
+  assert.deepEqual(stripHopByHop(headers), [['accept', 'text/html']]);
+
+  // Repeats stay separate pairs — the wire shape — including set-cookie out of a Headers, which must
+  // not be pre-joined: a cookie value may itself contain a comma.
+  const pairs = [
+    ['Content-Type', 'text/plain'],
+    ['connection', 'close'],
+    ['set-cookie', 'a=1; Expires=Wed, 1 Jan 2025 00:00:00 GMT'],
+    ['set-cookie', 'b=2; Path=/'],
+  ];
+  assert.deepEqual(stripHopByHop(pairs), [
+    ['content-type', 'text/plain'],
+    ['set-cookie', 'a=1; Expires=Wed, 1 Jan 2025 00:00:00 GMT'],
+    ['set-cookie', 'b=2; Path=/'],
+  ]);
+  const repeated = new Headers();
+  repeated.append('set-cookie', 'a=1; Path=/');
+  repeated.append('set-cookie', 'b=2; Path=/');
+  repeated.append('accept', 'text/html');
+  assert.deepEqual(stripHopByHop(repeated), [
+    ['accept', 'text/html'],
+    ['set-cookie', 'a=1; Path=/'],
+    ['set-cookie', 'b=2; Path=/'],
+  ]);
+  // A plain object may carry an array for repeats, like the old object shape allowed.
+  assert.deepEqual(stripHopByHop({ 'x-multi': ['one', 'two'], accept: 'text/html' }), [
+    ['x-multi', 'one'],
+    ['x-multi', 'two'],
+    ['accept', 'text/html'],
+  ]);
 });
 
 test('pathTemplate keeps ordinary segments and templates ids, queries and all', () => {
@@ -106,16 +140,56 @@ test('a proxied request is replayed as protocol frames and the answer comes back
 
   assert.equal(req.method, 'POST');
   assert.equal(req.path, '/quiet/77?token=SEKRET');
-  assert.equal(req.headers['content-type'], 'application/json');
-  assert.equal(req.headers['x-custom'], 'yes');
+  // Headers travel as [name, value] pairs, the shape the contract pins and remote.rs accepts.
+  assert.ok(Array.isArray(req.headers));
+  const sent = Object.fromEntries(req.headers);
+  assert.equal(sent['content-type'], 'application/json');
+  assert.equal(sent['x-custom'], 'yes');
   for (const absent of ['connection', 'te', 'x-relay-evil', 'x-relay-kind', 'x-relay-install-id']) {
-    assert.equal(req.headers[absent], undefined, absent);
+    assert.equal(sent[absent], undefined, absent);
   }
   assert.deepEqual(await ms.body(req.id), [b64encode(bytes('{"hello":"world"}'))]);
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('content-type'), 'text/plain');
   assert.equal(text, 'ok');
+  ms.socket.close();
+});
+
+test('a res with the pair-shaped headers remote.rs sends keeps repeated set-cookie separate', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  await ms.connect(relay);
+
+  const pending = within(relay.fetch(proxyRequest('/cookies')), 'pair-header response never finished');
+  const req = await within(ms.next('req'), 'no req frame');
+  // Exactly what remote.rs serves_req puts on the wire: an array of [name, value] pairs, lower-cased.
+  ms.send({
+    t: 'res',
+    id: req.id,
+    status: 200,
+    headers: [['content-type', 'text/plain'], ['set-cookie', 'a=1; Path=/'], ['set-cookie', 'b=2; Path=/'], ['connection', 'close']],
+  });
+  ms.send({ t: 'body', id: req.id, chunk: b64encode(bytes('ok')), end: true });
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.headers.getSetCookie(), ['a=1; Path=/', 'b=2; Path=/']);
+  assert.equal(response.headers.get('connection'), null);
+  assert.equal(await response.text(), 'ok');
+
+  // A header list the wire cannot carry fails that stream with a 502 instead of throwing past the
+  // message handler and leaving the browser waiting for a head that never comes.
+  const bad = within(relay.fetch(proxyRequest('/junk-headers')), 'bad-header stream never finished');
+  const badReq = await within(ms.next('req'), 'no req frame for the bad-header stream');
+  ms.send({ t: 'res', id: badReq.id, status: 200, headers: [['host', 'x'], [null, 'boom']] });
+  assert.equal((await bad).status, 502);
+
+  // The tunnel itself is none the worse for it.
+  const later = within(relay.fetch(proxyRequest('/after')), 'later stream never finished');
+  const laterReq = await within(ms.next('req'), 'no later req frame');
+  ms.send({ t: 'res', id: laterReq.id, status: 200, headers: [] });
+  ms.send({ t: 'body', id: laterReq.id, chunk: b64encode(bytes('ok')), end: true });
+  assert.equal((await later).status, 200);
   ms.socket.close();
 });
 
@@ -178,9 +252,10 @@ test('websocket passthrough relays text and binary both ways and propagates clos
   const res1 = await open1;
   assert.equal(res1.status, 101);
   assert.equal(wsOpen.path, '/events');
-  assert.equal(wsOpen.headers['sec-websocket-key'], undefined);
-  assert.equal(wsOpen.headers['x-relay-install-id'], undefined);
-  assert.equal(wsOpen.headers['sec-websocket-protocol'], 'events-v1');
+  const wsHeaders = Object.fromEntries(wsOpen.headers);
+  assert.equal(wsHeaders['sec-websocket-key'], undefined);
+  assert.equal(wsHeaders['x-relay-install-id'], undefined);
+  assert.equal(wsHeaders['sec-websocket-protocol'], 'events-v1');
 
   const browser = browserEnds.at(-1);
   browser.accept();
