@@ -282,14 +282,16 @@ async fn classify_orphan(wt: &Path, retention_secs: u64) -> OrphanVerdict {
     if age_secs < retention_secs {
         return OrphanVerdict::Skip;
     }
-    let mut cmd = tokio::process::Command::new("git");
+    // The clean host default: the orphan's worktree is colony content, so no credential and no
+    // config a repository could hang code on (`status` can run content filters).
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C").arg(wt).args(["status", "--porcelain"]);
     match exec(&mut cmd).await {
         Ok(out) if out.trim().is_empty() => {}
         Ok(_) => return OrphanVerdict::Held("dirty".into()),
         Err(_) => return OrphanVerdict::Held("unreadable-git".into()),
     }
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C")
         .arg(wt)
         .args(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
