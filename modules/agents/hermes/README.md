@@ -59,9 +59,10 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
 
 ## Gaps
 
-- Nothing stages the `hermes` binary into the colony VM yet; the runner's preflight fails loudly
-  (`status error`, non-zero exit, the pinned install command in the message) when it is missing, so
-  a colony that picks this module stops there.
+- Nothing stages the `hermes` binary into the colony VM yet; the harness refuses the launch and the
+  boot on the stock preset images, which carry no agent CLIs, and on a custom image the runner's
+  preflight fails loudly (`status error`, non-zero exit, the pinned install command in the message)
+  when it is missing.
 - No ACP question channel, so the module cannot ask you anything.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
   launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo

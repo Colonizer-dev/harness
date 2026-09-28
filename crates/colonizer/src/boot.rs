@@ -415,6 +415,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let org_settings = app.org_settings(&s.org);
     let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
     let stack = resolve_stack(&modules, &sandbox_schema, &org_settings, &wt, &log).await;
+    // The module's `requires` preflight (issue #633), re-run on the image this boot actually
+    // resolved — the same value the runner brief and the sandbox spec get — so a resume or restart
+    // onto a changed image refuses before any VM work rather than dying in the runner's in-VM
+    // preflight. The launch-time check held the configured stack; here the detected one.
+    if let Err(problem) = crate::modules::check_requires(
+        &agent,
+        &colony_image(&app.agents, &modules, &stack),
+        &crate::modules::harness_staged_binaries(&app.cfg),
+    ) {
+        anyhow::bail!(problem);
+    }
 
     mark_phase(app, id, &mut timing, "git").await;
 

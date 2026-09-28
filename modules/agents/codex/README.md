@@ -2,8 +2,9 @@
 
 Drives OpenAI's [Codex CLI](https://developers.openai.com/codex) (`codex`, the `@openai/codex` npm
 package) as a Colonizer agent module on the `colonizer-runner/1` protocol. **Status: SHIPPING as a
-runner — the `codex` binary is not staged into the colony image yet, so a colony stops at this
-module's preflight until you put the pinned CLI on the image's PATH.**
+runner — the `codex` binary is not staged into the colony image yet, so the harness refuses a
+launch on the stock preset images and, on a custom image, a colony stops at this module's
+preflight, until you put the pinned CLI on the image's PATH.**
 
 The runner is `runner.mjs`: one headless `codex exec --json` process per turn, the prompt on stdin
 (`-` as the prompt argument — an issue brief can be far larger than an argv slot), the first turn's
@@ -98,7 +99,8 @@ required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
 ## What is not supported yet
 
 - The `codex` binary in the colony image: nothing fetches or stages it (see the grok-build module's
-  "What remains" for the same gap); until then the preflight fails a codex colony at boot.
+  "What remains" for the same gap); until then the harness refuses a codex launch on the stock
+  preset images, and a custom image's colony at the runner's preflight.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
 - Questions (`answer` is ignored) and resuming a codex thread across a runner restart: the thread id

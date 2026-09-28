@@ -389,6 +389,16 @@ pub async fn create(
     if let Err(e) = app.cfg.linux_binary("bin/colonizer-agentd") {
         return Err(client_error(StatusCode::BAD_REQUEST, &format!("{e:#}")));
     }
+    // The module's `requires` preflight (issue #633): a colony whose agent binary neither the
+    // harness stages nor the colony image carries is refused before anything is created. The image
+    // here is the configured stack's (detection needs the worktree, made at boot); the stock
+    // presets all answer the same way, so the verdict matches the boot-time check.
+    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, &app.agents);
+    let stack = orgs::effective_stack(&modules, &sandbox_schema, &app.org_settings(owner));
+    let staged = crate::modules::harness_staged_binaries(&app.cfg);
+    if let Err(problem) = crate::modules::check_requires(agent, &colony_image(&app.agents, &modules, &stack), &staged) {
+        return Err(client_error(StatusCode::BAD_REQUEST, &problem));
+    }
     // A tier the rule does not know would silently fall back to the rule's own choice, which is not
     // what an operator naming one asked for — refuse the launch instead.
     let model_tier = match req.model_tier.as_deref() {
@@ -1342,6 +1352,7 @@ mod tests {
             dir,
             entry: vec!["run".into()],
             needs_claude: false,
+            requires: crate::modules::Requires::default(),
             schema: json!({}),
             egress: None,
             resume_dir: None,

@@ -12,6 +12,9 @@
     "binaries": [
       "opencode"
     ],
+    "fetched_by_runner": [
+      "opencode"
+    ],
     "image": "glibc + node >= 20"
   },
   "secrets": [],
