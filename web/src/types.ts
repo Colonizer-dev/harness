@@ -805,33 +805,30 @@ export interface TelemetryStatus {
   heartbeat: { install_id: string | null; version: string; platform: string; colonies: number };
 }
 
-/** The anonymous usage batch, exactly what a sender would transmit. Built whatever the switch says, and nothing is sent yet. */
+/** The anonymous usage batch, exactly what a sender transmits: Cratefield's module-telemetry payload (Cratefield/harness#413), the grammar the collector on the other side parses. Built whatever the switch says. */
 export interface UsageBatch {
-  payload_version: number;
-  /** Random per on-period; null while reporting is off, so nothing here can be tied to this machine. */
-  usage_id: string | null;
-  harness_version: string;
-  platform: string;
-  colonies: {
-    parallel_now: string;
-    terminal: { pr_opened: string; no_changes: string; stopped: string; failed: string };
-  };
-  sandbox: { preset: string; image_changed_from_default: boolean };
-  autopilot: { enabled: boolean; held: string };
-  /** `<kind>.<key>` for every declared setting this install carries — names only, never values. */
-  settings_set: string[];
-  boot_ms: { phase: string; bucket: string }[];
-  providers: string;
-  /** Failures and attention reasons under the harness's own labels, bucketed like every count. */
-  error_kinds: Record<string, string>;
+  schema: number;
+  /** 32 lowercase hex — the per-on-period usage id without its dashes. All zeros while reporting is off or held off by the environment: a batch the sender refuses to post. */
+  install: string;
+  client: { kind: string; version: string; platform: string; arch: string };
+  /** The declared modules this batch speaks for: the mothership, and nothing else it composes. */
+  modules: string[];
+  /**
+   * One event per observation; each name's `.`-separated parts come from a closed vocabulary, so the
+   * label a field used to carry rides in the name (`colonies.parallel_now.2-3`, `boot.vm-boot.5-15s`,
+   * `setting.agent.model`). Outcome, error class, duration and count stay at their neutral values: a
+   * usage batch is a set of observations, not runs. docs/usage-data.md maps field by field.
+   */
+  events: { name: string; outcome: "ok" | "error" | "cancelled"; error: string; duration: string; count: number }[];
 }
 
-/** GET /api/telemetry/usage, and of a successful PUT. The batch is built whatever the switch says, so it can be read in full. */
+/** GET /api/telemetry/usage, and of a successful PUT. The batch is built whatever the switch says, so it can be read in full — and it is the same value the sender posts, at most once a day when an endpoint is named. */
 export interface UsageStatus {
   /** Already resolved: true when reporting is on — including when nobody has answered, since it is on by default — false once declined or held off by the environment. */
   enabled: boolean;
   /** An environment variable keeping it off whatever Settings says (COLONIZER_TELEMETRY, DO_NOT_TRACK or CI). */
   blocked_by: string | null;
+  /** The payload schema the batch speaks; the same value as `batch.schema`. */
   payload_version: number;
   batch: UsageBatch;
 }

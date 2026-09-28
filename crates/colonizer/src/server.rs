@@ -277,6 +277,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::remote::start_tasks(app, router);
     crate::summaries::start_tasks(app);
     crate::telemetry::start_tasks(app);
+    crate::usage::start_tasks(app);
     crate::version::start_tasks(app);
     crate::watchdog::start_tasks(app);
 }

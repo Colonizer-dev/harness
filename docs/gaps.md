@@ -41,7 +41,6 @@ Last checked against the code on 2026-09-27.
 | Watchdog hint-loop and control-defeat signatures | `docs/boundaries.md`, "Watchdog signatures (planned)" | Only the stall path exists (`crates/colonizer/src/watchdog.rs`) | [#609](https://github.com/Colonizer-dev/harness/issues/609) |
 | A session store other than local disk | `docs/session-store.md` | The `SessionStore` trait and a reference object-store backend exist, but startup reads and per-session writes bypass it, and no command runs the migration | [#610](https://github.com/Colonizer-dev/harness/issues/610) |
 | Verifying bun and pnpm repositories | `docs/colonies.md`, "Verifying done" | Verification detects the package manager, but the stock colony image has no bun or pnpm | [#589](https://github.com/Colonizer-dev/harness/issues/589) |
-| Sending usage data | `docs/usage-data.md` | Batches are built and kept locally (`crates/colonizer/src/usage.rs`); nothing sends them. The sender is Cratefield/harness#413, which nothing here composes yet | none filed |
 | Approval rules for commands (exec policy) | `docs/vision.md`, guardrails | Not built; a first slice is in review | [#471](https://github.com/Colonizer-dev/harness/issues/471) |
 | Resuming a colony whose tokens ran out | `docs/protocol.md`, quota exhaustion | A quota-parked colony reuses `stopped` and is resumed by hand | [#213](https://github.com/Colonizer-dev/harness/issues/213) |
 | Jev deciding, not only measuring | `docs/colonies.md`, "Measuring Jev compaction" | Stage 1 is shadow-mode measurement only; nothing acts on it | [#582](https://github.com/Colonizer-dev/harness/issues/582) |
@@ -76,6 +75,7 @@ Elements that are easy to remember as missing, and where they are.
 | Five ant states, and a stumble on a failed step | `colonizer-website/colonies.html`, "the ant shows what its settler is doing" | `web/src/components/AntAvatar.tsx`; "stopped" is its `paused` state |
 | A model for each kind of work | `colonizer-website/index.html`, "03 / the router" illustration | `web/src/components/SettingsDialog.tsx` |
 | History read from an event log | Cockpit prototype, history ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | Since [#527](https://github.com/Colonizer-dev/harness/pull/527), History reads the activity log (`GET /api/activity`, `web/src/cockpit/history.ts`); the inbox does not yet (above) |
+| Sending usage data | `docs/usage-data.md` | Built since #628: the batch is Cratefield's `module-telemetry` payload, and the sender posts it at most once a day — but there is no default endpoint, so an install that never sets `COLONIZER_TELEMETRY_ENDPOINT` in the mothership's environment sends nothing, ever (`crates/colonizer/src/usage.rs`) |
 
 ## Keeping it true
 

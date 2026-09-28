@@ -384,7 +384,7 @@ export function SettingsBody({
         {
           id: "usage",
           label: "Usage data",
-          hint: "An anonymous batch, built here and shown — nothing is sent yet",
+          hint: "An anonymous batch, shown in full and sent only to an endpoint you name",
           badge: usage ? (usage.enabled ? "On" : "Off") : undefined,
         },
         {
@@ -1448,15 +1448,20 @@ function UsagePane({
   const info = (
     <>
       <p>
-        The batch is built on this machine and shown here, and that is all this release does: it has no sender — no endpoint, no
-        background loop, no network call. A later one may carry the batch, composed from Cratefield’s module-telemetry.
+        The batch is built on this machine and shown here, and it is the exact value the sender posts — composed from Cratefield’s
+        module-telemetry, validated against the same grammar the collector parses. It is sent at most once a day, and only when the
+        Mothership was given a collector endpoint to post it to: with no <Code>COLONIZER_TELEMETRY_ENDPOINT</Code> in its
+        environment, nothing is ever sent.
       </p>
-      <p>The batch carries a fresh random id while it is on — which is the default — and switching it off forgets that id, so a later period could never be tied to this one.</p>
+      <p>
+        The batch carries a random install id while it is on — which is the default — kept for at most thirty days and forgotten when
+        switching off, so a later period could never be tied to this one.
+      </p>
     </>
   );
 
   return (
-    <Pane title="Usage data" subtitle="An anonymous batch, collected and shown here only — nothing is sent" info={info} back={back}>
+    <Pane title="Usage data" subtitle="An anonymous batch, shown here in full — sent at most once a day, only to an endpoint you name" info={info} back={back}>
       {!usage ? (
         <p className="flex items-center gap-2 text-[13px] text-muted">
           <Spinner /> Loading…
@@ -1479,9 +1484,8 @@ function UsagePane({
             </p>
           )}
           <p className="text-[12.5px] text-muted">
-            On by default, and nothing is sent yet: this build only collects the batch and shows it here. Switch it off here or with{" "}
-            <Code>colonizer telemetry off</Code>; the Mothership’s environment can also hold it off whatever this switch says —{" "}
-            <Code>COLONIZER_TELEMETRY=0</Code>, <Code>DO_NOT_TRACK=1</Code> or <Code>CI=true</Code>.
+            On by default. Switch it off here or with <Code>colonizer telemetry off</Code>; the Mothership’s environment can also hold it
+            off whatever this switch says — <Code>COLONIZER_TELEMETRY=0</Code>, <Code>DO_NOT_TRACK=1</Code> or <Code>CI=true</Code>.
           </p>
           <div>
             <h4 className="mb-1.5 text-[12.5px] font-semibold">The whole batch</h4>
@@ -1489,9 +1493,9 @@ function UsagePane({
               {JSON.stringify(usage.batch, null, 2)}
             </pre>
             <p className="mt-2 text-[12.5px] text-muted">
-              Every byte a sender would transmit, verbatim — <Code>usage_id</Code> is <Code>null</Code> while the switch is off. Nothing
-              else is in it: no repository, branch or issue names, no paths, no prompts or agent output, no tokens or URLs, and no setting
-              values — setting names only.
+              Every byte a send carries, verbatim — <Code>install</Code> is all zeros while the switch is off, a batch the sender will
+              not post. Nothing else is in it: no repository, branch or issue names, no paths, no prompts or agent output, no tokens or
+              URLs, and no setting values — setting names only.
             </p>
           </div>
         </div>

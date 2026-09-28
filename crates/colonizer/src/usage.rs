@@ -1,9 +1,16 @@
-//! Anonymous usage reporting: the batch that would be sent, and the switch that says whether one may
-//! ever leave the machine. This build ships the local half only — no sender, no endpoint constant, no
-//! background loop — because a client will be composed from Cratefield's `module-telemetry` crate when
-//! that exists (Cratefield/harness#413). Until then the batch is built and shown — at
-//! `GET /api/telemetry/usage`, at `colonizer telemetry show`, and once on stderr at the first
-//! start — so a user can always read exactly what is reported, before answering or after.
+//! Anonymous usage reporting: the batch that is sent, and the switch that says whether one may
+//! ever leave the machine. The sender composes Cratefield's `module-telemetry` crate
+//! (Cratefield/harness#413): the batch is built from live state, validated through the crate's
+//! [`Batch::parse`] — the same grammar the collector on the other side parses — and posted to an
+//! endpoint at most once per 24 hours, dropping the batch on any non-2xx. There is **no default
+//! endpoint**: nothing is sent until `COLONIZER_TELEMETRY_ENDPOINT` names one, so an install that
+//! never sets it never sends a byte. The mapping from what this harness knows to the payload's
+//! closed event vocabulary is documented in docs/usage-data.md.
+//!
+//! The batch is shown whatever the switch says — at `GET /api/telemetry/usage`, at
+//! `colonizer telemetry show`, and once on stderr at the first start — and it is the same value
+//! the sender posts, so a user can always read exactly what is reported, before answering or
+//! after.
 //!
 //! Reporting is on unless the user says no: `colonizer telemetry on|off` writes the answer straight
 //! to `<config>/usage.json`, with no network and no running mothership needed, so switching off —
@@ -11,7 +18,8 @@
 //!
 //! Everything in a batch comes from a closed vocabulary, enforced by the test at the bottom of this
 //! file: counts and durations as buckets, settings as schema-declared names without values, boot
-//! phases and failures as labels the harness itself defines.
+//! phases and failures as labels the harness itself defines. The install id rotates every
+//! [`consent::ROTATION_DAYS`] days, Cratefield's bound, so no id accumulates for longer than that.
 
 use crate::{
     Shared, client_error,
@@ -24,22 +32,39 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State, http::StatusCode};
+use chrono::{DateTime, Utc};
+use cratefield_module_telemetry::{consent, payload};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    time::Duration,
 };
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time::sleep};
 
-/// Bumped when the batch's shape or vocabulary changes, so a future sender can tell periods apart.
-const PAYLOAD_VERSION: u32 = 1;
+/// The payload type the batch speaks: Cratefield's grammar, parsed, never hand-assembled on the
+/// way out. Constructed only by [`build`], which goes through [`payload::Batch::parse`].
+pub use payload::Batch;
 
+/// The env var that names the collector, the full URL of its ingest route. There is no default:
+/// unset, it means nothing is ever sent — the switch and the batch still work, shown locally.
+const ENDPOINT_ENV: &str = "COLONIZER_TELEMETRY_ENDPOINT";
 /// The file the answer is kept in, beside the live map's telemetry.json in the config dir.
 const CHOICE_FILE: &str = "usage.json";
 /// The file the last batch built is kept in, so `colonizer telemetry show` in another process can
 /// print its exact bytes.
 const LAST_BATCH_FILE: &str = "usage-last.json";
+/// The file the last successful send is recorded in, which the 24-hour cadence compares.
+const SENT_FILE: &str = "usage-sent.json";
+/// One send at most per 24 hours (Cratefield's client contract: flush at most once per run or per
+/// 24 hours, whichever is sooner — a run shorter than a day sends at most once).
+const SEND_EVERY_SECS: i64 = 24 * 60 * 60;
+/// How often the sender's loop looks at whether a send is due.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How long after startup the sender's loop first looks: shortly after, not during — boot has
+/// enough to do, and a batch built mid-boot would describe half a state anyway.
+const STARTUP_DELAY: Duration = Duration::from_secs(60);
 
 /// The boot phases `boot_inner` marks, in the order a boot runs them. A phase name outside this set
 /// (a future version, a hand-edited sessions.json) is dropped rather than sent.
@@ -68,76 +93,55 @@ const FIXED_ERRORS: &[(&str, &str)] = &[
     (sessions::PUBLISH_LOST_TO_RESTART, "publish_interrupted"),
 ];
 
-/// One anonymous usage batch — exactly what a sender would transmit, built by [`batch`]. There is no
-/// sender in this build; see the module docs.
-///
-/// Nothing here is sourced from inside a colony: no agent output, no terminal output, no repository,
-/// branch, issue or worktree names, no paths, no diffs, no prompts, no tokens, no URLs, no model or
-/// image strings. Every string is a label from a closed, compile-time set — bucket labels, preset
-/// ids, boot phase names, failure kinds, module kinds and schema-declared setting names — except
-/// three machine-generated fields: `usage_id` (a random UUID, separate from the live map's
-/// `install_id` so the two datasets cannot be joined), `harness_version` (the crate's own version)
-/// and `platform` (the same closed string the live map sends). A colony's free-text error
-/// (`Session.error`) never appears: failures are bucketed under the fixed messages the harness
-/// writes itself, and a failure the harness did not name contributes nothing.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Batch {
-    pub payload_version: u32,
-    /// Random per on-period, `null` while the switch is off. Never the live map's install id.
-    pub usage_id: Option<String>,
-    pub harness_version: &'static str,
-    pub platform: &'static str,
-    pub colonies: Colonies,
-    pub sandbox: Sandbox,
-    pub autopilot: Autopilot,
-    /// `<kind>.<key>` for every setting an install carries that its schema declares, sorted. Names
-    /// only, never values.
-    pub settings_set: Vec<String>,
-    /// Where boot time went, per phase, across the colonies this install has booted.
-    pub boot_ms: Vec<BootPhase>,
-    pub providers: &'static str,
-    pub error_kinds: BTreeMap<&'static str, &'static str>,
+/// The one module name a batch declares, in Cratefield's `modules` list: the thing being reported
+/// on is this mothership, and there is nothing else it composes that a collector would know.
+const MODULE: &str = "mothership";
+
+/// The install value that stands in while there is no usage id — reporting off, or an environment
+/// block — because the grammar requires 32 hex characters either way. It marks a batch that will
+/// never be sent, and [`Usage::send`] refuses to post one, so it never reaches a collector.
+fn no_install() -> String {
+    "0".repeat(32)
 }
 
-/// How busy this mothership is, and how its finished colonies came out.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Colonies {
-    /// Colonies with a running microVM right now; queued ones hold none, so they are not counted.
-    pub parallel_now: &'static str,
-    /// How finished colonies came out, by the status they ended in.
-    pub terminal: Terminal,
+/// The usage id as the payload's `install`: the UUID without its dashes — 32 lowercase hex, the
+/// shape [`consent::install_id_is_valid`] accepts. An id that is not that shape (a hand-edited
+/// usage.json) stands in as [`no_install`] rather than being sent broken.
+fn install_of(usage_id: Option<String>) -> String {
+    let Some(id) = usage_id else {
+        return no_install();
+    };
+    let hex = id.replace('-', "").to_ascii_lowercase();
+    if consent::install_id_is_valid(&hex) {
+        hex
+    } else {
+        no_install()
+    }
 }
 
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Terminal {
-    pub pr_opened: &'static str,
-    pub no_changes: &'static str,
-    pub stopped: &'static str,
-    pub failed: &'static str,
+/// The closed `client` shape the grammar asks for, from the closed platform string the live map
+/// sends: `linux-x86_64` becomes the pair (linux, x86-64), `darwin-arm64` (macos, aarch64), and
+/// anything else (other, other).
+fn client_shape(platform: &str) -> (&'static str, &'static str) {
+    match platform {
+        "linux-x86_64" => ("linux", "x86-64"),
+        "darwin-arm64" => ("macos", "aarch64"),
+        _ => ("other", "other"),
+    }
 }
 
-/// The sandbox stack, without the image string itself, which is user free text.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Sandbox {
-    /// The stack as configured: `auto` when detection is in use, a preset id otherwise, or `unknown`
-    /// if the configured preset is not one the harness knows.
-    pub preset: &'static str,
-    /// Whether the image a colony actually boots differs from the one the resolved stack names.
-    pub image_changed_from_default: bool,
+/// The version the payload carries: a plain release triple, because the grammar rejects a
+/// pre-release tag or build metadata rather than trim it. A version that is not a triple rounds
+/// down to `0.0.0`, the honest reading of "not a release".
+fn release_triple(version: &'static str) -> String {
+    payload::Version::parse(version).map_or_else(|| "0.0.0".to_owned(), |v| v.to_string())
 }
 
-/// Autopilot: the publish module's default for new colonies, and how many colonies it is holding.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct Autopilot {
-    pub enabled: bool,
-    pub held: &'static str,
-}
-
-/// One boot phase and where its median duration lands.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct BootPhase {
-    pub phase: &'static str,
-    pub bucket: &'static str,
+/// One counted observation, the shape every field of the old flat batch maps to: the label rides in
+/// the event's name, and the outcome, error class, duration and count stay at the grammar's neutral
+/// values — a usage batch is a set of observations, not runs. docs/usage-data.md has the mapping.
+fn counted(name: String) -> Value {
+    json!({"name": name, "outcome": "ok", "error": "none", "duration": "unknown", "count": 1})
 }
 
 /// Buckets a count so no exact number leaves the machine: 0, 1, then doubling bands, then 64 or more.
@@ -220,7 +224,7 @@ fn settings_set(modules: &ModulesConfig, agents: &[AgentModule]) -> Vec<String> 
 /// Where boot time went: for each known phase the harness marks, the median across the colonies that
 /// have booted (the upper of the two middles when there is an even number), bucketed. Phases the
 /// harness does not mark are dropped rather than sent.
-fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
+fn boot_ms(sessions: &[Session]) -> Vec<(&'static str, &'static str)> {
     let mut samples: Vec<(&str, Vec<u64>)> = BOOT_PHASES.iter().map(|phase| (*phase, Vec::new())).collect();
     for session in sessions {
         // A breakdown without `total_ms` is a boot still under way or one that stopped part way, with
@@ -246,10 +250,7 @@ fn boot_ms(sessions: &[Session]) -> Vec<BootPhase> {
         .filter(|(_, samples)| !samples.is_empty())
         .map(|(phase, mut samples)| {
             samples.sort_unstable();
-            BootPhase {
-                phase,
-                bucket: bucket_ms(samples[samples.len() / 2]),
-            }
+            (phase, bucket_ms(samples[samples.len() / 2]))
         })
         .collect()
 }
@@ -281,8 +282,8 @@ fn fixed_error_kind(message: &str) -> Option<&'static str> {
 }
 
 /// How failures and attention are distributed, as closed labels. A colony's own error text
-/// (`Session.error`) is free text and never becomes a kind, so this map can sum to less than
-/// `colonies.terminal.failed` — the unnamed failures are simply not named here.
+/// (`Session.error`) is free text and never becomes a kind, so this map can hold fewer kinds than
+/// `colonies.terminal.failed` covers — the unnamed failures are simply not named here.
 fn error_kinds(sessions: &[Session]) -> BTreeMap<&'static str, &'static str> {
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     for session in sessions {
@@ -300,8 +301,102 @@ fn terminal_count(sessions: &[Session], status: SessionStatus) -> &'static str {
     bucket_count(sessions.iter().filter(|s| s.status == status).count())
 }
 
-/// The pure half of [`batch`]: plain values in, batch out, so tests can build one from fixtures
-/// without an `App`.
+/// The pure half of [`build`]: the same plain values, mapped into Cratefield's payload JSON, with
+/// the declared vocabulary that names exactly the events it carries — so [`payload::Batch::parse`]
+/// can hold the result against the grammar the collector parses. docs/usage-data.md documents the
+/// mapping field by field.
+fn cratefield_value(
+    usage_id: Option<String>,
+    sessions: &[Session],
+    modules: &ModulesConfig,
+    agents: &[AgentModule],
+    providers: usize,
+) -> (Value, payload::Vocabulary) {
+    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, agents);
+    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
+    let held = sessions
+        .iter()
+        .filter(|s| attention_reason(s) == Some(AUTOPILOT_HELD))
+        .count();
+    // Suspended colonies excluded: their microVMs are down — that is what the suspension freed
+    // (issue #562).
+    let parallel_now = bucket_count(
+        sessions
+            .iter()
+            .filter(|s| s.status.is_live() && s.suspended.is_none())
+            .count(),
+    );
+    let preset_label = preset_label(&preset);
+    // Only the comparison is sent: the image string itself is user free text. The configured
+    // preset, not any colony's detected one — telemetry reports what the install does, and this
+    // code has no repository in hand to detect from.
+    let image_changed = sessions::colony_image(agents, modules, &preset) != image_baseline(&preset, &sandbox_schema);
+    let settings = settings_set(modules, agents);
+    let boots = boot_ms(sessions);
+    let kinds = error_kinds(sessions);
+
+    // The fixed order below is the payload's order, so the bytes a batch serializes to are stable
+    // and `usage-last.json` is not rewritten by a reorder.
+    let mut events = vec![
+        counted(format!("colonies.parallel_now.{parallel_now}")),
+        counted(format!(
+            "colonies.pr_opened.{}",
+            terminal_count(sessions, SessionStatus::PrOpened)
+        )),
+        counted(format!(
+            "colonies.no_changes.{}",
+            terminal_count(sessions, SessionStatus::NoChanges)
+        )),
+        counted(format!(
+            "colonies.stopped.{}",
+            terminal_count(sessions, SessionStatus::Stopped)
+        )),
+        counted(format!("colonies.failed.{}", terminal_count(sessions, SessionStatus::Failed))),
+        counted(format!("sandbox.preset.{preset_label}")),
+        counted(format!("sandbox.image_changed.{image_changed}")),
+        counted(format!("autopilot.enabled.{}", sessions::autopilot_default(agents, modules))),
+        counted(format!("autopilot.held.{}", bucket_count(held))),
+    ];
+    for name in &settings {
+        events.push(counted(format!("setting.{name}")));
+    }
+    for (phase, bucket) in &boots {
+        events.push(counted(format!("boot.{phase}.{bucket}")));
+    }
+    events.push(counted(format!("providers.{}", bucket_count(providers))));
+    for (kind, bucket) in &kinds {
+        events.push(counted(format!("error.{kind}.{bucket}")));
+    }
+
+    let value = json!({
+        "schema": payload::SCHEMA,
+        "install": install_of(usage_id),
+        "client": {
+            "kind": "server",
+            "version": release_triple(env!("CARGO_PKG_VERSION")),
+            "platform": client_shape(telemetry::platform()).0,
+            "arch": client_shape(telemetry::platform()).1,
+        },
+        "modules": [MODULE],
+        "events": events,
+    });
+    let vocabulary = payload::Vocabulary {
+        events: value["events"]
+            .as_array()
+            .expect("events is a list we just built")
+            .iter()
+            .map(|event| event["name"].as_str().expect("a counted event names itself").to_owned())
+            .collect(),
+        modules: vec![MODULE.to_owned()],
+        max_events: payload::MAX_EVENTS_PER_BATCH,
+    };
+    (value, vocabulary)
+}
+
+/// Builds a batch from plain values, so tests can build one from fixtures without an `App`. The
+/// result has been through [`payload::Batch::parse`], so the payload a sender would transmit is
+/// valid by construction under the grammar the collector parses — a batch that could not parse is
+/// a bug the test at the bottom of this file holds the line against, not something to show a user.
 fn build(
     usage_id: Option<String>,
     sessions: &[Session],
@@ -309,55 +404,14 @@ fn build(
     agents: &[AgentModule],
     providers: usize,
 ) -> Batch {
-    let sandbox_schema = schema_for("sandbox", &modules.sandbox.provider, agents);
-    let preset = setting_str(&modules.sandbox, &sandbox_schema, "preset");
-    let held = sessions
-        .iter()
-        .filter(|s| attention_reason(s) == Some(AUTOPILOT_HELD))
-        .count();
-    Batch {
-        payload_version: PAYLOAD_VERSION,
-        usage_id,
-        harness_version: env!("CARGO_PKG_VERSION"),
-        platform: telemetry::platform(),
-        colonies: Colonies {
-            // Suspended colonies excluded: their microVMs are down — that is what the suspension
-            // freed (issue #562).
-            parallel_now: bucket_count(
-                sessions
-                    .iter()
-                    .filter(|s| s.status.is_live() && s.suspended.is_none())
-                    .count(),
-            ),
-            terminal: Terminal {
-                pr_opened: terminal_count(sessions, SessionStatus::PrOpened),
-                no_changes: terminal_count(sessions, SessionStatus::NoChanges),
-                stopped: terminal_count(sessions, SessionStatus::Stopped),
-                failed: terminal_count(sessions, SessionStatus::Failed),
-            },
-        },
-        sandbox: Sandbox {
-            preset: preset_label(&preset),
-            // Only the comparison is sent: the image string itself is user free text. The configured
-            // preset, not any colony's detected one — telemetry reports what the install does, and
-            // this code has no repository in hand to detect from.
-            image_changed_from_default: sessions::colony_image(agents, modules, &preset)
-                != image_baseline(&preset, &sandbox_schema),
-        },
-        autopilot: Autopilot {
-            enabled: sessions::autopilot_default(agents, modules),
-            held: bucket_count(held),
-        },
-        settings_set: settings_set(modules, agents),
-        boot_ms: boot_ms(sessions),
-        providers: bucket_count(providers),
-        error_kinds: error_kinds(sessions),
-    }
+    let (value, vocabulary) = cratefield_value(usage_id, sessions, modules, agents, providers);
+    payload::Batch::parse(&value, &vocabulary)
+        .expect("a batch built from the closed vocabularies above is inside the declared grammar")
 }
 
-/// Gathers a batch from live state. This is the one function a sender would call (and then serialise
-/// with `serde_json`), which is why the API shows exactly its output. Each batch built is also kept
-/// in `usage-last.json`, for `colonizer telemetry show` in another process.
+/// Gathers a batch from live state. This is the one function both the API and the sender call, which
+/// is why the API shows exactly what is sent. Each batch built is also kept in `usage-last.json`,
+/// for `colonizer telemetry show` in another process.
 pub async fn batch(app: &Shared) -> Batch {
     // The id rides only on a batch that could actually be sent: while the switch is off, or the
     // environment keeps it off, there is nothing here for a dataset to join on.
@@ -402,6 +456,11 @@ pub struct Choice {
     /// so the two datasets cannot be joined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_id: Option<String>,
+    /// When the id was minted, so it can rotate every [`consent::ROTATION_DAYS`] days. An id with no
+    /// recorded birthday — a file written before rotation was kept — is treated as overdue and
+    /// rotated once, then kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_id_minted_at: Option<DateTime<Utc>>,
     /// Set once the first start has shown the batch on stderr, so later starts are quiet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notice_shown: bool,
@@ -423,30 +482,70 @@ impl Choice {
     }
 }
 
-/// The usage switch and the files it is kept in. There is no sender to wake, so unlike the live
-/// map's `Telemetry` this holds no client and no loop: the answer is re-read from the file before it
-/// is consulted, so a choice written by another process takes effect without a restart, and
-/// rewritten when the user answers.
+/// The last successful send, kept in `<config>/usage-sent.json`: what the 24-hour cadence compares.
+/// Unreadable or absent means never sent, which is also what a fresh install reads.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+struct Sent {
+    last_sent_at: DateTime<Utc>,
+}
+
+impl Sent {
+    fn load(path: &Path) -> Option<Self> {
+        std::fs::read(path).ok().and_then(|data| serde_json::from_slice(&data).ok())
+    }
+
+    fn save(&self, path: &Path) -> Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        util::write_private(path, &serde_json::to_vec_pretty(self)?).with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+/// The usage switch, the files it is kept in, and the sender. The answer is re-read from the file
+/// before it is consulted, so a choice written by another process takes effect without a restart,
+/// and rewritten when the user answers.
 pub struct Usage {
     path: PathBuf,
     /// Where the last batch built is kept, for `colonizer telemetry show` in another process.
     last: PathBuf,
+    /// Where the last successful send is recorded, for the 24-hour cadence.
+    sent: PathBuf,
+    /// The collector to post to, from `COLONIZER_TELEMETRY_ENDPOINT`. `None` — the default — means
+    /// nothing is ever sent, whatever the switch says.
+    endpoint: Option<String>,
     blocked: Option<&'static str>,
+    client: reqwest::Client,
     choice: Mutex<Choice>,
+    /// The last successful send, in memory as well as in `usage-sent.json`: when the file's write
+    /// fails, the memory keeps the cadence honest, so a sent batch is not re-sent on the next tick.
+    last_sent: Mutex<Option<DateTime<Utc>>>,
 }
 
 impl Usage {
-    pub fn new(config_dir: &Path) -> Self {
-        Self::with(config_dir.join(CHOICE_FILE), disabled_by_env())
+    pub fn new(config_dir: &Path) -> Result<Self> {
+        let endpoint = util::env_nonempty(ENDPOINT_ENV);
+        Self::with(config_dir.join(CHOICE_FILE), endpoint, disabled_by_env())
     }
 
-    fn with(path: PathBuf, blocked: Option<&'static str>) -> Self {
-        Self {
+    fn with(path: PathBuf, endpoint: Option<String>, blocked: Option<&'static str>) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            // Short timeouts: a collector that answers slowly must not hold the loop, and the next
+            // batch is a day away anyway.
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        Ok(Self {
             last: path.with_file_name(LAST_BATCH_FILE),
+            sent: path.with_file_name(SENT_FILE),
             choice: Mutex::new(Choice::load(&path)),
+            last_sent: Mutex::new(None),
             path,
+            endpoint: endpoint.map(|e| e.trim_end_matches('/').to_string()),
             blocked,
-        }
+            client,
+        })
     }
 
     /// Re-reads the answer from disk, so a choice written by another process — `colonizer telemetry
@@ -470,7 +569,8 @@ impl Usage {
 
     /// The id the next batch carries: none while reporting is off (the environment or the user), and
     /// otherwise the kept id — minted and persisted here on the very first batch, so an id exists for
-    /// the whole on-period whatever switched reporting on.
+    /// the whole on-period whatever switched reporting on — and rotated once it is
+    /// [`consent::ROTATION_DAYS`] days old, so no id accumulates longer than that.
     async fn batch_id(&self) -> Option<String> {
         if self.blocked.is_some() {
             return None;
@@ -480,32 +580,100 @@ impl Usage {
         if choice.enabled == Some(false) {
             return None;
         }
-        if let Some(id) = choice.usage_id.clone() {
-            return Some(id);
+        let overdue = match (choice.usage_id.as_deref(), choice.usage_id_minted_at) {
+            (Some(_), Some(minted)) => (Utc::now() - minted).num_days() >= i64::from(consent::ROTATION_DAYS),
+            // An id with no birthday is one this code did not mint; it gets a fresh one.
+            (Some(_), None) => true,
+            (None, _) => true,
+        };
+        if !overdue {
+            return choice.usage_id.clone();
         }
         let id = uuid::Uuid::new_v4().to_string();
         choice.usage_id = Some(id.clone());
+        choice.usage_id_minted_at = Some(Utc::now());
         // If this write fails the batch is still built; the id just would not survive a restart.
         let _ = choice.save(&self.path);
         Some(id)
     }
 
     /// Switches usage reporting on or off and saves the answer. Switching on keeps or creates the
-    /// usage id; switching off forgets it, so the next period cannot be joined to this one. This
-    /// touches no network and needs no round-trip: there is no sender in this build, so writing the
-    /// file here is the whole of the operation.
+    /// usage id; switching off forgets it and its birthday, so the next period cannot be joined to
+    /// this one. This touches no network and needs no round-trip: writing the file here is the whole
+    /// of the operation, and the sender, reading the file before every send, stops with it.
     async fn set(&self, enabled: bool) -> Result<()> {
         if let Some(variable) = self.blocked {
             bail!("usage reporting is kept off by {variable} in the mothership's environment");
         }
         self.reload().await;
         let mut choice = self.choice.lock().await;
-        choice.usage_id = match enabled {
-            true => Some(choice.usage_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string())),
-            false => None,
-        };
+        match enabled {
+            true if choice.usage_id.is_none() => {
+                choice.usage_id = Some(uuid::Uuid::new_v4().to_string());
+                choice.usage_id_minted_at = Some(Utc::now());
+            }
+            true => {}
+            false => {
+                choice.usage_id = None;
+                choice.usage_id_minted_at = None;
+            }
+        }
         choice.enabled = Some(enabled);
         choice.save(&self.path)
+    }
+
+    /// Whether the mothership owes a send right now: the switch on, an endpoint named, and the last
+    /// successful send — if there was one — older than 24 hours. The last send is the later of the
+    /// file's record and this life's memory, so a success whose record could not be written is not
+    /// re-sent on the next tick either.
+    async fn due(&self) -> bool {
+        if !self.active().await || self.endpoint.is_none() {
+            return false;
+        }
+        let last = Sent::load(&self.sent).map(|sent| sent.last_sent_at);
+        let last = match *self.last_sent.lock().await {
+            Some(memory) => Some(memory.max(last.unwrap_or(memory))),
+            None => last,
+        };
+        match last {
+            Some(last) => (Utc::now() - last).num_seconds() >= SEND_EVERY_SECS,
+            None => true,
+        }
+    }
+
+    /// Posts the batch — the same value the API shows — to the configured collector, and records the
+    /// time on any 2xx. Both gates are checked here, not only by the loop, so nothing can send with
+    /// the switch off, without an endpoint, or with the placeholder install. Anything else is a
+    /// dropped batch: the failure is one stderr line naming no payload, and the next attempt waits
+    /// for the next due tick, because a sender that retries is an outage amplifier (Cratefield's
+    /// client contract: lost counts are the correct loss). Returns whether it sent.
+    async fn send(&self, batch: &Batch) -> bool {
+        if !self.active().await || batch.install == no_install() {
+            return false;
+        }
+        let Some(endpoint) = self.endpoint.as_deref() else {
+            return false;
+        };
+        match self.client.post(endpoint).json(batch).send().await {
+            Ok(response) if response.status().is_success() => {
+                let now = Utc::now();
+                // The memory first, whatever happens to the file: the cadence reads both, so the
+                // send is not repeated on the next tick when the record cannot be written.
+                *self.last_sent.lock().await = Some(now);
+                if let Err(e) = (Sent { last_sent_at: now }).save(&self.sent) {
+                    eprintln!("could not record the usage send: {e:#}");
+                }
+                true
+            }
+            Ok(response) => {
+                eprintln!("the usage batch was dropped: the collector answered {}", response.status());
+                false
+            }
+            Err(e) => {
+                eprintln!("the usage batch was dropped: {e}");
+                false
+            }
+        }
     }
 
     /// The first-run notice: on the first start where nobody has answered and no environment switch
@@ -527,9 +695,11 @@ impl Usage {
         eprintln!(
             "Anonymous usage reporting is on: the mothership reports counts and bucket labels only, and \
              nothing identifying — no repository, issue or worktree names, no paths, no agent output. This \
-             is the exact batch it would send:\n{}\nTurn it off with `colonizer telemetry off`; the \
-             environment variables COLONIZER_TELEMETRY, DO_NOT_TRACK and CI also keep it off.",
-            serde_json::to_string_pretty(batch)?
+             is the exact batch it would send:\n{}\nNothing is sent unless {} names a collector, and then \
+             at most one batch a day. Turn it off with `colonizer telemetry off`; the environment \
+             variables COLONIZER_TELEMETRY, DO_NOT_TRACK and CI also keep it off.",
+            serde_json::to_string_pretty(batch)?,
+            ENDPOINT_ENV,
         );
         let mut choice = self.choice.lock().await;
         choice.notice_shown = true;
@@ -572,14 +742,16 @@ fn disabled_by_env_values(
     None
 }
 
-/// The body of `GET /api/telemetry/usage`, and of a successful `PUT`. `batch` is exactly what a sender
-/// would transmit — built by the same [`batch`] function, not a re-derivation.
+/// The body of `GET /api/telemetry/usage`, and of a successful `PUT`. `batch` is exactly what the
+/// sender transmits — built by the same [`batch`] function, not a re-derivation.
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Status {
     pub enabled: bool,
     /// The environment switch holding it off (`COLONIZER_TELEMETRY`, `DO_NOT_TRACK` or `CI`), named
     /// the same as the live map's `blocked_by`.
     pub blocked_by: Option<&'static str>,
+    /// The payload schema the batch speaks: Cratefield's [`payload::SCHEMA`], the same value as
+    /// `batch.schema`.
     pub payload_version: u32,
     pub batch: Batch,
 }
@@ -588,7 +760,7 @@ async fn view(app: &Shared) -> Status {
     Status {
         enabled: app.usage.active().await,
         blocked_by: app.usage.blocked,
-        payload_version: PAYLOAD_VERSION,
+        payload_version: payload::SCHEMA,
         batch: batch(app).await,
     }
 }
@@ -650,10 +822,17 @@ pub fn cli_set(config_dir: &Path, enabled: bool) -> Result<()> {
     let path = config_dir.join(CHOICE_FILE);
     let mut choice = Choice::load(&path);
     choice.enabled = Some(enabled);
-    choice.usage_id = match enabled {
-        true => Some(choice.usage_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string())),
-        false => None,
-    };
+    match enabled {
+        true if choice.usage_id.is_none() => {
+            choice.usage_id = Some(uuid::Uuid::new_v4().to_string());
+            choice.usage_id_minted_at = Some(Utc::now());
+        }
+        true => {}
+        false => {
+            choice.usage_id = None;
+            choice.usage_id_minted_at = None;
+        }
+    }
     choice.save(&path)?;
     match (enabled, disabled_by_env()) {
         (true, Some(variable)) => eprintln!("usage reporting is on, but {variable} in this environment keeps it off"),
@@ -664,6 +843,25 @@ pub fn cli_set(config_dir: &Path, enabled: bool) -> Result<()> {
         (false, None) => eprintln!("usage reporting is off"),
     }
     Ok(())
+}
+
+/// The sender's loop: shortly after startup, then once an hour, send the batch if it is due — the
+/// switch on, an endpoint named, and the last successful send older than 24 hours. A batch that
+/// cannot be sent is dropped, not queued: nothing accumulates anywhere.
+pub async fn run(app: Shared) {
+    sleep(STARTUP_DELAY).await;
+    loop {
+        if app.usage.due().await {
+            let batch = batch(&app).await;
+            app.usage.send(&batch).await;
+        }
+        sleep(CHECK_EVERY).await;
+    }
+}
+
+/// This module's background work, started once by `server::start_tasks` when the mothership serves.
+pub(crate) fn start_tasks(app: &crate::Shared) {
+    tokio::spawn(run(app.clone()));
 }
 
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
@@ -677,9 +875,10 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 mod tests {
     use super::*;
     use crate::providers::Provider;
-    use chrono::Utc;
+    use axum::{Router, extract::State, routing::post};
     use serde_json::json;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     /// A session full of the things a real one carries: names, paths and free text that must never
     /// reach a batch.
@@ -771,34 +970,43 @@ mod tests {
         }
     }
 
+    /// Every event name the batch carries, in order.
+    fn names(batch: &Batch) -> Vec<&str> {
+        batch.events.iter().map(|event| event.name.as_str()).collect()
+    }
+
     /// The whole closed vocabulary a batch may draw from, spelled out here rather than derived from
     /// the code, so a new string appearing in the payload fails the no-free-text test until it is
-    /// added here deliberately.
-    const ALLOWED: &[&str] = &[
-        // Field names.
-        "payload_version",
-        "usage_id",
-        "harness_version",
+    /// added here deliberately. A string in the JSON must be one of these, a machine-shaped field, or
+    /// an event name whose `.`-separated parts are all these.
+    const TOKENS: &[&str] = &[
+        // Field names, Cratefield's grammar's.
+        "schema",
+        "install",
+        "client",
+        "kind",
+        "version",
         "platform",
-        "colonies",
-        "parallel_now",
-        "terminal",
-        "pr_opened",
-        "no_changes",
-        "stopped",
-        "failed",
-        "sandbox",
-        "preset",
-        "image_changed_from_default",
-        "autopilot",
-        "enabled",
-        "held",
-        "settings_set",
-        "boot_ms",
-        "phase",
-        "bucket",
-        "providers",
-        "error_kinds",
+        "arch",
+        "modules",
+        "events",
+        "name",
+        "outcome",
+        "error",
+        "duration",
+        "count",
+        // The one module name a batch declares, and the client shape it names itself with.
+        "mothership",
+        "server",
+        "linux",
+        "macos",
+        "x86-64",
+        "aarch64",
+        "other",
+        // The neutral values every counted observation carries.
+        "ok",
+        "none",
+        "unknown",
         // Count and duration buckets.
         "0",
         "1",
@@ -814,7 +1022,7 @@ mod tests {
         "15-60s",
         "60s+",
         // Sandbox stacks: `auto` (detection in use, reported as configured), the preset ids, plus
-        // the label for one the harness does not know.
+        // the label for one the harness does not know. Booleans, as labels.
         "auto",
         "node",
         "python",
@@ -822,6 +1030,8 @@ mod tests {
         "go",
         "custom",
         "unknown",
+        "true",
+        "false",
         // Boot phases, in boot order.
         "issue",
         "git",
@@ -831,6 +1041,23 @@ mod tests {
         "vm-boot",
         "mesh-join",
         "agentd",
+        // Event name namespaces: the fields the mapping hangs observations on.
+        "colonies",
+        "parallel_now",
+        "pr_opened",
+        "no_changes",
+        "stopped",
+        "failed",
+        "sandbox",
+        "preset",
+        "image_changed",
+        "autopilot",
+        "enabled",
+        "held",
+        "setting",
+        "boot",
+        "providers",
+        "error",
         // Failure kinds: the harness's own names and the attention reasons it sets.
         "agentd_not_ready",
         "harness_restarted",
@@ -840,11 +1067,12 @@ mod tests {
         "waiting_for_answer",
         "nudges_exhausted",
         "autopilot_held",
+        "model_error",
         "agent_failed",
         // Setting names this install set (schema-declared keys, never values).
-        "agent.model",
-        "sandbox.image",
-        "sandbox.preset",
+        "agent",
+        "model",
+        "image",
     ];
 
     /// Every string in the JSON: object keys and string values, recursively.
@@ -862,16 +1090,14 @@ mod tests {
         }
     }
 
-    /// The three machine-generated strings, recognised by shape rather than by membership.
+    /// The two machine-generated strings, recognised by shape rather than by membership: the install
+    /// id (32 lowercase hex — a UUID without its dashes, or the all-zero stand-in) and the version
+    /// triple. The client shape's values are in `TOKENS`.
     fn is_machine_field(string: &str) -> bool {
-        if uuid::Uuid::parse_str(string).is_ok_and(|u| u.get_version_num() == 4) {
+        if string.len() == 32 && string.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')) {
             return true;
         }
-        if string == env!("CARGO_PKG_VERSION") {
-            return true;
-        }
-        // The closed platform set the live map sends.
-        matches!(string, "linux-x86_64" | "darwin-arm64" | "other")
+        string == env!("CARGO_PKG_VERSION")
     }
 
     #[test]
@@ -964,44 +1190,129 @@ mod tests {
             assert!(!text.contains(secret), "the batch leaked `{secret}`: {text}");
         }
 
-        // And every string it does carry is accounted for: a closed-vocabulary label, or one of the
-        // three machine-generated fields recognised by shape.
+        // And every string it does carry is accounted for: a closed-vocabulary token, one of the
+        // two machine-shaped fields, or an event name assembled wholly from closed tokens.
         let mut strings = Vec::new();
         collect_strings(&serde_json::to_value(&batch).unwrap(), &mut strings);
         strings.sort();
         strings.dedup();
         for string in &strings {
+            let parts: Vec<&str> = string.split('.').collect();
             assert!(
-                is_machine_field(string) || ALLOWED.contains(&string.as_str()),
+                is_machine_field(string)
+                    || TOKENS.contains(&string.as_str())
+                    || (parts.len() > 1 && parts.iter().all(|part| TOKENS.contains(part))),
                 "the batch carries a string outside the closed vocabulary: {string:?}"
             );
         }
     }
 
     #[test]
-    fn a_batch_is_exactly_eleven_fields() {
+    fn a_batch_is_exactly_cratefields_five_fields() {
         let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
         let value = serde_json::to_value(&batch).unwrap();
         let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
+        assert_eq!(keys, ["client", "events", "install", "modules", "schema"]);
+        assert_eq!(value["schema"], payload::SCHEMA);
         assert_eq!(
-            keys,
-            [
-                "autopilot",
-                "boot_ms",
-                "colonies",
-                "error_kinds",
-                "harness_version",
-                "payload_version",
-                "platform",
-                "providers",
-                "sandbox",
-                "settings_set",
-                "usage_id"
-            ]
+            value["install"],
+            "0".repeat(32),
+            "the all-zero stand-in while no id was minted to ride on — never sent"
         );
-        assert_eq!(value["payload_version"], 1);
-        assert_eq!(value["usage_id"], Value::Null, "no id when none was minted to ride on");
+        assert_eq!(value["modules"], json!(["mothership"]));
+        assert!(
+            !value["events"].as_array().unwrap().is_empty(),
+            "even the empty install reports its zeros: the grammar requires at least one event"
+        );
+        let client = &value["client"];
+        assert_eq!(
+            [client["kind"].clone(), client["platform"].clone(), client["arch"].clone()],
+            [json!("server"), json!("linux"), json!("x86-64")],
+            "the shape this test machine reports; the mapping is client_shape's"
+        );
+        assert_eq!(client["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// A batch dense with everything the vocabulary can carry: every boot phase, every failure kind,
+    /// settings on two kinds. The ceiling is part of the grammar — a mapping that could overflow it
+    /// would be refused by the collector, so the sum is held here, under it, by construction.
+    fn maximal_fixture() -> (Option<String>, Vec<Session>, ModulesConfig, Vec<AgentModule>) {
+        let mut booted = session(SessionStatus::Idle);
+        booted.boot_timing = Some(json!({
+            "total_ms": 12_345,
+            "phases": BOOT_PHASES.map(|phase| json!({"name": phase, "ms": 1_000})).to_vec()
+        }));
+        let mut failed = session(SessionStatus::Failed);
+        failed.error = Some(sessions::AGENTD_NOT_READY.into());
+        let mut watchdog = session(SessionStatus::WaitingForAnswer);
+        watchdog.attention = Some(json!({"reason": "nudges_exhausted", "since": Utc::now(), "nudges": 3}));
+        let mut held = session(SessionStatus::Queued);
+        held.attention = Some(json!({"reason": AUTOPILOT_HELD, "since": Utc::now()}));
+        let mut errored = session(SessionStatus::Running);
+        errored.attention = Some(json!({"reason": crate::gateway::MODEL_ERROR_REASON, "since": Utc::now()}));
+        let mut runner_gone = session(SessionStatus::Failed);
+        runner_gone.attention = Some(json!({"reason": AGENT_FAILED, "since": Utc::now()}));
+
+        let mut modules = ModulesConfig::default();
+        modules.sandbox.settings = json!({"preset": "node", "image": "node:24-bookworm"})
+            .as_object()
+            .cloned()
+            .unwrap();
+        modules.agent.settings = json!({"model": "sonnet"}).as_object().cloned().unwrap();
+
+        (
+            Some("0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b".into()),
+            vec![booted, failed, watchdog, held, errored, runner_gone],
+            modules,
+            vec![agent()],
+        )
+    }
+
+    #[test]
+    fn the_batch_parses_under_cratefields_grammar_and_stays_under_the_ceiling() {
+        let (id, sessions, modules, agents) = maximal_fixture();
+        let (value, vocabulary) = cratefield_value(id.clone(), &sessions, &modules, &agents, 2);
+
+        // What build() makes is exactly what the grammar accepts, and the shown bytes — the API's,
+        // usage-last.json's, the notice's — parse again the way the collector would parse them.
+        let built = payload::Batch::parse(&value, &vocabulary).unwrap();
+        let shown = build(id, &sessions, &modules, &agents, 2);
+        assert_eq!(shown, built);
+        let reparsed = payload::Batch::parse(&serde_json::to_value(&shown).unwrap(), &vocabulary).unwrap();
+        assert_eq!(shown, reparsed);
+        assert!(shown.events.len() <= payload::MAX_EVENTS_PER_BATCH);
+    }
+
+    #[test]
+    fn client_shape_maps_the_live_map_platforms_onto_the_grammar() {
+        assert_eq!(client_shape("linux-x86_64"), ("linux", "x86-64"));
+        assert_eq!(client_shape("darwin-arm64"), ("macos", "aarch64"));
+        assert_eq!(client_shape("other"), ("other", "other"));
+        assert_eq!(client_shape("plan9-powerpc"), ("other", "other"));
+    }
+
+    #[test]
+    fn a_version_that_is_not_a_release_triple_rounds_down() {
+        assert_eq!(release_triple("0.1.9"), "0.1.9");
+        assert_eq!(
+            release_triple("1.0.0-beta+homebrew"),
+            "0.0.0",
+            "the grammar rejects tags, never trims them"
+        );
+    }
+
+    #[test]
+    fn the_install_id_becomes_the_hex_install_and_garbage_becomes_the_placeholder() {
+        assert_eq!(
+            install_of(Some("0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b".into())),
+            "0b0c9a8e4f7d4a519b2e3c1d5e6f7a8b"
+        );
+        assert_eq!(install_of(None), no_install());
+        assert_eq!(install_of(Some("not an id".into())), no_install());
+        assert!(consent::install_id_is_valid(&install_of(Some(
+            "0b0c9a8e-4f7d-4a51-9b2e-3c1d5e6f7a8b".into()
+        ))));
     }
 
     #[test]
@@ -1092,11 +1403,12 @@ mod tests {
         Choice {
             enabled: Some(true),
             usage_id: Some(uuid::Uuid::new_v4().to_string()),
+            usage_id_minted_at: Some(Utc::now()),
             notice_shown: false,
         }
         .save(&path)
         .unwrap();
-        let usage = Usage::with(path, Some("CI"));
+        let usage = Usage::with(path, None, Some("CI")).unwrap();
         assert!(!usage.active().await, "an environment block beats a saved yes");
         assert!(usage.set(true).await.is_err(), "a blocked switch cannot be turned on");
         assert!(usage.set(false).await.is_err(), "nor off: it reads as off either way");
@@ -1113,7 +1425,11 @@ mod tests {
             .cloned()
             .unwrap();
         let batch = build(None, &[], &modules, &[], 0);
-        assert_eq!(batch.settings_set, vec!["sandbox.image"]);
+        assert_eq!(settings_set(&modules, &[]), vec!["sandbox.image"]);
+        assert!(
+            names(&batch).contains(&"setting.sandbox.image"),
+            "a declared setting becomes one event under its name"
+        );
         assert!(
             !serde_json::to_string(&batch).unwrap().contains("bookworm"),
             "values are never sent"
@@ -1124,7 +1440,7 @@ mod tests {
     async fn switching_on_creates_an_id_and_switching_off_forgets_it() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let path = dir.join("usage.json");
-        let usage = Usage::with(path.clone(), None);
+        let usage = Usage::with(path.clone(), None, None).unwrap();
         assert!(
             usage.path.ends_with("usage.json"),
             "kept beside the live map's telemetry.json, not in it"
@@ -1138,18 +1454,20 @@ mod tests {
             Choice {
                 enabled: Some(true),
                 usage_id: Some(id.clone()),
+                usage_id_minted_at: usage.choice.lock().await.usage_id_minted_at,
                 notice_shown: false
             }
         );
 
         usage.set(false).await.unwrap();
         // The file stays — the question has been answered — but the id is gone, so the next period
-        // cannot be joined to this one. No network is touched: there is no sender to tell.
+        // cannot be joined to this one. No network is touched: switching off is a file write.
         assert_eq!(
             Choice::load(&path),
             Choice {
                 enabled: Some(false),
                 usage_id: None,
+                usage_id_minted_at: None,
                 notice_shown: false
             }
         );
@@ -1167,7 +1485,7 @@ mod tests {
     async fn an_install_that_never_answered_reports_by_default() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let path = dir.join("usage.json");
-        let usage = Usage::with(path.clone(), None);
+        let usage = Usage::with(path.clone(), None, None).unwrap();
         assert!(usage.active().await, "reporting is on until the user says no");
 
         // The first batch mints the id and keeps it, so the whole on-period shares one even though
@@ -1191,13 +1509,14 @@ mod tests {
     async fn an_answer_written_behind_a_running_mothership_is_honoured() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let path = dir.join("usage.json");
-        let usage = Usage::with(path.clone(), None);
+        let usage = Usage::with(path.clone(), None, None).unwrap();
         assert!(usage.active().await);
 
         // Another process — `colonizer telemetry off` — writes the file behind the running mothership.
         Choice {
             enabled: Some(false),
             usage_id: None,
+            usage_id_minted_at: None,
             notice_shown: false,
         }
         .save(&path)
@@ -1210,6 +1529,7 @@ mod tests {
         Choice {
             enabled: Some(true),
             usage_id: Some(id.clone()),
+            usage_id_minted_at: Some(Utc::now()),
             notice_shown: false,
         }
         .save(&path)
@@ -1219,11 +1539,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_install_id_rotates_after_thirty_days_and_not_before() {
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("usage.json");
+        let usage = Usage::with(path.clone(), None, None).unwrap();
+        usage.set(true).await.unwrap();
+
+        // A fresh id is kept, not rotated every look.
+        let id = usage.batch_id().await.unwrap();
+        assert_eq!(usage.batch_id().await.unwrap(), id, "a fresh id is kept");
+
+        // Backdate its birthday past Cratefield's rotation: the next batch gets a new id, and the
+        // new birthday is now.
+        let mut choice = usage.choice.lock().await;
+        choice.usage_id_minted_at = Some(Utc::now() - chrono::Duration::days(i64::from(consent::ROTATION_DAYS) + 1));
+        choice.save(&path).unwrap();
+        drop(choice);
+        let rotated = usage.batch_id().await.unwrap();
+        assert_ne!(rotated, id, "an id older than the rotation becomes a new id");
+        let kept = Choice::load(&path);
+        assert_eq!(kept.usage_id.as_deref(), Some(rotated.as_str()));
+        assert_eq!(
+            (Utc::now() - kept.usage_id_minted_at.unwrap()).num_days(),
+            0,
+            "the new id starts its own thirty days"
+        );
+
+        // An id with no recorded birthday — a file from before rotation was kept — is treated as
+        // overdue: rotated once, then kept.
+        let mut choice = usage.choice.lock().await;
+        choice.usage_id_minted_at = None;
+        choice.save(&path).unwrap();
+        drop(choice);
+        let unmarked = usage.batch_id().await.unwrap();
+        assert_ne!(unmarked, rotated);
+        assert_eq!(
+            usage.batch_id().await.unwrap(),
+            unmarked,
+            "and then it keeps its own birthday"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn the_first_run_notice_is_shown_once_then_quiet() {
         let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
         let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
 
-        let fresh = Usage::with(dir.join("usage.json"), None);
+        let fresh = Usage::with(dir.join("usage.json"), None, None).unwrap();
         assert!(
             fresh.show_notice(&batch).await.unwrap(),
             "the first start shows the batch on stderr"
@@ -1241,15 +1604,16 @@ mod tests {
         Choice {
             enabled: Some(false),
             usage_id: None,
+            usage_id_minted_at: None,
             notice_shown: false,
         }
         .save(&dir.join("answered.json"))
         .unwrap();
-        let answered = Usage::with(dir.join("answered.json"), None);
+        let answered = Usage::with(dir.join("answered.json"), None, None).unwrap();
         assert!(!answered.show_notice(&batch).await.unwrap());
 
         // Nor one whose environment keeps reporting off.
-        let blocked = Usage::with(dir.join("blocked.json"), Some("CI"));
+        let blocked = Usage::with(dir.join("blocked.json"), None, Some("CI")).unwrap();
         assert!(!blocked.show_notice(&batch).await.unwrap());
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1292,6 +1656,7 @@ mod tests {
             Choice {
                 enabled: Some(false),
                 usage_id: None,
+                usage_id_minted_at: None,
                 notice_shown: false
             }
         );
@@ -1326,12 +1691,19 @@ mod tests {
             &[],
             0,
         );
-        assert_eq!(
-            batch.error_kinds,
-            BTreeMap::from([("agentd_not_ready", "1"), ("nudges_exhausted", "1"), ("vm_stopped", "1")]),
-            "a failure or reason the harness did not name contributes no kind"
+        let batch_names = names(&batch);
+        for named in ["error.agentd_not_ready.1", "error.nudges_exhausted.1", "error.vm_stopped.1"] {
+            assert!(batch_names.contains(&named), "the batch counts {named}: {batch_names:?}");
+        }
+        assert!(
+            !batch_names.iter().any(|name| name.starts_with("error.autopilot_held")),
+            "nothing holds autopilot here, so nothing names it"
         );
-        assert_eq!(batch.autopilot.held, "0");
+        assert!(names(&batch).contains(&"autopilot.held.0"));
+        assert!(
+            !batch_names.iter().any(|name| name.contains("acme")),
+            "a failure the harness did not name contributes no kind, whatever its text says"
+        );
     }
 
     #[test]
@@ -1362,15 +1734,8 @@ mod tests {
     fn the_image_is_reported_only_as_changed_or_not() {
         let modules = ModulesConfig::default();
         let batch = build(None, &[], &modules, &[], 0);
-        assert_eq!(
-            batch.sandbox,
-            Sandbox {
-                preset: "auto",
-                image_changed_from_default: false
-            }
-        );
         assert!(
-            !batch.sandbox.image_changed_from_default,
+            names(&batch).contains(&"sandbox.preset.auto") && names(&batch).contains(&"sandbox.image_changed.false"),
             "a fresh install on auto boots the fallback image and must not be reported as changed"
         );
 
@@ -1380,13 +1745,7 @@ mod tests {
             .cloned()
             .unwrap();
         let batch = build(None, &[], &pinned, &[], 0);
-        assert_eq!(
-            batch.sandbox,
-            Sandbox {
-                preset: "rust",
-                image_changed_from_default: true
-            }
-        );
+        assert!(names(&batch).contains(&"sandbox.preset.rust") && names(&batch).contains(&"sandbox.image_changed.true"));
         assert!(
             !serde_json::to_string(&batch).unwrap().contains("ghcr.io"),
             "the image string is not sent"
@@ -1403,18 +1762,10 @@ mod tests {
         let mut c = session(SessionStatus::Idle);
         c.boot_timing = Some(json!({"total_ms": 950_000, "phases": [{"name": "vm-boot", "ms": 900_000}]}));
         let batch = build(None, &[a, b, c], &ModulesConfig::default(), &[], 0);
+        let batch_names: Vec<&str> = names(&batch).into_iter().filter(|name| name.starts_with("boot.")).collect();
         assert_eq!(
-            batch.boot_ms,
-            vec![
-                BootPhase {
-                    phase: "vm-boot",
-                    bucket: "5-15s"
-                },
-                BootPhase {
-                    phase: "agentd",
-                    bucket: "<1s"
-                }
-            ],
+            batch_names,
+            ["boot.vm-boot.5-15s", "boot.agentd.<1s"],
             "the median of 1200, 6000 and 900000, in boot order, and an unnamed phase never appears"
         );
     }
@@ -1430,18 +1781,10 @@ mod tests {
         let mut starting = session(SessionStatus::Starting);
         starting.boot_timing = Some(json!({"phases": [{"name": "issue", "ms": 90_000}]}));
         let batch = build(None, &[booted, failed, starting], &ModulesConfig::default(), &[], 0);
+        let batch_names: Vec<&str> = names(&batch).into_iter().filter(|name| name.starts_with("boot.")).collect();
         assert_eq!(
-            batch.boot_ms,
-            vec![
-                BootPhase {
-                    phase: "issue",
-                    bucket: "<1s"
-                },
-                BootPhase {
-                    phase: "vm-boot",
-                    bucket: "1-2s"
-                }
-            ],
+            batch_names,
+            ["boot.issue.<1s", "boot.vm-boot.1-2s"],
             "only the boot that finished, and so has `total_ms`, is sampled"
         );
     }
@@ -1458,27 +1801,192 @@ mod tests {
             session(SessionStatus::Stopped),
         ];
         let batch = build(None, &sessions, &ModulesConfig::default(), &[], 3);
-        assert_eq!(
-            batch.colonies.parallel_now, "2-3",
-            "live colonies only; queued holds no microVM"
-        );
-        assert_eq!(batch.colonies.terminal.pr_opened, "2-3");
-        assert_eq!(batch.colonies.terminal.no_changes, "0");
-        assert_eq!(batch.colonies.terminal.stopped, "1");
-        assert_eq!(batch.colonies.terminal.failed, "1");
-        assert_eq!(batch.providers, "2-3", "three providers, bucketed like any other count");
-        // publish.autopilot's schema default is on, and nothing in this install overrides it.
-        assert_eq!(
-            batch.autopilot,
-            Autopilot {
-                enabled: true,
-                held: "0"
-            }
-        );
-        assert_eq!(
-            batch.settings_set,
-            Vec::<String>::new(),
+        let batch_names = names(&batch);
+        for named in [
+            "colonies.parallel_now.2-3", // live colonies only; queued holds no microVM
+            "colonies.pr_opened.2-3",
+            "colonies.no_changes.0",
+            "colonies.stopped.1",
+            "colonies.failed.1",
+            "providers.2-3", // three providers, bucketed like any other count
+            "autopilot.enabled.true",
+            "autopilot.held.0",
+        ] {
+            assert!(batch_names.contains(&named), "the batch counts {named}: {batch_names:?}");
+        }
+        assert!(
+            !batch_names.iter().any(|name| name.starts_with("setting.")),
             "an install that set nothing names nothing"
         );
+    }
+
+    /// A stand-in collector that records what it receives and answers `status`.
+    async fn collector(status: StatusCode) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let log = received.clone();
+        let router = Router::new()
+            .route(
+                "/v1/telemetry/events",
+                post(
+                    move |State(log): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
+                        log.lock().await.push(body);
+                        status
+                    },
+                ),
+            )
+            .with_state(log);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The full ingest route, as an operator would name it in COLONIZER_TELEMETRY_ENDPOINT.
+        let url = format!("http://{}/v1/telemetry/events", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (url, received)
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_while_the_switch_is_off_or_no_endpoint_is_named() {
+        let (url, received) = collector(StatusCode::OK).await;
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let batch = build(Some(uuid::Uuid::new_v4().to_string()), &[], &ModulesConfig::default(), &[], 0);
+
+        // The switch off, an endpoint named: no batch is owed, and a send refuses.
+        let path = dir.join("off.json");
+        Choice {
+            enabled: Some(false),
+            usage_id: None,
+            usage_id_minted_at: None,
+            notice_shown: false,
+        }
+        .save(&path)
+        .unwrap();
+        let off = Usage::with(path, Some(url.clone()), None).unwrap();
+        assert!(!off.due().await, "the switch is off, so nothing is owed");
+        assert!(!off.send(&batch).await, "the send refuses with the switch off");
+        assert!(received.lock().await.is_empty(), "the collector saw nothing");
+
+        // The switch on, no endpoint — the default install: nothing is owed, nothing to post to.
+        let on = Usage::with(dir.join("on.json"), None, None).unwrap();
+        assert!(!on.due().await, "no endpoint, so nothing is owed however new the batch");
+        assert!(!on.send(&batch).await, "the send refuses without an endpoint");
+        assert!(received.lock().await.is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_due_send_posts_exactly_the_shown_batch_and_records_the_success() {
+        let (url, received) = collector(StatusCode::OK).await;
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("usage.json");
+        let usage = Usage::with(path.clone(), Some(url), None).unwrap();
+        usage.set(true).await.unwrap();
+
+        // A first send is owed with no recorded success.
+        assert!(usage.due().await, "never sent, so the batch is owed");
+
+        // The batch built is the one value everything uses — the API's `batch` field, the file
+        // `telemetry show` prints, and the bytes the sender posts.
+        let batch = build(
+            Some(usage.choice.lock().await.usage_id.clone().unwrap()),
+            &[],
+            &ModulesConfig::default(),
+            &[],
+            0,
+        );
+        assert!(usage.send(&batch).await, "the collector answers 200, so the batch went");
+
+        let bodies = received.lock().await;
+        assert_eq!(bodies.len(), 1, "one send, not a burst");
+        assert_eq!(
+            bodies[0],
+            serde_json::to_value(&batch).unwrap(),
+            "the collector read exactly the shown batch"
+        );
+
+        // And what it read is inside the grammar the real collector parses.
+        let (_, vocabulary) = cratefield_value(
+            usage.choice.lock().await.usage_id.clone(),
+            &[],
+            &ModulesConfig::default(),
+            &[],
+            0,
+        );
+        let parsed = payload::Batch::parse(&bodies[0], &vocabulary).expect("the posted batch parses");
+        assert_eq!(parsed, batch);
+
+        drop(bodies);
+        assert!(
+            Sent::load(&usage.sent).is_some(),
+            "the success is recorded, so the cadence can compare against it"
+        );
+        assert!(!usage.due().await, "just sent, so nothing is owed for the next 24 hours");
+
+        // A failure is dropped, not queued: the collector's rejection is logged and the success is
+        // not recorded, so the next due tick tries once more — hourly at the soonest, never in a
+        // retry storm.
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_non_2xx_answer_drops_the_batch_and_records_no_success() {
+        let (url, received) = collector(StatusCode::BAD_REQUEST).await;
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("usage.json");
+        let usage = Usage::with(path, Some(url), None).unwrap();
+        usage.set(true).await.unwrap();
+        assert!(usage.due().await);
+
+        let batch = build(Some(uuid::Uuid::new_v4().to_string()), &[], &ModulesConfig::default(), &[], 0);
+        assert!(!usage.send(&batch).await, "a 400 is not a send");
+        assert_eq!(
+            received.lock().await.len(),
+            1,
+            "the collector did receive it — and answered 400"
+        );
+        assert!(Sent::load(&usage.sent).is_none(), "a dropped batch records no success");
+        assert!(usage.due().await, "still owed: the next tick tries once more, not sooner");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_placeholder_install_is_never_posted() {
+        let (url, received) = collector(StatusCode::OK).await;
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        // On, but with an id of no shape at all — a hand-edited usage.json: active() is true, and
+        // the batch's install is the all-zero stand-in, which the sender refuses to post.
+        Choice {
+            enabled: Some(true),
+            usage_id: Some("not-an-id".into()),
+            usage_id_minted_at: Some(Utc::now()),
+            notice_shown: true,
+        }
+        .save(&dir.join("usage.json"))
+        .unwrap();
+        let usage = Usage::with(dir.join("usage.json"), Some(url), None).unwrap();
+        let batch = build(Some("not-an-id".into()), &[], &ModulesConfig::default(), &[], 0);
+        assert_eq!(batch.install, no_install());
+        assert!(!usage.send(&batch).await, "the placeholder never reaches a collector");
+        assert!(received.lock().await.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_success_whose_record_cannot_be_written_is_not_resent_next_tick() {
+        let (url, received) = collector(StatusCode::OK).await;
+        let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+        let usage = Usage::with(dir.join("usage.json"), Some(url), None).unwrap();
+        usage.set(true).await.unwrap();
+        assert!(usage.due().await);
+
+        // The record's path is taken by a directory, so the write after a 2xx fails.
+        std::fs::create_dir(&usage.sent).unwrap();
+        let batch = build(Some(uuid::Uuid::new_v4().to_string()), &[], &ModulesConfig::default(), &[], 0);
+        assert!(usage.send(&batch).await, "the collector answers 200, so the batch went");
+        assert_eq!(received.lock().await.len(), 1);
+        assert!(
+            !usage.due().await,
+            "the in-memory record keeps the 24-hour cadence when the file cannot be written"
+        );
+        std::fs::remove_dir_all(&usage.sent).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

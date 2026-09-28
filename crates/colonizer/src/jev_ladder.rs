@@ -22,7 +22,7 @@ use crate::{Shared, protocol::JevDecision, sessions::Runtime, util::append_line}
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, collections::VecDeque, path::Path, sync::Arc};
+use std::{collections::BTreeMap, collections::HashMap, collections::VecDeque, path::Path, sync::Arc};
 
 /// A decision's `keep_result` at or above this counts as "the plugin predicted this chunk would be
 /// needed" — the same default the plugin itself keeps at (`jev_keep_threshold`, docs/protocol.md,
@@ -125,11 +125,26 @@ pub(crate) fn precision_recall(rows: &[LadderRow], threshold: f64) -> LadderMetr
 }
 
 /// The match key for "the agent re-issued this call": the tool name plus a canonical spelling of
-/// the input. `serde_json`'s `Value` prints objects with sorted keys, so two calls with the same
-/// arguments sign identically however the runner ordered the fields — and both sides arrive as
-/// `Value`s parsed by the same deserialiser, so no second canonicalisation is needed.
+/// the input. The canonical spelling sorts objects' keys — see [`canonical`] — so two calls with
+/// the same arguments sign identically however the runner ordered the fields.
 pub(crate) fn signature(name: &str, input: &Value) -> String {
-    format!("{name} {input}")
+    format!("{name} {}", canonical(input))
+}
+
+/// A spelling of `value` that does not depend on the order its object keys were parsed in.
+/// `serde_json` used to print objects with sorted keys for free, but its `preserve_order` feature —
+/// which cratefield-core, the telemetry payload's dependency, turns on for this whole build — makes
+/// key order follow parse order instead. The signature must not wobble with a dependency's feature
+/// flags, so the sort is spelled out here.
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: BTreeMap<&String, &Value> = map.iter().collect();
+            Value::Object(sorted.into_iter().map(|(key, item)| (key.clone(), canonical(item))).collect())
+        }
+        Value::Array(items) => Value::Array(items.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
 }
 
 /// Per-session watch state (`Runtime.jev_ladder`): what each recent tool call looked like, and

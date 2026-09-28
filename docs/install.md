@@ -251,7 +251,7 @@ What the mothership keeps in the config directory:
 | `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
 | `api-token`, `api-tokens.json` | The owner token behind the sign-in link, and scoped API tokens ([docs/cli.md](cli.md#scoped-api-tokens)) |
-| `telemetry.json`, `usage.json`, `usage-last.json` | The [live map](telemetry.md) and [usage data](usage-data.md) answers, and the last usage batch built |
+| `telemetry.json`, `usage.json`, `usage-last.json`, `usage-sent.json` | The [live map](telemetry.md) and [usage data](usage-data.md) answers, the last usage batch built, and when the last one was sent |
 | `updates.json` | The update check switch ([docs/updates.md](updates.md)) |
 | `loops.json`, `redteam-schedules.json` | Scheduled loops and red-team runs |
 | `colonizer.toml` | Optional hand-written file; today it holds `[publish] co_author` |
@@ -306,6 +306,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_TELEMETRY` | – | `off`, `0`, `false` or `no` does the same |
 | `CI` | – | Exactly `true` keeps [usage data](usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
+| `COLONIZER_TELEMETRY_ENDPOINT` | – (nothing is sent) | The collector URL usage data is posted to, at most once a day. No default: unset, no [usage data](usage-data.md) is ever sent, whatever the switch says |
 | `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
 

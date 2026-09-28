@@ -192,7 +192,8 @@ pub struct App {
     pub telemetry: crate::telemetry::Telemetry,
     pub updater: crate::update::Updater,
     pub updates: crate::version::Updates,
-    /// Anonymous usage reporting, local half only: the batch that would be sent and the switch for it.
+    /// Anonymous usage reporting: the batch, the switch for it, and the sender that posts the batch
+    /// at most once a day when `COLONIZER_TELEMETRY_ENDPOINT` names a collector.
     pub usage: crate::usage::Usage,
 }
 
@@ -265,7 +266,7 @@ impl App {
             telemetry: crate::telemetry::Telemetry::new(&cfg.config_dir)?,
             updater: crate::update::Updater::new(),
             updates: crate::version::Updates::new(&cfg.config_dir)?,
-            usage: crate::usage::Usage::new(&cfg.config_dir),
+            usage: crate::usage::Usage::new(&cfg.config_dir)?,
 
             cfg,
         })

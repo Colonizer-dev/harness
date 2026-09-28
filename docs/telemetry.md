@@ -10,9 +10,9 @@ a small prompt instead. You can change your answer at any time in Settings, unde
 answer, and whenever it is off, the mothership sends nothing.
 
 **This is not [usage data](usage-data.md).** That is a second, separate thing: a batch of counts about
-how the harness is used, with its own switch and a different random id, and on by default, though in
-its current release it is never sent at all, only built, shown and kept. The environment switches below
-keep both off.
+how the harness is used, with its own switch and a different random id, and on by default, though it
+is sent at most once a day and only when `COLONIZER_TELEMETRY_ENDPOINT` names a collector — unset,
+nothing is sent at all. The environment switches below keep both off.
 
 ## What is sent
 
