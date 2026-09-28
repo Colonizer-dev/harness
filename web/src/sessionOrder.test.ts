@@ -39,6 +39,15 @@ describe("sessionRank", () => {
     expect(sessionRank(session({ status: "waiting_for_answer" }))).toBe(0);
   });
 
+  it("ranks one that answered while suspended with the queue — it needs nobody, only a slot (issue #667)", () => {
+    const answeredWaiting = session({
+      status: "waiting_for_answer",
+      suspended: { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" },
+      pending_answer: { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:05:00Z" },
+    });
+    expect(sessionRank(answeredWaiting)).toBe(3);
+  });
+
   it("ranks a live attention flag first, whatever its reason", () => {
     for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
       expect(sessionRank(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(0);

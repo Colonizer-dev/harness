@@ -142,8 +142,13 @@ export interface Session {
    * reset time when it named one. Older mothership builds omit the whole field.
    */
   parked?: { at: string; reason: string; resets_at?: string; vm_kept: boolean } | null;
-  /** The stored answer between the user sending it and the re-boot; opaque to the UI (issue #562). */
-  pending_answer?: unknown;
+  /**
+   * The answer held between the user sending it and the colony's re-boot (issue #562), present only
+   * while one is stored: which question it answers, the prompt as asked, and — once the queue has
+   * it — when it was answered (RFC3339), the restore-order key. Older mothership builds omit the
+   * whole field.
+   */
+  pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */

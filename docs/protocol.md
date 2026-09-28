@@ -560,9 +560,15 @@ absent for a plain launch.
 only reason and path this build writes are the two shown; `snapshot` is what a real VM memory
 snapshot would carry, always `null` today. `agent_session` is the runner's own conversation id
 from the `agent_session` event (§2), what a resumed boot continues. `pending_answer` holds an
-answer that arrived while the colony was suspended, `{question_id, prompt}`: persisted before the
-answer is acknowledged and cleared only once a boot has delivered it, so a failed boot or a
-mothership restart never loses it. All three are absent on a colony that has never been suspended.
+answer that arrived while the colony was suspended, `{question_id, prompt, answered_at?}`:
+persisted before the answer is acknowledged and cleared only once a boot has delivered it, so a
+failed boot or a mothership restart never loses it. `answered_at` (RFC 3339) is when the answer
+arrived, and is left out of records saved before answers kept one — those restore by the
+suspension's own time. A colony with `suspended` and `pending_answer` both set, status still
+`waiting_for_answer`, is answered and waiting for a slot ([#667]): no new status is invented for
+it, restores take such colonies in answer order ahead of fresh launches, and the cockpit shows
+"Answered · resumes when a slot frees" with the colony's place in line (its rank among the
+answered ones by that same order). All three are absent on a colony that has never been suspended.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never
