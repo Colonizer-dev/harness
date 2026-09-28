@@ -1,11 +1,12 @@
 # grok-build (agent module)
 
 Drives xAI's [Grok Build](https://github.com/xai-org/grok-build) CLI (`grok`) as a Colonizer agent
-module on the `colonizer-runner/1` protocol. **Status: PLANNED / experimental — the first slice of
+module on the `colonizer-runner/1` protocol. **Status: experimental, from
 [#333](https://github.com/Colonizer-dev/harness/issues/333).** It is pickable in Settings and per
-org (module discovery lists every `modules/agents/*/module.json`), but nothing mothership-side knows
-about it yet, nothing stages the `grok` binary into the colony image, and it has not run in a real
-colony; see "What remains".
+org (module discovery lists every `modules/agents/*/module.json`), the mothership pushes the xAI key
+into its colonies when configured and routes prefixed models through the provider gateway, but
+nothing stages the `grok` binary into the colony image and it has not run in a real colony; see
+"What remains".
 
 The runner is `runner.mjs`: one headless `grok` process per turn (`--prompt-file`,
 `--output-format streaming-json`), the first turn's `end` event yields the grok `sessionId`, and
@@ -42,23 +43,31 @@ answer), each named problem emits a `log` error plus `status error` with the nam
 - `GROK_CREDENTIAL_MISSING` — `XAI_API_KEY` unset/empty. Fix below.
 - `GROK_BINARY_MISSING` — no grok at `COLONIZER_GROK_BIN`/PATH; the log carries the pinned install command.
 - `GROK_VERSION_DRIFT` — `grok --version` (parsed leniently for X.Y.Z) is not the pinned version.
-- `GROK_MODEL_PROVIDER` — a model setting naming another provider than `xai-grok/<model>`.
+- `GROK_MODEL_PROVIDER` — a model setting that names a provider with no gateway route, or one whose route speaks the anthropic wire (see "Credential story").
 
 ## Credential story
 
 Like the Claude module's #30 precedent: the colony holds only a placeholder; the mothership holds
 the real xAI key and swaps it in on TLS to `api.x.ai` (declared in `module.json` `secrets`). The
-colony never authenticates interactively: the runner refuses to spawn grok without `XAI_API_KEY`,
+mothership pushes the key in itself at boot when it has one — the stored key of a provider named
+`xai-grok`, else its own `XAI_API_KEY`, arriving as `XAI_API_KEY` for host `api.x.ai`; a user-added
+colony secret keeps working for when neither is configured. The colony never authenticates
+interactively: the runner refuses to spawn grok without a credential (a routed model counts),
 never runs `grok login`, and additionally starts every grok child with `BROWSER=/bin/false`
 (belt-and-braces — not a documented grok switch) so nothing can open a browser. A fresh `GROK_HOME`
 also means no cached OAuth token (02-authentication.md: the API key authenticates when no session
 token is active).
 
-Honest scope: the mothership-side push of the xAI key into boot secrets (`crates/colonizer/src/boot.rs`,
-alongside the Claude/TypeSafe keys) and gateway routing are **follow-ups, not in this slice**. Today
-the key reaches a colony only if you add `XAI_API_KEY` for host `api.x.ai` as a colony secret in the
-cockpit's Secrets view (`crates/colonizer/src/colony_secrets.rs`; `XAI_API_KEY` is not on that file's
-reserved list), and grok then talks to `api.x.ai` directly.
+A `<provider>/<model>` whose prefix matches a model route (`docs/protocol.md` §6.5) rides the
+mothership's provider gateway instead of `api.x.ai`: the runner sets `GROK_MODELS_BASE_URL` to the
+route's `/v1` and `GROK_CODE_XAI_API_KEY` to the per-colony token from the route's headers — when
+that base URL is set, Grok Build sends the API key as `Authorization: Bearer`
+([Vercel AI Gateway docs for Grok Build](https://vercel.com/docs/ai-gateway/coding-agents/grok-build),
+which document both variable names) — and drops `XAI_API_KEY` from the child env, so the placeholder
+key never reaches the gateway. The gateway meters the tokens and prices them, so spend accounting and
+the colony's budgets apply, and no xAI key is needed on those turns. Only `openai`-wire routes fit —
+the gateway serves the OpenAI paths on those alone — so an `anthropic`-wire route, or a prefix nobody
+configured, is refused with `GROK_MODEL_PROVIDER` before grok runs.
 
 ## Nesting decisions
 
@@ -87,10 +96,9 @@ it received, and checks the happy path's events against the required fields of
 
 ## What remains
 
-- Mothership-side xAI key push into boot secrets (`boot.rs`) and provider-gateway routing for
-  `xai-grok` models; today only a user-added `XAI_API_KEY` colony secret works.
-- Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`, so a
-  colony does not depend on grok being preinstalled in the image.
+- Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`
+  ([#602](https://github.com/Colonizer-dev/harness/issues/602)), so a colony does not depend on grok
+  being preinstalled in the image.
 - Generic `requires.binaries` (and pins) preflight in Rust, so the harness fails a boot before the
   runner has to.
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.

@@ -43,7 +43,7 @@
       "model": {
         "type": "string",
         "title": "Orchestrator model",
-        "description": "Model for the colony as xai-grok/<model> (grok-4.5 is the CLI's own default) or a bare xAI model id. Other providers are refused: grok talks to api.x.ai directly in this slice.",
+        "description": "Model for the colony as xai-grok/<model> (grok-4.5 is the CLI's own default) or a bare xAI model id. A <provider>/<model> whose prefix matches a connection from Settings → Model providers rides the mothership's gateway on its openai wire instead — tokens and spend are accounted host-side. Anthropic-wire connections and providers with no route are refused: grok speaks the OpenAI wire only.",
         "default": "xai-grok/grok-4.5",
         "env": "COLONIZER_MODEL"
       }

@@ -4,6 +4,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     config::{ModuleChoice, Settings},
+    sandbox::Secret,
 };
 use axum::{
     Json,
@@ -40,6 +41,9 @@ pub struct AgentModule {
     pub dir: PathBuf,
     pub entry: Vec<String>,
     pub needs_claude: bool,
+    /// The module's declared secrets for a [`VENDOR_KEYS`] host: what a stored vendor key is pushed
+    /// into the colony under (issue #629).
+    pub vendor_secrets: Vec<DeclaredSecret>,
     pub schema: Value,
     /// The manifest's `egress` declaration; third-party modules may omit the section.
     pub egress: Option<Egress>,
@@ -119,6 +123,56 @@ fn parse_egress(manifest: &Value) -> Result<Option<Egress>, String> {
         telemetry,
         extra,
     }))
+}
+
+/// One entry of a manifest's `secrets` section, as it names it: the env vars the runner reads the
+/// key from and the hosts each is good for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclaredSecret {
+    pub env: Vec<String>,
+    pub hosts: Vec<String>,
+}
+
+/// The vendors whose key a module's runner may need on the wire itself (issue #629), by the host a
+/// manifest declares: the gateway provider id whose stored key applies, and the mothership env to
+/// fall back to when it has none. Keyed by host rather than module id, so a third-party module that
+/// declares the same host gets the same push.
+pub(crate) const VENDOR_KEYS: &[(&str, &str, &str)] = &[
+    ("api.openai.com", "openai", "OPENAI_API_KEY"),
+    ("api.x.ai", "xai-grok", "XAI_API_KEY"),
+];
+
+/// The secrets a module's colonies boot with for the gateway's vendor keys (issue #629): the stored
+/// gateway key of the provider each declared host maps to, else the mothership env named for it,
+/// under the module's own env names and hosts. Nothing configured means no secret — never a boot
+/// failure. `stored` and `env` are injected lookups so the unit test needs no process state, and
+/// `taken` holds env names a colony secret already grants, which keep the operator's own value.
+pub fn vendor_boot_secrets(
+    module: &AgentModule,
+    stored: &dyn Fn(&str) -> Option<String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    taken: &[String],
+) -> Vec<Secret> {
+    let mut out = Vec::new();
+    for (host, provider, fallback) in VENDOR_KEYS {
+        let Some(declared) = module.vendor_secrets.iter().find(|s| s.hosts.iter().any(|h| h == host)) else {
+            continue;
+        };
+        let Some(value) = stored(provider).or_else(|| env(fallback).filter(|v| !v.trim().is_empty())) else {
+            continue;
+        };
+        for name in &declared.env {
+            if taken.contains(name) {
+                continue;
+            }
+            out.push(Secret {
+                env: name.clone(),
+                value: value.clone(),
+                hosts: declared.hosts.clone(),
+            });
+        }
+    }
+    out
 }
 
 /// A bare hostname: labels of letters, digits and hyphens, none empty or hyphen-led; no scheme,
@@ -224,6 +278,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         description: manifest["description"].as_str().unwrap_or_default().to_string(),
         entry: entry_cmd,
         needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        vendor_secrets: vendor_secrets(&manifest),
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
         egress,
@@ -240,6 +295,36 @@ fn normalize_schema(value: &Value) -> Value {
     } else {
         json!({"type": "object", "properties": {}})
     }
+}
+
+/// The manifest's `secrets` entries that name a [`VENDOR_KEYS`] host — the ones a stored vendor key
+/// is pushed under (issue #629). Anything else a module declares for its own hosts is not the
+/// gateway's to fill.
+fn vendor_secrets(manifest: &Value) -> Vec<DeclaredSecret> {
+    let strings = |value: &Value| {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    manifest["secrets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|secret| DeclaredSecret {
+            env: strings(&secret["env"]),
+            hosts: strings(&secret["hosts"]),
+        })
+        .filter(|secret| {
+            secret
+                .hosts
+                .iter()
+                .any(|host| VENDOR_KEYS.iter().any(|(known, _, _)| known == host))
+        })
+        .collect()
 }
 
 pub struct Provider {
@@ -735,14 +820,10 @@ mod tests {
         std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
         let module = AgentModule {
             id: "claude-code".into(),
-            name: String::new(),
-            description: String::new(),
             dir,
             entry: vec!["node".into(), "runner.mjs".into()],
             needs_claude: true,
-            schema: Value::Null,
-            egress: None,
-            resume_dir: None,
+            ..agent_module(Vec::new())
         };
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
@@ -779,6 +860,130 @@ mod tests {
         assert_eq!(pi.vm_command(), ["node", "/opt/colonizer/agent/runner.mjs"]);
         assert_eq!(pi.schema["properties"]["model"]["env"], "COLONIZER_MODEL");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn manifests_that_declare_a_vendor_host_expose_its_secret_for_the_boot_push() {
+        // The runner-wire agents (issue #629) each name one vendor host in their manifest's
+        // `secrets`: that declaration is the whole trigger for pushing a gateway key, so
+        // discovery must distil exactly the vendor-facing entries from whatever else the
+        // manifest grants. An agent without a vendor host stays empty.
+        const CODEX: &str = include_str!("../../../modules/agents/codex/module.json");
+        const GROK: &str = include_str!("../../../modules/agents/grok-build/module.json");
+        const PI: &str = include_str!("../../../modules/agents/pi/module.json");
+        let root = std::env::temp_dir().join(format!("colonizer-vendor-manifests-{}", crate::util::short_id()));
+        for (dir, manifest) in [("codex", CODEX), ("grok-build", GROK), ("pi", PI)] {
+            let dir = root.join("modules/agents").join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("module.json"), manifest).unwrap();
+            std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
+        }
+        let (modules, problems) = discover_agents(Some(&root));
+        assert!(problems.is_empty(), "{problems:?}");
+        let secrets = |id: &str| {
+            modules
+                .iter()
+                .find(|m| m.id == id)
+                .expect("the manifest is discovered")
+                .vendor_secrets
+                .clone()
+        };
+        assert_eq!(
+            secrets("codex"),
+            vec![DeclaredSecret {
+                env: vec!["CODEX_API_KEY".into()],
+                hosts: vec!["api.openai.com".into()],
+            }],
+            "{:?}",
+            secrets("codex")
+        );
+        assert_eq!(
+            secrets("grok-build"),
+            vec![DeclaredSecret {
+                env: vec!["XAI_API_KEY".into()],
+                hosts: vec!["api.x.ai".into()],
+            }],
+            "{:?}",
+            secrets("grok-build")
+        );
+        assert!(secrets("pi").is_empty(), "pi declares no vendor host");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A discovered-looking [`AgentModule`] whose only interesting field is `vendor_secrets`: the
+    /// push logic reads the manifest's declarations, not its id or entry.
+    fn agent_module(vendor_secrets: Vec<DeclaredSecret>) -> AgentModule {
+        AgentModule {
+            id: "codex".into(),
+            name: String::new(),
+            description: String::new(),
+            dir: std::path::PathBuf::new(),
+            entry: vec!["node".into()],
+            needs_claude: false,
+            vendor_secrets,
+            schema: Value::Null,
+            egress: None,
+            resume_dir: None,
+        }
+    }
+
+    #[test]
+    fn a_vendor_key_is_resolved_stored_first_then_env_and_never_over_a_taken_env() {
+        // `Secret` carries a key value and so has no `Debug`; the push is compared as plain rows.
+        fn rows(secrets: &[Secret]) -> Vec<(&str, &str, Vec<&str>)> {
+            secrets
+                .iter()
+                .map(|s| (s.env.as_str(), s.value.as_str(), s.hosts.iter().map(String::as_str).collect()))
+                .collect()
+        }
+
+        // Plain `fn` items, not closures: a closure literal fixes its argument's lifetime, which the
+        // higher-ranked `Fn(&str)` the lookups are declared with needs.
+        fn stored_openai(id: &str) -> Option<String> {
+            (id == "openai").then(|| "sk-test-stored".to_string())
+        }
+        fn stored_none(_: &str) -> Option<String> {
+            None
+        }
+        fn env_xai_blank(name: &str) -> Option<String> {
+            (name == "XAI_API_KEY").then(|| "  ".to_string())
+        }
+        fn env_xai(name: &str) -> Option<String> {
+            (name == "XAI_API_KEY").then(|| "sk-test-env".to_string())
+        }
+        fn env_none(_: &str) -> Option<String> {
+            None
+        }
+
+        // The push order the colony sees: a stored gateway key wins over the mothership's own env,
+        // a blank or missing stored key falls back to that env, and nothing configured means no
+        // secret — never a boot failure. An env name a colony secret already grants is skipped, so
+        // the operator's own value keeps precedence without a duplicate flag.
+        let module = agent_module(vec![
+            DeclaredSecret {
+                env: vec!["CODEX_API_KEY".into()],
+                hosts: vec!["api.openai.com".into()],
+            },
+            DeclaredSecret {
+                env: vec!["XAI_API_KEY".into()],
+                hosts: vec!["api.x.ai".into()],
+            },
+        ]);
+        assert_eq!(
+            rows(&vendor_boot_secrets(&module, &stored_openai, &env_xai_blank, &[])),
+            vec![("CODEX_API_KEY", "sk-test-stored", vec!["api.openai.com"])],
+        );
+
+        // No stored openai key and a blank XAI env: the env fallback only fires on a value.
+        assert_eq!(
+            rows(&vendor_boot_secrets(&module, &stored_none, &env_xai, &[])),
+            vec![("XAI_API_KEY", "sk-test-env", vec!["api.x.ai"])],
+        );
+
+        // Nothing configured anywhere, or the env name taken by a colony secret: silence.
+        assert!(vendor_boot_secrets(&module, &stored_none, &env_none, &[]).is_empty());
+        let taken = ["CODEX_API_KEY".to_string()];
+        assert!(vendor_boot_secrets(&module, &stored_openai, &env_none, &taken).is_empty());
     }
 
     #[test]
@@ -828,14 +1033,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!("colonizer-plugin-dirs-{}", crate::util::short_id()));
         let agent = AgentModule {
             id: "claude-code".into(),
-            name: String::new(),
-            description: String::new(),
             dir: root.clone(),
-            entry: vec!["node".into()],
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
-            egress: None,
-            resume_dir: None,
+            ..agent_module(Vec::new())
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).

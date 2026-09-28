@@ -40,7 +40,7 @@ plus `status error` with the name as `detail`:
 - `CODEX_CREDENTIAL_MISSING` — neither `CODEX_API_KEY` nor `OPENAI_API_KEY` is set. Fix below.
 - `CODEX_BINARY_MISSING` — no codex at `COLONIZER_CODEX_BIN`/PATH; the log carries `npm install -g @openai/codex@0.156.1`.
 - `CODEX_VERSION_DRIFT` — `codex --version` (prints `codex-cli X.Y.Z`) is not the pinned version.
-- `CODEX_MODEL_PROVIDER` — a model setting naming another provider than `openai/<model>`.
+- `CODEX_MODEL_PROVIDER` — a model setting that names a provider with no gateway route, or one whose route speaks the anthropic wire (see below).
 
 ## Credential story
 
@@ -50,9 +50,19 @@ docs name it as the variable for non-interactive runs). On the same probe, `OPEN
 was **not** picked up by `codex exec` in a fresh `CODEX_HOME`, so the runner re-exports it to the
 child as `CODEX_API_KEY` — either variable works for the runner, but name the colony secret
 `CODEX_API_KEY`: the cockpit refuses colony secrets whose names start with `OPENAI_`, which are
-reserved for the mothership's own credentials. Like every colony credential, the key is added in the
-cockpit's Secrets view for host `api.openai.com`; a ChatGPT plan sign-in is still not a credential
+reserved for the mothership's own credentials. The mothership also pushes the key in itself at boot
+when it has one: the stored key of a provider named `openai`, else its own `OPENAI_API_KEY`, arrives
+as `CODEX_API_KEY` for host `api.openai.com`, so a manual secret is only needed when neither is
+configured. A ChatGPT plan sign-in is still not a credential
 ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](../../../docs/decisions.md)).
+
+A `<provider>/<model>` whose prefix matches a model route (`docs/protocol.md` §6.5) rides the
+mothership's provider gateway instead: the runner points a codex `model_provider` at the gateway's
+OpenAI passthrough and puts the per-colony token in its headers, so no OpenAI key is needed on those
+turns and the stored key never leaves the mothership. The gateway meters the tokens and prices them,
+so spend accounting and the colony's budgets apply. Only `openai`-wire routes fit — the gateway
+serves the OpenAI paths on those alone — so an `anthropic`-wire route, or a prefix nobody
+configured, is refused with `CODEX_MODEL_PROVIDER` before codex runs.
 
 ## Nesting decisions
 
@@ -68,11 +78,12 @@ The microVM is the boundary. Inside it:
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
 | Host config / OAuth token / MCP | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): all of these live under it; `BROWSER=/bin/false` as belt-and-braces |
 
-The model setting (`COLONIZER_MODEL`) is passed as `-m <model>` when set, as `openai/<model>` or a
-bare model id; **empty (the default) passes no `-m`, so Codex runs on the CLI's own default model**
-— that is the module's documented default. `subagent_model` and `background_model` are accepted
-for parity with the other modules but unused: headless `codex exec` has no subagent or
-background-worker split.
+The model setting (`COLONIZER_MODEL`) is passed as `-m <model>` when set: a bare id, `openai/<model>`
+without a route, or the bare remainder of a routed `<provider>/<model>` (the gateway expects the
+bare model, like the hermes runner). **Empty (the default) passes no `-m`, so Codex runs on the
+CLI's own default model** — that is the module's documented default. `subagent_model` and
+`background_model` are accepted for parity with the other modules but unused: headless `codex exec`
+has no subagent or background-worker split.
 
 ## Tests
 
@@ -83,10 +94,9 @@ stdin prompt and env it received, and checks the happy path's events against the
 
 ## What is not supported yet
 
-- The `codex` binary in the colony image: nothing fetches or stages it (see the grok-build module's
+- The `codex` binary in the colony image: nothing fetches or stages it
+  ([#602](https://github.com/Colonizer-dev/harness/issues/602); see the grok-build module's
   "What remains" for the same gap); until then the preflight fails a codex colony at boot.
-- Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
-  same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
 - Questions (`answer` is ignored), the colonizer MCP tools (memory, findings, wait), and resuming a
   codex thread across a runner restart: the thread id lives in the runner's memory and its session
   rollout in the runner's fresh `CODEX_HOME`, both gone when the colony's VM is.

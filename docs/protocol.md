@@ -2105,9 +2105,13 @@ route gets one extra allow rule for that port on top of its egress policy
 ```json
 [{"provider": "strix", "prefix": "strix/",
   "base_url": "http://host.microsandbox.internal:41750/providers/strix", "auth": "none",
+  "wire": "openai",
   "headers": {"x-colonizer-colony": "<per-colony token>"},
   "timeout_secs": 900, "context_tokens": 131072, "fallback_model": "claude-sonnet-5"}]
 ```
+
+`wire` is the provider's wire (`anthropic`, the default, or `openai`): a runner that speaks the OpenAI
+wire itself reads it to know which routes serve its own paths untranslated (issue #629).
 
 **Runner.**
 
@@ -2126,7 +2130,10 @@ route gets one extra allow rule for that port on top of its egress policy
 
 **Gateway endpoint** `ANY /providers/{id}/{path}`:
 
-- Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`. The same token is also
+  accepted as `Authorization: Bearer <token>` — what a runner speaking the OpenAI wire sends — and the
+  gateway's own header keeps precedence when a request carries both. Neither credential is ever forwarded
+  to a provider.
 - A colony past its spend budget is refused `403` `permission_error` before it waits for a slot, with no
   `x-colonizer-fallback`: there is nothing to fall back to. The same check stops the colony on the host,
   worktree kept, so raising the budget and resuming continues it.
@@ -2154,13 +2161,20 @@ route gets one extra allow rule for that port on top of its egress policy
 - Every request that passes colony auth is one JSON line in the colony's `<session dir>/gateway.jsonl`,
   with its outcome and, on failure, the failure code `health.last_failure` reports.
 
-**`openai` wire.** A provider with `wire: "openai"` speaks OpenAI's Chat Completions API, and the gateway
-translates in both directions (`crates/colonizer/src/openai.rs`). The runner's fallback resends its own,
-untranslated request, so it is unaffected.
+**`openai` wire.** A provider with `wire: "openai"` speaks OpenAI's Chat Completions API. `POST /v1/messages`
+is translated in both directions (`crates/colonizer/src/openai.rs`), and two of OpenAI's own routes pass
+through untranslated (issue #629). The runner's fallback resends its own, untranslated request, so it is
+unaffected.
 
-- Only `POST /v1/messages` is translated, to `{base_url}/v1/chat/completions`, sent with `content-type` and
-  the provider credential only. Any other path, including `/v1/messages/count_tokens`, answers `404`, and
-  the runner estimates the token count itself.
+- `POST /v1/responses` and `POST /v1/chat/completions` are forwarded to `{base_url}` + the same path (query
+  kept; a `base_url` that already ends in `/v1` does not grow a second one, so the presets that store it
+  that way — xai-grok's `https://api.x.ai/v1` — join normally), sent with `content-type` and the provider
+  credential only. The connection policy's `model_map`
+  renames the model exactly as on `/v1/messages`, and a streaming chat completion gains
+  `stream_options.include_usage` unless the colony asked for usage itself — accounting needs the final
+  chunk. Everything else forwards as sent; a body neither rewrite touches goes out byte-for-byte. Any
+  other path on this wire — including `/v1/messages/count_tokens`, which has no OpenAI equivalent — and a
+  non-POST to these two answers `404`, and the runner estimates the token count itself.
 - The request is rebuilt from an allowlist. `system`, and system messages inside `messages`, become
   `system` messages; text, images (base64 or URL) and PDF documents become content parts; `tool_use` becomes
   `tool_calls`, and `tool_result` becomes `tool` messages directly after them (images in a tool result move
@@ -2197,7 +2211,11 @@ counted differently but on one scale, Anthropic's token names:
   carries the running output total); a non-streaming JSON body is buffered only to count, up to 4 MiB,
   past which the response forwards unpriced. Anything the tap cannot parse counts as zero, so an
   estimate can only undercount.
-- `wire: openai`: the usage the translation already extracted is reused; the body is never read twice.
+- `wire: openai`: the usage the translation already extracted is reused; the body is never read twice. A
+  passthrough response is tapped like the anthropic wire instead, in the route's own spelling: Responses'
+  `response.completed` event — or the `usage` of a finished non-streaming body — and a chat completion's
+  final chunk (or non-streaming `usage`), with cached input coming back out of the input total either way,
+  so both wires account on Anthropic's scale.
 
 `pricing` is five rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
 `cache_read_per_mtok`, `cache_write_per_mtok` and `thinking_per_mtok`. A save checks that the first
@@ -2229,7 +2247,7 @@ anthropic-wire provider must be scheme and host only, with no `/v1` suffix: the 
 request's own path itself (`/v1/messages`, and `/v1/models` for the health probe), so a base already
 ending in `/v1` doubles it and 404s silently until the first live call. `PUT /api/providers/{id}` now
 rejects that shape at save time for `wire: anthropic` (an `openai`-wire base_url ending in `/v1`, like
-`xai-grok`'s, is unaffected — the translator appends `/chat/completions` itself). Meta enforces
+`xai-grok`'s, is legitimate — the gateway's join there skips the guest path's repeated `/v1`). Meta enforces
 `max_tokens >= 16`, answering `400` `invalid_request_error` below it, so a colony or provider default for
 this preset must respect that floor. Meta is also a heavy reasoner: thinking tokens are spent from the
 output budget before any text, so `max_tokens` should be set generously here, and its

@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { parseRoutes, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -92,6 +92,28 @@ const count = (type, n) => (events) => {
   return matches.length >= n ? matches[n - 1] : undefined;
 };
 
+// The routes a boot would push (docs/protocol.md §6.5), one per wire; keys are obviously fake.
+const ROUTES = parseRoutes(
+  JSON.stringify([
+    {
+      provider: 'strix',
+      prefix: 'strix/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/strix',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+      wire: 'openai',
+    },
+    {
+      provider: 'anth',
+      prefix: 'anth/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/anth',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+    },
+  ]),
+);
+const ROUTES_JSON = JSON.stringify(ROUTES.routes);
+
 test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('codex-cli 0.156.1'), '0.156.1');
   assert.equal(parseVersion('1.2.3'), '1.2.3');
@@ -104,6 +126,41 @@ test('resolveModel accepts openai and bare ids, keeps empties for the CLI defaul
   assert.deepEqual(resolveModel('  gpt-5.3-codex '), { model: 'gpt-5.3-codex' });
   assert.deepEqual(resolveModel(''), {});
   assert.match(resolveModel('deepseek/deepseek-flash').error, /^CODEX_MODEL_PROVIDER:/);
+});
+
+test('parseRoutes validates the route array like the hermes and pi runners do, defaulting the wire to anthropic', () => {
+  assert.deepEqual(parseRoutes('not json'), { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] });
+  assert.equal(parseRoutes('{}').routes.length, 0);
+  assert.match(parseRoutes('{}').warnings[0], /expected a JSON array/);
+  const bad = parseRoutes(JSON.stringify([{ prefix: 'x', base_url: 'ftp://x' }, { prefix: 'ok/', base_url: 'http://ok', wire: 'websocket' }]));
+  assert.equal(bad.routes.length, 0);
+  assert.equal(bad.warnings.length, 2, 'a bad prefix and an unknown wire each drop their route');
+  const good = parseRoutes(JSON.stringify([{ prefix: 'p/', base_url: 'http://p', headers: { 'X-Colonizer-Colony': 'tok', bad_name: 'dropped' } }]));
+  assert.deepEqual(good.routes, [{ provider: 'p', prefix: 'p/', base_url: 'http://p', headers: { 'x-colonizer-colony': 'tok' }, wire: 'anthropic' }]);
+});
+
+test('resolveModel sends an openai-wire route through the gateway, keeps openai and bare ids direct, and refuses the rest', () => {
+  const routed = resolveModel('strix/gpt-5.2', ROUTES.routes);
+  assert.equal(routed.model, 'gpt-5.2', 'the prefix is stripped before -m');
+  assert.equal(routed.route.wire, 'openai');
+  assert.deepEqual(resolveModel('gpt-5.3-codex', ROUTES.routes), { model: 'gpt-5.3-codex' }, 'bare ids stay direct');
+  assert.deepEqual(resolveModel('openai/gpt-5.2', ROUTES.routes), { model: 'gpt-5.2' }, 'openai/ with no openai/ route stays direct');
+  assert.match(resolveModel('anth/claude-sonnet-5', ROUTES.routes).error, /^CODEX_MODEL_PROVIDER:.*anthropic wire/);
+  assert.match(resolveModel('deepseek/deepseek-flash', ROUTES.routes).error, /Settings → Model providers/);
+});
+
+test('turnArgs adds the custom provider for a routed model, as TOML -c values', () => {
+  const args = turnArgs({ model: 'gpt-5.2', threadId: 'thread-1', route: ROUTES.routes[0] });
+  assert.deepEqual(pair(args, '-c'), ['-c', 'check_for_update_on_startup=false'], 'the nesting overrides stay first');
+  const overrides = args.flatMap((arg, i) => (arg === '-c' ? [args[i + 1]] : []));
+  assert.ok(overrides.includes('model_provider="colonizer"'));
+  assert.ok(overrides.includes('model_providers.colonizer.name="colonizer"'));
+  assert.ok(overrides.includes('model_providers.colonizer.base_url="http://host.microsandbox.internal:41750/providers/strix/v1"'));
+  assert.ok(overrides.includes('model_providers.colonizer.wire_api="responses"'));
+  assert.ok(overrides.includes('model_providers.colonizer.http_headers={x-colonizer-colony="colony-token-1"}'));
+  assert.deepEqual(pair(args, '-m'), ['-m', 'gpt-5.2']);
+  const direct = turnArgs({ model: 'gpt-5.2' });
+  assert.equal(direct.filter((arg) => arg.startsWith('model_provider')).length, 0, 'a direct model carries no provider overrides');
 });
 
 test('turnArgs carries the --json framing, the nesting overrides, and the resume subcommand order', () => {
@@ -178,6 +235,71 @@ test('an OPENAI_API_KEY colony reaches codex as CODEX_API_KEY, the only name cod
   runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
   assert.equal(runner.turns()[0].env.CODEX_API_KEY, 'set', 'the fallback credential rides under the real name');
+
+  await stop(runner);
+});
+
+test('a routed openai-wire model rides the gateway: provider overrides, no key, resume keeps the config', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'strix/gpt-5.2', COLONIZER_MODEL_ROUTES: ROUTES_JSON, CODEX_API_KEY: '' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  const second = await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+  assert.equal(second.is_error, false);
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  for (const [i, invocation] of turns.entries()) {
+    const overrides = invocation.argv.flatMap((arg, j) => (arg === '-c' ? [invocation.argv[j + 1]] : []));
+    assert.ok(overrides.includes('model_provider="colonizer"'), `turn ${i + 1} selects the gateway provider`);
+    assert.ok(
+      overrides.some((arg) => arg.startsWith('model_providers.colonizer.base_url="http://host.microsandbox.internal:41750/providers/strix/v1"')),
+      `turn ${i + 1} points the provider at the gateway passthrough`,
+    );
+    assert.ok(overrides.includes('model_providers.colonizer.wire_api="responses"'), `turn ${i + 1} speaks the responses wire`);
+    assert.ok(
+      overrides.includes('model_providers.colonizer.http_headers={x-colonizer-colony="colony-token-1"}'),
+      `turn ${i + 1} carries the colony header`,
+    );
+    assert.deepEqual(pair(invocation.argv, '-m'), ['-m', 'gpt-5.2'], `turn ${i + 1} passes the bare model id`);
+    assert.equal(invocation.env.CODEX_API_KEY, 'unset', 'a routed turn needs no OpenAI key');
+  }
+  assert.deepEqual(pair(turns[1].argv.slice(0, turns[1].argv.indexOf('-')), 'resume'), ['resume', 'thread-fake-1'], 'the second turn still resumes');
+  assert.equal(runner.records().some((r) => r.argv.includes('login')), false, 'the runner never logs in');
+
+  await stop(runner);
+});
+
+test('an anthropic-wire route and an unknown prefix are refused by name, and codex never runs', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'anth/claude-sonnet-5', COLONIZER_MODEL_ROUTES: ROUTES_JSON });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^CODEX_MODEL_PROVIDER:/);
+  assert.match(turnEnd.result, /anthropic wire/);
+
+  runner.send({ type: 'set_model', model: 'deepseek/deepseek-flash' });
+  const refusal = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the unrouted refusal');
+  assert.match(refusal.message, /no gateway route/, 'set_model is refused too');
+  assert.equal(runner.turns().length, 0, 'no codex process may run for a refused model');
+
+  await stop(runner);
+});
+
+test('malformed route JSON is warned about and the bare model runs direct', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'gpt-5.2', COLONIZER_MODEL_ROUTES: 'not json' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  const warning = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn'), 'the routes warning');
+  assert.match(warning.message, /ignoring COLONIZER_MODEL_ROUTES: not valid JSON/);
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(pair(runner.turns()[0].argv, '-m'), ['-m', 'gpt-5.2'], 'the turn runs direct, as without routes');
+  assert.equal(runner.turns()[0].env.CODEX_API_KEY, 'set', 'the direct path still uses the credential');
 
   await stop(runner);
 });

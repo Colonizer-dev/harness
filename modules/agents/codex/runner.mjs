@@ -22,6 +22,49 @@ export const MISSING_BINARY = 'CODEX_BINARY_MISSING';
 export const VERSION_DRIFT = 'CODEX_VERSION_DRIFT';
 export const MODEL_PROVIDER = 'CODEX_MODEL_PROVIDER';
 
+// The wires a gateway route can speak (docs/protocol.md §6.5); a missing `wire` means the default.
+const WIRES = new Set(['anthropic', 'openai']);
+const HEADER_NAME = /^[A-Za-z0-9-]+$/;
+
+/** COLONIZER_MODEL_ROUTES → validated routes, with warnings instead of throwing — the same wire
+ * shape the hermes and pi runners parse, validated again here because a module is an independent
+ * directory. `wire` is newer than the routes themselves: a route without one speaks the gateway's
+ * default, anthropic. */
+export function parseRoutes(raw) {
+  let data;
+  try {
+    data = JSON.parse(raw ?? '');
+  } catch {
+    return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] };
+  }
+  if (!Array.isArray(data)) return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: expected a JSON array'] };
+  const routes = [];
+  const warnings = [];
+  data.forEach((entry, i) => {
+    const prefix = typeof entry?.prefix === 'string' ? entry.prefix : '';
+    const baseUrl = typeof entry?.base_url === 'string' ? entry.base_url : '';
+    const wire = entry?.wire ?? 'anthropic';
+    if (!prefix.endsWith('/') || prefix.length < 2 || !/^https?:\/\//.test(baseUrl) || !WIRES.has(wire)) {
+      warnings.push(`ignoring model route ${i}: needs a "<provider>/" prefix, an http(s) base_url and wire anthropic|openai`);
+      return;
+    }
+    const rawHeaders = entry.headers && typeof entry.headers === 'object' && !Array.isArray(entry.headers) ? entry.headers : {};
+    const headers = Object.fromEntries(
+      Object.entries(rawHeaders)
+        .filter(([name, header]) => HEADER_NAME.test(name) && typeof header === 'string')
+        .map(([name, header]) => [name.toLowerCase(), header]),
+    );
+    routes.push({
+      provider: typeof entry.provider === 'string' && entry.provider ? entry.provider : prefix.slice(0, -1),
+      prefix,
+      base_url: baseUrl,
+      headers,
+      wire,
+    });
+  });
+  return { routes, warnings };
+}
+
 /** The pin, read from module.json so the manifest and this preflight cannot drift apart. */
 export function readPin() {
   const pin = JSON.parse(readFileSync(join(here, 'module.json'), 'utf8'))?.requires?.pins?.codex;
@@ -56,8 +99,11 @@ function versionOf(bin, spawnFn) {
 export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
   // Either secret name is a credential, and an empty one counts as absent — the same rule the
   // error below states, and the same rule childEnv applies when it names the key for the child.
+  // A model routed through the gateway needs neither: the colony token in its headers is the
+  // credential (§6.5), so the check only gates direct api.openai.com runs.
+  const routed = resolveModel(env.COLONIZER_MODEL, parseRoutes(env.COLONIZER_MODEL_ROUTES).routes).route;
   const credential = String(env.CODEX_API_KEY ?? '').trim() || String(env.OPENAI_API_KEY ?? '').trim();
-  if (!credential) {
+  if (!credential && !routed) {
     return {
       code: MISSING_CREDENTIAL,
       message:
@@ -83,23 +129,34 @@ export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
   return null;
 }
 
-/** The `-m` value for a model setting: `openai/<model>` or a bare OpenAI model id; any other
- * provider prefix is refused by name (gateway routing is a follow-up, README "Credential story").
- * An empty setting means no `-m`: codex then runs on the CLI's own default model. */
-export function resolveModel(spec) {
+/** The `-m` value for a model setting, plus the gateway route it rides when one applies. A bare
+ * OpenAI model id, or `openai/<model>` with no `openai/` route configured, goes straight to
+ * api.openai.com as before; a prefix a route carries rides that route through the provider gateway
+ * when its wire is `openai` — the only wire the gateway serves codex's OpenAI paths on (§6.5). An
+ * anthropic-wire route, or a prefix nobody configured, is refused by name. An empty setting means
+ * no `-m`: codex then runs on the CLI's own default model. */
+export function resolveModel(spec, routes = []) {
   const value = String(spec ?? '').trim();
   if (!value) return {};
   const slash = value.indexOf('/');
-  if (slash > 0 && value.slice(0, slash) !== 'openai') {
-    return { error: `${MODEL_PROVIDER}: "${value}" names another provider; this module runs openai/<model> only` };
+  if (slash < 1) return { model: value };
+  const prefix = value.slice(0, slash + 1);
+  const route = routes.find((r) => r.prefix === prefix);
+  if (route) {
+    if (route.wire !== 'openai') {
+      return { error: `${MODEL_PROVIDER}: "${value}" names provider ${route.provider}, whose gateway route speaks the anthropic wire; codex can only ride openai-wire routes (Settings → Model providers)` };
+    }
+    return { model: value.slice(slash + 1), route };
   }
-  return { model: slash > 0 ? value.slice(slash + 1) : value };
+  if (prefix === 'openai/') return { model: value.slice(slash + 1) };
+  return { error: `${MODEL_PROVIDER}: "${value}" names a provider with no gateway route; add it under Settings → Model providers, or use openai/<model>` };
 }
 
 /** One headless codex turn (`codex exec --json`): the prompt rides stdin (`-`), exec-level options
  * come before the `resume` subcommand (which takes no `-c`), and the nesting decisions from the
- * README applied. */
-export function turnArgs({ model, threadId }) {
+ * README applied. A routed model adds the custom provider the config reference defines: every `-c`
+ * value is parsed as TOML, hence the quoted strings and the inline table for the headers. */
+export function turnArgs({ model, threadId, route = null }) {
   const args = [
     '--json', // events as JSONL on stdout (developers.openai.com/codex/noninteractive)
     '--skip-git-repo-check', // the runner may sit anywhere; the colony VM is the boundary
@@ -108,6 +165,21 @@ export function turnArgs({ model, threadId }) {
     '-c', 'history.persistence="none"', // no prompt history file; the session rollout stays (resume needs it)
     '-c', 'otel.metrics_exporter="none"', // product analytics off (upstream config reference)
   ];
+  if (route) {
+    // The gateway ride (§6.5): base_url is the route's OpenAI passthrough, wire_api="responses" is
+    // the passthrough codex hits (`POST <base_url>/v1/responses`), and the colony header is the
+    // whole credential — no env_key, so codex demands no key for this provider.
+    const headers = Object.entries(route.headers)
+      .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+      .join(',');
+    args.push(
+      '-c', 'model_provider="colonizer"',
+      '-c', 'model_providers.colonizer.name="colonizer"',
+      '-c', `model_providers.colonizer.base_url="${route.base_url.replace(/\/+$/, '')}/v1"`,
+      '-c', 'model_providers.colonizer.wire_api="responses"',
+      '-c', `model_providers.colonizer.http_headers={${headers}}`,
+    );
+  }
   if (model) args.push('-m', model);
   if (threadId) args.push('resume', threadId); // resume: a colony is one continuous codex thread
   args.push('-'); // the prompt: read from stdin
@@ -168,7 +240,7 @@ export function mergeUsage(totals, model, usage) {
 /** Runs one turn as a codex child, emitting the mapped protocol events as they arrive; resolves with
  * the turn's codex thread id once the child exits. `interrupt()` SIGINTs the child (codex saves the
  * session rollout continuously) and escalates to SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals }) {
+export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals, route = null }) {
   let child = null;
   let interrupted = false;
   // The thread id to carry into the next turn: whatever `thread.started` named last, else the one
@@ -182,7 +254,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
     let completed = null;
     let failed = null;
     let failure = null;
-    child = spawnFn(codexBin(env), turnArgs({ model, threadId }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawnFn(codexBin(env), turnArgs({ model, threadId, route }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
     // The prompt rides stdin (`-` as the prompt argument): an issue brief can be far larger than
     // an argv slot, and a child that exits early must not turn a broken pipe into a crash.
     child.stdin.on('error', () => {});
@@ -304,6 +376,8 @@ class AsyncQueue {
  * arrives mid-turn is queued for the next slot, while interrupt, set_model and answer apply at once. */
 export async function run({ commands, emit, env, spawnFn = spawn }) {
   emit({ type: 'status', state: 'idle' });
+  const { routes, warnings } = parseRoutes(env.COLONIZER_MODEL_ROUTES);
+  for (const message of warnings) emit({ type: 'log', level: 'warn', message });
   const problem = await preflight({ env, spawnFn });
   const home = mkdtempSync(join(tmpdir(), 'colonizer-codex-'));
   if (problem) {
@@ -327,7 +401,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
       while (pending.length) {
         const message = pending.shift();
         emit({ type: 'status', state: 'working' });
-        const resolved = resolveModel(modelSpec);
+        const resolved = resolveModel(modelSpec, routes);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
@@ -339,7 +413,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals });
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, route: resolved.route ?? null });
         try {
           const result = await turn.done;
           threadId = result.threadId ?? threadId;
@@ -377,7 +451,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
-        const resolved = resolveModel(command.model);
+        const resolved = resolveModel(command.model, routes);
         if (resolved.error || !resolved.model) {
           emit({ type: 'log', level: resolved.error ? 'error' : 'warn', message: resolved.error ?? 'ignored a set_model without a model' });
           break;

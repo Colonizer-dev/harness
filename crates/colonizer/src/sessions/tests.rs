@@ -177,6 +177,7 @@ pub(crate) fn app_that_can_create(root: &std::path::Path) -> Shared {
         dir,
         entry: vec!["run".into()],
         needs_claude: false,
+        vendor_secrets: Vec::new(),
         schema: json!({}),
         egress: None,
         resume_dir: None,

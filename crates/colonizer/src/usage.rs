@@ -765,6 +765,7 @@ mod tests {
             dir: PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"),
             entry: vec!["runner.mjs".into()],
             needs_claude: true,
+            vendor_secrets: Vec::new(),
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
             egress: None,
             resume_dir: None,

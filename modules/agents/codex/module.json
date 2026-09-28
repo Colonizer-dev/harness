@@ -42,7 +42,7 @@
       "model": {
         "type": "string",
         "title": "Orchestrator model",
-        "description": "Model for the colony as openai/<model> or a bare OpenAI model id, passed to codex exec -m. Empty (the default) passes no -m: Codex runs on the CLI's own default model. Other providers are refused: codex talks to api.openai.com directly in this slice.",
+        "description": "Model for the colony as openai/<model> or a bare OpenAI model id, passed to codex exec -m. Empty (the default) passes no -m: Codex runs on the CLI's own default model. A <provider>/<model> whose prefix matches a connection from Settings → Model providers rides the mothership's gateway on its openai wire instead — tokens and spend are accounted host-side and no OpenAI key is needed in the colony. Anthropic-wire connections and providers with no route are refused: codex speaks the OpenAI wire only.",
         "default": "",
         "env": "COLONIZER_MODEL"
       },

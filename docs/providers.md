@@ -15,15 +15,19 @@ spend and carry. Every field and route is in
 | :--- | :--- | :--- | :--- |
 | `claude-code` | yes — unrouted models go straight to Anthropic; `<provider>/<model>` rides the gateway's Anthropic Messages route | yes — same route; the gateway translates the openai wire | yes — the `disabled_tools` setting (`COLONIZER_DISABLED_TOOLS`) becomes the SDK session's `disallowedTools` |
 | `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | not yet — ACP names no per-tool switch; the runner maps no `disabled_tools` equivalent |
-| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | not yet — the runner already passes `-c` config overrides; a tool switch would ride those |
-| `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | not yet — the runner sets only `GROK_*` env toggles (memory, telemetry, updater) |
+| `codex` | no — an `anthropic`-wire route is refused (`CODEX_MODEL_PROVIDER`): codex speaks the OpenAI wire only | yes — a `<provider>/<model>` whose prefix matches a route rides the gateway's OpenAI passthrough (`/v1/responses`) via a codex `model_provider` override; bare ids and `openai/` with no route go straight to `api.openai.com` with `CODEX_API_KEY` | not yet — the runner already passes `-c` config overrides; a tool switch would ride those |
+| `grok-build` | no — an `anthropic`-wire route is refused (`GROK_MODEL_PROVIDER`): grok speaks the OpenAI wire only | yes — same passthrough, via `GROK_MODELS_BASE_URL` and the colony token as the bearer key; bare ids and `xai-grok/` with no route go straight to `api.x.ai` with `XAI_API_KEY` | not yet — the runner sets only `GROK_*` env toggles (memory, telemetry, updater) |
 | `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | not yet — the runner hardcodes `agent.disabled_toolsets` (whole toolsets, not a per-colony setting) |
 | `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | not yet — the generated inline config carries no per-tool entries |
 | `pi` | yes — the runner writes `models.json` from the routes, `api: anthropic-messages` | yes — same; the gateway presents anthropic-messages to every guest | not yet — the runner configures models only |
 
-`codex` and `grok-build` run against their vendor API from the colony's own secret, so no route
-reaches them yet: no `model_map`, no spend accounting through the gateway, no connection-level tool
-strip.
+`codex` and `grok-build` speak only the OpenAI wire, so a route reaches them when the connection's
+wire is `openai`: the gateway forwards their Responses and Chat Completions requests to the
+connection verbatim and records the usage, so spend accounting and the budgets apply. A connection
+on the `anthropic` wire is refused by both runners, named in the model setting's error. A bare model
+id, or `openai/` / `xai-grok/` with no route configured, still runs against the vendor API from the
+colony's own secret, outside the gateway: no spend accounting through the gateway and no
+connection-level tool strip for those.
 
 ## `model_map` and wire names
 

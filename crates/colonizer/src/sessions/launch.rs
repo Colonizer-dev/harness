@@ -1342,6 +1342,7 @@ mod tests {
             dir,
             entry: vec!["run".into()],
             needs_claude: false,
+            vendor_secrets: Vec::new(),
             schema: json!({}),
             egress: None,
             resume_dir: None,
