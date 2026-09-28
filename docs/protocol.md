@@ -1287,22 +1287,24 @@ environment keeps it off.
 
 ### `GET /api/telemetry/usage` and `PUT /api/telemetry/usage`
 
-Anonymous usage reporting, separate from the live map ([usage-data.md](usage-data.md)). **Nothing is
-sent in this build**: there is no sender and no endpoint yet. The mothership only builds the batch it
-would send, so you can read it here or with `colonizer telemetry show`. The choice is kept in
-`<config>/usage.json` and is on unless switched off.
+Anonymous usage reporting, separate from the live map ([usage-data.md](usage-data.md)). The mothership
+builds the batch — Cratefield's `module-telemetry` payload ([usage-data.md](usage-data.md)) — so you
+can read exactly what a send carries, here or with `colonizer telemetry show`. The batch is sent at
+most once a day, and only when `COLONIZER_TELEMETRY_ENDPOINT` names a collector in the mothership's
+environment: unset, nothing is sent, ever. The choice is kept in `<config>/usage.json` and is on
+unless switched off.
 
 ```json
-{"enabled": true, "blocked_by": null, "payload_version": 1, "batch": {"payload_version": 1, "usage_id": "…",
- "harness_version": "…", "platform": "darwin-arm64", "colonies": {"parallel_now": "2-3", "terminal": {…}},
- "sandbox": {…}, "autopilot": {…}, "settings_set": ["sandbox.preset"], "boot_ms": [{"phase": "git", "bucket": "1-2s"}],
- "providers": "1", "error_kinds": {}}}
+{"enabled": true, "blocked_by": null, "payload_version": 1, "batch": {"schema": 1, "install": "…",
+ "client": {"kind": "server", "version": "…", "platform": "linux", "arch": "x86-64"},
+ "modules": ["mothership"], "events": [{"name": "colonies.parallel_now.2-3", "outcome": "ok",
+ "error": "none", "duration": "unknown", "count": 1}, {"name": "boot.git.1-2s", …}]}}
 ```
 
 Counts and durations are bucket labels, settings are names without values. `blocked_by` names
 `COLONIZER_TELEMETRY`, `DO_NOT_TRACK` or `CI` when the environment holds reporting off. `PUT
-{"enabled": bool}` saves the choice (off clears `usage_id`, on makes a new one) and answers the same
-status; **409** while the environment holds it off.
+{"enabled": bool}` saves the choice (off forgets the id behind `install`, on makes a new one) and
+answers the same status; **409** while the environment holds it off.
 
 ### `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket)
 

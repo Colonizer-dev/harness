@@ -1251,29 +1251,37 @@ let mockTelemetry: TelemetryStatus = {
 };
 
 // The usage batch: reporting is on by default, so `enabled` arrives already resolved to true — the
-// "never answered" distinction lives only in usage.json and is not exposed over the API. This build
-// has no sender; the batch is only collected and shown.
+// "never answered" distinction lives only in usage.json and is not exposed over the API. The batch
+// is Cratefield's module-telemetry payload; it is sent at most once a day, only when the Mothership
+// was given a collector endpoint.
 let mockLoginItem = false;
 let mockUsage: UsageStatus = {
   enabled: true,
   blocked_by: null,
   payload_version: 1,
   batch: {
-    payload_version: 1,
-    usage_id: "0f8a6c1e-4d2b-4a9e-9c3f-5b7d1e2a6c48",
-    harness_version: "0.1.3",
-    platform: "darwin-arm64",
-    colonies: { parallel_now: "1", terminal: { pr_opened: "2-3", no_changes: "0", stopped: "1", failed: "0" } },
-    sandbox: { preset: "node", image_changed_from_default: false },
-    autopilot: { enabled: true, held: "0" },
-    settings_set: ["agent.model", "sandbox.preset"],
-    boot_ms: [
-      { phase: "issue", bucket: "<1s" },
-      { phase: "vm-boot", bucket: "5-15s" },
-      { phase: "agentd", bucket: "1-2s" },
+    schema: 1,
+    install: "0f8a6c1e4d2b4a9e9c3f5b7d1e2a6c48",
+    client: { kind: "server", version: "0.1.3", platform: "macos", arch: "aarch64" },
+    modules: ["mothership"],
+    events: [
+      { name: "colonies.parallel_now.1", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "colonies.pr_opened.2-3", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "colonies.no_changes.0", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "colonies.stopped.1", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "colonies.failed.0", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "sandbox.preset.node", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "sandbox.image_changed.false", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "autopilot.enabled.true", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "autopilot.held.0", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "setting.agent.model", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "setting.sandbox.preset", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "boot.issue.<1s", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "boot.vm-boot.5-15s", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "boot.agentd.1-2s", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "providers.1", outcome: "ok", error: "none", duration: "unknown", count: 1 },
+      { name: "error.vm_stopped.1", outcome: "ok", error: "none", duration: "unknown", count: 1 },
     ],
-    providers: "1",
-    error_kinds: { vm_stopped: "1" },
   },
 };
 
@@ -2631,12 +2639,9 @@ export function createMockApi(): Api {
     setUsage: async (enabled) => {
       await sleep(250);
       if (mockUsage.blocked_by) throw new ApiError("usage reporting is kept off by the Mothership's environment", 409);
-      mockUsage = {
-    ...mockUsage,
-    enabled,
-    // Switching on creates the id; switching off forgets it, so the next period cannot be joined to this one.
-    batch: { ...mockUsage.batch, usage_id: enabled ? (mockUsage.batch.usage_id ?? crypto.randomUUID()) : null },
-      };
+      // The batch is untouched by the switch: the id it carries is minted, kept and rotated by the
+      // Mothership, and switching off here stops the sender, it does not rewrite the shown batch.
+      mockUsage = { ...mockUsage, enabled };
       return clone(mockUsage);
     },
     repos: () => later(() => REPOS, 350),

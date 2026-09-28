@@ -325,10 +325,19 @@ mod tests {
             "the next event succeeds and jumps past the lost one"
         );
         let events = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        // Compared by parsed fields, not bytes: the key order within a line follows whichever
+        // serde_json map the build has (a dependency turns `preserve_order` on), and is not part
+        // of the format.
         assert_eq!(
-            events, "{\"origin\":\"agent\",\"seq\":2,\"state\":\"idle\",\"type\":\"status\"}\n",
-            "seq 1 stays lost"
+            events.lines().count(),
+            1,
+            "the recovered line is the only thing in the log; seq 1 stays lost"
         );
+        let written: serde_json::Value = serde_json::from_str(&events).unwrap();
+        assert_eq!(written["seq"], 2, "seq 1 stays lost");
+        assert_eq!(written["type"], "status");
+        assert_eq!(written["state"], "idle");
+        assert_eq!(written["origin"], "agent");
         let _ = std::fs::remove_dir_all(root);
     }
 

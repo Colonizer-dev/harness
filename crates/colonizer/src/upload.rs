@@ -69,7 +69,7 @@ fn stays_home_reason(name: &str) -> &'static str {
         "credential"
     } else if name == "telemetry.json" {
         "telemetry"
-    } else if name == "usage.json" || name == "usage-last.json" {
+    } else if name == "usage.json" || name == "usage-last.json" || name == "usage-sent.json" {
         "usage"
     } else if matches!(
         name,
@@ -221,6 +221,7 @@ mod tests {
             "telemetry.json",
             "usage.json",
             "usage-last.json",
+            "usage-sent.json",
             "host_id",
             "known-orgs.json",
             "push-subscriptions.json",
@@ -308,6 +309,7 @@ mod tests {
         assert_eq!(by("telemetry.json").reason, "telemetry");
         assert_eq!(by("usage.json").reason, "usage");
         assert_eq!(by("usage-last.json").reason, "usage");
+        assert_eq!(by("usage-sent.json").reason, "usage");
         for name in [
             "host_id",
             "known-orgs.json",

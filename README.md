@@ -368,7 +368,7 @@ sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |
 | Live map | Off until you switch it on. When on, a heartbeat every 5 minutes: a random id, version, platform and colony count. No code, repositories or names ([docs/telemetry.md](docs/telemetry.md)). |
-| Usage data | On by default: an anonymous batch of counts, built and shown locally — and nothing is sent at all in this release. A different random id from the live map's; `colonizer telemetry off` switches it off ([docs/usage-data.md](docs/usage-data.md)). |
+| Usage data | On by default: an anonymous batch of counts, shown in full before anything is sent. Sent at most once a day, and only when `COLONIZER_TELEMETRY_ENDPOINT` names a collector — unset, nothing is sent at all. A different random id from the live map's; `colonizer telemetry off` switches it off ([docs/usage-data.md](docs/usage-data.md)). |
 
 Colonies are detached: they keep running when the mothership restarts, and it reconnects to them.
 
@@ -380,7 +380,9 @@ instead, and what has to be true before unattended work: [docs/audit.md](docs/au
 Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. The answers to
 the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) questions live beside it, in
 `telemetry.json` and `usage.json`, and `usage-last.json` beside those keeps the last usage batch
-built. Process settings come from the environment:
+built. Process settings come from the environment. There is one more for usage data:
+`COLONIZER_TELEMETRY_ENDPOINT` names the collector it is posted to, at most once a day — with no
+default, so unset means nothing is ever sent ([docs/usage-data.md](docs/usage-data.md)). The rest:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
