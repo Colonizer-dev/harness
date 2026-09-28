@@ -25,10 +25,26 @@ reference](https://developers.openai.com/codex/config-reference), verified again
 
 Codex also speaks a bidirectional app-server protocol. This slice uses `codex exec` instead: one
 process per turn, a read-only JSONL stream, no daemon to keep alive. The cost is that nothing
-interactive crosses the boundary: an `answer` command is logged and ignored (the agent cannot ask
-the user anything yet), and `interrupt` SIGINTs the child (codex saves the session rollout
-continuously, so the partial turn stays resumable) and ends the turn as an error. Question routing
-is the follow-up.
+interactive crosses the boundary natively: `interrupt` SIGINTs the child (codex saves the session
+rollout continuously, so the partial turn stays resumable) and ends the turn as an error.
+Questions still reach the user — through the colonizer MCP server described next.
+
+## Questions
+
+The model asks the user through its own MCP server: the runner writes a `[mcp_servers.colonizer]`
+block into the fresh `CODEX_HOME`'s `config.toml`, launching the module's `mcp.mjs` on `node` with
+the loopback bridge URL and a fresh bearer token as its env (config.toml rather than `-c`
+overrides, so the token is not on argv). `mcp.mjs` exposes a single `ask_user` tool; a call POSTs
+to the bridge, which emits the `question` event, moves the status to `waiting_for_answer`, and
+holds the HTTP response until the matching `answer` command resolves it with `{answers, response}`
+and the status settles back. The item pair codex streams for the call (`mcp_tool_call`) is dropped:
+a question is never also a `tool_call`/`tool_result` (§2). `tool_timeout_sec = 3600` outlives any
+human — codex's own default
+would time the park out — and `default_tools_approval_mode = "approve"` keeps the call
+auto-approved alongside `--dangerously-bypass-approvals-and-sandbox`; while a call is parked,
+`mcp.mjs` sends MCP progress notifications for the same reason. An `answer` naming an unknown id
+is warned about, and an interrupt, a turn end or a shutdown cancels every open ask
+(`{cancelled: true}`).
 
 ## Pinned binary and preflight
 
@@ -87,6 +103,6 @@ stdin prompt and env it received, and checks the happy path's events against the
   "What remains" for the same gap); until then the preflight fails a codex colony at boot.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
-- Questions (`answer` is ignored), the colonizer MCP tools (memory, findings, wait), and resuming a
-  codex thread across a runner restart: the thread id lives in the runner's memory and its session
-  rollout in the runner's fresh `CODEX_HOME`, both gone when the colony's VM is.
+- The other colonizer MCP tools (memory, findings, wait), and resuming a codex thread across a
+  runner restart: the thread id lives in the runner's memory and its session rollout in the
+  runner's fresh `CODEX_HOME`, both gone when the colony's VM is.

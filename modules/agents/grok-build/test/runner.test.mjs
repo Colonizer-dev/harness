@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, startTurn, turnArgs } from '../runner.mjs';
+import { createBridge, parseVersion, resolveModel, startTurn, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -30,8 +30,9 @@ function startRunner(env = {}) {
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(fakeGrok)} "$@"\n`, { mode: 0o755 });
   const scratch = mkdtempSync(join(tmpdir(), 'grok-test-'));
   const record = join(scratch, 'record.jsonl');
+  const askRecord = join(scratch, 'ask.jsonl');
   const child = spawn(process.execPath, [join(moduleDir, 'runner.mjs')], {
-    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, XAI_API_KEY: 'xai-test-key', COLONIZER_GROK_BIN: bin, GROK_FAKE_RECORD: record, ...env },
+    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, XAI_API_KEY: 'xai-test-key', COLONIZER_GROK_BIN: bin, GROK_FAKE_RECORD: record, GROK_FAKE_ASK_RECORD: askRecord, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const events = [];
@@ -72,7 +73,35 @@ function startRunner(env = {}) {
   const records = () => (existsSync(record) ? readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   // Only the prompt invocations are turns; the records also hold the preflight's `--version` call.
   const turns = () => records().filter((r) => r.argv.includes('--prompt-file'));
-  return { child, events, send, waitUntil, waitExit, records, turns };
+  // What the bridge answered to each colonizer__ask_user POST the fake grok made.
+  const asks = () => (existsSync(askRecord) ? readFileSync(askRecord, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+  return { child, events, send, waitUntil, waitExit, records, turns, asks };
+}
+
+/** The bridge the runner registered in the fresh GROK_HOME's config.toml, plus a /ask POSTer that
+ * drives it the way mcp.mjs does. Waits for the first grok invocation to be recorded, since the
+ * config exists from the runner's boot but its location is only known once a child has run. */
+async function bridgeOf(runner) {
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const home = runner.records().find((r) => r.env.GROK_HOME)?.env.GROK_HOME;
+    if (home) {
+      const config = readFileSync(join(home, 'config.toml'), 'utf8');
+      const url = /COLONIZER_BRIDGE_URL = "([^"]+)"/.exec(config)?.[1];
+      const token = /COLONIZER_BRIDGE_TOKEN = "([^"]+)"/.exec(config)?.[1];
+      return {
+        config,
+        url,
+        token,
+        async post(body) {
+          const res = await fetch(`${url}/ask`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+          return res;
+        },
+      };
+    }
+    if (Date.now() > deadline) assert.fail('no grok invocation was recorded');
+    await sleep(10);
+  }
 }
 
 const stop = (runner) => (runner.send({ type: 'shutdown' }), runner.waitExit());
@@ -282,13 +311,116 @@ test('shutdown mid-turn exits cleanly with code 0', async (t) => {
   assert.equal(await runner.waitExit(), 0);
 });
 
-test('an answer is logged and ignored (no question path); stdin EOF exits like shutdown', async (t) => {
+const post = (bridge, body, token) => fetch(`${bridge.url}/ask`, { method: 'POST', headers: { authorization: `Bearer ${token ?? bridge.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const lastEvent = async (events, pred) => {
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const hit = events.filter(pred).at(-1);
+    if (hit) return hit;
+    if (Date.now() > deadline) assert.fail('the bridge never emitted the expected event');
+    await sleep(5);
+  }
+};
+
+test('the bridge maps an ask to the question shape, and answers or cancels the parked call', async () => {
+  const events = [];
+  const states = [];
+  const b = await createBridge({ emit: (e) => events.push(e), setStatus: (s) => states.push(s), isWorking: () => false, token: 'tok' });
+  try {
+    assert.equal(await post(b, { questions: [] }, 'wrong').then((r) => r.status), 401, 'the token is required');
+    const parked = post(b, { questions: [{ question: 'Q?', multiSelect: true, options: [{ label: 'a' }] }] }).then((r) => r.json());
+    const q1 = await lastEvent(events, (e) => e.type === 'question');
+    assert.deepEqual(q1, { type: 'question', question_id: 'q-1', message_id: null, questions: [{ question: 'Q?', header: 'Q?', multi_select: true, options: [{ label: 'a', description: '', preview: null }] }] });
+    assert.equal(states.at(-1), 'waiting_for_answer');
+    b.cancelAll(); // what an interrupt, a turn end or shutdown does
+    assert.deepEqual(await parked, { cancelled: true });
+    assert.equal(b.answer('q-1', {}, null), false, 'a cancelled ask is no longer open');
+
+    const parked2 = post(b, { message_id: 'msg-1', questions: [] }).then((r) => r.json());
+    const q2 = (await lastEvent(events, (e) => e.type === 'question' && e.question_id !== 'q-1')).question_id;
+    assert.equal(b.answer(q2, { Q: 'a' }, 'free text'), true);
+    assert.deepEqual(await parked2, { answers: { Q: 'a' }, response: 'free text' });
+    assert.deepEqual(await lastEvent(events, (e) => e.type === 'question_answered'), { type: 'question_answered', question_id: q2, answers: { Q: 'a' }, response: 'free text' });
+    assert.equal(states.at(-1), 'idle', 'no turn is running, so the status settles to idle');
+  } finally {
+    await b.close();
+  }
+});
+
+test('config.toml in the fresh GROK_HOME registers the colonizer MCP server with the bridge env', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'xai-grok/grok-4.5' });
+  t.after(() => runner.child.kill('SIGKILL'));
+  runner.send({ type: 'user_message', id: 'initial', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  const { config, url, token } = await bridgeOf(runner);
+  const table = config.slice(config.indexOf('[mcp_servers.colonizer]'));
+  assert.ok(table.startsWith('[mcp_servers.colonizer]'), 'the colonizer server has its own table');
+  assert.ok(table.includes(`command = ${JSON.stringify(process.execPath)}`), 'the server runs on this node');
+  assert.ok(table.includes(`args = [${JSON.stringify(join(moduleDir, 'mcp.mjs'))}]`), 'the vendored mcp.mjs is the server');
+  assert.match(url ?? '', /^http:\/\/127\.0\.0\.1:\d+$/, 'the loopback bridge URL is configured');
+  assert.ok(token && token.length >= 32, 'a real bearer token is configured');
+  assert.ok(table.includes('tool_timeout_sec = 3600'), 'an ask may wait on a human for a while');
+  await stop(runner);
+});
+
+test('a colonizer__ask_user call becomes a question card, and the answer reaches grok', async (t) => {
+  const questions = [{ question: 'Which database?', header: 'Database', multiSelect: false, options: [{ label: 'Postgres', description: 'boring' }, { label: 'SQLite', description: 'embedded' }] }];
+  const runner = startRunner({ GROK_FAKE_ASK: JSON.stringify(questions) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'ask me something' });
+  const q = await runner.waitUntil(first('question'), 'the question card');
+  assert.equal(q.question_id, 'q-1');
+  assert.deepEqual(q.questions, [{ question: 'Which database?', header: 'Database', multi_select: false, options: [{ label: 'Postgres', description: 'boring', preview: null }, { label: 'SQLite', description: 'embedded', preview: null }] }]);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
+  assert.ok(!runner.events.some((e) => e.type === 'tool_call' && String(e.name).startsWith('colonizer')), 'a question is never also a tool_call (§2)');
+
+  runner.send({ type: 'answer', question_id: q.question_id, answers: { 'Which database?': 'Postgres' } });
+  const answered = await runner.waitUntil(first('question_answered'), 'question_answered');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: q.question_id, answers: { 'Which database?': 'Postgres' }, response: null });
+  const end = await runner.waitUntil(first('turn_end'), 'the turn to finish');
+  assert.equal(end.is_error, false);
+  assert.match(end.result, /"answers"/, 'grok got the bridge answer and said so');
+  const order = runner.events.map((e) => `${e.type}:${e.state ?? ''}`);
+  assert.ok(order.indexOf('question_answered:') < order.lastIndexOf('status:working'), 'the turn resumes after the answer');
+  assert.deepEqual(runner.asks(), [{ answers: { 'Which database?': 'Postgres' }, response: null }], 'the parked /ask HTTP response carried {answers, response} to grok');
+  await stop(runner);
+});
+
+test('an interrupt cancels the pending ask, and a late answer warns', async (t) => {
+  const runner = startRunner({ GROK_FAKE_SLEEP_MS: 60000 });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'slow turn' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'working'), 'the slow turn to start');
+  // Driven through the config.toml registration, exactly like mcp.mjs would.
+  const bridge = await bridgeOf(runner);
+  const asked = bridge.post({ questions: [{ question: 'Proceed?', options: [{ label: 'yes' }] }] }).then((r) => r.json());
+  const q = await runner.waitUntil(first('question'), 'the question card');
+  assert.equal(q.question_id, 'q-1');
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
+
+  runner.send({ type: 'interrupt' });
+  assert.deepEqual(await asked, { cancelled: true }); // the parked HTTP call is released
+  const end = await runner.waitUntil(first('turn_end'), 'the interrupted turn');
+  assert.equal(end.is_error, true);
+  assert.ok(!runner.events.some((e) => e.type === 'question_answered'), 'a cancelled ask answers nothing');
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'idle after the interrupt');
+
+  runner.send({ type: 'answer', question_id: q.question_id, answers: {} });
+  const warned = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no open question')), 'the late-answer warning');
+  assert.match(warned.message, /q-1/);
+  await stop(runner);
+});
+
+test('an answer with no open question warns; stdin EOF exits like shutdown', async (t) => {
   const runner = startRunner();
   t.after(() => runner.child.kill('SIGKILL'));
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'the runner to come up');
-  runner.send({ type: 'answer', question_id: 'q-1', answers: {}, response: 'yes' });
-  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.message.includes('answer')), 'the answer to be logged');
-  assert.equal(logged.level, 'info');
+  runner.send({ type: 'answer', question_id: 'q-9', answers: {}, response: 'yes' });
+  const warned = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no open question')), 'the unknown-id warning');
+  assert.match(warned.message, /q-9/);
   runner.child.stdin.end();
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
   assert.equal(await runner.waitExit(), 0);

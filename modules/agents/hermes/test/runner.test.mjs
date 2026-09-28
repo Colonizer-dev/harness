@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, hermesConfig, probeHermes, resolveModel, runAgent } from '../runner.mjs';
+import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, hermesConfig, MCP_TIMEOUT_SECS, probeHermes, resolveModel, runAgent } from '../runner.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STUB = join(HERE, 'fake-hermes.mjs');
@@ -37,9 +37,14 @@ function harness(env = {}) {
     ...(env.FAKE_HERMES_MODE ? { FAKE_HERMES_MODE: env.FAKE_HERMES_MODE } : {}),
     ...(env.COLONIZER_HERMES_TURN_TIMEOUT_SECS ? { COLONIZER_HERMES_TURN_TIMEOUT_SECS: env.COLONIZER_HERMES_TURN_TIMEOUT_SECS } : {}),
   };
-  const done = runAgent({ hermes: ['node', STUB], commands, emit: (event) => events.push(event), env: childEnv, home });
-  return { home, record, events, commands, done, readRecord: () => JSON.parse(readFileSync(record, 'utf8')) };
+  const h = { home, record, events, commands, bridge: null, readRecord: () => JSON.parse(readFileSync(record, 'utf8')) };
+  h.done = runAgent({ hermes: ['node', STUB], commands, emit: (event) => events.push(event), env: childEnv, home, onReady: (bridge) => (h.bridge = bridge) });
+  return h;
 }
+
+/** POSTs to the runner's loopback bridge the way mcp.mjs does (bearer auth, JSON body). */
+const askBridge = (bridge, body) =>
+  fetch(`${bridge.url}/ask`, { method: 'POST', headers: { authorization: `Bearer ${bridge.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 const waitFor = (events, predicate, what, timeoutMs = 15_000) =>
   new Promise((resolve, reject) => {
@@ -162,6 +167,7 @@ test('the written config pins the local backend, switches Hermes extras off, and
   assert.equal(config.skills.write_approval, true);
   assert.deepEqual(config.auxiliary.background_review, { enabled: false });
   assert.deepEqual(config.agent.disabled_toolsets, DISABLED_TOOLSETS);
+  assert.ok(config.agent.disabled_toolsets.includes('clarify')); // the MCP ask_user tool replaces it
   assert.deepEqual(config.model, { provider: 'colonizer-deepseek', default: 'deepseek-flash' });
   assert.deepEqual(config.providers, {
     'colonizer-deepseek': {
@@ -170,6 +176,13 @@ test('the written config pins the local backend, switches Hermes extras off, and
       extra_headers: { 'x-colonizer-colony': 'tok-1' },
     },
   });
+  // The question channel: the vendored mcp.mjs, reachable over the runner's loopback bridge.
+  assert.equal(config.mcp_servers.colonizer.command, process.execPath);
+  assert.deepEqual(config.mcp_servers.colonizer.args, [join(HERE, '..', 'mcp.mjs')]);
+  assert.equal(config.mcp_servers.colonizer.env.COLONIZER_BRIDGE_URL, h.bridge.url);
+  assert.equal(config.mcp_servers.colonizer.env.COLONIZER_BRIDGE_TOKEN, h.bridge.token);
+  assert.equal(config.mcp_servers.colonizer.timeout, MCP_TIMEOUT_SECS);
+  assert.equal(hermesConfig([], null).mcp_servers, undefined); // the runner always registers it
   assert.deepEqual(hermesConfig([]).agent.disabled_toolsets, DISABLED_TOOLSETS);
   h.commands.push({ type: 'shutdown' });
   await h.done;
@@ -280,10 +293,73 @@ test('a turn that exceeds the timeout is terminated with an error', async () => 
   await h.done;
 });
 
-test('an answer command warns: headless Hermes has no question channel', async () => {
+test('an ask becomes a question card and the answer command completes the tool call', async () => {
+  const h = harness({ FAKE_HERMES_MODE: 'ask' });
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'ask me before shipping' });
+  const question = await waitFor(h.events, (e) => e.type === 'question', 'question');
+  assert.equal(question.question_id, 'q-1');
+  assert.equal(question.message_id, null);
+  assert.deepEqual(question.questions, [
+    {
+      question: 'Ship it?',
+      header: 'Ship it?',
+      multi_select: false,
+      options: [
+        { label: 'Yes', description: 'open the pull request', preview: null },
+        { label: 'No', description: '', preview: null },
+      ],
+    },
+  ]);
+  await waitFor(h.events, (e) => e.type === 'status' && e.state === 'waiting_for_answer', 'waiting_for_answer');
+  h.commands.push({ type: 'answer', question_id: 'q-1', answers: { 'Ship it?': 'Yes' }, response: 'ship it' });
+  const answered = await waitFor(h.events, (e) => e.type === 'question_answered', 'question_answered');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: 'q-1', answers: { 'Ship it?': 'Yes' }, response: 'ship it' });
+  const end = await waitFor(h.events, (e) => e.type === 'turn_end', 'turn_end');
+  assert.equal(end.is_error, false);
+  // The MCP call Hermes made is question traffic: §2 says a question is never also a
+  // tool_call/tool_result, so only the question card and the result text carry it.
+  assert.ok(!h.events.some((e) => e.type === 'tool_call' || e.type === 'tool_result'), 'a question is never also a tool_call/tool_result (§2)');
+  assert.match(end.result, /"answers"/, 'the answer reached the model as the ask tool result');
+  assert.ok(h.events.some((e) => e.type === 'status' && e.state === 'working' && h.events.indexOf(e) > h.events.indexOf(answered)));
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  assertConforms(h.events);
+});
+
+test('interrupt cancels a pending ask; the turn ends in error with no answer', async (t) => {
+  // The fake ignores SIGTERM, so the child outlives the interrupt: an ask released before any
+  // turn_end can only have been cancelled at the interrupt, not at the child's exit.
+  const h = harness({ FAKE_HERMES_MODE: 'hang', FAKE_HERMES_HANG_MS: '5000', FAKE_HERMES_IGNORE_SIGTERM: '1' });
+  t.after(() => h.commands.push({ type: 'shutdown' })); // a failed assert must still leave the runner closing
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'ask and hang' });
+  await waitFor(h.events, (e) => e.type === 'status' && e.state === 'working', 'working status');
+  const asked = askBridge(h.bridge, { questions: [] }).then((r) => r.json());
+  const question = await waitFor(h.events, (e) => e.type === 'question', 'question');
+  await waitFor(h.events, (e) => e.type === 'status' && e.state === 'waiting_for_answer', 'waiting_for_answer');
+  h.commands.push({ type: 'interrupt' });
+  assert.deepEqual(await asked, { cancelled: true }); // the asker is released, mcp.mjs turns this into an error result
+  assert.ok(!h.events.some((e) => e.type === 'turn_end'), 'the ask is cancelled before the child exits, not at its exit');
+  h.commands.push({ type: 'answer', question_id: question.question_id, answers: {} });
+  await waitFor(h.events, (e) => e.type === 'log' && e.message.includes('no open question'), 'late-answer warn');
+  assert.ok(!h.events.some((e) => e.type === 'question_answered'));
+
+  // Shutdown is what finally stops a SIGTERM-ignoring child: the interrupted turn still ends, in
+  // error, and the status settles past waiting_for_answer.
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  const end = h.events.find((e) => e.type === 'turn_end');
+  assert.ok(end, 'the interrupted turn still ended');
+  assert.equal(end.is_error, true);
+  const states = h.events.filter((e) => e.type === 'status').map((e) => e.state);
+  assert.ok(states.lastIndexOf('idle') > states.lastIndexOf('waiting_for_answer'), 'no stale waiting_for_answer once the turn is gone');
+  assert.deepEqual(h.events.at(-1), { type: 'status', state: 'exited' });
+  assertConforms(h.events);
+});
+
+test('an answer with an unknown question id warns', async () => {
   const h = harness();
-  h.commands.push({ type: 'answer', question_id: 'q1', answers: {}, response: null });
-  await waitFor(h.events, (e) => e.type === 'log' && /question channel/.test(e.message), 'warn log');
+  h.commands.push({ type: 'answer', question_id: 'q-9', answers: {}, response: null });
+  await waitFor(h.events, (e) => e.type === 'log' && e.message.includes('no open question with id q-9'), 'warn log');
   h.commands.push({ type: 'shutdown' });
   await h.done;
   assertConforms(h.events);

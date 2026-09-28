@@ -92,6 +92,15 @@ const count = (type, n) => (events) => {
   return matches.length >= n ? matches[n - 1] : undefined;
 };
 
+/** The bridge URL and token the runner registered in turn one's fresh CODEX_HOME (config.toml). */
+const bridgeEnv = (runner) => {
+  const envBlock = readFileSync(join(runner.turns()[0].env.CODEX_HOME, 'config.toml'), 'utf8').split('[mcp_servers.colonizer.env]')[1] ?? '';
+  const value = (key) => new RegExp(`^${key} = "(.*)"$`, 'm').exec(envBlock)?.[1];
+  return { url: value('COLONIZER_BRIDGE_URL'), token: value('COLONIZER_BRIDGE_TOKEN') };
+};
+/** What the model's ask_user call does: POST to the runner's loopback bridge. */
+const askPost = (bridge, body) => fetch(`${bridge.url}/ask`, { method: 'POST', headers: { authorization: `Bearer ${bridge.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+
 test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('codex-cli 0.156.1'), '0.156.1');
   assert.equal(parseVersion('1.2.3'), '1.2.3');
@@ -251,16 +260,95 @@ test('shutdown mid-turn exits cleanly with code 0', async (t) => {
   assert.equal(await runner.waitExit(), 0);
 });
 
-test('an answer is logged and ignored (no question path); stdin EOF exits like shutdown', async (t) => {
+test('an answer without an open question warns; stdin EOF exits like shutdown', async (t) => {
   const runner = startRunner();
   t.after(() => runner.child.kill('SIGKILL'));
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'the runner to come up');
-  runner.send({ type: 'answer', question_id: 'q-1', answers: {}, response: 'yes' });
-  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.message.includes('answer')), 'the answer to be logged');
-  assert.equal(logged.level, 'info');
+  runner.send({ type: 'answer', question_id: 'q-9', answers: {}, response: 'yes' });
+  const warned = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.message.includes('no open question')), 'the answer to be warned about');
+  assert.equal(warned.level, 'warn');
   runner.child.stdin.end();
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
   assert.equal(await runner.waitExit(), 0);
+});
+
+test('the fresh CODEX_HOME registers the colonizer MCP server pointing at mcp.mjs', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'openai/gpt-5.2' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  const config = readFileSync(join(runner.turns()[0].env.CODEX_HOME, 'config.toml'), 'utf8');
+  assert.match(config, /^\[mcp_servers\.colonizer\]$/m);
+  assert.match(config, new RegExp(`^command = ${JSON.stringify(process.execPath)}$`, 'm'));
+  assert.match(config, new RegExp(`^args = \\[${JSON.stringify(join(moduleDir, 'mcp.mjs'))}\\]$`, 'm'), 'the vendored mcp.mjs, not a sibling module’s');
+  assert.match(config, /^tool_timeout_sec = 3600$/m, 'an ask waits on a human past codex’s default tool timeout');
+  assert.match(config, /^default_tools_approval_mode = "approve"$/m);
+  const bridge = bridgeEnv(runner);
+  assert.match(bridge.url, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.ok(bridge.token.length >= 32, 'a fresh bearer token rides config.toml, not argv');
+
+  await stop(runner);
+});
+
+test('ask_user parks the turn as a question card until the answer command resolves it', async (t) => {
+  const runner = startRunner({ CODEX_FAKE_ASK: JSON.stringify([{ question: 'Ship now?', header: 'Ship', multiSelect: false, options: [{ label: 'Yes', description: 'push it' }, { label: 'No' }] }]) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'ask me' });
+  const question = await runner.waitUntil(first('question'), 'the question card');
+  assert.deepEqual(question, {
+    type: 'question',
+    question_id: 'q-1',
+    message_id: null,
+    questions: [{ question: 'Ship now?', header: 'Ship', multi_select: false, options: [{ label: 'Yes', description: 'push it', preview: null }, { label: 'No', description: '', preview: null }] }],
+  });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
+
+  runner.send({ type: 'answer', question_id: 'q-1', answers: { Ship: 'Yes' }, response: 'ship it' });
+  assert.deepEqual(await runner.waitUntil(first('question_answered'), 'question_answered'), { type: 'question_answered', question_id: 'q-1', answers: { Ship: 'Yes' }, response: 'ship it' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.equal(turnEnd.is_error, false);
+  const order = runner.events.map((e) => `${e.type}:${e.state ?? ''}`);
+  assert.ok(order.indexOf('status:working', order.indexOf('question_answered:')) < order.indexOf('turn_end:'), 'the status settles back to working while codex finishes the turn');
+  assert.ok(!runner.events.some((e) => (e.type === 'tool_call' || e.type === 'tool_result') && e.tool_call_id === 'item_mcp_1'), 'a question is never also a tool_call/tool_result (§2)');
+  assertSchema(runner.events);
+
+  const askRecord = runner.records().find((r) => r.ask);
+  assert.deepEqual(askRecord.ask.tools, ['ask_user'], 'the fake spoke to the real mcp.mjs from config.toml');
+  assert.deepEqual(askRecord.ask.result, { answers: { Ship: 'Yes' }, response: 'ship it' });
+
+  await stop(runner);
+});
+
+test('interrupt cancels a pending ask instead of answering it', async (t) => {
+  // The fake ignores SIGINT, so the child outlives the interrupt: an ask released before the
+  // turn_end can only have been cancelled at the interrupt, not at the child's exit.
+  const runner = startRunner({ CODEX_FAKE_SLEEP_MS: 1500, CODEX_FAKE_SLEEP_FIRST: '1', CODEX_FAKE_IGNORE_SIGINT: '1' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'slow turn' });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'working'), 'the slow turn to start');
+  await runner.waitUntil(() => runner.turns().length, 'the turn to be recorded');
+  const asked = askPost(bridgeEnv(runner), { questions: [] });
+  const question = await runner.waitUntil(first('question'), 'the question card');
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
+  runner.send({ type: 'interrupt' });
+  assert.deepEqual(await asked, { cancelled: true }); // the parked asker is released while the child still runs
+  assert.ok(!runner.events.some((e) => e.type === 'turn_end'), 'the ask is cancelled before the child exits, not at its exit');
+  runner.send({ type: 'answer', question_id: question.question_id, answers: {} });
+  const warned = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no open question')), 'the late answer to be warned about');
+  assert.match(warned.message, /q-1/);
+
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the interrupted turn to end');
+  assert.equal(turnEnd.is_error, true);
+  assert.ok(!runner.events.some((e) => e.type === 'question_answered'), 'a cancelled ask is not an answer');
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'idle after the interrupt');
+  const lastStatus = runner.events.filter((e) => e.type === 'status').at(-1);
+  assert.equal(lastStatus.state, 'idle', 'no stale waiting_for_answer once the turn is gone');
+
+  await stop(runner);
 });
 
 test('without CODEX_API_KEY: a named error, and codex is never invoked', async (t) => {

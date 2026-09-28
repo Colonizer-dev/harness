@@ -3,11 +3,16 @@
 // docs/protocol.md §2 (JSON-line commands on stdin, JSON-line protocol events on stdout). One
 // `codex exec` child per turn, the prompt on stdin; the first turn's `thread.started` event carries
 // the codex thread id and every later turn resumes it with `resume`, so a colony is one continuous
-// codex thread. The pin lives in module.json; every flag and event field is cited in the README.
+// codex thread. The model asks the user through the colonizer MCP server (mcp.mjs, registered in
+// the fresh CODEX_HOME's config.toml); its asks park on this runner's loopback bridge until the
+// matching `answer` command. The pin lives in module.json; every flag and event field is cited in
+// the README.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -130,11 +135,38 @@ export function childEnv(env, home) {
   };
 }
 
+/** The fresh CODEX_HOME's config.toml: the colonizer MCP server whose single `ask_user` tool is
+ * how the model reaches the user (README, "Questions"). config.toml rather than `-c` overrides so
+ * the bridge token is not on argv; `tool_timeout_sec` must outlive any human answer, and
+ * `default_tools_approval_mode = "approve"` auto-approves the call (as the bypass flag already
+ * does for MCP). JSON.stringify of a string is a valid TOML basic string for our paths and URLs. */
+export function codexConfig({ node = process.execPath, moduleDir = here, bridge }) {
+  const s = (value) => JSON.stringify(value);
+  return [
+    '[mcp_servers.colonizer]',
+    `command = ${s(node)}`,
+    `args = [${s(join(moduleDir, 'mcp.mjs'))}]`,
+    `tool_timeout_sec = ${MCP_TOOL_TIMEOUT_SECS}`,
+    'default_tools_approval_mode = "approve"',
+    '',
+    '[mcp_servers.colonizer.env]',
+    `COLONIZER_BRIDGE_URL = ${s(bridge.url)}`,
+    `COLONIZER_BRIDGE_TOKEN = ${s(bridge.token)}`,
+    '',
+  ].join('\n');
+}
+
 // docs/protocol.md §2 caps tool_result output at 20 000 characters.
 const TOOL_RESULT_LIMIT = 20000;
+// config.toml's mcp tool_timeout_sec: codex defaults a tool call to a few minutes, but an ask
+// waits on a human (README, "Questions").
+const MCP_TOOL_TIMEOUT_SECS = 3600;
 // item types that are a tool: started emits the tool_call, completed its tool_result. agent_message
 // and reasoning are the model's own voice; todo_list (plan updates) has no protocol counterpart.
 const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
+// colonizer-server MCP calls are question traffic, not work: §2 says a question is never also a
+// tool_call/tool_result, so those items are dropped (the bridge's question events carry them).
+const isAsk = (item) => item.type === 'mcp_tool_call' && item.server === 'colonizer';
 
 const clip = (text, limit = TOOL_RESULT_LIMIT) => (text.length > limit ? `${text.slice(0, limit - 1)}…` : text);
 const plainObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
@@ -205,7 +237,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
           if (typeof event.thread_id === 'string' && event.thread_id) latestThread = event.thread_id;
           break;
         case 'item.started':
-          if (TOOL_ITEMS.has(event.item?.type)) emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.item.id ?? ''), name: event.item.type, input: toolInput(event.item) });
+          if (TOOL_ITEMS.has(event.item?.type) && !isAsk(event.item)) emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.item.id ?? ''), name: event.item.type, input: toolInput(event.item) });
           break;
         case 'item.updated': // progress only; the completed item carries the outcome
           break;
@@ -213,7 +245,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
           const item = plainObject(event.item);
           if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) text.push(item.text);
           else if (item.type === 'reasoning' && typeof item.text === 'string' && item.text) thoughts.push(item.text);
-          else if (TOOL_ITEMS.has(item.type)) {
+          else if (TOOL_ITEMS.has(item.type) && !isAsk(item)) {
             emit({ type: 'tool_result', tool_call_id: String(item.id ?? ''), output: clip(toolOutput(item)), is_error: toolIsError(item) });
           }
           break;
@@ -275,6 +307,46 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
   };
 }
 
+/** Loopback HTTP bridge to mcp.mjs: an ask_user call parks here until the matching `answer`
+ * command arrives on stdin (docs/protocol.md §2's question card). Shaped like the other runners'
+ * bridges; this one serves `/ask` only. */
+export async function createBridge({ emit, setStatus, isWorking, token = randomBytes(16).toString('hex') }) {
+  let count = 0;
+  const pending = new Map();
+  const server = createServer((req, res) => {
+    const reply = (status, payload) => { if (res.destroyed) return; res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); };
+    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1 << 20) req.destroy(); });
+    req.on('end', () => {
+      let msg = null;
+      try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
+      if (req.url !== '/ask') { reply(404, {}); return; }
+      const questionId = `q-${++count}`;
+      pending.set(questionId, (answers) => reply(200, answers ?? { cancelled: true }));
+      const qs = Array.isArray(msg.questions) ? msg.questions : [];
+      emit({ type: 'question', question_id: questionId, message_id: typeof msg.message_id === 'string' ? msg.message_id : null, questions: qs.map((q) => ({ question: String(q?.question ?? ''), header: String(q?.header ?? q?.question ?? ''), multi_select: Boolean(q?.multiSelect), options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? ''), preview: null })) })) });
+      setStatus('waiting_for_answer');
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return {
+    url: `http://127.0.0.1:${server.address().port}`, token, pending: () => pending.size,
+    answer(questionId, answers, response) {
+      const resolve = pending.get(questionId);
+      if (!resolve) return false;
+      pending.delete(questionId);
+      emit({ type: 'question_answered', question_id: questionId, answers, response });
+      if (pending.size) setStatus('waiting_for_answer');
+      else setStatus(isWorking() ? 'working' : 'idle');
+      resolve({ answers, response });
+      return true;
+    },
+    cancelAll() { for (const resolve of pending.values()) resolve(null); pending.clear(); },
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
+  };
+}
+
 /** A push-only async queue: `next()` resolves per command, and `close()` ends the stream with null. */
 class AsyncQueue {
   #pending = [];
@@ -303,13 +375,12 @@ class AsyncQueue {
 /** The command loop: turns run one at a time (one prompt per codex process); a user_message that
  * arrives mid-turn is queued for the next slot, while interrupt, set_model and answer apply at once. */
 export async function run({ commands, emit, env, spawnFn = spawn }) {
-  emit({ type: 'status', state: 'idle' });
+  let status = null;
+  // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
+  const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
+  setStatus('idle');
   const problem = await preflight({ env, spawnFn });
   const home = mkdtempSync(join(tmpdir(), 'colonizer-codex-'));
-  if (problem) {
-    emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
-    emit({ type: 'status', state: 'error', detail: problem.code });
-  }
 
   let modelSpec = String(env.COLONIZER_MODEL ?? '');
   let currentModel = null; // what the UI last heard through model_changed
@@ -319,6 +390,12 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const pending = [];
   const totals = { models: {} };
   let n = 0;
+  const bridge = await createBridge({ emit, setStatus, isWorking: () => turn !== null });
+  writeFileSync(join(home, 'config.toml'), codexConfig({ bridge }));
+  if (problem) {
+    emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
+    setStatus('error', problem.code);
+  }
 
   const pump = async () => {
     if (pumping) return;
@@ -326,12 +403,13 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     try {
       while (pending.length) {
         const message = pending.shift();
-        emit({ type: 'status', state: 'working' });
+        setStatus('working');
         const resolved = resolveModel(modelSpec);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: problem ? 'error' : 'idle', ...(problem ? { detail: problem.code } : {}) });
+          if (problem) setStatus('error', problem.code);
+          else setStatus('idle');
           continue;
         }
         if (currentModel === null && resolved.model) {
@@ -345,14 +423,15 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           threadId = result.threadId ?? threadId;
         } catch (err) {
           // A turn that throws must still end as an error turn, or the colony's turn never terminates.
-          turn = null;
           emit({ type: 'log', level: 'error', message: `the turn crashed: ${err?.message ?? err}` });
           emit({ type: 'turn_end', is_error: true, result: `the turn crashed: ${err?.message ?? err}`, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: 'error', detail: 'turn crashed' });
+          setStatus('error', 'turn crashed');
           break;
+        } finally {
+          turn = null;
+          bridge.cancelAll(); // the child is gone: an ask it left parked is released as cancelled
         }
-        turn = null;
-        emit({ type: 'status', state: 'idle' });
+        setStatus('idle');
       }
     } finally {
       pumping = false;
@@ -374,6 +453,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         break;
       }
       case 'interrupt':
+        bridge.cancelAll(); // the interrupted turn cannot answer its open asks any more
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
@@ -387,20 +467,25 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         currentModel = resolved.model; // applied from the next turn on: one codex process per turn
         break;
       }
-      case 'answer':
-        // Headless codex has no question path (README, "Questions"); question routing is a follow-up.
-        emit({ type: 'log', level: 'info', message: 'ignored an answer: headless codex cannot ask questions yet' });
+      case 'answer': {
+        // The model asked through ask_user and the bridge parked its HTTP response on this id.
+        const answers = command.answers && typeof command.answers === 'object' && !Array.isArray(command.answers) ? command.answers : {};
+        const response = typeof command.response === 'string' && command.response.trim() ? command.response : null;
+        if (!bridge.answer(command.question_id, answers, response)) emit({ type: 'log', level: 'warn', message: `no open question with id ${command.question_id}` });
         break;
+      }
       default:
         break; // unknown commands are ignored (protocol forward compatibility)
     }
   }
 
+  bridge.cancelAll(); // a parked ask is released with the turn above; the orphaned mcp.mjs drains
   if (turn) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
-  emit({ type: 'status', state: 'exited' });
+  setStatus('exited');
+  await bridge.close();
 }
 
 async function main() {

@@ -13,9 +13,14 @@
 //   CODEX_FAKE_STDERR        text to write to stderr before exiting
 //   CODEX_FAKE_SLEEP_MS      sleep before emitting, so a turn can be interrupted
 //   CODEX_FAKE_SLEEP_FIRST   when set, only the first invocation sleeps (later turns recover)
+//   CODEX_FAKE_IGNORE_SIGINT when set, SIGINT is ignored: only the runner's SIGKILL stops the fake
+//   CODEX_FAKE_ASK           JSON questions for an ask_user call to the colonizer MCP server that
+//                            $CODEX_HOME/config.toml registers; the round trip is recorded and the
+//                            call streams as an mcp_tool_call item pair
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { spawn } from 'node:child_process';
+import { dirname, join } from 'node:path';
 
 const argv = process.argv.slice(2);
 const recordPath = process.env.CODEX_FAKE_RECORD;
@@ -54,6 +59,49 @@ if (argv.includes('--version')) {
 
 record();
 
+// Reads the colonizer MCP server registration out of $CODEX_HOME/config.toml the way codex would
+// and speaks newline-delimited JSON-RPC 2.0 to it, so the tests exercise mcp.mjs through a real
+// child instead of posting at the bridge directly. Minimal TOML: flat `key = value` lines, where a
+// JSON value parses as the JSON it is (the runner writes only basic strings, numbers and arrays).
+const mcpServerFromConfig = (configPath) => {
+  const tables = {};
+  let table = '';
+  for (const line of readFileSync(configPath, 'utf8').split('\n')) {
+    const header = /^\[(.+)\]\s*$/.exec(line);
+    if (header) { table = header[1]; continue; }
+    const entry = /^([A-Za-z0-9_-]+) = (.+?)\s*$/.exec(line);
+    if (entry && table) (tables[table] ??= {})[entry[1]] = JSON.parse(entry[2]);
+  }
+  const server = tables['mcp_servers.colonizer'] ?? {};
+  if (!server.command) throw new Error('config.toml registers no mcp_servers.colonizer');
+  return { command: server.command, args: server.args ?? [], env: tables['mcp_servers.colonizer.env'] ?? {} };
+};
+
+async function askViaConfig(configPath, questions) {
+  const { command, args, env } = mcpServerFromConfig(configPath);
+  const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  let buf = '';
+  const waiting = new Map();
+  child.stdout.on('data', (chunk) => {
+    buf += chunk;
+    for (let at; (at = buf.indexOf('\n')) >= 0;) {
+      const line = buf.slice(0, at).trim();
+      buf = buf.slice(at + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      if (msg.id === undefined) continue; // progress notifications get no waiter
+      waiting.get(msg.id)?.(msg);
+      waiting.delete(msg.id);
+    }
+  });
+  let nextId = 0;
+  const rpc = (method, params) => new Promise((resolve) => { const id = ++nextId; waiting.set(id, resolve); child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`); });
+  const tools = await rpc('tools/list');
+  const call = await rpc('tools/call', { name: 'ask_user', arguments: { questions }, _meta: { progressToken: 7 } });
+  child.kill('SIGKILL');
+  return { tools: (tools.result?.tools ?? []).map((tool) => tool.name), result: JSON.parse(call.result?.content?.[0]?.text ?? 'null'), isError: Boolean(call.result?.isError) };
+}
+
 const threadId = process.env.CODEX_FAKE_THREAD_ID ?? 'thread-fake-1';
 const defaultEvents = () => [
   { type: 'thread.started', thread_id: threadId },
@@ -79,10 +127,29 @@ const events = (process.env.CODEX_FAKE_SCRIPT ? readFileSync(process.env.CODEX_F
   });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The interrupt test needs a child that outlives the runner's SIGINT: then an ask released before
+// the turn_end can only have been cancelled at the interrupt, not at the child's exit.
+if (process.env.CODEX_FAKE_IGNORE_SIGINT === '1') process.on('SIGINT', () => {});
 if (process.env.CODEX_FAKE_SLEEP_MS && (!process.env.CODEX_FAKE_SLEEP_FIRST || invocation === 0)) {
   await sleep(Number(process.env.CODEX_FAKE_SLEEP_MS));
 }
-for (const event of events.length ? events : defaultEvents()) {
+// The ask stands in for the model calling ask_user mid-turn: it parks on the bridge until the
+// test's `answer` command resolves it, then rides the stream as the mcp_tool_call item pair codex
+// emits for an MCP call.
+let ask = null;
+if (process.env.CODEX_FAKE_ASK) {
+  ask = await askViaConfig(join(process.env.CODEX_HOME ?? '.', 'config.toml'), JSON.parse(process.env.CODEX_FAKE_ASK));
+  if (recordPath) appendFileSync(recordPath, `${JSON.stringify({ argv, ask })}\n`);
+}
+const mcpItems = ask
+  ? [
+      { type: 'item.started', item: { id: 'item_mcp_1', type: 'mcp_tool_call', server: 'colonizer', tool: 'ask_user', status: 'in_progress' } },
+      { type: 'item.completed', item: { id: 'item_mcp_1', type: 'mcp_tool_call', server: 'colonizer', tool: 'ask_user', status: 'completed', aggregated_output: JSON.stringify(ask.result ?? { error: 'no result' }) } },
+    ]
+  : [];
+const stream = events.length ? events : defaultEvents();
+stream.splice(2, 0, ...mcpItems); // after thread.started and turn.started, like a mid-turn call
+for (const event of stream) {
   if (process.env.CODEX_FAKE_NO_COMPLETE === '1' && event.type === 'turn.completed') continue;
   process.stdout.write(`${typeof event === 'string' ? event : JSON.stringify(event)}\n`);
 }

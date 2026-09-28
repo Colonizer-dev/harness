@@ -2,13 +2,17 @@
 // Colonizer agent runner for xAI's Grok Build CLI (`grok`), headless: the runner contract of
 // docs/protocol.md §2 (JSON-line commands on stdin, JSON-line protocol events on stdout). One
 // `grok` child per turn; the first turn's `end` event carries the grok sessionId and every later
-// turn resumes it with `-r`, so a colony is one continuous grok session. The pin lives in
-// module.json; every flag and event field is cited from the upstream user guide in the README.
+// turn resumes it with `-r`, so a colony is one continuous grok session. Questions go through our
+// own MCP tool (mcp.mjs, registered in the fresh GROK_HOME's config.toml) and a loopback bridge
+// below. The pin lives in module.json; every flag and event field is cited from the upstream user
+// guide in the README.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -121,6 +125,60 @@ export function childEnv(env, home) {
   };
 }
 
+/** The fresh GROK_HOME's config.toml: it registers the vendored colonizer MCP server so the model
+ * can call colonizer__ask_user, with the loopback bridge's URL and token in the server's env
+ * (README "Questions"). JSON.stringify of a string is a valid TOML basic string for ordinary paths
+ * and URLs. tool_timeout_sec is set to an hour explicitly: an ask waits on a human, and grok's own
+ * default is 6000 s per tool call. */
+export function homeConfig({ bridge, node = process.execPath, mcpModule = join(here, 'mcp.mjs') }) {
+  return [
+    '[mcp_servers.colonizer]',
+    `command = ${JSON.stringify(node)}`,
+    `args = [${JSON.stringify(mcpModule)}]`,
+    `env = { COLONIZER_BRIDGE_URL = ${JSON.stringify(bridge.url)}, COLONIZER_BRIDGE_TOKEN = ${JSON.stringify(bridge.token)} }`,
+    'tool_timeout_sec = 3600',
+  ].join('\n');
+}
+
+/** Loopback HTTP bridge to mcp.mjs: an ask_user call parks until the matching `answer` command.
+ * Interrupt, turn end and shutdown cancel the parked calls; `answer` on an unknown id is a warn. */
+export async function createBridge({ emit, setStatus, isWorking, token = randomBytes(16).toString('hex') }) {
+  let count = 0;
+  const pending = new Map();
+  const server = createServer((req, res) => {
+    const reply = (status, payload) => { if (res.destroyed) return; res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); };
+    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1 << 20) req.destroy(); });
+    req.on('end', () => {
+      let msg = null;
+      try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
+      if (req.url !== '/ask') { reply(404, {}); return; }
+      const questionId = `q-${++count}`;
+      pending.set(questionId, (answers) => reply(200, answers ?? { cancelled: true }));
+      const qs = Array.isArray(msg.questions) ? msg.questions : [];
+      emit({ type: 'question', question_id: questionId, message_id: typeof msg.message_id === 'string' ? msg.message_id : null, questions: qs.map((q) => ({ question: String(q?.question ?? ''), header: String(q?.header ?? q?.question ?? ''), multi_select: Boolean(q?.multiSelect), options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? ''), preview: null })) })) });
+      setStatus('waiting_for_answer');
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return {
+    url: `http://127.0.0.1:${server.address().port}`, token, pending: () => pending.size,
+    answer(questionId, answers, response) {
+      const resolve = pending.get(questionId);
+      if (!resolve) return false;
+      pending.delete(questionId);
+      emit({ type: 'question_answered', question_id: questionId, answers, response });
+      if (pending.size) setStatus('waiting_for_answer');
+      else setStatus(isWorking() ? 'working' : 'idle');
+      resolve({ answers, response });
+      return true;
+    },
+    cancelAll() { for (const resolve of pending.values()) resolve(null); pending.clear(); },
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
+  };
+}
+
 // tool_call_update statuses that are progress, not a result; anything else is the tool's outcome.
 const PROGRESS = new Set(['in_progress', 'pending', 'running']);
 // docs/protocol.md §2 caps tool_result output at 20 000 characters.
@@ -194,6 +252,9 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
     let endEvent = null;
     let errorEvent = null;
     const thoughts = [];
+    // colonizer__* MCP calls are question traffic, not work: §2 says a question is never also a
+    // tool_call/tool_result, so the call ids are remembered only to drop their updates.
+    const colonizerCalls = new Set();
     child = spawnFn(grokBin(env), turnArgs({ promptFile, model, sessionId }), { env: childEnv(env, home), stdio: ['ignore', 'pipe', 'pipe'] });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => (stderrTail = (stderrTail + chunk).slice(-2000)));
@@ -218,10 +279,17 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
         case 'thought':
           if (typeof event.data === 'string' && event.data) thoughts.push(event.data);
           break;
-        case 'tool_call':
-          emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.toolCallId ?? ''), name: String(event.toolName ?? event.kind ?? 'unknown'), input: plainObject(event.rawInput) });
+        case 'tool_call': {
+          const name = String(event.toolName ?? event.kind ?? 'unknown');
+          if (name.startsWith('colonizer__')) {
+            if (event.toolCallId != null) colonizerCalls.add(String(event.toolCallId));
+            break;
+          }
+          emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.toolCallId ?? ''), name, input: plainObject(event.rawInput) });
           break;
+        }
         case 'tool_call_update': {
+          if (colonizerCalls.has(String(event.toolCallId ?? ''))) break; // its outcome is the question_answered flow
           if (PROGRESS.has(String(event.status ?? ''))) break; // progress only; the result follows
           emit({ type: 'tool_result', tool_call_id: String(event.toolCallId ?? ''), output: clip(toolOutput(event)), is_error: /fail|error|denied|cancel/i.test(String(event.status ?? '')) });
           break;
@@ -309,12 +377,15 @@ class AsyncQueue {
 /** The command loop: turns run one at a time (one prompt per grok process); a user_message that
  * arrives mid-turn is queued for the next slot, while interrupt, set_model and answer apply at once. */
 export async function run({ commands, emit, env, spawnFn = spawn }) {
-  emit({ type: 'status', state: 'idle' });
+  let status = null;
+  // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
+  const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
+  setStatus('idle');
   const problem = await preflight({ env, spawnFn });
   const home = mkdtempSync(join(tmpdir(), 'colonizer-grok-'));
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
-    emit({ type: 'status', state: 'error', detail: problem.code });
+    setStatus('error', problem.code);
   }
 
   let modelSpec = String(env.COLONIZER_MODEL ?? '');
@@ -326,18 +397,23 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const totals = { cost: undefined, models: {} };
   let n = 0;
 
+  // The loopback bridge mcp.mjs talks to; grok finds its URL and token in the config written next.
+  const bridge = await createBridge({ emit, setStatus, isWorking: () => turn !== null });
+  writeFileSync(join(home, 'config.toml'), `${homeConfig({ bridge })}\n`);
+
   const pump = async () => {
     if (pumping) return;
     pumping = true;
     try {
       while (pending.length) {
         const message = pending.shift();
-        emit({ type: 'status', state: 'working' });
+        setStatus('working');
         const resolved = resolveModel(modelSpec);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: problem ? 'error' : 'idle', ...(problem ? { detail: problem.code } : {}) });
+          if (problem) setStatus('error', problem.code);
+          else setStatus('idle');
           continue;
         }
         if (currentModel === null && resolved.model) {
@@ -353,13 +429,15 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           // A turn that throws (a prompt file that cannot be written, say) must still end as an
           // error turn, or the colony's turn never terminates.
           turn = null;
+          bridge.cancelAll(); // a dead turn cannot answer its open asks any more
           emit({ type: 'log', level: 'error', message: `the turn crashed: ${err?.message ?? err}` });
           emit({ type: 'turn_end', is_error: true, result: `the turn crashed: ${err?.message ?? err}`, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: 'error', detail: 'turn crashed' });
+          setStatus('error', 'turn crashed');
           break;
         }
         turn = null;
-        emit({ type: 'status', state: 'idle' });
+        bridge.cancelAll(); // a turn that merely ended leaves its open asks stale too
+        setStatus(bridge.pending() ? 'waiting_for_answer' : 'idle');
       }
     } finally {
       pumping = false;
@@ -381,6 +459,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         break;
       }
       case 'interrupt':
+        bridge.cancelAll(); // the interrupted turn cannot answer its open asks any more
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
@@ -398,10 +477,12 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         currentModel = resolved.model; // applied from the next turn on: one grok process per turn
         break;
       }
-      case 'answer':
-        // Headless grok has no question path (README, "Ask"); question routing is a follow-up.
-        emit({ type: 'log', level: 'info', message: 'ignored an answer: headless grok cannot ask questions yet' });
+      case 'answer': {
+        const answers = command.answers && typeof command.answers === 'object' && !Array.isArray(command.answers) ? command.answers : {};
+        const response = typeof command.response === 'string' && command.response.trim() ? command.response : null;
+        if (!bridge.answer(command.question_id, answers, response)) emit({ type: 'log', level: 'warn', message: `no open question with id ${command.question_id}` });
         break;
+      }
       default:
         break; // unknown commands are ignored (protocol forward compatibility)
     }
@@ -411,7 +492,9 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
-  emit({ type: 'status', state: 'exited' });
+  bridge.cancelAll();
+  setStatus('exited');
+  await bridge.close();
 }
 
 async function main() {

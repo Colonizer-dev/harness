@@ -52,9 +52,14 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
   until the subagent-inheritance contract covers it.
 - **Scheduling and messaging.** `hermes gateway` (cron, messaging) is never started by this runner;
   the cronjob toolset is off.
-- **Questions.** None: `clarify` is a toolset for interactive questions and headless `-q` mode has no
-  channel to answer one, so an `answer` command gets a `warn` log. A future ACP driver (`hermes acp`)
-  is the gap-filler.
+- **Questions.** The runner registers a vendored MCP server under `mcp_servers.colonizer` in the
+  config (pointing at the module's `mcp.mjs`) whose one tool, `ask_user`, POSTs to a loopback bridge
+  in the runner: the call becomes a `question` event for the cockpit, and the `answer` command
+  resolves it and returns `{answers, response}` to the tool call. The server's tool-call `timeout`
+  is an hour and `mcp.mjs` holds a long ask open with progress notes; an interrupt or a turn end
+  cancels the ask. `clarify` stays disabled — the MCP tool replaces it. Hermes only loads MCP
+  servers when the optional `mcp` Python extra is installed (`pip install -e ".[mcp]"`); without it
+  the tool is silently absent.
 - **Credentials.** Only gateway routes, above: no provider secret ever enters the colony.
 
 ## Gaps
@@ -62,7 +67,8 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
 - Nothing stages the `hermes` binary into the colony VM yet; the runner's preflight fails loudly
   (`status error`, non-zero exit, the pinned install command in the message) when it is missing, so
   a colony that picks this module stops there.
-- No ACP question channel, so the module cannot ask you anything.
+- Questions need the `[mcp]` extra: an image whose hermes-agent install skipped it silently has no
+  `ask_user` tool, and the model then has no channel to ask anything.
 - No end-to-end colony run: the live verification above used a fake Anthropic-wire gateway and no
   microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic, and the
   in-VM preflight has only run against the stub. Not `SHIPPING`.

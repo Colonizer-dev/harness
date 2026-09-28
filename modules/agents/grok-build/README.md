@@ -21,11 +21,26 @@ leniently and counts as zero when absent.
 
 Grok also speaks ACP (`grok agent stdio`, bidirectional — tool approvals and questions). This slice
 uses headless mode instead: one process per turn, read-only stream, no SDK to vendor, and a mapping
-small enough to test against a stub CLI. The cost is that nothing interactive can cross the
-boundary: an `answer` command is logged and ignored (the agent cannot ask the user anything yet),
-and `interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an
-error, and the runner keeps serving turns. Question routing — via ACP (`session/request_permission`)
-or a colonizer MCP ask tool — is the follow-up.
+small enough to test against a stub CLI. Nothing interactive crosses the grok boundary itself:
+`interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an error,
+and the runner keeps serving turns.
+
+## Questions
+
+Headless grok cannot ask the user anything, so the runner brings its own path: the module ships
+`mcp.mjs`, a dependency-free MCP stdio server whose only tool is `ask_user`, and the runner
+registers it by writing `config.toml` into the fresh `GROK_HOME` — `[mcp_servers.colonizer]` with
+`command`/`args`/`env` and `tool_timeout_sec = 3600`, because an ask can wait on a human
+(`--always-approve` covers MCP tools, so no approval prompt can block the call). When the model
+calls `colonizer__ask_user`, the server POSTs the question to a loopback HTTP bridge in `runner.mjs`
+(bearer token; URL and token reach the server through its `env` in the config), the bridge emits
+the `question` protocol event and sets `waiting_for_answer`, and the parked HTTP response is
+resolved only when the `answer` command arrives — which emits `question_answered`, settles the
+status and hands `{answers, response}` back to the model, so the turn continues. An interrupt, a
+turn end and shutdown cancel the open asks; the model sees a cancelled tool result. A colonizer
+question is never also a `tool_call`/`tool_result` (§2). One nesting caveat: a colonized repo's
+project-scope `.grok/config.toml` defining its own `colonizer` server would replace ours
+(26-config-reference.md limits project config to MCP servers, plugins and permission).
 
 ## Pinned binary
 
@@ -72,7 +87,8 @@ The microVM is the boundary. Inside it:
 | Cross-session memory | **off** | `GROK_MEMORY=0` (05-configuration.md) |
 | Telemetry | **off** | `GROK_TELEMETRY_ENABLED=0` (05-configuration.md) |
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |
-| Hooks / plugins / MCP / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: all of these live under it (14-headless-mode.md "File Locations") |
+| Hooks / plugins / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: all of these live under it (14-headless-mode.md "File Locations") |
+| MCP (user scope) | **colonizer's server only** | the runner writes `$GROK_HOME/config.toml` registering `mcp.mjs` ("Questions"); nothing else lives in the fresh home |
 | Hooks / plugins / MCP / skills (project scope) | **not yet enforced** | no verified global off-switch; a colonized repo's `.grok/` could still contribute them (26-config-reference.md limits project config to MCP servers, plugins and permission) |
 
 Subagents and plan mode are left at grok's defaults; `--no-subagents`/`--no-plan` exist if a later
@@ -83,7 +99,9 @@ slice wants them off.
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv and env
 it received, and checks the happy path's events against the required fields of
-`docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
+`docs/agent-events.schema.json`; the question round-trip is driven both through the fake's
+`colonizer__ask_user` call and by POSTing to the registered bridge directly, and `test/mcp.test.mjs`
+drives `mcp.mjs` over stdio against a stub bridge. CI covers only these stubbed contract tests.
 
 ## What remains
 
@@ -93,7 +111,6 @@ it received, and checks the happy path's events against the required fields of
   colony does not depend on grok being preinstalled in the image.
 - Generic `requires.binaries` (and pins) preflight in Rust, so the harness fails a boot before the
   runner has to.
-- Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
-- The colonizer MCP tools (findings, memory, wait) that the Claude module serves.
+- The remaining colonizer MCP tools (findings, memory, wait); `ask_user` is served today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
