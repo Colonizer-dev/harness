@@ -1,0 +1,1 @@
+**The relay knows its GitHub OAuth app.** `services/relay/wrangler.toml` now carries the Colonizer Remote Access OAuth app's client id (public; the secret is a Worker secret), so owner sign-in on `my.colonizer.dev` can start once the relay is deployed. ([#531])

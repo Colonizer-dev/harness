@@ -16,7 +16,7 @@ RELAY_DOMAIN = "my.colonizer.dev"
 # and replaces this). The client secret and the cookie-signing key are secrets, never config:
 #   npx --no-install wrangler secret put GITHUB_CLIENT_SECRET
 #   npx --no-install wrangler secret put SESSION_SECRET
-GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
+GITHUB_CLIENT_ID = "Ov23li46XfjVZvUbrdEF"
 
 [[d1_databases]]
 binding = "DB"
