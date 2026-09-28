@@ -377,7 +377,9 @@ export function SessionView({
             )}
             {attention.reason === "autopilot_held" && (
               <span className="opacity-80">
-                The agent's turn ended with an error. Check the chat, then press {finishing ? "Finish PR" : "Create PR"} or message the agent.
+                {attention.detail
+                  ? `Press ${finishing ? "Finish PR" : "Create PR"} to publish anyway, or message the agent.`
+                  : `The agent's turn ended with an error. Check the chat, then press ${finishing ? "Finish PR" : "Create PR"} or message the agent.`}
               </span>
             )}
           </div>

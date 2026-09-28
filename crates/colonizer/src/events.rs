@@ -63,11 +63,14 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 /// Issue #328: what autopilot does once a completion claim's verification verdict is in. A
 /// contradicted colony is held for the maintainer exactly as a failed turn is; anything else
 /// publishes as before — an unverifiable claim is not the colony's fault, and holding it would
-/// strand finished work on infra noise.
+/// strand finished work on infra noise, and an inconclusive one failed on the base commit too, so
+/// the failure is not this change's.
 pub(crate) fn verdict_step(verdict: &crate::verify::Verdict) -> Autopilot {
     match verdict {
         crate::verify::Verdict::Contradicted => Autopilot::Hold("the completion claim was contradicted"),
-        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Unverifiable => Autopilot::Publish,
+        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Inconclusive | crate::verify::Verdict::Unverifiable => {
+            Autopilot::Publish
+        }
     }
 }
 
@@ -865,7 +868,8 @@ mod tests {
     }
 
     /// Issue #328: only a contradicted claim holds — unverifiable is infra noise, not the
-    /// colony's fault, and holding it would strand finished work.
+    /// colony's fault, and holding it would strand finished work; inconclusive failed on the base
+    /// commit too, so it is not this change's failure.
     #[test]
     fn only_a_contradicted_claim_holds_the_publish() {
         assert_eq!(
@@ -873,6 +877,7 @@ mod tests {
             Autopilot::Hold("the completion claim was contradicted")
         );
         assert_eq!(verdict_step(&crate::verify::Verdict::Confirmed), Autopilot::Publish);
+        assert_eq!(verdict_step(&crate::verify::Verdict::Inconclusive), Autopilot::Publish);
         assert_eq!(verdict_step(&crate::verify::Verdict::Unverifiable), Autopilot::Publish);
     }
 

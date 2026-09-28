@@ -6,8 +6,8 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
-import type { Session } from "../types";
-import { StatusBadge, occupiesSlot, parkedLabel, statusLabel } from "./ui";
+import type { Attention, Session } from "../types";
+import { StatusBadge, attentionText, occupiesSlot, parkedLabel, statusLabel } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -99,5 +99,20 @@ describe("StatusBadge", () => {
     const out = badge({ status: "waiting_for_answer" });
     expect(out).toContain("Needs your answer");
     expect(out).toContain("pulse-soft");
+  });
+});
+
+describe("attentionText", () => {
+  const attention = (overrides: Partial<Attention>): Attention => ({ reason: "stalled", since: "2026-09-26T10:00:00Z", nudges: 1, ...overrides });
+
+  it("says why an autopilot hold happened when the mothership sent a detail (issue #672)", () => {
+    expect(
+      attentionText(attention({ reason: "autopilot_held", detail: "`cargo test` exited 101 in a fresh checkout; failing: a::b (last 200 lines in out/verify-cargo-test.log)" })),
+    ).toBe("`cargo test` exited 101 in a fresh checkout; failing: a::b (last 200 lines in out/verify-cargo-test.log)");
+  });
+
+  it("keeps the plain hold label when there is no detail to show", () => {
+    expect(attentionText(attention({ reason: "autopilot_held" }))).toBe("Autopilot held the PR");
+    expect(attentionText(attention({ reason: "autopilot_held", detail: "  " }))).toBe("Autopilot held the PR");
   });
 });
