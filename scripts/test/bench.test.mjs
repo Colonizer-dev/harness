@@ -5,8 +5,8 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, formatJevReport, jevReport, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
-import { readJsonLines } from '../colony-report.mjs';
+import { formatComparison, formatJevReport, jevReport, journalScoring, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
@@ -225,6 +225,18 @@ test('a comparison carries the clean verdict per task and the gap per run', () =
   assert.match(text, /clean → HACKED/);
   assert.match(text, /– → –/);
   assert.match(text, /Clean resolved 1\/2 → 0\/2 \(clean rate 50% → 0%, gap 50% → 50%\)/);
+});
+
+test('a run journals its scoring time into the spend journal, where the readers keep it', (ctx) => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-bench-journal-'));
+  ctx.after(() => rmSync(dir, { recursive: true, force: true }));
+  journalScoring(dir, 1500, new Date('2026-09-28T12:34:56Z'));
+  assert.deepEqual(readJsonLines(join(dir, 'spend.jsonl')), [
+    { ts: '2026-09-28T12:34:56.000Z', day: '2026-09-28', org: 'bench', kind: 'scoring', scoring_ms: 1500 },
+  ]);
+  assert.equal(loadSpend(dir).length, 1, "the server's own reader keeps the row");
+  // A data dir that cannot be written warns instead of failing the run that just finished.
+  assert.doesNotThrow(() => journalScoring(join(dir, 'missing'), 5, new Date('2026-09-28T12:34:56Z')));
 });
 
 // The Jev fixture ledger: three sessions — one graded under `before`, one under `after`, one in no run —
