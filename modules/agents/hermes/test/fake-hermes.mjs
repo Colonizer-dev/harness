@@ -3,7 +3,11 @@
 // records argv, the parsed HERMES_HOME config and the child env to $FAKE_HERMES_RECORD, then emits
 // the stream-json shapes verified against hermes-agent v2026.9.24. FAKE_HERMES_MODE picks a variant:
 // slow (deltas with gaps), hang (init then nothing), failure (result with error, exit 1), noise (a
-// non-JSON line first, as the tirith scanner prints). --version answers like the real binary.
+// non-JSON line first, as the tirith scanner prints), ask (the model calls the colonizer MCP
+// server's ask_user and waits on the runner's bridge for the answer). --version answers like the
+// real binary. FAKE_HERMES_IGNORE_SIGTERM=1 ignores SIGTERM (Hermes itself does stop on it, but the
+// ask test needs a process that survives the interrupt), and FAKE_HERMES_HANG_MS overrides the
+// hang's 120 s ceiling.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -47,6 +51,28 @@ if (text === undefined) {
 
 emit({ type: 'system', subtype: 'init', model: arg('-m') ?? 'unknown', session_id: session, timestamp: Date.now() });
 if (mode === 'noise') process.stdout.write('tirith: security scanner found no issues in 0.4s\n');
+if (process.env.FAKE_HERMES_IGNORE_SIGTERM === '1') process.on('SIGTERM', () => {});
+if (mode === 'ask') {
+  // The model asks through the colonizer MCP server: a tool_use naming mcp__colonizer__ask_user,
+  // then the server's POST to the runner's loopback bridge (the config's mcp_servers.colonizer.env
+  // carries the coordinates), then the tool_result with the answer and a result that used it.
+  const questions = [{ question: 'Proceed with the restart?', header: 'Restart', options: [{ label: 'Yes', description: 'restart now' }, { label: 'No' }] }];
+  emit({ type: 'tool_use', name: 'mcp__colonizer__ask_user', input: { questions }, timestamp: Date.now() });
+  const { COLONIZER_BRIDGE_URL: url, COLONIZER_BRIDGE_TOKEN: token } = config.mcp_servers?.colonizer?.env ?? {};
+  const res = await fetch(`${url}/ask`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ questions }) });
+  const answer = await res.json();
+  emit({ type: 'tool_result', name: 'mcp__colonizer__ask_user', output: JSON.stringify(answer), duration_ms: 5, is_error: false, timestamp: Date.now() });
+  emit({
+    type: 'result',
+    session_id: session,
+    exit_code: 0,
+    text: `Answered: ${JSON.stringify(answer)}`,
+    tokens: { input: 10, output: 5, total: 15, cache_read: 0, cache_write: 0 },
+    duration_ms: 50,
+    timestamp: Date.now(),
+  });
+  process.exit(0);
+}
 if (mode !== 'hang') {
   emit({ type: 'text', text: 'Working ', timestamp: Date.now() });
   if (mode === 'slow') await sleep(4000);
@@ -67,4 +93,4 @@ if (mode !== 'hang') {
     timestamp: Date.now(),
   });
 }
-if (mode === 'hang') await sleep(120_000);
+if (mode === 'hang') await sleep(Number(process.env.FAKE_HERMES_HANG_MS) || 120_000);
