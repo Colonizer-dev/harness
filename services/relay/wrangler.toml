@@ -22,11 +22,11 @@ GITHUB_CLIENT_ID = "REPLACE_WITH_GITHUB_CLIENT_ID"
 binding = "DB"
 database_name = "colonizer-relay"
 # Placeholder — a human replaces this with the real id from `wrangler d1 create colonizer-relay` (README).
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "476571ec-68ee-4b73-bf96-ad4b8dbe6d1e"
 migrations_dir = "migrations"
 
 # One tunnel DO per install; SQLite-backed so D1 and the DO live on the same storage tier.
-[[durable_objects]]
+[durable_objects]
 bindings = [{ name = "TUNNELS", class_name = "InstallTunnel" }]
 
 [[migrations]]
