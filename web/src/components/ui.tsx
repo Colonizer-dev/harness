@@ -92,6 +92,53 @@ export function isSuspended(session: Pick<Session, "suspended" | "pending_answer
   return session.suspended != null || session.pending_answer != null;
 }
 
+/** Whether the colony has already answered and is now only waiting for a parallelism slot to free
+ *  (issue #667): suspended, its answer stored, and `status` still `waiting_for_answer`. Not a new
+ *  status — a derived state, so nothing the mothership sends has to change for it to read right. */
+export function isAnsweredWaiting(
+  session: Pick<Session, "status" | "suspended" | "pending_answer">,
+): boolean {
+  return session.status === "waiting_for_answer" && session.suspended != null && session.pending_answer != null;
+}
+
+/** When the held answer took effect: `answered_at`, falling back to the suspend time. Epoch
+ *  milliseconds, the key the restore queue orders by; null when there is none or it will not parse. */
+export function answeredAt(session: Pick<Session, "suspended" | "pending_answer">): number | null {
+  const at = session.pending_answer?.answered_at ?? session.suspended?.at ?? null;
+  const ms = at == null ? NaN : Date.parse(at);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** This colony's place in the restore queue, 1-based: answered colonies re-boot in answer order and
+ *  ahead of fresh launches, so only answered-waiting colonies count as being in line. null when this
+ *  colony is not in that state (or is missing from the list). */
+export function restorePlace(
+  session: Pick<Session, "id" | "status" | "suspended" | "pending_answer">,
+  sessions: readonly Pick<Session, "id" | "status" | "suspended" | "pending_answer">[],
+): number | null {
+  if (!isAnsweredWaiting(session)) return null;
+  const inLine = sessions
+    .filter(isAnsweredWaiting)
+    .sort(
+      (a, b) =>
+        (answeredAt(a) ?? Infinity) - (answeredAt(b) ?? Infinity) ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+  const at = inLine.findIndex((s) => s.id === session.id);
+  return at < 0 ? null : at + 1;
+}
+
+/** 1st, 2nd, 3rd, 4th… — 11th through 13th stay `-th`, and so does everything else. */
+export function ordinal(n: number): string {
+  const teens = n % 100;
+  if (teens < 11 || teens > 13) {
+    if (n % 10 === 1) return `${n}st`;
+    if (n % 10 === 2) return `${n}nd`;
+    if (n % 10 === 3) return `${n}rd`;
+  }
+  return `${n}th`;
+}
+
 /** The park reasons the mothership writes (issue #213), in human words; anything else shows as given. */
 const PARK_REASONS: Record<string, string> = {
   provider_quota_exhausted: "provider quota exhausted",
@@ -114,15 +161,16 @@ export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
   return when ? `${reason} · resumes ${when}` : reason;
 }
 
-/** The label a colony's status reads as, suspension-aware (issue #562): a `waiting_for_answer`
- *  colony whose microVM is stopped is suspended rather than working, and one whose answer is
- *  stored and a boot is underway (queued or starting) says so. A colony still suspended while its
- *  answer sits stored keeps the suspended label — nothing is resuming yet. Everything else keeps
- *  the plain status label. */
+/** The label a colony's status reads as, suspension-aware (issues #562, #667): a
+ *  `waiting_for_answer` colony whose microVM is stopped is suspended rather than working, one whose
+ *  answer is stored and a boot is underway (queued or starting) says so, and one that answered while
+ *  suspended is not asking for anything — it is queued for a slot. Everything else keeps the plain
+ *  status label. */
 export function statusLabel(session: Pick<Session, "status" | "suspended" | "pending_answer">): string {
   if (session.pending_answer != null && (session.status === "queued" || session.status === "starting")) {
     return "Resuming with your answer";
   }
+  if (isAnsweredWaiting(session)) return "Answered · resumes when a slot frees";
   if (session.suspended != null && session.status === "waiting_for_answer") return "Suspended — resumes when you answer";
   return SESSION_STATUS[session.status]?.label ?? session.status;
 }
@@ -158,8 +206,11 @@ export function StatusBadge({ session }: { session: Pick<Session, "status" | "su
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone, live: false };
   // A suspended colony's microVM is stopped: the pulse would read as a machine burning while it is not.
   const animated = !isSuspended(session) && (session.status === "starting" || session.status === "running" || session.status === "publishing" || session.status === "waiting_for_answer");
+  // One that answered and is queued for a slot is not asking for anyone, so it loses the accent
+  // "needs you" tone and reads like the queue.
+  const tone: Tone = isAnsweredWaiting(session) ? "neutral" : meta.tone;
   return (
-    <Badge tone={meta.tone} pulse={animated}>
+    <Badge tone={tone} pulse={animated}>
       {statusLabel(session)}
     </Badge>
   );
