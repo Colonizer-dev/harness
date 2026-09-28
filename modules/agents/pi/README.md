@@ -32,9 +32,10 @@ cockpit has run on it yet. CI runs the fake-Pi tests (`npm test` in this directo
 | --- | --- | --- |
 | `COLONIZER_MODEL` | none | The model Pi runs on, as `<provider>/<model>` for a provider configured under Settings → Providers |
 | `COLONIZER_EFFORT` | none | Thinking level passed as `--thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` |
+| `COLONIZER_DISABLED_TOOLS` | none | Pi tool names passed as `--exclude-tools`, e.g. `bash`, `write`, on top of the default read, bash, edit, write set; grep, find and ls are never enabled in a colony, so listing them disables nothing |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1); set by the mothership, not by hand |
 
-Both settings are edited in the cockpit as the module's `model` and `effort` settings.
+All three settings are edited in the cockpit as the module's `model`, `effort` and `disabled_tools` settings.
 
 ## Models
 
@@ -65,7 +66,9 @@ neither does model tier routing (`route_per_task` with `model_low`/`model_high`)
 is the only model. Pi has no way to ask a question — `answer` commands warn, and the appended system
 prompt tells the model to choose and say so — and none of the in-process MCP tools exist: shared
 memory (`memory_search`/`memory_propose`), the findings tool and `wait`. Briefs that name them ask
-for the equivalent work done directly.
+for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
+not applied either: the harness refuses to launch a Pi colony while one is set (the install's
+`exec_policy` setting, or a repo `.colonizer/exec-policy.json`).
 
 ## Develop
 

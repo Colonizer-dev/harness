@@ -14,12 +14,12 @@ spend and carry. Every field and route is in
 | Backend | `anthropic` wire | `openai` wire | Harness-level `disabled_tools` |
 | :--- | :--- | :--- | :--- |
 | `claude-code` | yes — unrouted models go straight to Anthropic; `<provider>/<model>` rides the gateway's Anthropic Messages route | yes — same route; the gateway translates the openai wire | yes — the `disabled_tools` setting (`COLONIZER_DISABLED_TOOLS`) becomes the SDK session's `disallowedTools` |
-| `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | not yet — ACP names no per-tool switch; the runner maps no `disabled_tools` equivalent |
-| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | not yet — the runner already passes `-c` config overrides; a tool switch would ride those |
-| `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | not yet — the runner sets only `GROK_*` env toggles (memory, telemetry, updater) and the colonizer MCP server's `config.toml`; a tool switch would ride the same file |
-| `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | not yet — the runner hardcodes `agent.disabled_toolsets` (whole toolsets, not a per-colony setting) |
-| `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | not yet — the generated inline config carries no per-tool entries |
-| `pi` | yes — the runner writes `models.json` from the routes, `api: anthropic-messages` | yes — same; the gateway presents anthropic-messages to every guest | not yet — the runner configures models only |
+| `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | no — ACP names no per-tool switch, so the module declares no `disabled_tools` setting |
+| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | yes — native names (`shell`, `web_search`, `view_image`) become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, and the runner passes `--strict-config` so a key codex stops recognising fails the turn instead of silently keeping the tool; `apply_patch` (how codex writes files) and MCP tools cannot be turned off |
+| `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | yes — native tool ids (`run_terminal_cmd`, `read_file`, `write_file`, `search_replace`, `grep`, `list_dir`, `web_fetch`, `Agent`) go to `--disallowed-tools`; `web_search` is always off already |
+| `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | yes, toolset-granular — the names are Hermes toolsets (`terminal`, `file`, `web`, `browser`, `vision`, `code_execution`, `todo`, `session_search`, `image_gen`, …) added to `agent.disabled_toolsets`; single tools inside a toolset (only `write_file`, say) cannot be turned off |
+| `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | yes — native tool ids become `permission: {"*": "allow", <id>: "deny"}` entries in the generated inline config; `edit` covers write/edit/apply_patch (the three share one permission) |
+| `pi` | yes — the runner writes `models.json` from the routes, `api: anthropic-messages` | yes — same; the gateway presents anthropic-messages to every guest | yes — native tool names (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) go to `--exclude-tools` |
 
 `codex` and `grok-build` run against their vendor API from the colony's own secret, so no route
 reaches them yet: no `model_map`, no spend accounting through the gateway, no connection-level tool
@@ -44,9 +44,12 @@ value clears it).
   strips those tools from the `tools[]` of every request served through that connection — `WebSearch`
   also strips the `web_search` server tool, `WebFetch` also `web_fetch`. The strip applies per
   connection, so it reaches exactly the backends whose traffic rides the gateway (see the table).
-- **Harness (`disabled_tools` on the agent module).** Per backend, regardless of endpoint. Only
-  `claude-code` ships one so far: the setting is passed to the runner as `COLONIZER_DISABLED_TOOLS`
-  and becomes Claude Code's session `disallowedTools`.
+- **Harness (`disabled_tools` on the agent module).** Per backend, regardless of endpoint. The
+  setting reaches the runner as `COLONIZER_DISABLED_TOOLS`, and every shipped backend but `acp`
+  turns it into its own CLI's switch — the table above says which, and what the names are. Each
+  module declares the valid names itself, as the `x-known-tools` list on the setting's schema
+  property, and the boot check validates the setting against that list — falling back to Claude
+  Code's tool names for a module that declares none.
 
 Boot logs what was taken away, per colony, into `harness.jsonl`:
 `tool '<name>' disabled (level: connection|harness, …)`.
@@ -76,7 +79,7 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
   names the file, the provider and the row:
   `providers.json: provider '<id>': model_map['<canonical>']: …` (or `disabled_tools['<tool>']: …`);
 - an unknown tool in the harness `disabled_tools` setting — the message names the agent module and
-  the known tools: `agent module '<id>' setting 'disabled_tools': unknown tool '<name>' (known: …)`.
+  the tools it knows: `agent module '<id>' setting 'disabled_tools': unknown tool '<name>' (known: …)`.
 
 ## Plans, quotas and trust
 

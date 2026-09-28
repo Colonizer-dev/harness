@@ -29,6 +29,7 @@ prints one non-JSON banner line per turn, which this runner surfaces as a `warn`
 | `COLONIZER_HERMES_BIN` | `hermes` | The hermes command (split on spaces) |
 | `COLONIZER_HERMES_HOME` | `/tmp/colonizer-hermes` | `HERMES_HOME`; the runner writes `config.yaml` (as JSON, valid YAML) and the session-id file here. The config carries a `model:` block naming the resolved provider and default, rewritten before every turn so it always matches the CLI flags — without it Hermes' first-run guard sees "no API keys or providers found" (it ignores the top-level `providers:` map) and exits |
 | `COLONIZER_MODEL` | none — required | `<provider>/<model>`, which must match a gateway route; anything else refuses the turn |
+| `COLONIZER_DISABLED_TOOLS` | empty | The module's Disabled tools setting: comma-separated Hermes toolset names appended (deduplicated) to the always-off list in `agent.disabled_toolsets`. Whole toolsets only — a single tool inside one (only `write_file` within `file`, say) cannot be turned off; `memory`, `skills`, `delegation`, `cronjob`, `tts` and `clarify` are always off already |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes from the mothership (`docs/protocol.md` §6.1); one becomes a Hermes provider `colonizer-<id>` on the Anthropic Messages wire with the colony header |
 | `COLONIZER_HERMES_TURN_TIMEOUT_SECS` | 3600 | Per-turn cap; exceeding it SIGTERMs Hermes and ends the turn with an error |
 
@@ -59,10 +60,14 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
 
 ## Gaps
 
-- Nothing stages the `hermes` binary into the colony VM yet; the runner's preflight fails loudly
-  (`status error`, non-zero exit, the pinned install command in the message) when it is missing, so
-  a colony that picks this module stops there.
+- Nothing stages the `hermes` binary into the colony VM yet; the harness refuses the launch and the
+  boot on the stock preset images, which carry no agent CLIs, and on a custom image the runner's
+  preflight fails loudly (`status error`, non-zero exit, the pinned install command in the message)
+  when it is missing.
 - No ACP question channel, so the module cannot ask you anything.
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).
 - No end-to-end colony run: the live verification above used a fake Anthropic-wire gateway and no
   microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic, and the
   in-VM preflight has only run against the stub. Not `SHIPPING`.

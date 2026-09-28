@@ -964,6 +964,7 @@ mod tests {
             dir: PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"),
             entry: vec!["runner.mjs".into()],
             needs_claude: true,
+            requires: crate::modules::Requires::default(),
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
             egress: None,
             resume_dir: None,
@@ -1228,11 +1229,19 @@ mod tests {
             "even the empty install reports its zeros: the grammar requires at least one event"
         );
         let client = &value["client"];
-        assert_eq!(
-            [client["kind"].clone(), client["platform"].clone(), client["arch"].clone()],
-            [json!("server"), json!("linux"), json!("x86-64")],
-            "the shape this test machine reports; the mapping is client_shape's"
-        );
+        assert_eq!(client["kind"], json!("server"));
+        // The exact platform and arch are whatever this machine is: CI is Linux x86-64, a
+        // maintainer's Mac is macOS aarch64. The mapping itself is client_shape's to test.
+        if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(
+                [client["platform"].clone(), client["arch"].clone()],
+                [json!("linux"), json!("x86-64")],
+                "the shape the CI machine reports; the mapping is client_shape's"
+            );
+        } else {
+            assert!(client["platform"].as_str().is_some_and(|s| !s.is_empty()));
+            assert!(client["arch"].as_str().is_some_and(|s| !s.is_empty()));
+        }
         assert_eq!(client["version"], env!("CARGO_PKG_VERSION"));
     }
 

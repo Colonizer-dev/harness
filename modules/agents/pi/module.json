@@ -43,6 +43,22 @@
         ],
         "default": "",
         "env": "COLONIZER_EFFORT"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Pi tool names this colony never gets, such as bash or write, passed to Pi as --exclude-tools against its default read, bash, edit, write set. grep, find and ls are accepted names but are never enabled in a colony, so listing them disables nothing. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "read",
+          "bash",
+          "edit",
+          "write",
+          "grep",
+          "find",
+          "ls"
+        ]
       }
     }
   }

@@ -183,8 +183,10 @@ export function configToml({ url, token, env }) {
   ].join('\n');
 }
 
-/** One headless grok turn (14-headless-mode.md), with the nesting decisions from the README applied. */
-export function turnArgs({ promptFile, model, sessionId }) {
+/** One headless grok turn (14-headless-mode.md), with the nesting decisions from the README applied.
+ * `disabledTools` carries the module.json `disabled_tools` names, passed through grok's own headless
+ * denylist; the harness validated each against the manifest's "x-known-tools" at boot. */
+export function turnArgs({ promptFile, model, sessionId, disabledTools = [] }) {
   const args = [
     '--prompt-file', promptFile,
     '--output-format', 'streaming-json',
@@ -193,6 +195,7 @@ export function turnArgs({ promptFile, model, sessionId }) {
     '--disable-web-search', // the web-search backend's host is unverified, and egress denies it anyway
     '--no-auto-update',
   ];
+  if (disabledTools.length) args.push('--disallowed-tools', disabledTools.join(',')); // the headless denylist (14-headless-mode.md)
   if (model) args.push('-m', model);
   if (sessionId) args.push('-r', sessionId); // resume: a colony is one continuous grok session
   return args;
@@ -260,7 +263,7 @@ export function mergeUsage(totals, event) {
  * session state and exits 130) and escalates to SIGKILL after a grace period; an interrupt that
  * lands before the spawn (while the prompt file is being written) skips the spawn and ends the
  * turn as interrupted at once. */
-export function startTurn({ prompt, model, sessionId, messageId, env, home, emit, spawnFn = spawn, totals }) {
+export function startTurn({ prompt, model, sessionId, messageId, env, home, emit, spawnFn = spawn, totals, disabledTools = [] }) {
   let child = null;
   let interrupted = false;
   const done = (async () => {
@@ -290,7 +293,7 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
     let endEvent = null;
     let errorEvent = null;
     const thoughts = [];
-    child = spawnFn(grokBin(env), turnArgs({ promptFile, model, sessionId }), { env: childEnv(env, home), stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawnFn(grokBin(env), turnArgs({ promptFile, model, sessionId, disabledTools }), { env: childEnv(env, home), stdio: ['ignore', 'pipe', 'pipe'] });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => (stderrTail = (stderrTail + chunk).slice(-2000)));
 
@@ -421,6 +424,13 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const pending = [];
   const totals = { cost: undefined, models: {} };
   let n = 0;
+  // Harness-level tool switch (module.json `disabled_tools`): the names ride every turn as grok's
+  // own `--disallowed-tools` denylist. The harness validated them against the manifest's
+  // "x-known-tools" at boot; here they are only trimmed, with empties dropped.
+  const disabledTools = String(env.COLONIZER_DISABLED_TOOLS ?? '')
+    .split(',')
+    .map((tool) => tool.trim())
+    .filter(Boolean);
 
   // One bridge for the runner's life; the colonizer MCP server grok spawns points at it through the
   // config.toml the runner wrote into its fresh GROK_HOME (the address is fixed, so one write).
@@ -446,7 +456,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, sessionId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals });
+        turn = startTurn({ prompt: message.text, model: resolved.model, sessionId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, disabledTools });
         try {
           const result = await turn.done;
           sessionId = result.sessionId ?? sessionId;

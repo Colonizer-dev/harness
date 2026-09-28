@@ -12,6 +12,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 
 pub const KINDS: [&str; 14] = [
@@ -41,6 +42,8 @@ pub struct AgentModule {
     pub entry: Vec<String>,
     pub needs_claude: bool,
     pub schema: Value,
+    /// The manifest's `requires` declaration; third-party modules may omit the section.
+    pub requires: Requires,
     /// The manifest's `egress` declaration; third-party modules may omit the section.
     pub egress: Option<Egress>,
     /// The manifest's `session_resume.dir` — a path inside the VM where the runner keeps agent
@@ -48,6 +51,25 @@ pub struct AgentModule {
     /// cannot). The harness mounts a host directory over the path so transcripts survive a stopped
     /// microVM, and a suspended colony's answer resumes the same agent session (issue #562).
     pub resume_dir: Option<String>,
+}
+
+/// The manifest's `requires` declaration (issue #633): the binaries a colony needs on its `PATH`,
+/// the ones the runner fetches itself, and the versions pinned per binary or package. A pin keyed
+/// by a package name that is not a required binary (acp pins `@google/gemini-cli` for the `gemini`
+/// binary) is carried as declared and simply matches no binary in the preflight.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Requires {
+    pub binaries: Vec<String>,
+    pub pins: BTreeMap<String, Pin>,
+    pub fetched_by_runner: Vec<String>,
+}
+
+/// A pinned version, and the install command or script to get it when the manifest names one. The
+/// other pin fields (`source_rev`, `integrity`, `source`) are the runners' to read and ignored here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pin {
+    pub version: String,
+    pub install: Option<String>,
 }
 
 /// The fixed network hosts an agent module's runner needs, declared under `egress` in `module.json`
@@ -133,6 +155,158 @@ fn is_bare_hostname(host: &str) -> bool {
     })
 }
 
+/// Parses the optional `requires` section (issue #633). Only the shapes the preflight reads are
+/// held to anything — a malformed `binaries`, `pins` or `fetched_by_runner` is a manifest problem,
+/// the same as a broken `egress` — while `image` stays the free-text description it has always
+/// been and any other key or pin field is carried or ignored, so a module declaring more than this
+/// file knows still loads.
+fn parse_requires(manifest: &Value) -> Result<Requires, String> {
+    let Some(section) = manifest.get("requires") else {
+        return Ok(Requires::default());
+    };
+    let Some(map) = section.as_object() else {
+        return Err("requires must be an object".into());
+    };
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        let Some(value) = map.get(key) else { return Ok(Vec::new()) };
+        value
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().map(String::from))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or(format!("requires.{key} must be an array of strings"))
+    };
+    let mut pins = BTreeMap::new();
+    if let Some(value) = map.get("pins") {
+        let entries = value
+            .as_object()
+            .ok_or("requires.pins must be an object of package or binary name to pin")?;
+        for (name, pin) in entries {
+            let Some(version) = pin.get("version").and_then(Value::as_str) else {
+                return Err(format!("requires.pins.{name} must name a string \"version\""));
+            };
+            pins.insert(
+                name.clone(),
+                Pin {
+                    version: version.to_string(),
+                    install: pin.get("install").and_then(Value::as_str).map(String::from),
+                },
+            );
+        }
+    }
+    Ok(Requires {
+        binaries: strings("binaries")?,
+        pins,
+        fetched_by_runner: strings("fetched_by_runner")?,
+    })
+}
+
+/// The Claude Code build the harness stages as `bin/claude-guest`, pinned in vendor/claude-code.lock
+/// (same six columns as images.lock: name, version, platform, kind, sha256, url). Compiled in, so
+/// the pin always matches the harness that was built.
+const CLAUDE_LOCK: &str = include_str!("../../../vendor/claude-code.lock");
+
+/// The version the lock pins the Claude Code guest build to: its `agent` rows, whose version is the
+/// same on both platforms. `None` when the lock names no build, which only a hand-edited tree causes.
+fn claude_lock_version(lock: &str) -> Option<&str> {
+    lock.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find_map(|line| match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["claude-code", version, _platform, "agent", _sha256, _url] => Some(*version),
+            _ => None,
+        })
+}
+
+/// A binary the harness itself stages into every colony that needs it, with the version staged when
+/// the harness knows one: its own vendored build. `claude` is the only one today — mounted from the
+/// vendored `bin/claude-guest` when that is installed (app.rs `resolve_guest_claude_bin`), else the
+/// host's own Claude Code, whose version the harness does not know and so does not pin-check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedBinary {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// What the harness stages, read off the config: `claude`, at the version vendor/claude-code.lock
+/// pins when the vendored guest build is present.
+pub fn harness_staged_binaries(cfg: &crate::config::Settings) -> Vec<StagedBinary> {
+    vec![StagedBinary {
+        name: "claude".into(),
+        version: cfg
+            .asset("bin/claude-guest")
+            .is_ok()
+            .then(|| claude_lock_version(CLAUDE_LOCK))
+            .flatten()
+            .map(str::to_string),
+    }]
+}
+
+/// Whether an image reference is one of the stock presets, bare tag or `@sha256:`-pinned: the
+/// images the harness itself offers, which carry no agent CLIs. Anything else is a custom image the
+/// operator chose.
+fn is_stock_image(image: &str) -> bool {
+    crate::presets::PRESETS
+        .iter()
+        .any(|p| image == p.image || image.strip_prefix(&format!("{}@sha256:", p.image)).is_some())
+}
+
+/// The base tools every stock preset carries, so a module requiring one is not refused out of a
+/// stock image that in fact has it. The intersection across the presets, verified against the
+/// Debian bookworm layers they are built on: `sh`, `bash`, `tar` and `gzip` are in the Debian base
+/// under all of them, and `wget` is in the buildpack-deps layer node, python and go share and is
+/// installed by the rust image itself. Deliberately smaller than what any one preset carries:
+/// `git`, `curl` and `ssh` are absent from the rust preset (debian-slim installs neither), and
+/// `gcc` and `make` from the go preset — a module requiring one of those is told to pick an image
+/// that surely has it — as are the per-preset language runtimes.
+const STOCK_IMAGE_TOOLS: [&str; 5] = ["bash", "gzip", "sh", "tar", "wget"];
+
+/// The preflight behind launch and boot (issue #633): every binary a module's `requires.binaries`
+/// names must be available to the colony before one starts. A binary the runner fetches itself is
+/// available by construction; one the harness stages is available unless the module pins it at a
+/// version other than the staged one; anything else has to come from the colony image, and on the
+/// stock presets only the base tools every preset carries ([`STOCK_IMAGE_TOOLS`]) is taken as
+/// carried — anything else is refused naming the way out, even where some preset happens to ship
+/// it, because the check does not model each preset's contents. A custom `sandbox.image` is the
+/// operator's word — trusted here, still checked inside the VM by the runner's own preflight.
+pub fn check_requires(agent: &AgentModule, image: &str, staged: &[StagedBinary]) -> Result<(), String> {
+    for binary in &agent.requires.binaries {
+        if agent.requires.fetched_by_runner.contains(binary) {
+            continue;
+        }
+        let pin = agent.requires.pins.get(binary);
+        if let Some(staged_binary) = staged.iter().find(|staged| &staged.name == binary) {
+            if let (Some(staged_version), Some(pin)) = (&staged_binary.version, pin)
+                && staged_version != &pin.version
+            {
+                return Err(format!(
+                    "agent module `{}` pins the `{binary}` binary at {}, but the harness stages {}; \
+                     set the module's pin to {staged_version}, or boot an image with {binary} {} on PATH",
+                    agent.id, pin.version, staged_version, pin.version
+                ));
+            }
+            continue;
+        }
+        if !is_stock_image(image) || STOCK_IMAGE_TOOLS.contains(&binary.as_str()) {
+            continue;
+        }
+        let pinned = pin.map(|pin| format!(" (pinned {})", pin.version)).unwrap_or_default();
+        let install = pin
+            .and_then(|pin| pin.install.as_deref())
+            .map(|install| format!(" (install: {install})"))
+            .unwrap_or_default();
+        return Err(format!(
+            "agent module `{}` needs the `{binary}` binary{pinned}, which the harness does not stage \
+             and the stock preset images ({image} among them) do not all carry; set the sandbox \
+             module's image to one with {binary} on PATH{install}",
+            agent.id
+        ));
+    }
+    Ok(())
+}
+
 impl AgentModule {
     /// The runner command as seen inside the VM, where the module is mounted at `/opt/colonizer/agent`.
     pub fn vm_command(&self) -> Vec<String> {
@@ -190,7 +364,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         .filter(|args| !args.is_empty())
         .ok_or("\"entry\" must be a non-empty array of strings")?;
     let secrets = manifest["secrets"].to_string();
-    let binaries = manifest["requires"]["binaries"].to_string();
+    let requires = parse_requires(&manifest)?;
     let egress = parse_egress(&manifest)?;
     // An agent that declares session resumability must name the directory, or a suspended colony
     // would later boot with its transcript nowhere to be found: name the manifest problem now.
@@ -223,9 +397,10 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         name: manifest["name"].as_str().unwrap_or_default().to_string(),
         description: manifest["description"].as_str().unwrap_or_default().to_string(),
         entry: entry_cmd,
-        needs_claude: binaries.contains("\"claude\"") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        needs_claude: requires.binaries.iter().any(|binary| binary == "claude") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
+        requires,
         egress,
         resume_dir,
     })
@@ -632,16 +807,18 @@ fn validate_settings(
             };
             return Err(format!("`{key}` is not a {provider} setting; known settings: {known}"));
         };
-        let ok = match spec["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_i64() || value.is_u64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value.is_array() && value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
-            _ => true,
-        };
-        if !ok {
-            return Err(format!("setting `{key}` has the wrong type"));
+        // A type or range refusal names what the schema asks for (#642), so the fix needs no schema
+        // reading: the expected type, or the bounds the value must sit inside, one-sided or both.
+        let expected = |want: &str| format!("setting `{key}` must be {want}");
+        match spec["type"].as_str() {
+            Some("string") if !value.is_string() => return Err(expected("a string")),
+            Some("integer") if !value.is_i64() && !value.is_u64() => return Err(expected("an integer")),
+            Some("number") if !value.is_number() => return Err(expected("a number")),
+            Some("boolean") if !value.is_boolean() => return Err(expected("a boolean")),
+            Some("array") if !value.is_array() || !value.as_array().is_some_and(|items| items.iter().all(Value::is_string)) => {
+                return Err(expected("an array of strings"));
+            }
+            _ => {}
         }
         if let Some(options) = spec["enum"].as_array()
             && !options.contains(value)
@@ -656,7 +833,13 @@ fn validate_settings(
         if let Some(n) = value.as_f64()
             && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
         {
-            return Err(format!("setting `{key}` is out of range"));
+            let bounds = match (spec["minimum"].as_f64(), spec["maximum"].as_f64()) {
+                (Some(min), Some(max)) => format!("between {min} and {max}"),
+                (Some(min), None) => format!("at least {min}"),
+                (None, Some(max)) => format!("at most {max}"),
+                (None, None) => unreachable!("a range refusal fired, so the schema declared a bound"),
+            };
+            return Err(format!("setting `{key}` must be {bounds}"));
         }
         if let Some(s) = value.as_str()
             && (s.len() > 500 || s.contains('\n'))
@@ -741,6 +924,7 @@ mod tests {
             entry: vec!["node".into(), "runner.mjs".into()],
             needs_claude: true,
             schema: Value::Null,
+            requires: Requires::default(),
             egress: None,
             resume_dir: None,
         };
@@ -834,6 +1018,7 @@ mod tests {
             entry: vec!["node".into()],
             needs_claude: true,
             schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
+            requires: Requires::default(),
             egress: None,
             resume_dir: None,
         };
@@ -937,12 +1122,14 @@ mod tests {
 
         input.remove("unknwon").unwrap();
         input.insert("cpus".into(), json!(0));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be between 1 and 64", "{err}");
         input.insert("cpus".into(), json!("eight"));
         // Being stored buys a key nothing once the schema declares it: `cpus` is checked like any
         // other, and only keys no schema has pass through untouched.
         stored.insert("cpus".into(), json!(4));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be an integer", "{err}");
     }
 
     #[test]
@@ -972,7 +1159,8 @@ mod tests {
         );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
-        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+        assert_eq!(err, "setting `budget_usd` must be at least 0", "{err}");
         input.remove("budget_usd");
         input.insert("budget_tokens".into(), json!(-1));
         assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
@@ -1063,10 +1251,12 @@ mod tests {
         assert_eq!(out.get("mask_paths"), input.get("mask_paths"));
         assert_eq!(out.get("protect_paths"), input.get("protect_paths"));
 
-        // A non-array, or an array of non-strings, is the wrong type for the setting.
+        // A non-array, or an array of non-strings, is the wrong type for the setting, and the
+        // refusal says the type the schema asks for.
         for bad in [json!("secrets/credentials.json"), json!(["ok", 4])] {
             input.insert("mask_paths".into(), bad);
-            assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(err, "setting `mask_paths` must be an array of strings", "{err}");
         }
         // And the entries themselves are checked with the boot's own gate: absolute paths,
         // traversal, the worktree root and — for the masked list only — the git dir.
@@ -1141,9 +1331,10 @@ mod tests {
         let mut input = Map::new();
         for bad in [json!(0), json!(1441)] {
             input.insert("hold_timeout_minutes".into(), bad);
-            assert!(
-                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
-                "the timeout is 1 to 1440 minutes"
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(
+                err, "setting `hold_timeout_minutes` must be between 1 and 1440",
+                "the refusal names the bounds: {err}"
             );
         }
         for ok in [1, 30, 1440] {
@@ -1293,5 +1484,293 @@ mod tests {
             listed += 1;
         }
         assert!(listed >= 6, "expected the six shipped agent modules, walked {listed}");
+    }
+
+    /// An agent module carrying exactly these `requires`, for the preflight tests below.
+    fn agent_with(requires: Requires) -> AgentModule {
+        AgentModule {
+            id: "grok-build".into(),
+            name: String::new(),
+            description: String::new(),
+            dir: PathBuf::new(),
+            entry: vec!["node".into()],
+            needs_claude: false,
+            schema: Value::Null,
+            requires,
+            egress: None,
+            resume_dir: None,
+        }
+    }
+
+    #[test]
+    fn the_requires_section_parses_binaries_pins_and_the_runner_fetched_marker() {
+        // The shipped grok-build manifest: one required binary, pinned with an install command and
+        // a source_rev the preflight has no use for.
+        const GROK: &str = include_str!("../../../modules/agents/grok-build/module.json");
+        let grok: Value = serde_json::from_str(GROK).unwrap();
+        let requires = parse_requires(&grok).unwrap();
+        assert_eq!(requires.binaries, ["grok"]);
+        let pin = requires.pins.get("grok").expect("the grok pin parses");
+        assert_eq!(pin.version, "1.0.34");
+        assert_eq!(pin.install.as_deref(), Some("https://x.ai/cli/install.sh"));
+        // acp pins a package name that is not a required binary: carried as declared, matched to
+        // no binary by the preflight.
+        const ACP: &str = include_str!("../../../modules/agents/acp/module.json");
+        let acp: Value = serde_json::from_str(ACP).unwrap();
+        let requires = parse_requires(&acp).unwrap();
+        assert_eq!(requires.binaries, ["gemini"]);
+        assert_eq!(requires.pins.keys().next().map(String::as_str), Some("@google/gemini-cli"));
+        assert!(!requires.pins.contains_key("gemini"), "{:?}", requires.pins);
+        assert!(requires.fetched_by_runner.is_empty());
+        // opencode fetches its own binary at runtime, so the preflight must leave it alone.
+        const OPENCODE: &str = include_str!("../../../modules/agents/opencode/module.json");
+        let opencode: Value = serde_json::from_str(OPENCODE).unwrap();
+        let requires = parse_requires(&opencode).unwrap();
+        assert_eq!(requires.fetched_by_runner, ["opencode"]);
+        assert_eq!(requires.binaries, ["opencode"]);
+        // No section at all parses as none; pi declares none of the checked keys.
+        assert_eq!(parse_requires(&json!({})).unwrap(), Requires::default());
+        const PI: &str = include_str!("../../../modules/agents/pi/module.json");
+        let pi: Value = serde_json::from_str(PI).unwrap();
+        assert_eq!(parse_requires(&pi).unwrap(), Requires::default());
+    }
+
+    #[test]
+    fn a_required_binary_no_stock_image_carries_is_refused_naming_the_binary_and_the_fix() {
+        let agent = agent_with(Requires {
+            binaries: vec!["grok".into()],
+            pins: BTreeMap::from([(
+                "grok".into(),
+                Pin {
+                    version: "1.0.34".into(),
+                    install: Some("https://x.ai/cli/install.sh".into()),
+                },
+            )]),
+            ..Default::default()
+        });
+        let image = crate::presets::pinned_image("node").unwrap();
+        let err = check_requires(&agent, &image, &[]).unwrap_err();
+        assert!(
+            err.contains("agent module `grok-build` needs the `grok` binary (pinned 1.0.34)")
+                && err.contains(&image)
+                && err.contains("set the sandbox module's image to one with grok on PATH")
+                && err.contains("install: https://x.ai/cli/install.sh"),
+            "{err}"
+        );
+        // The bare tag is the same stock image, and a pin without an install command refuses just
+        // the same, without pretending to know how to install the binary.
+        assert!(check_requires(&agent, "node:24-bookworm", &[]).is_err());
+        let unpinned_install = agent_with(Requires {
+            binaries: vec!["hermes".into()],
+            ..Default::default()
+        });
+        let err = check_requires(&unpinned_install, "rust:1-bookworm", &[]).unwrap_err();
+        assert!(
+            err.contains("needs the `hermes` binary, which") && !err.contains("install:") && !err.contains("pinned"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_required_binary_a_custom_image_may_carry_is_trusted_until_the_vm_checks() {
+        let agent = agent_with(Requires {
+            binaries: vec!["grok".into()],
+            ..Default::default()
+        });
+        assert!(
+            check_requires(&agent, "ghcr.io/me/grok-toolchain:1", &[]).is_ok(),
+            "a custom image is the operator's word; the runner's in-VM preflight still checks"
+        );
+    }
+
+    #[test]
+    fn a_base_tool_every_stock_preset_carries_passes_the_check() {
+        let wget = agent_with(Requires {
+            binaries: vec!["wget".into()],
+            ..Default::default()
+        });
+        assert!(
+            check_requires(&wget, &crate::presets::pinned_image("node").unwrap(), &[]).is_ok(),
+            "the Debian base tools ride every stock preset, whatever else it ships"
+        );
+        // The list is what the presets share, not what the widest one carries: `git` ships on the
+        // node, python and go images but not the rust one, so it still refuses — without claiming
+        // the configured image carries nothing like it.
+        let git = agent_with(Requires {
+            binaries: vec!["git".into()],
+            ..Default::default()
+        });
+        let image = crate::presets::pinned_image("node").unwrap();
+        let err = check_requires(&git, &image, &[]).unwrap_err();
+        assert!(err.contains("do not all carry") && err.contains(&image), "{err}");
+    }
+
+    #[test]
+    fn a_runner_fetched_binary_passes_whatever_the_image() {
+        let agent = agent_with(Requires {
+            binaries: vec!["opencode".into()],
+            fetched_by_runner: vec!["opencode".into()],
+            ..Default::default()
+        });
+        assert!(check_requires(&agent, &crate::presets::pinned_image("node").unwrap(), &[]).is_ok());
+    }
+
+    #[test]
+    fn the_staged_claude_passes_and_a_mismatching_pin_is_refused_naming_both_versions() {
+        let pinned = |version: &str| {
+            agent_with(Requires {
+                binaries: vec!["claude".into()],
+                pins: BTreeMap::from([(
+                    "claude".into(),
+                    Pin {
+                        version: version.into(),
+                        install: None,
+                    },
+                )]),
+                ..Default::default()
+            })
+        };
+        let staged = [StagedBinary {
+            name: "claude".into(),
+            version: Some("2.1.280".into()),
+        }];
+        let image = crate::presets::pinned_image("node").unwrap();
+        // The shipped claude-code module pins nothing: the staged binary is what it needs.
+        assert!(check_requires(&pinned("2.1.280"), &image, &staged).is_ok());
+        assert!(
+            check_requires(
+                &agent_with(Requires {
+                    binaries: vec!["claude".into()],
+                    ..Default::default()
+                }),
+                &image,
+                &staged
+            )
+            .is_ok()
+        );
+        let err = check_requires(&pinned("9.9.9"), &image, &staged).unwrap_err();
+        assert!(
+            err.contains("pins the `claude` binary at 9.9.9, but the harness stages 2.1.280"),
+            "{err}"
+        );
+        // A staged version the harness does not know — the host's own install standing in for a
+        // missing vendored build — cannot be pin-checked, so it is not.
+        let unknown = [StagedBinary {
+            name: "claude".into(),
+            version: None,
+        }];
+        assert!(check_requires(&pinned("9.9.9"), &image, &unknown).is_ok());
+    }
+
+    #[test]
+    fn a_malformed_requires_section_is_a_manifest_problem_by_path_and_cause() {
+        let root = std::env::temp_dir().join(format!("colonizer-requires-{}", crate::util::short_id()));
+        let agents = root.join("modules/agents");
+        for (dir, manifest) in [
+            (
+                "bad-binaries",
+                r#"{"id": "x", "entry": ["node"], "requires": {"binaries": "claude"}}"#,
+            ),
+            ("bad-pins", r#"{"id": "x", "entry": ["node"], "requires": {"pins": []}}"#),
+            (
+                "pin-no-version",
+                r#"{"id": "x", "entry": ["node"], "requires": {"pins": {"claude": {}}}}"#,
+            ),
+            (
+                "bad-marker",
+                r#"{"id": "x", "entry": ["node"], "requires": {"fetched_by_runner": "opencode"}}"#,
+            ),
+            ("not-an-object", r#"{"id": "x", "entry": ["node"], "requires": "claude"}"#),
+        ] {
+            std::fs::create_dir_all(agents.join(dir)).unwrap();
+            std::fs::write(agents.join(dir).join("module.json"), manifest).unwrap();
+        }
+        let (modules, problems) = discover_agents(Some(&root));
+        assert!(modules.is_empty(), "{:?}", modules.iter().map(|m| &m.id));
+        assert_eq!(problems.len(), 5, "{problems:?}");
+        let manifest = |dir: &str| agents.join(dir).join("module.json").display().to_string();
+        assert!(
+            problems.contains(&format!(
+                "{}: requires.binaries must be an array of strings",
+                manifest("bad-binaries")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!(
+                "{}: requires.pins must be an object of package or binary name to pin",
+                manifest("bad-pins")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!(
+                "{}: requires.pins.claude must name a string \"version\"",
+                manifest("pin-no-version")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!(
+                "{}: requires.fetched_by_runner must be an array of strings",
+                manifest("bad-marker")
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.contains(&format!("{}: requires must be an object", manifest("not-an-object"))),
+            "{problems:?}"
+        );
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_claude_lock_version_reads_the_agent_rows_only() {
+        let version = claude_lock_version(CLAUDE_LOCK).expect("the shipped lock pins a Claude Code build");
+        assert!(!version.is_empty(), "{version}");
+        const SAMPLE: &str = "\
+# a comment naming the row that is not an entry
+claude-code  2.1.280  linux-arm64  agent  aa  https://x/arm64
+claude-code  2.1.280  linux-x64    agent  bb  https://x/x64
+other        9.9.9    linux-x64    agent  cc  https://x/other
+";
+        assert_eq!(claude_lock_version(SAMPLE), Some("2.1.280"));
+        assert_eq!(
+            claude_lock_version("claude-code 2.1.280 linux-x64 binary aa https://x/x64"),
+            None,
+            "a non-agent kind never matches"
+        );
+        assert_eq!(claude_lock_version(""), None);
+    }
+
+    #[test]
+    fn the_harness_stages_claude_at_the_lock_version_only_when_the_guest_build_is_installed() {
+        let mut cfg = crate::config::Settings {
+            bind: "127.0.0.1:0".into(),
+            data_dir: PathBuf::new(),
+            config_dir: PathBuf::new(),
+            runtime_dir: PathBuf::new(),
+            assets: None,
+            msb: "msb".into(),
+            claude_bin: None,
+            gateway_bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: Vec::new(),
+            fleet_peers: Vec::new(),
+        };
+        let staged = harness_staged_binaries(&cfg);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].name, "claude");
+        assert_eq!(staged[0].version, None, "no vendored build, no version to pin-check");
+        let dir = std::env::temp_dir().join(format!("colonizer-staged-claude-{}", crate::util::short_id()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join("bin/claude-guest"), b"\x7fELF padding").unwrap();
+        cfg.assets = Some(dir.clone());
+        let staged = harness_staged_binaries(&cfg);
+        assert_eq!(
+            staged[0].version.as_deref(),
+            claude_lock_version(CLAUDE_LOCK),
+            "the vendored build is the lock's"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 }

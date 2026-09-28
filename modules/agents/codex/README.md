@@ -2,8 +2,9 @@
 
 Drives OpenAI's [Codex CLI](https://developers.openai.com/codex) (`codex`, the `@openai/codex` npm
 package) as a Colonizer agent module on the `colonizer-runner/1` protocol. **Status: SHIPPING as a
-runner — the `codex` binary is not staged into the colony image yet, so a colony stops at this
-module's preflight until you put the pinned CLI on the image's PATH.**
+runner — the `codex` binary is not staged into the colony image yet, so the harness refuses a
+launch on the stock preset images and, on a custom image, a colony stops at this module's
+preflight, until you put the pinned CLI on the image's PATH.**
 
 The runner is `runner.mjs`: one headless `codex exec --json` process per turn, the prompt on stdin
 (`-` as the prompt argument — an issue brief can be far larger than an argv slot), the first turn's
@@ -77,6 +78,7 @@ The microVM is the boundary. Inside it:
 | Update check | **off** | `-c check_for_update_on_startup=false` |
 | Prompt history | **off** | `-c history.persistence="none"`; the session rollout persists (resume needs it) |
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
+| Colony-disabled tools | **per setting** | the `disabled_tools` setting: `shell`, `web_search` and `view_image` become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, passed with `--strict-config` (an exec flag) so a key codex stops recognising fails the turn loudly; `apply_patch` and MCP tools have no switch |
 | Host config / OAuth token | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): these live under it; `BROWSER=/bin/false` as belt-and-braces |
 | Colonizer MCP tools | **on** | `-c mcp_servers.colonizer.*` overrides registering `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
 
@@ -98,9 +100,13 @@ required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
 ## What is not supported yet
 
 - The `codex` binary in the colony image: nothing fetches or stages it (see the grok-build module's
-  "What remains" for the same gap); until then the preflight fails a codex colony at boot.
+  "What remains" for the same gap); until then the harness refuses a codex launch on the stock
+  preset images, and a custom image's colony at the runner's preflight.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
 - Questions (`answer` is ignored) and resuming a codex thread across a runner restart: the thread id
   lives in the runner's memory and its session rollout in the runner's fresh `CODEX_HOME`, both gone
   when the colony's VM is.
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a codex colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).

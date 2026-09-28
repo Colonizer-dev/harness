@@ -65,6 +65,7 @@ node scripts/bench.mjs run  --repo owner/bench --label before
 # change one thing: a prompt, a module setting, a model
 node scripts/bench.mjs run  --repo owner/bench --label after
 node scripts/bench.mjs compare bench-before.json bench-after.json
+node scripts/bench.mjs jev  bench-before.json bench-after.json   # grade Jev compaction across the runs
 node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull requests and delete their branches
 ```
 
@@ -73,8 +74,8 @@ task, and answers the questions it asks by itself: it picks the option matching 
 else the first one, and records what it chose. It authenticates with `COLONIZER_API_TOKEN`, else the
 `api-token` file in `COLONIZER_CONFIG_DIR` (default `~/.config/colonizer`). `--only a,b` runs a subset,
 `--timeout` bounds a colony in seconds (default 1200), `--data <dir>` names the mothership's data
-directory the colony report and trajectory monitor read (default `COLONIZER_DATA_DIR`, else
-`~/.local/share/colonizer`), and `--heldout <dir>` scores the held-out suite below (`--max-gap`,
+directory the colony report, trajectory monitor and `jev`'s ledger read (default `COLONIZER_DATA_DIR`,
+else `~/.local/share/colonizer`), and `--heldout <dir>` scores the held-out suite below (`--max-gap`,
 default 0.25, sets its threshold). Results go to `bench-<label>.json`.
 
 This costs real model tokens and opens real pull requests on the scratch repository. It opens them nowhere
@@ -105,6 +106,38 @@ number to watch.
 The [offline evolver](evolver.md) builds on these run files: it clusters diagnosed failures into classes,
 turns one class into a prompt-only proposal, and retains the proposal only when a rerun of the same tasks
 beats a baseline — judged with the same per-task honesty as `compare`, single regressions included.
+
+## Grading Jev compaction
+
+When [`jev_compaction`](colonies.md#measuring-jev-compaction) is on, the mothership appends one `decision`
+row per chunk each compaction pass kept or dropped, and one `reread` row each time the agent re-issues a
+call a decision was about, to `<data dir>/jev_ladder.jsonl`. `jev` reads that ledger and grades the
+colonies against each other:
+
+```sh
+node scripts/bench.mjs jev bench-before.json bench-after.json   # --data <dir> names a non-default mothership
+node scripts/bench.mjs jev --json bench-before.json             # the same report as JSON
+```
+
+A colony is a session. Its run is the first run file on the command line whose results list that
+`session_id` — the same files `compare` reads — and it carries that result's task, agent and model for
+display. A session no given run names (chat colonies, run files left off the command line) grades under
+`(no run)`, last.
+
+| Run | Colony | Task | Harness · model | Decisions | Rereads | TP | FP | FN | TN | Precision | Recall |
+| :--- | :--- | :--- | :--- | --: | --: | --: | --: | --: | --: | --: | --: |
+| before | 7c1e2a91 | add-helper | claude-code · opus | 14 | 3 | 2 | 2 | 1 | 9 | 0.50 | 0.67 |
+| before | total | | | 14 | 3 | 2 | 2 | 1 | 9 | 0.50 | 0.67 |
+| (no run) | d4b8f102 | – | – · – | 4 | 1 | 0 | 0 | 1 | 3 | – | 0.00 |
+| overall | | | | 18 | 4 | 2 | 2 | 2 | 12 | 0.50 | 0.50 |
+
+A decision predicts a chunk was needed when its `keep_result` is at or above the threshold — default 0.5,
+`--threshold` to move it, the same score the plugin itself keeps at — and a reread of that decision's tool
+call is the ground truth. Precision is the share of predicted-needed chunks that really were re-issued;
+recall is the share of re-issued chunks the pass predicted to keep. A zero denominator reads as `–`, not
+0: undefined, not a bad score. The counts sit beside the rates because one colony in one run is a small
+sample; a `total` row pools them, so ten colonies' one-decision runs begin to say something. A reread only
+ever grades decisions from its own session.
 
 ## Held-out suite
 

@@ -83,6 +83,7 @@ The microVM is the boundary. Inside it:
 | grok OS sandbox | **off** | `--sandbox off` explicitly (18-sandbox.md) |
 | Tool approval | **auto** | `--always-approve`: headless cannot answer a prompt; the microVM is the boundary |
 | Web search/fetch | **off** | `--disable-web-search` (backend host unverified; egress denies it anyway) |
+| Colony-disabled tools | **per setting** | the `disabled_tools` setting rides as grok's own headless denylist, `--disallowed-tools <ids>` (14-headless-mode.md); the colonizer MCP tools are not on it |
 | Cross-session memory | **off** | `GROK_MEMORY=0` (05-configuration.md) |
 | Telemetry | **off** | `GROK_TELEMETRY_ENABLED=0` (05-configuration.md) |
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |
@@ -120,9 +121,12 @@ keyed on the same verdict the test asserts.
 - Mothership-side xAI key push into boot secrets (`boot.rs`) and provider-gateway routing for
   `xai-grok` models; today only a user-added `XAI_API_KEY` colony secret works.
 - Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`, so a
-  colony does not depend on grok being preinstalled in the image.
-- Generic `requires.binaries` (and pins) preflight in Rust, so the harness fails a boot before the
-  runner has to.
+  colony does not depend on grok being preinstalled in the image. (The harness now refuses a launch
+  or boot on a stock preset image, where grok is never present; a custom image is still only
+  checked by the runner's in-VM preflight.)
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a grok-build colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).

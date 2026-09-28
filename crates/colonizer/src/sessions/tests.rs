@@ -164,6 +164,12 @@ pub(crate) async fn app_with_colony(id: &str, status: SessionStatus) -> (Shared,
 /// matching the configured provider and a guest binary that claims to be an ELF. Shared with
 /// validation.rs, whose fix-colony test creates a session the same way.
 pub(crate) fn app_that_can_create(root: &std::path::Path) -> Shared {
+    app_that_can_create_needing(root, false)
+}
+
+/// The same install, with the agent module marked as needing Claude credentials: the launch
+/// refusal for a missing login reads the flag off the module, not off anything installed.
+pub(crate) fn app_that_can_create_needing(root: &std::path::Path, needs_claude: bool) -> Shared {
     let assets = root.join("assets");
     let dir = assets.join("modules/agents/claude-code");
     std::fs::create_dir_all(&dir).unwrap();
@@ -176,7 +182,8 @@ pub(crate) fn app_that_can_create(root: &std::path::Path) -> Shared {
         description: String::new(),
         dir,
         entry: vec!["run".into()],
-        needs_claude: false,
+        needs_claude,
+        requires: crate::modules::Requires::default(),
         schema: json!({}),
         egress: None,
         resume_dir: None,

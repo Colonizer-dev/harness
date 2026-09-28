@@ -413,7 +413,7 @@ vendored one — logged when the skillset is saved and again at each colony boot
 | `claude-accounts.json` load | `claude_accounts::load_meta`: logs and reads empty; writers refuse (409) | `a_corrupt_record_reads_as_empty_and_refuses_to_be_overwritten` |
 | `colonizer.toml` load | `FileConfig::load`: logs file, error and fix, continues with defaults | `load_reads_colonizer_toml_from_the_config_dir` |
 | `COLONIZER_GATEWAY_BIND` | `Settings::parse_gateway_bind` refuses startup (issue #406) | `gateway_bind_defaults_unset_parses_an_ip_port_and_refuses_everything_else` |
-| Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | none yet (follow-up) |
+| Colony launch | `sessions::create`: unknown tier, a model naming no configured provider, an uninstalled agent module, missing Claude credentials | `an_unknown_model_tier_is_refused_naming_the_tier_and_the_known_ones`, `a_model_override_naming_no_configured_provider_is_refused_naming_both`, `a_launch_on_an_agent_module_that_is_not_installed_is_refused`, `a_launch_without_claude_credentials_is_refused_naming_the_account` |
 | Activity log filters | `activity::list` → `parse_filter`: an unknown kind or actor, or a `limit` outside 1–500, is refused naming the value and the accepted ones | `a_bad_filter_is_refused_by_name` |
 | Spawn | the boot refuses a `<provider>/` model setting no configured provider owns, or one a provider's `model_map` does not list (`ColonyRoutes::unusable_route`); the runner's router warns about malformed routes | `an_unconfigured_provider_prefix_refuses_the_launch_naming_the_fix`, `configured_prefixes_and_bare_names_pass_the_unrouted_check`; `router.test.mjs` |
 
@@ -450,6 +450,7 @@ What the rule found, setting by setting — the table reviewers check:
 | --- | --- | --- |
 | Unknown module-setting key on save | dropped, so the typo read as the default | fixed: refused, naming the known settings |
 | Enum refusal | "must be one of the listed options" | fixed: names them |
+| Range and type refusals | "out of range" / "wrong type", without the bound or the type | fixed: name the bounds and the expected type |
 | Corrupt `colonizer.toml` | a bare "using defaults" | fixed: names file, error, fix |
 | Corrupt `claude-accounts.json` | silently reset the default-account choice | fixed: logged, and saves refuse the overwrite |
 | Local plugin shadowing vendored | no configure-time log | fixed: logged naming both paths at skillset save (colony boot already logged it) |
@@ -466,10 +467,6 @@ The filed refusals will read:
   cannot boot — set sandbox.provider to a listed provider in Settings → Modules`
 - `org model override "claude-opus-4-999" has no provider prefix and is not a known Claude alias; it
   will be sent to Anthropic as-is. Use "provider/model" …`
-
-Two gaps are known and not yet filed: the range and type refusals in `validate_settings` say "out of
-range" / "wrong type" without the min, max or expected type, and the launch refusals for an unknown
-tier or a bad model override have no direct unit test.
 
 ## Mesh design
 

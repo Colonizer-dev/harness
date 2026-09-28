@@ -5,7 +5,8 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { formatComparison, formatJevReport, jevReport, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const TASKS = JSON.parse(readFileSync(join(ROOT, 'scripts/bench/tasks.json'), 'utf8'));
@@ -224,4 +225,86 @@ test('a comparison carries the clean verdict per task and the gap per run', () =
   assert.match(text, /clean → HACKED/);
   assert.match(text, /– → –/);
   assert.match(text, /Clean resolved 1\/2 → 0\/2 \(clean rate 50% → 0%, gap 50% → 50%\)/);
+});
+
+// The Jev fixture ledger: three sessions — one graded under `before`, one under `after`, one in no run —
+// covering all four outcomes, an unscored decision, a keep_result at and just below the threshold, an
+// orphan reread, and a line a crash tore in half (scripts/test/fixtures/jev_ladder.jsonl).
+const LEDGER = readJsonLines(join(ROOT, 'scripts/test/fixtures/jev_ladder.jsonl'));
+const jevResult = (session_id, id, agent, model) => ({ session_id, id, agent, model, tier: 'low' });
+const beforeRun = { label: 'before', results: [jevResult('7c1e2a91', 'add-helper', 'claude-code', 'zai/glm-5.3-flash')] };
+const afterRun = { label: 'after', results: [jevResult('b2f9d304', 'cart-rounding', 'codex', null)] };
+
+test('the jev report grades each colony against its rereads, under the run that ran it', () => {
+  const report = jevReport(LEDGER, [beforeRun, afterRun], 0.5);
+  assert.deepEqual(report.runs.map((r) => r.run), ['before', 'after', '(no run)'], 'a session no run names grades last, under (no run)');
+  const alpha = report.runs[0].colonies[0];
+  assert.equal(alpha.colony, '7c1e2a91');
+  assert.equal(alpha.task, 'add-helper', 'the task, agent and model ride from the run result for display');
+  assert.equal(alpha.agent, 'claude-code');
+  assert.equal(alpha.model, 'zai/glm-5.3-flash');
+  assert.deepEqual({ decisions: alpha.decisions, rereads: alpha.rereads, tp: alpha.tp, fp: alpha.fp, fn: alpha.fn, tn: alpha.tn }, { decisions: 5, rereads: 2, tp: 1, fp: 1, fn: 1, tn: 2 });
+  assert.equal(alpha.precision, 0.5);
+  assert.equal(alpha.recall, 0.5);
+});
+
+test('a keep_result exactly at the threshold was predicted positive, just below was not', () => {
+  const beta = jevReport(LEDGER, [afterRun], 0.5).runs[0].colonies[0];
+  assert.deepEqual({ tp: beta.tp, fp: beta.fp, fn: beta.fn, tn: beta.tn }, { tp: 1, fp: 0, fn: 2, tn: 0 }, '0.5 predicted; 0.49 and null did not');
+  assert.equal(beta.precision, 1);
+  assert.ok(Math.abs(beta.recall - 1 / 3) < 1e-9);
+});
+
+test('no positive predictions leaves precision undefined, and an orphan reread grades nothing', () => {
+  const report = jevReport(LEDGER, [beforeRun, afterRun], 0.5);
+  const gamma = report.runs[2].colonies[0];
+  assert.equal(gamma.colony, 'e6a8c177');
+  assert.equal(gamma.task, null);
+  assert.deepEqual({ decisions: gamma.decisions, rereads: gamma.rereads, tp: gamma.tp, fp: gamma.fp, fn: gamma.fn, tn: gamma.tn }, { decisions: 2, rereads: 2, tp: 0, fp: 0, fn: 1, tn: 1 });
+  assert.equal(gamma.precision, null, 'nothing was predicted needed: undefined, not a zero score');
+  assert.equal(gamma.recall, 0, 'a confirmed need the plugin failed to predict');
+});
+
+test('run totals and the overall pool the group counts', () => {
+  const report = jevReport(LEDGER, [beforeRun, afterRun], 0.5);
+  assert.deepEqual({ tp: report.runs[0].total.tp, fn: report.runs[0].total.fn, tn: report.runs[0].total.tn, decisions: report.runs[0].total.decisions, precision: report.runs[0].total.precision }, { tp: 1, fn: 1, tn: 2, decisions: 5, precision: 0.5 });
+  assert.deepEqual({ tp: report.total.tp, fp: report.total.fp, fn: report.total.fn, tn: report.total.tn, decisions: report.total.decisions, rereads: report.total.rereads }, { tp: 2, fp: 1, fn: 4, tn: 3, decisions: 10, rereads: 7 });
+  assert.equal(report.total.precision, 2 / 3);
+  assert.equal(report.total.recall, 1 / 3);
+});
+
+test('a raised threshold un-predicts the boundary decision', () => {
+  const report = jevReport(LEDGER, [beforeRun, afterRun], 0.6);
+  const beta = report.runs[1].colonies[0];
+  assert.deepEqual({ tp: beta.tp, fp: beta.fp, fn: beta.fn }, { tp: 0, fp: 0, fn: 3 }, 'every one of its predictions is gone at 0.6');
+  assert.equal(beta.precision, null, 'which leaves it with no positive predictions, so no precision');
+  assert.deepEqual({ tp: report.total.tp, fn: report.total.fn }, { tp: 1, fn: 5 }, 'only 0.9 stays predicted above 0.6');
+});
+
+test('the fixture ledger keeps the rows around its torn line', () => {
+  assert.match(readFileSync(join(ROOT, 'scripts/test/fixtures/jev_ladder.jsonl'), 'utf8'), /tore in half/);
+  assert.equal(LEDGER.length, 17, 'the torn line is skipped, not counted');
+});
+
+test('the jev table shows the rates with the counts beside them, and – for undefined', () => {
+  const text = formatJevReport(jevReport(LEDGER, [beforeRun, afterRun], 0.5));
+  assert.match(text, /# Jev compaction, graded at threshold 0\.5/);
+  assert.match(text, /\| Run \| Colony \| Task \| Harness · model \| Decisions \| Rereads \| TP \| FP \| FN \| TN \| Precision \| Recall \|/);
+  assert.match(text, /\| before \| 7c1e2a91 \| add-helper \| claude-code · zai\/glm-5\.3-flash \| 5 \| 2 \| 1 \| 1 \| 1 \| 2 \| 0\.50 \| 0\.50 \|/);
+  assert.match(text, /\| before \| total \| {2}\| {2}\| 5 \| 2 \| 1 \| 1 \| 1 \| 2 \| 0\.50 \| 0\.50 \|/);
+  assert.match(text, /\| \(no run\) \| e6a8c177 \| – \| – · – \| 2 \| 2 \| 0 \| 0 \| 1 \| 1 \| – \| 0\.00 \|/);
+  assert.match(text, /\| overall \| {2}\| {2}\| {2}\| 10 \| 7 \| 2 \| 1 \| 4 \| 3 \| 0\.67 \| 0\.33 \|/);
+});
+
+test('parseArgs takes the jev subcommand: a threshold, --json and the run files', () => {
+  const args = parseArgs(['jev', '--threshold', '0.6', '--json', 'bench-before.json']);
+  assert.equal(args.command, 'jev');
+  assert.equal(args.threshold, 0.6);
+  assert.equal(args.json, true);
+  assert.deepEqual(args.files, ['bench-before.json']);
+  assert.equal(parseArgs(['jev']).threshold, 0.5, 'the default is the keep threshold the plugin itself uses');
+  assert.equal(parseArgs(['jev']).json, false);
+  assert.throws(() => parseArgs(['jev', '--threshold']), /--threshold needs a value/);
+  assert.throws(() => parseArgs(['jev', '--threshold', 'soon']), /--threshold needs a number/);
+  assert.throws(() => parseArgs(['jev', '--json=false']), /unknown argument/);
 });

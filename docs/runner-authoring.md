@@ -20,10 +20,15 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    | `name`, `description` | yes | What the pickers show |
    | `settings` | yes | The settings schema, the JSON Schema subset in [protocol.md](protocol.md) §4. Each property's `env` names the environment variable the runner receives the value in; an empty value is not passed at all |
    | `secrets` | partly | `[{ "env": [...], "hosts": [...] }]`: the credentials the agent uses and the hosts they are for. Every host must be covered by `egress` (item 2). A secret env named `CLAUDE_CODE_OAUTH_TOKEN` marks the module as needing a Claude login |
-   | `requires` | partly | `binaries`, `image` and `pins` document what the colony image must carry. Only one thing is read: a `binaries` list containing `claude` marks the module as needing a Claude login and sets `COLONIZER_CLAUDE_BIN`. A runner may read its own `pins` (the codex runner checks `requires.pins.codex` in its preflight) |
+   | `requires` | mostly | `binaries` names what must be on the colony's `PATH`: a list containing `claude` marks the module as needing a Claude login, and the whole list is preflighted at launch and boot. On a stock preset image a binary is accepted when the harness stages it (`claude`), the runner fetches it (listed under `fetched_by_runner`), or it is one of the base tools every preset carries (`bash`, `gzip`, `sh`, `tar`, `wget`); anything else — no agent CLI is staged or shipped — refuses with the binary and, when the module pins it, the pinned version and install command. `pins` holds the versions, applied to a binary when the pin's key is the binary's name; a pin whose key is a package name (`@google/gemini-cli`) is carried for runners to read. A custom `sandbox.image` is trusted here and only checked by the runner's in-VM preflight. The free-text `image` description is not interpreted |
    | `egress` | yes | Item 2 |
    | `session_resume` | yes, optional | Item 9 |
    | `kind`, `protocol` | no | Every shipped module sets `"kind": "agent"` and `"protocol": "colonizer-runner/1"`; do the same |
+
+   Declaring an `exec_policy` setting is a promise that the runner enforces the [exec policy](../modules/agents/claude-code/README.md#exec-policy)
+   in that variable (Claude Code and ACP do). Without it, the harness refuses to launch the module
+   while a policy is set — the install's `exec_policy` setting or a repo `.colonizer/exec-policy.json`
+   — rather than run the agent unguarded.
 
 2. **Egress declaration.** Add `egress: { "api": [...], "auth": [...], "telemetry": [...],
    "extra": [...] }` — bare hostnames, a leading `*.` allowed for wildcards (subdomains only:
