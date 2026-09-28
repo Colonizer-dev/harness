@@ -1073,6 +1073,7 @@ mod tests {
                 egress: None,
                 resume_dir: Some("/root/.claude/projects".into()),
                 loop_tools: false,
+                vendor_secrets: Vec::new(),
             }],
             |_| {},
         );

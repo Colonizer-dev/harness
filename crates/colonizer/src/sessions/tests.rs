@@ -188,6 +188,7 @@ pub(crate) fn app_that_can_create_needing(root: &std::path::Path, needs_claude: 
         egress: None,
         resume_dir: None,
         loop_tools: false,
+        vendor_secrets: Vec::new(),
     };
     crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
 }

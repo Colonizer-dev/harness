@@ -34,6 +34,8 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const COLONY_HEADER: &str = "x-colonizer-colony";
+/// The token as a plain bearer credential, the form a runner speaking ordinary HTTP auth sends.
+pub const BEARER_PREFIX: &str = "Bearer ";
 pub const FALLBACK_HEADER: &str = "x-colonizer-fallback";
 /// Names a quota-exhausted provider answer (issue #225); the body stays the provider's own.
 pub const QUOTA_HEADER: &str = "x-colonizer-quota-exhausted";
@@ -776,16 +778,35 @@ fn ends_sse_event(chunk: &[u8]) -> bool {
 /// A body-end callback that records what passed through.
 type Recorder = Box<dyn FnOnce(Usage) + Send>;
 
-/// Counts the tokens of a passing Anthropic response without touching the bytes the colony receives:
+/// Which API's usage spellings a response speaks: the Anthropic Messages usage object, or the two
+/// OpenAI ones (`/v1/responses` and `/v1/chat/completions`). Decided by the route the request came
+/// in on, never by sniffing the body.
+#[derive(Clone, Copy, Default)]
+enum Shape {
+    #[default]
+    Anthropic,
+    Openai,
+}
+
+/// What the gateway does with a request: pass the Anthropic body through untranslated, pass an
+/// OpenAI-wire route's body through untranslated, or translate an Anthropic body into Chat
+/// Completions. Chooses the response handler and the usage tap's [`Shape`] together, so a
+/// passthrough response is never read as an Anthropic one.
+enum Routed {
+    Anthropic,
+    Openai,
+    Translated(openai::RequestInfo),
+}
+
+/// Counts the tokens of a passing response without touching the bytes the colony receives:
 /// [`counted_body`] feeds every forwarded chunk here and reads the totals when the body ends. Anything
 /// unexpected (a proxy in front of the provider, a shape this version doesn't know) counts nothing and
 /// never breaks the pass-through.
 #[derive(Default)]
 enum UsageTap {
     /// A non-streaming JSON body, buffered up to `MAX_TAP_BODY` purely for counting.
-    Json(Vec<u8>),
-    /// An SSE body, read event by event as it passes: `message_start` fixes the input side,
-    /// `message_delta` carries the running output total.
+    Json(Vec<u8>, Shape),
+    /// An SSE body, read event by event as it passes.
     Sse(SseTap),
     /// A body too big or too odd to count. Bytes still pass; nothing is recorded.
     #[default]
@@ -793,22 +814,22 @@ enum UsageTap {
 }
 
 impl UsageTap {
-    fn anthropic(is_sse: bool) -> Self {
+    fn new(shape: Shape, is_sse: bool) -> Self {
         if is_sse {
-            Self::Sse(SseTap::default())
+            Self::Sse(SseTap::new(shape))
         } else {
-            Self::Json(Vec::new())
+            Self::Json(Vec::new(), shape)
         }
     }
 
     fn push(&mut self, chunk: &[u8]) {
-        let overflow = matches!(self, Self::Json(buffer) if buffer.len() + chunk.len() > MAX_TAP_BODY);
+        let overflow = matches!(self, Self::Json(buffer, _) if buffer.len() + chunk.len() > MAX_TAP_BODY);
         if overflow {
             *self = Self::Skip;
             return;
         }
         match self {
-            Self::Json(buffer) => buffer.extend_from_slice(chunk),
+            Self::Json(buffer, _) => buffer.extend_from_slice(chunk),
             Self::Sse(tap) => tap.push(chunk),
             Self::Skip => {}
         }
@@ -817,11 +838,21 @@ impl UsageTap {
     fn finish(self) -> Usage {
         match self {
             // Malformed or truncated JSON parses to nothing, which is the deal: count only what is certain.
-            Self::Json(buffer) => serde_json::from_slice::<Value>(&buffer)
-                .map(|body| anthropic_usage(&body["usage"]))
+            Self::Json(buffer, shape) => serde_json::from_slice::<Value>(&buffer)
+                .map(|body| shape.json_usage(&body["usage"]))
                 .unwrap_or_default(),
             Self::Sse(tap) => tap.usage,
             Self::Skip => Usage::default(),
+        }
+    }
+}
+
+impl Shape {
+    /// The usage object of a finished response, in this shape's spelling.
+    fn json_usage(self, usage: &Value) -> Usage {
+        match self {
+            Self::Anthropic => anthropic_usage(usage),
+            Self::Openai => openai_usage(usage),
         }
     }
 }
@@ -838,16 +869,46 @@ fn anthropic_usage(usage: &Value) -> Usage {
     }
 }
 
+/// The token counts an OpenAI usage object carries, in either spelling: Chat Completions names the
+/// sides `prompt_tokens`/`completion_tokens` ([`openai::usage_of`]), Responses `input_tokens`/
+/// `output_tokens`. Cached input is a subset of the input total in both, so it comes back out of the
+/// input side, like Anthropic's separately reported cache reads.
+fn openai_usage(usage: &Value) -> Usage {
+    if usage["prompt_tokens"].is_u64() {
+        return openai::usage_of(usage);
+    }
+    let input = usage["input_tokens"].as_u64().unwrap_or(0);
+    let cached = usage["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or(0)
+        .min(input);
+    Usage {
+        input_tokens: input - cached,
+        output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
+        thinking_tokens: usage["output_tokens_details"]["reasoning_tokens"].as_u64().unwrap_or(0),
+    }
+}
+
 /// Assembles SSE events out of the chunks a forwarded body arrives in, keeping only what accounting
 /// needs. Never holds the bytes back: it watches a private copy of the stream.
 #[derive(Default)]
 struct SseTap {
+    shape: Shape,
     line: Vec<u8>,
     data: String,
     usage: Usage,
 }
 
 impl SseTap {
+    fn new(shape: Shape) -> Self {
+        Self {
+            shape,
+            ..SseTap::default()
+        }
+    }
+
     fn push(&mut self, chunk: &[u8]) {
         self.line.extend_from_slice(chunk);
         while let Some(end) = self.line.iter().position(|&b| b == b'\n') {
@@ -885,23 +946,38 @@ impl SseTap {
         let Ok(event) = serde_json::from_str::<Value>(&data) else {
             return;
         };
-        match event["type"].as_str() {
-            Some("message_start") => {
-                let message = anthropic_usage(&event["message"]["usage"]);
-                self.usage.input_tokens = message.input_tokens;
-                self.usage.cache_read_tokens = message.cache_read_tokens;
-                self.usage.cache_write_tokens = message.cache_write_tokens;
+        match self.shape {
+            Shape::Anthropic => match event["type"].as_str() {
+                Some("message_start") => {
+                    let message = anthropic_usage(&event["message"]["usage"]);
+                    self.usage.input_tokens = message.input_tokens;
+                    self.usage.cache_read_tokens = message.cache_read_tokens;
+                    self.usage.cache_write_tokens = message.cache_write_tokens;
+                }
+                // Deltas carry the running output and thinking totals, so the last one seen is the final count.
+                Some("message_delta") => {
+                    let output = event["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                    self.usage.output_tokens = self.usage.output_tokens.max(output);
+                    let thinking = event["usage"]["output_tokens_details"]["thinking_tokens"]
+                        .as_u64()
+                        .unwrap_or(0);
+                    self.usage.thinking_tokens = self.usage.thinking_tokens.max(thinking);
+                }
+                _ => {}
+            },
+            Shape::Openai => {
+                // Responses reports usage once, on the terminal `response.completed` event's
+                // `response.usage`; a chat completion just ends with a chunk whose `usage` is filled
+                // in. Events without a usage object count nothing, so the last one carrying numbers
+                // is the answer either way.
+                let usage = match event["type"].as_str() {
+                    Some("response.completed") => &event["response"]["usage"],
+                    _ => &event["usage"],
+                };
+                if usage.is_object() {
+                    self.usage = openai_usage(usage);
+                }
             }
-            // Deltas carry the running output and thinking totals, so the last one seen is the final count.
-            Some("message_delta") => {
-                let output = event["usage"]["output_tokens"].as_u64().unwrap_or(0);
-                self.usage.output_tokens = self.usage.output_tokens.max(output);
-                let thinking = event["usage"]["output_tokens_details"]["thinking_tokens"]
-                    .as_u64()
-                    .unwrap_or(0);
-                self.usage.thinking_tokens = self.usage.thinking_tokens.max(thinking);
-            }
-            _ => {}
         }
     }
 }
@@ -972,7 +1048,9 @@ fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, reservation: 
     })
 }
 
-/// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`.
+/// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`. An
+/// openai-wire base_url legitimately ends in `/v1` (the xai-grok catalog ships `https://api.x.ai/v1`),
+/// so a request path that starts with `/v1/` does not repeat the base's own.
 fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<String> {
     let clean = rest.starts_with('/')
         && rest.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c))
@@ -980,8 +1058,50 @@ fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<Strin
     if !clean {
         return None;
     }
+    let base = base_url.trim_end_matches('/');
+    let rest = match base.ends_with("/v1") && rest.starts_with("/v1/") {
+        true => &rest["/v1".len()..],
+        false => rest,
+    };
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
-    Some(format!("{}{rest}{query}", base_url.trim_end_matches('/')))
+    Some(format!("{base}{rest}{query}"))
+}
+
+/// The body a passthrough route forwards: the connection policy applies exactly as it does to
+/// `/v1/messages` (#295) — its `model_map` renames the model, and `disabled_tools` matches a
+/// top-level `tools[].name` that OpenAI-shaped tool entries (nested under `function`) never carry —
+/// and a streaming chat completion gets `stream_options.include_usage` unless the colony asked for
+/// usage itself, because without it the final usage chunk never comes and accounting counts nothing.
+/// Every other field forwards untouched; `stream_options` is chat-only, Responses reports usage on
+/// its terminal `response.completed` event regardless. With neither rewrite pending the colony's own
+/// bytes go out unchanged, never re-serialized — the same byte-identical escape hatch the policy has.
+fn openai_passthrough_body(rest: &str, body: &[u8], provider: &Provider) -> Result<Vec<u8>, String> {
+    let policy = apply_connection_policy(body, provider);
+    let body = policy.as_deref().unwrap_or(body);
+    // The body's one parse: it decides whether either rewrite applies and is the rewrite's input.
+    let mut request: Value = serde_json::from_slice(body).map_err(|e| format!("request body is not JSON: {e}"))?;
+    let wants_usage = rest == "/v1/chat/completions"
+        && request.get("stream").and_then(Value::as_bool) == Some(true)
+        && request
+            .get("stream_options")
+            .and_then(|options| options.get("include_usage"))
+            .and_then(Value::as_bool)
+            != Some(true);
+    if policy.is_none() && !wants_usage {
+        return Ok(body.to_vec());
+    }
+    let object = request.as_object_mut().ok_or("request body is not a JSON object")?;
+    if wants_usage {
+        match object.get_mut("stream_options") {
+            Some(options @ Value::Object(_)) => {
+                options["include_usage"] = json!(true);
+            }
+            _ => {
+                object.insert("stream_options".into(), json!({"include_usage": true}));
+            }
+        }
+    }
+    serde_json::to_vec(&request).map_err(|e| e.to_string())
 }
 
 /// The provider's credential header, if it has one.
@@ -1136,17 +1256,18 @@ fn micro_usd(usd: f64) -> u64 {
 /// What one request is estimated to spend, so its cost can be reserved before dispatch. Intentionally
 /// approximate (issue #409): the estimate bounds how far a burst of parallel requests can overshoot
 /// the budget before any of them records its real cost, and is never billed. The output side reads
-/// the request's own `max_tokens` — `max_completion_tokens` in OpenAI's spelling — falling back to
-/// [`ESTIMATED_MAX_TOKENS`] when it names neither or is not JSON; the input side is the body's bytes
-/// over four, the usual tokens-per-byte rule of thumb. A provider without pricing estimates at $0,
-/// exactly what recording it would cost. This being the body's one parse, the requested model rides
-/// along for the audit record — which only ever names a model the model-id validator passed, never
-/// raw body text.
+/// the request's own `max_tokens` — `max_completion_tokens` in Chat Completions' spelling,
+/// `max_output_tokens` in Responses' — falling back to [`ESTIMATED_MAX_TOKENS`] when it names neither
+/// or is not JSON; the input side is the body's bytes over four, the usual tokens-per-byte rule of
+/// thumb. A provider without pricing estimates at $0, exactly what recording it would cost. This
+/// being the body's one parse, the requested model rides along for the audit record — which only ever
+/// names a model the model-id validator passed, never raw body text.
 fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<String>) {
     let request: Value = serde_json::from_slice(body).unwrap_or_default();
     let output_tokens = request
         .get("max_tokens")
         .or_else(|| request.get("max_completion_tokens"))
+        .or_else(|| request.get("max_output_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(ESTIMATED_MAX_TOKENS);
     let model = request["model"]
@@ -1164,6 +1285,19 @@ fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<
     )
 }
 
+/// A colony token from `Authorization: Bearer <token>`: the same secret, in the form an OpenAI-wire
+/// runner sends by default. Not the scheme Claude Code uses, but the comparison is the same
+/// constant-time one [`Gateway::colony_for_token`] applies to either form.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix(BEARER_PREFIX)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
 async fn proxy(
     State(app): State<Shared>,
     Path((id, _)): Path<(String, String)>,
@@ -1172,7 +1306,15 @@ async fn proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let token = headers.get(COLONY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    // The colony token arrives as `x-colonizer-colony` — the header every runner is configured with —
+    // or as a plain `Authorization: Bearer` for one that speaks ordinary HTTP auth (issue #629). The
+    // gateway's own header keeps precedence, and neither credential is ever forwarded upstream: the
+    // outgoing headers are built from scratch below, carrying only the provider's own key.
+    let token = headers
+        .get(COLONY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| bearer_token(&headers))
+        .unwrap_or_default();
     let Some(session) = app.colony_for_token(token).await else {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -1333,18 +1475,23 @@ async fn proxy(
             }
         }
     };
-    // Everything that can refuse the request happens here, before it waits for a slot. The anthropic wire
-    // never parses the body; the openai wire has to rebuild it.
-    let (url, upstream_headers, body, translation) = match provider.wire {
+    // Everything that can refuse the request happens here, before it waits for a slot. The anthropic
+    // wire never parses the body; the openai wire either passes its own routes through (rewriting only
+    // the model) or rebuilds an Anthropic body into Chat Completions. Either wire's refusal of a body
+    // it cannot forward reads the same.
+    let bad_request = |message: String| -> Response {
+        audit.fail(StatusCode::BAD_REQUEST.as_u16(), GatewayFailure::BadRequest);
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            format!("colonizer gateway: {message}"),
+            None,
+        )
+    };
+    let (url, upstream_headers, body, routed) = match provider.wire {
         Wire::Anthropic => {
             let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
-                audit.fail(StatusCode::BAD_REQUEST.as_u16(), GatewayFailure::BadRequest);
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request_error",
-                    "colonizer gateway: unsupported path",
-                    None,
-                );
+                return bad_request("unsupported path".into());
             };
             // Preemptive, not a retry: the provider's quirks say which fields its dialect rejects, so a
             // request carrying them is rewritten once, up front, and the rewrite is logged with the field
@@ -1368,7 +1515,36 @@ async fn proxy(
             // Normalization rewrites fields, never the model: what goes out is the requested model,
             // or the connection policy's mapped name for it.
             audit.set_wire_model(wire_model);
-            (url, forward_headers(&headers, credential_header(&app, &provider)), body, None)
+            (
+                url,
+                forward_headers(&headers, credential_header(&app, &provider)),
+                body,
+                Routed::Anthropic,
+            )
+        }
+        // A runner speaking the OpenAI wire itself (issue #629) posts one of the provider's own routes
+        // and gets it forwarded as sent — only the model_map rename and, for a streaming chat
+        // completion, the usage request are applied.
+        Wire::Openai if method == Method::POST && matches!(rest, "/v1/responses" | "/v1/chat/completions") => {
+            let Some(url) = upstream_url(&provider.base_url, rest, uri.query()) else {
+                return bad_request("unsupported path".into());
+            };
+            let body = match openai_passthrough_body(rest, &body, &provider) {
+                Ok(body) => Bytes::from(body),
+                Err(message) => return bad_request(message),
+            };
+            // The audit's wire model reads back from the rewritten body — validator applied, like the
+            // translated route's.
+            let wire_model = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|v| v["model"].as_str().filter(|m| valid_model(m)).map(str::to_string));
+            audit.set_wire_model(wire_model);
+            let mut upstream_headers = HeaderMap::new();
+            upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
+            if let Some((name, value)) = credential_header(&app, &provider) {
+                upstream_headers.insert(name, value);
+            }
+            (url, upstream_headers, body, Routed::Openai)
         }
         Wire::Openai => {
             // 404 is also what tells the colony router to estimate `count_tokens` itself.
@@ -1386,28 +1562,18 @@ async fn proxy(
             let body = apply_connection_policy(&body, &provider).map(Bytes::from).unwrap_or(body);
             let (body, info) = match openai::translate_request(&body) {
                 Ok(translated) => translated,
-                Err(message) => {
-                    audit.fail(StatusCode::BAD_REQUEST.as_u16(), GatewayFailure::BadRequest);
-                    return api_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_request_error",
-                        format!("colonizer gateway: {message}"),
-                        None,
-                    );
-                }
+                Err(message) => return bad_request(message),
             };
             audit.set_wire_model(valid_model(&info.model).then(|| info.model.clone()));
+            let Some(url) = upstream_url(&provider.base_url, path, None) else {
+                return bad_request("unsupported path".into());
+            };
             let mut upstream_headers = HeaderMap::new();
             upstream_headers.insert("content-type", HeaderValue::from_static("application/json"));
             if let Some((name, value)) = credential_header(&app, &provider) {
                 upstream_headers.insert(name, value);
             }
-            (
-                format!("{}{path}", provider.base_url.trim_end_matches('/')),
-                upstream_headers,
-                Bytes::from(body),
-                Some(info),
-            )
+            (url, upstream_headers, Bytes::from(body), Routed::Translated(info))
         }
     };
 
@@ -1484,28 +1650,32 @@ async fn proxy(
     // streamed response; the spend reservation deliberately lives longer, inside the recorder,
     // until the real cost has replaced the estimate.
     let guards = (busy, in_flight, permit, timed);
-    if let Some(info) = translation {
-        let record = usage_recorder(&app, &colony, &provider, reservation);
-        // The fallback is decided here, where the provider's `fallback_model` is in reach: set means
-        // quota failover is on for this role, unset opts it out, and the env opts out globally.
-        let quota_fallback =
-            provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
-        return openai_response(
-            upstream,
-            guards,
-            usage,
-            record,
-            timeout,
-            &info,
-            &app.gateway,
-            &provider,
-            quota_fallback,
-            &id,
-            Some((&app, &colony)),
-            Some(audit),
-        )
-        .await;
-    }
+    let shape = match routed {
+        Routed::Translated(info) => {
+            let record = usage_recorder(&app, &colony, &provider, reservation);
+            // The fallback is decided here, where the provider's `fallback_model` is in reach: set means
+            // quota failover is on for this role, unset opts it out, and the env opts out globally.
+            let quota_fallback =
+                provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
+            return openai_response(
+                upstream,
+                guards,
+                usage,
+                record,
+                timeout,
+                &info,
+                &app.gateway,
+                &provider,
+                quota_fallback,
+                &id,
+                Some((&app, &colony)),
+                Some(audit),
+            )
+            .await;
+        }
+        Routed::Anthropic => Shape::Anthropic,
+        Routed::Openai => Shape::Openai,
+    };
 
     let status = upstream.status();
     if status.as_u16() >= 400 {
@@ -1530,13 +1700,13 @@ async fn proxy(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.contains("text/event-stream"));
-    // The body forwards exactly as upstream sent it; the tap only watches a private copy for usage.
-    // The audit rides in the body: its line lands when the body ends (or is dropped), so the record
-    // counts the whole streamed response.
+    // The body forwards exactly as upstream sent it; the tap only watches a private copy for usage,
+    // reading the wire the request rode in on. The audit rides in the body: its line lands when the
+    // body ends (or is dropped), so the record counts the whole streamed response.
     audit.set_status(status.as_u16());
     let body = counted_body(
         stream_body(upstream.bytes_stream(), guards, timeout, is_sse),
-        UsageTap::anthropic(is_sse),
+        UsageTap::new(shape, is_sse),
         Some(usage_recorder(&app, &colony, &provider, reservation)),
         Some(audit),
     );
@@ -1546,8 +1716,9 @@ async fn proxy(
     response
 }
 
-/// An `anthropic`-wire provider's error, buffered whole: error bodies are small and terminal, and
-/// only a buffered error can be classified before answering. The body forwards verbatim; a quota
+/// A passthrough response's error, buffered whole: error bodies are small and terminal, and
+/// only a buffered error can be classified before answering. The body forwards verbatim — an
+/// OpenAI-wire route's error stays OpenAI-shaped, no Anthropic wrapping; a quota
 /// hit additionally records the provider as exhausted and names it in headers, offering the Claude
 /// fallback exactly when the provider has a `fallback_model` (unset is the per-role opt-out) and
 /// `COLONIZER_QUOTA_FALLBACK` keeps failover on.
@@ -1880,7 +2051,7 @@ async fn models_probe(app: &App, provider: &Provider) -> Value {
     let mut request = app
         .gateway
         .client
-        .get(format!("{}/v1/models", provider.base_url.trim_end_matches('/')))
+        .get(upstream_url(&provider.base_url, "/v1/models", None).expect("the probe path is clean"))
         .timeout(HEALTH_TIMEOUT);
     if let Some((name, value)) = credential_header(app, provider) {
         request = request.header(name, value);
@@ -2008,6 +2179,16 @@ mod tests {
         assert_eq!(
             upstream_url("http://100.80.225.14:8000", "/v1/models", None).as_deref(),
             Some("http://100.80.225.14:8000/v1/models")
+        );
+        // A base_url that already ends in /v1 (xai-grok's is https://api.x.ai/v1) must not grow a
+        // second one: the gateway drops the guest path's repeat.
+        assert_eq!(
+            upstream_url("https://api.x.ai/v1", "/v1/chat/completions", None).as_deref(),
+            Some("https://api.x.ai/v1/chat/completions")
+        );
+        assert_eq!(
+            upstream_url("https://api.x.ai/v1/", "/v1/responses", None).as_deref(),
+            Some("https://api.x.ai/v1/responses")
         );
         assert!(upstream_url("http://h", "/v1/../admin", None).is_none());
         assert!(upstream_url("http://h", "/v1/%2e%2e/admin", None).is_none());
@@ -2303,19 +2484,65 @@ mod tests {
         headers
     }
 
-    /// POSTs `body` to `provider` on the gateway as a colony carrying `token` and `credentials`.
-    async fn post_to_gateway(app: &Shared, token: &str, provider: &str, credentials: HeaderMap, body: Bytes) -> Response {
+    /// POSTs `body` to `provider` + `rest` on the gateway as a colony carrying `token` and `credentials`.
+    async fn post_to_path(
+        app: &Shared,
+        token: &str,
+        provider: &str,
+        rest: &str,
+        credentials: HeaderMap,
+        body: Bytes,
+    ) -> Response {
         let mut headers = credentials;
         headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
         proxy(
             State(app.clone()),
-            Path((provider.to_string(), "v1/messages".into())),
+            Path((provider.to_string(), rest.trim_start_matches('/').into())),
             Method::POST,
-            format!("/providers/{provider}/v1/messages").parse().unwrap(),
+            format!("/providers/{provider}{rest}").parse().unwrap(),
             headers,
             body,
         )
         .await
+    }
+
+    /// POSTs `body` to `provider` on the gateway as a colony carrying `token` and `credentials`.
+    async fn post_to_gateway(app: &Shared, token: &str, provider: &str, credentials: HeaderMap, body: Bytes) -> Response {
+        post_to_path(app, token, provider, "/v1/messages", credentials, body).await
+    }
+
+    /// Serves one POST route that captures every request's headers and body and answers `status`
+    /// with `content_type` and `body` exactly as given — the raw upstream a passthrough test needs,
+    /// where [`capturing_upstream`]'s JSON answer cannot carry an SSE stream or a byte-exact check.
+    /// Returns the base URL and the last request's headers and body.
+    async fn raw_upstream(
+        path: &'static str,
+        status: StatusCode,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (String, Arc<Mutex<(HeaderMap, Bytes)>>) {
+        let seen = Arc::new(Mutex::new((HeaderMap::new(), Bytes::new())));
+        let capture = seen.clone();
+        let answer = Bytes::from_static(body.as_bytes());
+        let router = Router::new().route(
+            path,
+            axum::routing::post(move |headers: HeaderMap, request: Bytes| {
+                let capture = capture.clone();
+                let answer = answer.clone();
+                async move {
+                    *capture.lock().unwrap() = (headers, request);
+                    (
+                        status,
+                        [(axum::http::header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+                        answer,
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), seen)
     }
 
     /// A forwarded 2xx leaves one audit line per request carrying the outcome and the usage, and
@@ -2467,6 +2694,444 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["model"], "claude-sonnet-5", "the requested model");
         assert_eq!(lines[0]["wire_model"], "deepseek-v4-pro", "the model_map's wire name");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An OpenAI-wire route a colony speaks itself — `POST /v1/responses` (issue #629) — is
+    /// forwarded byte-for-byte, and accounting reads the Responses usage spelling: cached input
+    /// comes out of the input side, reasoning rides along as thinking. The spend lands on the
+    /// colony like any routed request, and the colony's own credentials stop at the gateway.
+    #[tokio::test]
+    async fn a_responses_passthrough_forwards_verbatim_and_records_the_usage() {
+        const ANSWER: &str = r#"{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5",
+"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],
+"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14,
+"input_tokens_details":{"cached_tokens":4},"output_tokens_details":{"reasoning_tokens":2}}}"#;
+        let (base, seen) = raw_upstream("/v1/responses", StatusCode::OK, "application/json", ANSWER).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-passthrough-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix"],
+            json!([{"id": "strix", "name": "Strix", "base_url": base, "auth": "none", "wire": "openai",
+                    "pricing": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}}]),
+        )
+        .await;
+        let request = Bytes::from_static(
+            br#"{"model":"gpt-5.5","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":16}"#,
+        );
+        let response = post_to_path(
+            &app,
+            &token,
+            "strix",
+            "/v1/responses",
+            placeholder_credentials(),
+            request.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            forwarded,
+            Bytes::from_static(ANSWER.as_bytes()),
+            "forwarded exactly as upstream sent it"
+        );
+
+        let (upstream_headers, upstream_body) = seen.lock().unwrap().clone();
+        assert_eq!(upstream_body, request, "the body forwards as the colony sent it");
+        assert!(
+            upstream_headers.get("x-api-key").is_none(),
+            "no x-api-key may reach the upstream"
+        );
+        assert!(
+            upstream_headers.get(axum::http::header::AUTHORIZATION).is_none(),
+            "no bearer may reach the upstream"
+        );
+
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["wire"], "openai");
+        assert_eq!(lines[0]["path"], "/v1/responses");
+        assert_eq!(lines[0]["model"], "gpt-5.5");
+        assert_eq!(lines[0]["wire_model"], "gpt-5.5");
+        assert_eq!(lines[0]["status"], 200);
+        assert_eq!(lines[0]["input_tokens"], 6, "10 input minus the 4 that were cached");
+        assert_eq!(lines[0]["output_tokens"], 4);
+
+        let mut recorded = None;
+        for _ in 0..1000 {
+            if let Some(cost) = app.session("c1").await.and_then(|s| s.routed_cost_usd) {
+                recorded = Some(cost);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            recorded.is_some_and(|cost| cost > 0.0),
+            "the passthrough usage was priced and recorded"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `POST /v1/chat/completions` is the same passthrough in Chat Completions' spelling, with one
+    /// rewrite each way: the connection policy's `model_map` renames the model on the way out (#295),
+    /// and a streaming request is asked for usage the colony did not ask for, because without
+    /// `stream_options.include_usage` the final chunk carries none and accounting counts nothing.
+    #[tokio::test]
+    async fn a_chat_passthrough_maps_the_model_and_counts_the_usage() {
+        const ANSWER: &str = r#"{"id":"cpl_1","object":"chat.completion","created":1,"model":"gpt-5.5-route",
+"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],
+"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12,
+"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":1}}}"#;
+        let (base, seen) = raw_upstream("/v1/chat/completions", StatusCode::OK, "application/json", ANSWER).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-chat-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["kimi"],
+            json!([{"id": "kimi", "name": "Kimi", "base_url": base, "auth": "none", "wire": "openai",
+                    "model_map": {"gpt-5.5": "gpt-5.5-route"}}]),
+        )
+        .await;
+        let request =
+            Bytes::from_static(br#"{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":16}"#);
+        let response = post_to_path(
+            &app,
+            &token,
+            "kimi",
+            "/v1/chat/completions",
+            placeholder_credentials(),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            forwarded,
+            Bytes::from_static(ANSWER.as_bytes()),
+            "forwarded exactly as upstream sent it"
+        );
+
+        let (_, upstream_body): (HeaderMap, Bytes) = seen.lock().unwrap().clone();
+        let sent: Value = serde_json::from_slice(&upstream_body).unwrap();
+        assert_eq!(sent["model"], "gpt-5.5-route", "the model_map's wire name");
+        assert_eq!(
+            sent["messages"],
+            json!([{"role": "user", "content": "hi"}]),
+            "the rest forwards untouched"
+        );
+
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["path"], "/v1/chat/completions");
+        assert_eq!(lines[0]["model"], "gpt-5.5", "what the colony asked for");
+        assert_eq!(lines[0]["wire_model"], "gpt-5.5-route", "what went upstream");
+        assert_eq!(lines[0]["input_tokens"], 4, "7 prompt tokens minus the 3 that were cached");
+        assert_eq!(lines[0]["output_tokens"], 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A passthrough stream is counted from the usage its final event carries and forwarded untouched:
+    /// Responses names it on `response.completed`, a chat completion on the last chunk. The chat
+    /// request went out with `stream_options.include_usage` added, or that last chunk would carry
+    /// none. (The gateway's own keep-alive pings stay comments, which no event parser reads.)
+    #[tokio::test]
+    async fn a_passthrough_stream_counts_the_usage_its_final_event_carries() {
+        const RESPONSES_SSE: &str = "\
+event: response.created
+data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}
+
+event: response.output_text.delta
+data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}
+
+event: response.completed
+data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"usage\":{\"input_tokens\":10,\"output_tokens\":4,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens_details\":{\"reasoning_tokens\":2}}}}
+
+";
+        const CHAT_SSE: &str = "\
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}
+
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}
+
+data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"gpt-5.5\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":5,\"total_tokens\":12}}
+
+data: [DONE]
+
+";
+        let (responses_base, responses_seen) =
+            raw_upstream("/v1/responses", StatusCode::OK, "text/event-stream", RESPONSES_SSE).await;
+        let (chat_base, chat_seen) = raw_upstream("/v1/chat/completions", StatusCode::OK, "text/event-stream", CHAT_SSE).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-passthrough-sse-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix", "kimi"],
+            json!([
+                {"id": "strix", "name": "Strix", "base_url": responses_base, "auth": "none", "wire": "openai"},
+                {"id": "kimi", "name": "Kimi", "base_url": chat_base, "auth": "none", "wire": "openai"},
+            ]),
+        )
+        .await;
+
+        let response = post_to_path(
+            &app,
+            &token,
+            "strix",
+            "/v1/responses",
+            placeholder_credentials(),
+            Bytes::from_static(br#"{"model":"gpt-5.5","input":"hi","stream":true}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            forwarded,
+            Bytes::from_static(RESPONSES_SSE.as_bytes()),
+            "every event byte kept"
+        );
+
+        let response = post_to_path(
+            &app,
+            &token,
+            "kimi",
+            "/v1/chat/completions",
+            placeholder_credentials(),
+            Bytes::from_static(br#"{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let forwarded = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(forwarded, Bytes::from_static(CHAT_SSE.as_bytes()), "every chunk byte kept");
+        let (_, chat_body): (HeaderMap, Bytes) = chat_seen.lock().unwrap().clone();
+        let sent: Value = serde_json::from_slice(&chat_body).unwrap();
+        assert_eq!(
+            sent["stream_options"],
+            json!({"include_usage": true}),
+            "usage requested on the colony's behalf"
+        );
+        let (_, responses_body): (HeaderMap, Bytes) = responses_seen.lock().unwrap().clone();
+        let responses_request: Value = serde_json::from_slice(&responses_body).unwrap();
+        assert!(
+            responses_request.get("stream_options").is_none(),
+            "the Responses API has no stream_options; the injection is chat-only"
+        );
+
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["path"], "/v1/responses");
+        assert_eq!(lines[0]["input_tokens"], 6, "10 input minus the 4 that were cached");
+        assert_eq!(lines[0]["output_tokens"], 4);
+        assert_eq!(lines[1]["path"], "/v1/chat/completions");
+        assert_eq!(lines[1]["input_tokens"], 7);
+        assert_eq!(lines[1]["output_tokens"], 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The colony token also arrives as `Authorization: Bearer` — what a runner speaking the
+    /// OpenAI wire sends by default (issue #629). The same constant-time compare accepts it, a wrong
+    /// one is refused like an unknown gateway header, the gateway's own header keeps precedence when
+    /// a request carries both, and the colony's authorization never reaches the upstream.
+    #[tokio::test]
+    async fn the_colony_token_is_accepted_as_a_bearer_and_never_forwarded() {
+        const ANSWER: &str = r#"{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.5",
+"output":[],"usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let (base, seen) = raw_upstream("/v1/responses", StatusCode::OK, "application/json", ANSWER).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-bearer-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix"],
+            json!([{"id": "strix", "name": "Strix", "base_url": base, "auth": "none", "wire": "openai"}]),
+        )
+        .await;
+        let request = Bytes::from_static(br#"{"model":"gpt-5.5","input":"hi"}"#);
+
+        /// POSTs to strix `/v1/responses` carrying only `Authorization: Bearer <token>` — no gateway
+        /// header, the way an OpenAI-wire runner authenticates.
+        async fn post_as_bearer(app: &Shared, token: &str, body: Bytes) -> Response {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                axum::http::header::AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+            proxy(
+                State(app.clone()),
+                Path(("strix".into(), "v1/responses".into())),
+                Method::POST,
+                "/providers/strix/v1/responses".parse().unwrap(),
+                headers,
+                body,
+            )
+            .await
+        }
+
+        let response = post_as_bearer(&app, &token, request.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK, "a bearer alone authenticates");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        let response = post_as_bearer(&app, "not-a-colony", request.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "a wrong bearer is an unknown token"
+        );
+        assert_eq!(audit_lines(&app, "c1").len(), 1, "an unknown token leaves no line");
+
+        let mut bogus = HeaderMap::new();
+        bogus.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer not-a-colony"),
+        );
+        let response = post_to_path(&app, &token, "strix", "/v1/responses", bogus, request).await;
+        assert_eq!(response.status(), StatusCode::OK, "the gateway header outranks the bearer");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        let (upstream_headers, _) = seen.lock().unwrap().clone();
+        assert!(
+            upstream_headers.get(axum::http::header::AUTHORIZATION).is_none(),
+            "the colony's bearer stops at the gateway"
+        );
+        assert_eq!(audit_lines(&app, "c1").len(), 2, "one line per authenticated request");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Everything else on an OpenAI-wire provider still 404s: the gateway serves the translated
+    /// `/v1/messages` and the two passthrough routes, and no other path or method reaches upstream.
+    #[tokio::test]
+    async fn an_openai_wire_route_the_provider_does_not_serve_is_a_404() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-passthrough-404-{}", uuid::Uuid::new_v4()));
+        // Port 9 (discard) is never reached: nothing may be sent upstream.
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix"],
+            json!([{"id": "strix", "name": "Strix", "base_url": "http://127.0.0.1:9", "auth": "none", "wire": "openai"}]),
+        )
+        .await;
+        let request = Bytes::from_static(br#"{"model":"gpt-5.5","input":"hi"}"#);
+
+        let response = post_to_path(
+            &app,
+            &token,
+            "strix",
+            "/v1/embeddings",
+            placeholder_credentials(),
+            request.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "not_found_error");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COLONY_HEADER, HeaderValue::from_str(&token).unwrap());
+        let response = proxy(
+            State(app.clone()),
+            Path(("strix".into(), "v1/responses".into())),
+            Method::GET,
+            "/providers/strix/v1/responses".parse().unwrap(),
+            headers,
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "a GET is not the passthrough");
+        assert_eq!(audit_lines(&app, "c1").len(), 2, "each refusal leaves its line");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The openai-wire presets store their `/v1` in the base_url (xai-grok's is `https://api.x.ai/v1`,
+    /// issue #629). The join must not grow a second one: the translated `/v1/messages` and both
+    /// passthrough routes land just below the base's `/v1`, where the upstream actually listens —
+    /// against a repeated `/v1/v1` both mocks would never have been reached.
+    #[tokio::test]
+    async fn a_base_url_that_already_ends_in_v1_does_not_grow_a_second_one() {
+        const ANSWER: &str = r#"{"id":"cpl_1","object":"chat.completion","created":1,"model":"m",
+"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],
+"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+        let (responses_base, responses_seen) = raw_upstream("/v1/responses", StatusCode::OK, "application/json", ANSWER).await;
+        let (chat_base, chat_seen) = raw_upstream("/v1/chat/completions", StatusCode::OK, "application/json", ANSWER).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-v1-base-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix", "kimi"],
+            json!([
+                {"id": "strix", "name": "Strix", "base_url": format!("{responses_base}/v1"), "auth": "none", "wire": "openai"},
+                {"id": "kimi", "name": "Kimi", "base_url": format!("{chat_base}/v1"), "auth": "none", "wire": "openai"}
+            ]),
+        )
+        .await;
+
+        let request = Bytes::from_static(br#"{"model":"m","input":"hi"}"#);
+        let response = post_to_path(&app, &token, "strix", "/v1/responses", placeholder_credentials(), request).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the passthrough landed below the base's /v1"
+        );
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let (_, upstream_body): (HeaderMap, Bytes) = responses_seen.lock().unwrap().clone();
+        let sent: Value = serde_json::from_slice(&upstream_body).unwrap();
+        assert_eq!(sent["model"], "m");
+
+        let request = Bytes::from_static(br#"{"model":"m","messages":[{"role":"user","content":"hi"}],"max_tokens":16}"#);
+        let response = post_to_gateway(&app, &token, "kimi", placeholder_credentials(), request).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "the translated join skipped the repeated /v1"
+        );
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let (_, upstream_body): (HeaderMap, Bytes) = chat_seen.lock().unwrap().clone();
+        let sent: Value = serde_json::from_slice(&upstream_body).unwrap();
+        assert_eq!(sent["model"], "m", "the model rides along");
+        assert_eq!(sent["max_completion_tokens"], 16, "anthropic's max_tokens on the openai wire");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The budget and its in-flight reservation gate a passthrough like any other request: a
+    /// request whose estimate would tip the colony past its cap is refused before dispatch, so a
+    /// burst of `/v1/responses` POSTs cannot spend past the cap either.
+    #[tokio::test]
+    async fn a_passthrough_request_still_honors_the_budget() {
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-passthrough-budget-{}", uuid::Uuid::new_v4()));
+        // Port 9 (discard) is never reached: the request is refused before dispatch.
+        let (app, token) = colony_with_providers(
+            &root,
+            &["strix"],
+            json!([{
+                "id": "strix", "name": "Strix", "base_url": "http://127.0.0.1:9", "auth": "none", "wire": "openai",
+                "pricing": {"input_per_mtok": 1.0, "output_per_mtok": 1.0}
+            }]),
+        )
+        .await;
+        let provider = Provider {
+            base_url: "http://127.0.0.1:9".into(),
+            wire: crate::providers::Wire::Openai,
+            pricing: Some(crate::providers::Pricing {
+                input_per_mtok: 1.0,
+                output_per_mtok: 1.0,
+                ..Default::default()
+            }),
+            ..provider("strix", None)
+        };
+        let body = Bytes::from_static(br#"{"model":"gpt-5.5","input":"hi","max_output_tokens":3000}"#);
+        let budget = estimate_request_cost_usd(&provider, &body).0 * 0.5;
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("budget_usd".into(), json!(budget));
+
+        let response = post_to_path(&app, &token, "strix", "/v1/responses", HeaderMap::new(), body).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let refused: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("budget"), "names the budget: {message}");
+        assert_eq!(
+            app.gateway.usage_counters("strix").snapshot().requests,
+            0,
+            "refused locally, so nothing counts as provider usage"
+        );
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "budget");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2695,9 +3360,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// The estimate reads the request's own `max_tokens` (OpenAI's `max_completion_tokens` too) and
-    /// falls back to the documented constant when the body names neither, is not JSON, or the provider
-    /// carries no pricing at all — which estimates, like it records, at nothing (issue #409).
+    /// The estimate reads the request's own `max_tokens` (`max_completion_tokens` and the Responses
+    /// passthrough's `max_output_tokens` too) and falls back to the documented constant when the body
+    /// names none of them, is not JSON, or the provider carries no pricing at all — which estimates,
+    /// like it records, at nothing (issue #409).
     #[test]
     fn cost_estimates_read_the_requests_own_cap_and_fall_back_without_one() {
         let priced = Provider {
@@ -2720,6 +3386,11 @@ mod tests {
         assert!(
             (estimate_request_cost_usd(&priced, &openai).0 - expected(&openai, 500)).abs() < 1e-12,
             "the OpenAI spelling of the same cap is read too"
+        );
+        let responses = Bytes::from(r#"{"model":"gpt-5.5","max_output_tokens":800,"input":"hi"}"#);
+        assert!(
+            (estimate_request_cost_usd(&priced, &responses).0 - expected(&responses, 800)).abs() < 1e-12,
+            "the Responses passthrough's spelling is read too"
         );
 
         // No cap named, or not JSON at all: the documented fallback bounds the output side.
@@ -4040,7 +4711,7 @@ mod tests {
         let sink = seen.clone();
         let body = counted_body(
             futures_util::stream::iter(chunks),
-            UsageTap::anthropic(is_sse),
+            UsageTap::new(Shape::Anthropic, is_sse),
             Some(Box::new(move |usage| *sink.lock().unwrap() = Some(usage))),
             None,
         );

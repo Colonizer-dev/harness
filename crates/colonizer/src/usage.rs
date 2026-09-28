@@ -969,6 +969,7 @@ mod tests {
             egress: None,
             resume_dir: None,
             loop_tools: false,
+            vendor_secrets: Vec::new(),
         }
     }
 

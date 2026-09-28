@@ -1094,6 +1094,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec!["api.typesafe.ai".into()],
         });
     }
+    // Vendor keys (issue #629): a module whose manifest declares a vendor host gets the gateway
+    // provider's stored key for that vendor — else the mothership's own env — pushed under the env
+    // names and hosts the manifest names. Nothing configured is silent: the module runs without a
+    // key, which is not a boot failure. A colony secret naming the same env keeps its own value.
+    let taken = colony_secrets.iter().map(|(meta, _)| meta.env.clone()).collect::<Vec<_>>();
+    secrets.extend(crate::modules::vendor_boot_secrets(
+        &agent,
+        &|id| app.provider_key(id),
+        &|name| std::env::var(name).ok(),
+        &taken,
+    ));
     if !colony_secrets.is_empty() {
         log.info(format!(
             "colony secrets: {}",
