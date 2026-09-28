@@ -60,6 +60,7 @@ import {
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
 import { RemoteAccessPane } from "./RemoteAccessPane";
+import { TokensPane } from "./TokensPane";
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
@@ -74,7 +75,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -374,6 +375,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "tokens",
+          label: "API tokens",
+          hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
+        },
+        {
           id: "updates",
           label: "Updates",
           hint: "Which Colonizer this is, and whether a newer one is out",
@@ -533,6 +539,7 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
