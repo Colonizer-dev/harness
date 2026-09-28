@@ -16,6 +16,9 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
   the repository picked there that runs every hour. The interval takes `m`, `h` or `d`. `/loop 14d …`
   runs every 14 days at the current time of day: a whole-day interval past a week becomes an
   every-N-days cadence (up to 365 days). `/loop <task>` without an interval is self-paced.
+- **The CLI**: `colonizer loop create acme/app --name "Triage" --prompt "Triage new issues"
+  daily@09:00`, with `loop list`, `run`, `stop`, `start` and `delete` beside it — the grammar is in
+  [cli.md](cli.md#loops).
 - **The Map view** offers a map-refresh loop once a repository has a map ([Map refresh](#map-refresh)).
 
 An end date (`end_at`) can be set through the API; the cockpit's form keeps one that is already set
