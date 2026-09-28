@@ -233,6 +233,13 @@ jobs:
       - name: Test
         run: npm test
 
+      # Validates wrangler.toml and the bundle without touching Cloudflare: a malformed config
+      # (e.g. `[[durable_objects]]` where wrangler wants a table) fails here, not at deploy time.
+      - name: Wrangler config (dry run)
+        run: |
+          npm ci
+          npx --no-install wrangler deploy --dry-run --outdir "$RUNNER_TEMP/relay-dry"
+
   web:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
