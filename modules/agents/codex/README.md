@@ -29,9 +29,12 @@ whose values are JSON and therefore valid TOML): `mcp.mjs`, a dependency-free st
 runner points at a loopback HTTP bridge held for the colony's life. `wait` (block instead of
 polling; the server's `tool_timeout_sec` is raised to 3600 so a wait can run to its 1800 s cap) and
 `memory_search` run inside the server; `finding_file` and `memory_propose` cross the bridge and
-leave the colony as `finding` and `memory_proposal` events. The tool list follows the same switches
-as the other modules: findings only under `COLONIZER_FINDINGS=true`, memory only when
-`COLONIZER_MEMORY_DIR` is mounted, `wait` always.
+leave the colony as `finding` and `memory_proposal` events, and so do a loop colony's pacing tools:
+`loop_next` (the next run's delay in minutes, clamped to 15–1440 like the mothership clamps it) and
+`loop_stop`. The tool list follows the same switches as the other modules: findings only under
+`COLONIZER_FINDINGS=true`, memory only when `COLONIZER_MEMORY_DIR` is mounted, the loop tools only
+under `COLONIZER_LOOP=true` — `loop_next` additionally when `COLONIZER_LOOP_SELF_PACED=true` — and
+`wait` always.
 
 ## Headless, not app-server
 
@@ -80,7 +83,7 @@ The microVM is the boundary. Inside it:
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
 | Colony-disabled tools | **per setting** | the `disabled_tools` setting: `shell`, `web_search` and `view_image` become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, passed with `--strict-config` (an exec flag) so a key codex stops recognising fails the turn loudly; `apply_patch` and MCP tools have no switch |
 | Host config / OAuth token | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): these live under it; `BROWSER=/bin/false` as belt-and-braces |
-| Colonizer MCP tools | **on** | `-c mcp_servers.colonizer.*` overrides registering `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
+| Colonizer MCP tools | **on** | `-c mcp_servers.colonizer.*` overrides registering `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module, the loop tools on `COLONIZER_LOOP`/`COLONIZER_LOOP_SELF_PACED` (above, "The colonizer MCP server") |
 
 The model setting (`COLONIZER_MODEL`) is passed as `-m <model>` when set, as `openai/<model>` or a
 bare model id; **empty (the default) passes no `-m`, so Codex runs on the CLI's own default model**
@@ -93,8 +96,8 @@ background-worker split.
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-codex.mjs`, a stub codex CLI that records the argv,
 stdin prompt and env it received, and — when a test scripts `CODEX_FAKE_MCP_CALLS` — plays the
-model against the registered colonizer MCP server, so findings, memory and wait are tested end to
-end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The happy path's events are checked against the
+model against the registered colonizer MCP server, so findings, memory, the loop tools and wait are
+tested end to end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The happy path's events are checked against the
 required fields of `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
 
 ## What is not supported yet

@@ -968,6 +968,7 @@ mod tests {
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 

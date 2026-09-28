@@ -51,6 +51,10 @@ pub struct AgentModule {
     /// cannot). The harness mounts a host directory over the path so transcripts survive a stopped
     /// microVM, and a suspended colony's answer resumes the same agent session (issue #562).
     pub resume_dir: Option<String>,
+    /// Whether the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643),
+    /// declared as `"loop_tools": true` in the manifest. A loop's brief only names the tools when
+    /// the module it launches on declares them.
+    pub loop_tools: bool,
 }
 
 /// The manifest's `requires` declaration (issue #633): the binaries a colony needs on its `PATH`,
@@ -378,6 +382,12 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
                 .to_string(),
         ),
     };
+    // A loop-tools flag that is anything but a boolean would quietly strip a loop's colony of the
+    // tools its brief goes on to promise, so name the manifest problem now.
+    let loop_tools = match manifest.get("loop_tools") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("\"loop_tools\" must be a boolean")?,
+    };
     // A declared egress omitting a host its secrets are for would have the allowlist (#304) break
     // the requests those secrets authenticate; with no section, nothing is held to this.
     if let Some(egress) = &egress {
@@ -403,6 +413,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         requires,
         egress,
         resume_dir,
+        loop_tools,
     })
 }
 
@@ -422,6 +433,8 @@ pub struct Provider {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// Agent kind only: whether the module's runner serves the loop tools (`loop_tools`, #643).
+    pub loop_tools: bool,
 }
 
 pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
@@ -430,6 +443,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         name: name.into(),
         description: description.into(),
         schema,
+        loop_tools: false,
     };
     match kind {
         "source" => vec![p(
@@ -519,7 +533,13 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         ],
         "agent" => agents
             .iter()
-            .map(|a| p(&a.id, &a.name, &a.description, a.schema.clone()))
+            .map(|a| Provider {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                description: a.description.clone(),
+                schema: a.schema.clone(),
+                loop_tools: a.loop_tools,
+            })
             .collect(),
         "interfaces" => vec![p(
             "default",
@@ -672,7 +692,14 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, app: &App) -> Value {
         "kind": kind,
         "provider": choice.provider,
         "enabled": choice.enabled,
-        "providers": providers.iter().map(|p| json!({"id": p.id, "name": p.name, "description": p.description})).collect::<Vec<_>>(),
+        "providers": providers.iter().map(|p| {
+            let mut row = json!({"id": p.id, "name": p.name, "description": p.description});
+            // Only the agent kind's rows say it: the loop tools are a runner capability (#643).
+            if kind == "agent" {
+                row["loop_tools"] = json!(p.loop_tools);
+            }
+            row
+        }).collect::<Vec<_>>(),
         "settings": choice.settings,
         "schema": schema,
     });
@@ -807,16 +834,18 @@ fn validate_settings(
             };
             return Err(format!("`{key}` is not a {provider} setting; known settings: {known}"));
         };
-        let ok = match spec["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_i64() || value.is_u64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value.is_array() && value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
-            _ => true,
-        };
-        if !ok {
-            return Err(format!("setting `{key}` has the wrong type"));
+        // A type or range refusal names what the schema asks for (#642), so the fix needs no schema
+        // reading: the expected type, or the bounds the value must sit inside, one-sided or both.
+        let expected = |want: &str| format!("setting `{key}` must be {want}");
+        match spec["type"].as_str() {
+            Some("string") if !value.is_string() => return Err(expected("a string")),
+            Some("integer") if !value.is_i64() && !value.is_u64() => return Err(expected("an integer")),
+            Some("number") if !value.is_number() => return Err(expected("a number")),
+            Some("boolean") if !value.is_boolean() => return Err(expected("a boolean")),
+            Some("array") if !value.is_array() || !value.as_array().is_some_and(|items| items.iter().all(Value::is_string)) => {
+                return Err(expected("an array of strings"));
+            }
+            _ => {}
         }
         if let Some(options) = spec["enum"].as_array()
             && !options.contains(value)
@@ -831,7 +860,13 @@ fn validate_settings(
         if let Some(n) = value.as_f64()
             && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
         {
-            return Err(format!("setting `{key}` is out of range"));
+            let bounds = match (spec["minimum"].as_f64(), spec["maximum"].as_f64()) {
+                (Some(min), Some(max)) => format!("between {min} and {max}"),
+                (Some(min), None) => format!("at least {min}"),
+                (None, Some(max)) => format!("at most {max}"),
+                (None, None) => unreachable!("a range refusal fired, so the schema declared a bound"),
+            };
+            return Err(format!("setting `{key}` must be {bounds}"));
         }
         if let Some(s) = value.as_str()
             && (s.len() > 500 || s.contains('\n'))
@@ -919,6 +954,7 @@ mod tests {
             requires: Requires::default(),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
@@ -952,9 +988,32 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let pi = modules.iter().find(|m| m.id == "pi").expect("the pi manifest is discovered");
         assert!(!pi.needs_claude, "pi holds no claude binary and no Claude credential");
+        assert!(!pi.loop_tools, "pi serves no colonizer MCP server, so no loop tools");
         assert_eq!(pi.vm_command(), ["node", "/opt/colonizer/agent/runner.mjs"]);
         assert_eq!(pi.schema["properties"]["model"]["env"], "COLONIZER_MODEL");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_loop_tools_flag_is_parsed_from_the_manifest() {
+        // The loop tools (`loop_next`, `loop_stop`) are a per-module capability: the manifest
+        // declares them, and a loop's brief only names them when the module does (issue #643).
+        let dir = std::env::temp_dir().join(format!("colonizer-loop-tools-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("module.json");
+        let write = |manifest: &str| std::fs::write(&path, manifest).unwrap();
+
+        write(include_str!("../../../modules/agents/claude-code/module.json"));
+        assert!(read_agent(&path).unwrap().loop_tools, "claude-code serves the loop tools");
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"], "loop_tools": true}"#);
+        assert!(read_agent(&path).unwrap().loop_tools);
+        // Anything but a boolean is a manifest problem, not a silent default.
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"], "loop_tools": "yes"}"#);
+        assert_eq!(read_agent(&path).unwrap_err(), "\"loop_tools\" must be a boolean");
+        // And absent stays the default: no declaration, no loop tools.
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"]}"#);
+        assert!(!read_agent(&path).unwrap().loop_tools);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1013,6 +1072,7 @@ mod tests {
             requires: Requires::default(),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).
@@ -1114,12 +1174,14 @@ mod tests {
 
         input.remove("unknwon").unwrap();
         input.insert("cpus".into(), json!(0));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be between 1 and 64", "{err}");
         input.insert("cpus".into(), json!("eight"));
         // Being stored buys a key nothing once the schema declares it: `cpus` is checked like any
         // other, and only keys no schema has pass through untouched.
         stored.insert("cpus".into(), json!(4));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be an integer", "{err}");
     }
 
     #[test]
@@ -1149,7 +1211,8 @@ mod tests {
         );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
-        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+        assert_eq!(err, "setting `budget_usd` must be at least 0", "{err}");
         input.remove("budget_usd");
         input.insert("budget_tokens".into(), json!(-1));
         assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
@@ -1240,10 +1303,12 @@ mod tests {
         assert_eq!(out.get("mask_paths"), input.get("mask_paths"));
         assert_eq!(out.get("protect_paths"), input.get("protect_paths"));
 
-        // A non-array, or an array of non-strings, is the wrong type for the setting.
+        // A non-array, or an array of non-strings, is the wrong type for the setting, and the
+        // refusal says the type the schema asks for.
         for bad in [json!("secrets/credentials.json"), json!(["ok", 4])] {
             input.insert("mask_paths".into(), bad);
-            assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(err, "setting `mask_paths` must be an array of strings", "{err}");
         }
         // And the entries themselves are checked with the boot's own gate: absolute paths,
         // traversal, the worktree root and — for the masked list only — the git dir.
@@ -1318,9 +1383,10 @@ mod tests {
         let mut input = Map::new();
         for bad in [json!(0), json!(1441)] {
             input.insert("hold_timeout_minutes".into(), bad);
-            assert!(
-                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
-                "the timeout is 1 to 1440 minutes"
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(
+                err, "setting `hold_timeout_minutes` must be between 1 and 1440",
+                "the refusal names the bounds: {err}"
             );
         }
         for ok in [1, 30, 1440] {
@@ -1485,6 +1551,7 @@ mod tests {
             requires,
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 

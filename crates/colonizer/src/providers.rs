@@ -1836,10 +1836,11 @@ mod tests {
             dir: PathBuf::from("/opt/colonizer/agent"),
             entry: vec!["runner.mjs".into()],
             needs_claude: false,
+            requires: Default::default(),
             schema,
             egress: None,
             resume_dir: None,
-            requires: crate::modules::Requires::default(),
+            loop_tools: false,
         }
     }
 

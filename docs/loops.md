@@ -16,6 +16,9 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
   the repository picked there that runs every hour. The interval takes `m`, `h` or `d`. `/loop 14d …`
   runs every 14 days at the current time of day: a whole-day interval past a week becomes an
   every-N-days cadence (up to 365 days). `/loop <task>` without an interval is self-paced.
+- **The CLI**: `colonizer loop create acme/app --name "Triage" --prompt "Triage new issues"
+  daily@09:00`, with `loop list`, `run`, `stop`, `start` and `delete` beside it — the grammar is in
+  [cli.md](cli.md#loops).
 - **The Map view** offers a map-refresh loop once a repository has a map ([Map refresh](#map-refresh)).
 
 An end date (`end_at`) can be set through the API; the cockpit's form keeps one that is already set
@@ -52,9 +55,10 @@ orchestrator may call:
   The value is clamped to 15 minutes – 24 hours and shown in the loop's note.
 - `loop_stop(reason)` — ends the loop ("stopped by the colony: …"). Re-enable it on the Loops page.
 
-Only the Claude Code agent module has these two tools today. A loop whose colonies run on another
-agent module still runs on its schedule, but its colonies cannot stop it, and a self-paced one runs
-every 24 hours.
+The Claude Code, Codex, Grok Build and OpenCode agent modules serve these two tools. A loop whose
+colonies run on a module without them — Pi, Hermes and ACP today — still runs on its schedule, but
+its brief never mentions the tools, the loop form warns when you pick self-paced, and a self-paced
+one simply runs again every 24 hours: its colonies can neither pace the loop nor stop it.
 
 A loop also ends by itself after its **max runs**, when its next run would fall past its **end
 date**, or — at its next slot — when its API token has been revoked.
