@@ -1649,4 +1649,120 @@ mod tests {
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    // -- launch refusals (create's bad-request gates) ---------------------------------------------
+
+    /// An unknown tier would silently fall back to the routing rule's own choice, which is not what
+    /// an operator naming one asked for, so `create` refuses naming the tier and the ones there are.
+    #[tokio::test]
+    async fn an_unknown_model_tier_is_refused_naming_the_tier_and_the_known_ones() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+
+        let err = create(
+            State(app.clone()),
+            None,
+            Json(NewSession {
+                model_tier: Some("gigantic".into()),
+                ..stack_request("acme/app", None, false).0
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST, "the request names a tier that does not exist");
+        let message = err.1.to_string();
+        assert!(message.contains("gigantic"), "{message}");
+        assert!(
+            message.contains("low, medium or high"),
+            "it names the tiers there are: {message}"
+        );
+        assert!(app.sessions.read().await.is_empty(), "nothing was created");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A `<provider>/<model>` override no configured provider owns would only fail inside the
+    /// colony, so `create` refuses at launch naming the override and the provider it names — for
+    /// the orchestrator's model and the subagents' alike.
+    #[tokio::test]
+    async fn a_model_override_naming_no_configured_provider_is_refused_naming_both() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+
+        let err = create(
+            State(app.clone()),
+            None,
+            Json(NewSession {
+                model_override: Some("unconfigured/claude-opus-4".into()),
+                ..stack_request("acme/app", None, false).0
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let message = err.1.to_string();
+        assert!(message.contains("unconfigured/claude-opus-4"), "{message}");
+        assert!(
+            message.contains("no configured provider \"unconfigured\""),
+            "it names the provider nothing configures: {message}"
+        );
+
+        // The subagent override rides the same check, under its own name.
+        let err = create(
+            State(app.clone()),
+            None,
+            Json(NewSession {
+                subagent_model_override: Some("unconfigured/claude-opus-4".into()),
+                ..stack_request("acme/app", None, false).0
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.to_string().contains("subagent model"), "{}", err.1);
+        assert!(app.sessions.read().await.is_empty(), "nothing was created");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The agent module a launch would run on must be installed: an org pointed at one no manifest
+    /// answers for is refused at launch, not discovered from a failed boot.
+    #[tokio::test]
+    async fn a_launch_on_an_agent_module_that_is_not_installed_is_refused() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        app.modules.write().await.agent.provider = "ghost-module".into();
+
+        let err = create(State(app.clone()), None, stack_request("acme/app", None, false))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let message = err.1.to_string();
+        assert!(message.contains("not installed"), "{message}");
+        assert!(app.sessions.read().await.is_empty(), "nothing was created");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An agent module that runs on Claude refuses to launch without a credential to run on: the
+    /// refusal names the account the operator would log in with.
+    #[tokio::test]
+    async fn a_launch_without_claude_credentials_is_refused_naming_the_account() {
+        // `claude_cred_for` falls back to the environment, so where a token is exported the launch
+        // would rightly start and the refusal cannot be arranged: skip rather than misreport.
+        if crate::util::env_nonempty("CLAUDE_CODE_OAUTH_TOKEN").is_some()
+            || crate::util::env_nonempty("ANTHROPIC_API_KEY").is_some()
+        {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create_needing(&root, true);
+
+        let err = create(State(app.clone()), None, stack_request("acme/app", None, false))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let message = err.1.to_string();
+        assert!(message.contains("log in with Claude"), "{message}");
+        assert!(message.contains("'default'"), "it names the account: {message}");
+        assert!(app.sessions.read().await.is_empty(), "nothing was created");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
