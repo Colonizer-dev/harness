@@ -68,8 +68,10 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    verdict. Never change `is_error`, the content or any return code. Ship a strip test — with the
    layer off, every event is identical apart from the `denial` field. Known limits: masked-path
    empty reads are not detectable from text, and tools the agent spawns through `sh` never reach
-   your classifier — they rely on the runner-level hints. Only the claude-code runner implements
-   this layer today (`modules/agents/claude-code/runner.mjs`, the `PostToolUseFailure` hook).
+   your classifier — they rely on the runner-level hints. (The masked-path *attempt* itself is
+   reported separately, as the `path_policy` event of issue #647 — `pathpolicy.mjs`.) Only the
+   claude-code runner implements this layer today (`modules/agents/claude-code/runner.mjs`, the
+   `PostToolUseFailure` hook).
 4. **Preflight, naming the error.** Check the agent binary and everything it needs before the
    first turn, and refuse with a message naming the missing thing and the way out: the codex
    runner's `preflight` (`modules/agents/codex/runner.mjs:55-84`) refuses a missing credential, a

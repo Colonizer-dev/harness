@@ -1201,6 +1201,13 @@ export type AgentEventBody =
       }>;
     }
   /**
+   * The agent reached for a path the path policy masks or write-protects (docs/path-policy.md,
+   * #647). Reporting only — the mount enforced before this ran. The harness turns it into a colony
+   * log line and a History entry per distinct (access, path); the stream types it and renders
+   * nothing of its own.
+   */
+  | { type: "path_policy"; access: "read" | "write"; policy: "masked" | "protected"; path: string; tool?: string }
+  /**
    * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
    * fresh checkout and the git state read directly, never the agent's own account. Host-generated,
    * like the finding-chain events, so the runner-event schema does not list it.

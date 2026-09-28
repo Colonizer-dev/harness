@@ -90,6 +90,15 @@ and its reason on the card, answered like any other.
 The fence only sees commands the agent asks permission for: calls the agent runs without asking are
 not checked, so the policy is guidance, and the microVM is the boundary.
 
+## Path policy
+
+The two file requests this runner serves, `fs/read_text_file` and `fs/write_text_file`, meet the
+mounted bind list (docs/path-policy.md, issue #647) once `confine` has resolved the path: one
+`path_policy` event per distinct (access, path) that lands on a masked path — or writes to a masked
+or protected one — with the reply untouched. Reporting only; the mount enforces.
+`pathpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test, and a masked
+path reached any other way is the exec policy's or the mount's to stop, not this runner's.
+
 ## Verified and planned agents
 
 - **Gemini CLI (`gemini --experimental-acp`) — handshake verified.** The real CLI 0.61.0 completed
