@@ -219,6 +219,7 @@ mod tests {
             dir: PathBuf::new(),
             entry: vec![],
             needs_claude: false,
+            requires: Default::default(),
             schema,
             egress: None,
             resume_dir: None,
