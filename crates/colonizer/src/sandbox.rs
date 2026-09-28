@@ -2,9 +2,9 @@
 
 use axum::extract::State;
 
-use crate::util::{exec, mount_spec};
-use anyhow::{Context, Result};
-use std::{collections::HashSet, path::PathBuf};
+use crate::util::{exec, exec_within, mount_spec};
+use anyhow::{Context, Result, bail};
+use std::{collections::HashSet, path::PathBuf, time::Duration};
 use tokio::process::Command;
 
 pub struct Mount {
@@ -86,6 +86,35 @@ pub async fn boot(msb: &str, spec: &BootSpec) -> Result<()> {
 
 pub async fn remove(msb: &str, name: &str) {
     let _ = exec(Command::new(msb).args(["rm", "--force", "--quiet", name])).await;
+}
+
+/// How long a confirmed removal's `msb rm` and `msb ls` may each take: long enough for a forced
+/// removal of a real microVM, bounded so a wedged `msb` cannot hold a caller on it for good.
+pub(crate) const REMOVE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Removes a sandbox and answers whether it is really gone. Nothing here takes `msb rm`'s word for
+/// it: after the removal (run under `limit`, `--force`, exactly like [`remove`]) the sandbox counts
+/// as gone only when a full `msb ls --quiet` ([`all`], running or not) no longer lists it — a
+/// listed-but-stopped sandbox is not gone. A failed or slow removal is not a verdict either way,
+/// since it may have removed the sandbox anyway (or found it already gone); the listing is the one
+/// verdict. Everything else — a listing that fails or times out, the state then being unknown, or
+/// the name still listed afterwards — is an error, and the caller must treat the microVM as
+/// possibly still there.
+pub async fn remove_confirmed(msb: &str, name: &str, limit: Duration) -> Result<()> {
+    // A timeout drops the future, which is what fires `exec`'s `kill_on_drop` — a wedged `msb rm`
+    // is killed rather than left running.
+    let removal = exec_within(limit, Command::new(msb).args(["rm", "--force", "--quiet", name])).await;
+    let listed = tokio::time::timeout(limit, all(msb))
+        .await
+        .map_err(|_| anyhow::anyhow!("`msb ls --quiet` timed out after {limit:?}, so {name} could not be confirmed removed"))?
+        .with_context(|| format!("could not list the sandboxes to confirm {name} was removed"))?;
+    if listed.contains(name) {
+        match removal {
+            Ok(_) => bail!("microVM {name} is still listed after `msb rm --force --quiet` ran, so its removal is not confirmed"),
+            Err(e) => bail!("microVM {name} is still listed and `msb rm --force --quiet` failed: {e:#}"),
+        }
+    }
+    Ok(())
 }
 
 /// Whether this sandbox provider can snapshot a running microVM's memory, so a colony waiting on its
@@ -403,5 +432,123 @@ mod tests {
         // or to the plain tag the digest was pinned from.
         assert!(!matches_cache(pinned, &cache(&["node:latest"])));
         assert!(!matches_cache(pinned, &cache(&["node:24-bookworm"])));
+    }
+
+    // -- remove_confirmed, against a stand-in `msb` ----------------------------------------------
+
+    use crate::util::short_id;
+
+    /// A stand-in `msb` running `body` on every call (the pattern of the recover tests in
+    /// lifecycle.rs): an executable script in a throwaway directory, returned as the path a
+    /// backend would be given. The caller removes the directory when done.
+    fn stand_in_msb(body: &str) -> (String, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("colonizer-remove-confirm-{}", short_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let msb = root.join("msb");
+        std::fs::write(&msb, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (msb.display().to_string(), root)
+    }
+
+    /// The failure's one-line chain, so a regression reads as text and not just as `is_err()`.
+    fn message(e: &anyhow::Error) -> String {
+        format!("{e:#}")
+    }
+
+    #[tokio::test]
+    async fn a_removal_that_leaves_the_sandbox_listed_is_not_confirmed() {
+        let (msb, root) = stand_in_msb(
+            "if [ \"$1\" = rm ]; then exit 1; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' other colonizer-abc; fi\nexit 0\n",
+        );
+        let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        let m = message(&e);
+        assert!(m.contains("still listed"), "{m}");
+        assert!(m.contains("colonizer-abc"), "{m}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_successful_removal_the_listing_still_sees_is_not_confirmed() {
+        // `rm` exits 0, but the sandbox stays in `msb ls`: a listed-but-stopped sandbox is not
+        // gone, and the listing is the verdict, not the removal's exit code.
+        let (msb, root) = stand_in_msb("if [ \"$1\" = ls ]; then printf '%s\\n' colonizer-abc; fi\nexit 0\n");
+        let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(message(&e).contains("still listed"), "{}", message(&e));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_of_an_already_gone_sandbox_is_confirmed_by_the_listing() {
+        // `rm` fails, but only because there was nothing left to remove: the listing says so.
+        let (msb, root) = stand_in_msb("if [ \"$1\" = rm ]; then exit 1; fi\nexit 0\n");
+        remove_confirmed(&msb, "colonizer-abc", Duration::from_secs(10))
+            .await
+            .unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_fails_leaves_the_removal_unconfirmed() {
+        // `rm` reports success, but the listing cannot answer, so the state is unknown: refused.
+        let (msb, root) = stand_in_msb("if [ \"$1\" = ls ]; then exit 3; fi\nexit 0\n");
+        let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_secs(10))
+            .await
+            .unwrap_err();
+        assert!(message(&e).contains("could not list the sandboxes"), "{}", message(&e));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_removal_the_listing_confirms_is_ok() {
+        let asked = std::env::temp_dir().join(format!("colonizer-remove-args-{}", short_id()));
+        let (msb, root) = stand_in_msb(&format!("echo \"$*\" >> {asked:?}\nexit 0\n"));
+        remove_confirmed(&msb, "colonizer-abc", Duration::from_secs(10))
+            .await
+            .unwrap();
+        let calls = std::fs::read_to_string(&asked).unwrap();
+        assert!(calls.contains("rm --force --quiet colonizer-abc"), "{calls}");
+        assert!(calls.contains("ls --quiet"), "{calls}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_removal_is_killed_and_still_judged_by_the_listing() {
+        // `rm` hangs: the deadline kills it, and the listing decides. Gone, so confirmed — with
+        // the sandbox still listed it would not be.
+        let (msb, root) = stand_in_msb("if [ \"$1\" = rm ]; then sleep 30; fi\nexit 0\n");
+        let started = std::time::Instant::now();
+        remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "the deadline fired");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_wedged_removal_with_the_sandbox_still_listed_is_refused() {
+        let (msb, root) = stand_in_msb(
+            "if [ \"$1\" = rm ]; then sleep 30; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' colonizer-abc; fi\nexit 0\n",
+        );
+        let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        assert!(message(&e).contains("still listed"), "{}", message(&e));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_listing_that_never_answers_leaves_the_removal_unconfirmed() {
+        let (msb, root) = stand_in_msb("if [ \"$1\" = ls ]; then sleep 30; fi\nexit 0\n");
+        let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
+            .await
+            .unwrap_err();
+        let m = message(&e);
+        assert!(m.contains("timed out") && m.contains("colonizer-abc"), "{m}");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
