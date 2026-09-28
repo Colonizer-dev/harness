@@ -9,12 +9,13 @@
 use crate::app::{Boot, load_sessions};
 use crate::config::{ModulesConfig, Settings};
 use crate::{
-    App, Shared, StorageAlert, activity, api_tokens, auth, gateway, login_item, modules, remote, secrets, sessions, usage,
+    App, Shared, StorageAlert, activity, api_tokens, auth, client_error, gateway, login_item, modules, remote, secrets, sessions,
+    usage,
 };
 use anyhow::{Context, Result, bail};
 use axum::{
     Router,
-    extract::{Request, State},
+    extract::{MatchedPath, Request, State},
     http::{HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -166,6 +167,24 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
+/// Every `/api` path no module route claims, answered as the API error it is (`#641`): before,
+/// it fell through to the SPA fallback and read as a 200 `text/html` success, so a probe for an
+/// unknown route looked like a page. The API fence is segment-aware — `/apiary` is a cockpit
+/// path — and a matched route never reaches this: the router stamps `MatchedPath` on what it
+/// matched, and only a request that fell to a fallback gets here without one. Which is also the
+/// invariant that API routes stay registered flat: a router `nest`ed under `/api` carries only
+/// `MatchedNestedPath`, so its real routes would read as unmatched and be answered 404. It
+/// layers the web fallback too, so it needs no web dir and works the same when the UI was never
+/// built.
+async fn api_not_found(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    if (path == "/api" || path.starts_with("/api/")) && req.extensions().get::<MatchedPath>().is_none() {
+        client_error(StatusCode::NOT_FOUND, "no such API route").into_response()
+    } else {
+        next.run(req).await
+    }
+}
+
 /// Every API route, before any layer: `router` wraps them in the activity log's route layer and
 /// `host_guard`. Each module keeps its own routes in its `routes()`.
 pub(crate) fn api_routes() -> Router<Shared> {
@@ -234,6 +253,8 @@ pub(crate) fn router(app: &Shared) -> Router {
         // authenticated requests reach it.
         .route_layer(middleware::from_fn_with_state(app.clone(), activity::record_actions))
         .merge(web_router(app.cfg.assets.as_deref()))
+        // Inside `host_guard`, so an unauthenticated caller still hits the 401 wall, not the 404.
+        .layer(middleware::from_fn(api_not_found))
         .layer(middleware::from_fn_with_state(app.clone(), host_guard))
         .with_state(app.clone())
 }
@@ -388,7 +409,7 @@ pub(crate) async fn serve() -> Result<()> {
 mod tests {
     use super::*;
     use crate::stream;
-    use crate::tests::{temp_root, test_app};
+    use crate::tests::{temp_root, test_app, test_app_with};
     use axum::routing::{get, post};
     use serde_json::Value;
 
@@ -690,6 +711,124 @@ mod tests {
         if let Some(hostname) = full["host"]["hostname"].as_str() {
             assert!(!public_text.contains(hostname), "the hostname stays in the signed-in body");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Unknown `/api` paths answer the JSON 404 an API caller reads, and nothing else changes:
+    /// registered routes still match, `/apiary` is still a cockpit path, and `/assets` still 404s
+    /// on a missing chunk (#641).
+    #[tokio::test]
+    async fn unknown_api_paths_answer_a_json_404_and_cockpit_paths_keep_the_spa() {
+        let root = temp_root();
+        let assets = root.join("assets-dir");
+        std::fs::create_dir_all(assets.join("web/assets")).unwrap();
+        std::fs::write(assets.join("web/index.html"), "<html>cockpit</html>").unwrap();
+        std::fs::write(assets.join("web/assets/index-abc.js"), "export {};").unwrap();
+        let app = test_app_with(&root, |cfg| cfg.assets = Some(assets.clone()));
+        let router = router(&app);
+
+        for uri in ["/api", "/api/", "/api/does-not-exist", "/api/does/not/exist"] {
+            for method in [Method::GET, Method::POST] {
+                let res = router
+                    .clone()
+                    .oneshot(guarded(method.clone(), uri, vec![bearer(&app)]))
+                    .await
+                    .unwrap();
+                assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+                assert_eq!(
+                    res.headers().get(header::CONTENT_TYPE).unwrap(),
+                    "application/json",
+                    "{method} {uri}"
+                );
+                let body: Value = serde_json::from_str(&body_text(res).await).unwrap();
+                assert_eq!(body["error"], "no such API route", "{method} {uri}");
+            }
+        }
+
+        // A registered route still wins over the fallback, from the same router.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/api/status", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/api/status still answers");
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "/api/status is still the API"
+        );
+
+        // A wrong method on a real route is that route's 405, not the fallback's 404: the match
+        // counts, the method does not.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::POST, "/api/status", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED, "POST /api/status");
+
+        // And the 404 sits inside the token wall: unknown or not, an `/api` request without a
+        // token reads as 401, like every other API route.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/api/does-not-exist", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "unknown /api stays behind sign-in");
+        assert!(body_text(res).await.contains("colonizer open"), "told to sign in");
+
+        // `/apiary` is not `/api`: the cockpit's SPA fallback answers it as a page.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/apiary", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/apiary is a page");
+        let page = body_text(res).await;
+        assert!(
+            page.contains("cockpit") && !page.contains("no such"),
+            "/apiary serves the SPA"
+        );
+
+        // Hashed build assets keep their own 404: a missing chunk is not the page.
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/assets/index-abc.js", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "a present chunk is served");
+        let res = router
+            .oneshot(guarded(Method::GET, "/assets/missing.js", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "a missing chunk still 404s");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Without a built web dir the API 404 is the same, and only the cockpit falls back to the
+    /// "not built" page (#641).
+    #[tokio::test]
+    async fn unknown_api_paths_are_a_json_404_even_without_a_web_dir() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let router = router(&app);
+
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, "/api/does-not-exist", vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(res.headers().get(header::CONTENT_TYPE).unwrap(), "application/json");
+        let body: Value = serde_json::from_str(&body_text(res).await).unwrap();
+        assert_eq!(body["error"], "no such API route");
+
+        let res = router.oneshot(guarded(Method::GET, "/", vec![bearer(&app)])).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "/ still answers");
+        assert!(
+            body_text(res).await.contains("Colonizer is running"),
+            "/ is the not-built page"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

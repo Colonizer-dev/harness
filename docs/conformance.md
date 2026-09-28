@@ -72,9 +72,13 @@ continuation/cancellation. There is no UHP surface: every route is `/api/*`
 *UHP core class: implement the /uhp/v1 surface proposed in docs/protocol.md §7 (discovery,
 harnesses, responses, streaming, errors)*.
 
-That will not fix the 200s on its own: unknown `/api/*` paths fall through to the SPA fallback and
-answer `index.html`, which drives E-01–E-03 and X-08 today and would swallow UHP 404s tomorrow.
-Follow-up: *Unknown `/api/*` paths return 200 text/html (SPA fallback) instead of a JSON 404*.
+That will not fix the 200s on its own: the UHP surface lives outside `/api` — the suite probes
+`/v1/uhp` and reads an unknown harness, response or artifact there — and every other unknown path
+still falls through to the SPA fallback and answers `index.html`, which drives E-01–E-03 and X-08
+today and would swallow UHP 404s tomorrow. Unmatched `/api/*` paths themselves answer a JSON 404
+since #641, so the mothership's own API no longer reads a miss as a page; the same answer is
+wanted for the protocol's paths. Follow-up: *Paths outside `/api` return 200 text/html (SPA
+fallback) instead of a JSON 404*.
 
 **Extended** — sessions, files, artifacts. `GET /api/sessions` returns a bare, unpaginated array
 (`crates/colonizer/src/sessions/api.rs`); there is no artifact API — `publish.rs` speaks
