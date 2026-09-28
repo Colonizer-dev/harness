@@ -2702,12 +2702,14 @@ over `https://` (`http://` for a `ws://` base) plus `/api/installs`.
 #### `GET /api/remote`
 
 ```json
-{"enabled": true, "host": "c1c9215b.my.colonizer.dev", "connected": true, "since": "2026-09-25T00:16:11+00:00"}
+{"enabled": true, "host": "c1c9215b.my.colonizer.dev", "connected": true, "since": "2026-09-25T00:16:11+00:00", "replaced": false}
 ```
 
 `connected` is true only while the switch is on *and* the tunnel's handshake has succeeded; a
 stale status after a disable never reads as a live link. `since` is when the current tunnel came
-up.
+up. `replaced` is true only while the switch is on and the relay has parked the tunnel because a
+newer one took this install over (a second mothership on the same key); a re-enable, a reset or a
+fresh connect clears it.
 
 #### `PUT /api/remote {"enabled": bool}`
 
@@ -2781,6 +2783,12 @@ once the relay has shown it accepted the hello — its first frame on the connec
 merely coming up counts for nothing, so a relay that hangs up on a bad signature cannot turn the
 redial into a silent one-second loop (the log says so, distinctly). A disable or reset needs no
 backoff: the redial happens at once.
+
+One close is never redialed: a close frame saying this tunnel was replaced — the `4000` the relay
+sends for it, or the `4409` its contract pins — means another mothership dialed on the same
+install key, and dialing back would have the two replace each other forever. The supervisor parks
+instead, waiting on the switch/reset signal like a disabled tunnel, and `GET /api/remote` reports
+`"replaced": true`; a re-enable or reset dials again and clears the flag.
 
 Tunnelled requests skip the LAN host allowlist — the tunnel host is never a LAN host — but only
 for a request the supervisor itself decoded (the `Tunnelled` marker cannot be forged from outside

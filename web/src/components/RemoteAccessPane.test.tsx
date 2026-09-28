@@ -11,9 +11,10 @@ import { QrCode, RemoteAccessPane, connectionText, expiryText, formatPairingCode
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={{} as Api}>{node}</ApiContext.Provider>);
 
-const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null };
-const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00" };
+const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
+const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00", replaced: false };
 const onOffline: RemoteStatus = { ...onConnected, connected: false, since: null };
+const onReplaced: RemoteStatus = { ...onConnected, connected: false, since: null, replaced: true };
 const pendingPairing: RemotePairing = {
   owner: null,
   pending: [{ code: "123456", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 7 * 60 }],
@@ -56,6 +57,13 @@ describe("RemoteAccessPane", () => {
     expect(pane(onOffline)).toContain("Offline — reconnecting");
   });
 
+  it("says another mothership took over the link while replaced", () => {
+    const html = pane(onReplaced);
+    expect(html).toContain("Another mothership took over this link");
+    expect(html).not.toContain("Offline");
+    expect(html).toContain("text-warn"); // the takeover is a warning, not a quiet offline
+  });
+
   it("shows the owner once paired, and hides pairing entirely without an endpoint", () => {
     const paired = pane(onConnected, { owner: { github_login: "octocat" }, pending: [] });
     expect(paired).toContain("Paired with @octocat");
@@ -94,6 +102,7 @@ describe("remote helpers", () => {
     expect(connectionText(onConnected)).toMatch(/^Connected since /);
     expect(connectionText(onOffline)).toBe("Offline — reconnecting");
     expect(connectionText({ ...onConnected, since: null })).toBe("Offline — reconnecting");
+    expect(connectionText(onReplaced)).toBe("Another mothership took over this link");
   });
 
   it("reads a pairing expiry in unix seconds", () => {

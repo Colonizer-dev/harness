@@ -21,8 +21,10 @@ export function formatPairingCode(code: string): string {
   return /^\d{6}$/.test(code) ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 }
 
-/** The live link's one line: green with a local time while connected, amber while it redials. */
+/** The live link's one line: green with a local time while connected, amber while it redials, and
+ * a takeover warning when another mothership's tunnel holds the link. */
 export function connectionText(remote: RemoteStatus): string {
+  if (remote.replaced) return "Another mothership took over this link";
   if (!remote.connected || !remote.since) return "Offline — reconnecting";
   const at = new Date(remote.since);
   return `Connected since ${Number.isNaN(at.getTime()) ? remote.since : at.toLocaleTimeString()}`;

@@ -111,6 +111,10 @@ pub struct Remote {
 struct Status {
     connected: bool,
     since: Option<String>,
+    /// The relay closed the tunnel because a newer one took this install over; the supervisor
+    /// parks until the operator re-enables or resets instead of dialing back into a replacement
+    /// war. Cleared by a fresh successful connect, a re-enable, or a reset.
+    replaced: bool,
 }
 
 impl Remote {
@@ -145,6 +149,7 @@ impl Remote {
 
     /// What `GET /api/remote` answers. A tunnel is only ever "connected" while the switch is on:
     /// the supervisor's status can lag behind a disable, and must not read as a live link then.
+    /// The same gating keeps a stale "replaced" from outliving its switch.
     async fn view(&self) -> Value {
         let saved = self.saved.read().await;
         let status = self.status.read().await;
@@ -154,6 +159,7 @@ impl Remote {
             "host": saved.host,
             "connected": connected,
             "since": connected.then(|| status.since.clone()).flatten(),
+            "replaced": saved.enabled && status.replaced,
         })
     }
 
@@ -161,6 +167,15 @@ impl Remote {
         let mut status = self.status.write().await;
         status.connected = on;
         status.since = on.then(|| Utc::now().to_rfc3339());
+        if on {
+            status.replaced = false; // a fresh connect ends any parked-for-replaced state
+        }
+    }
+
+    /// Flags the link as taken over by a newer tunnel; cleared by a fresh connect, a re-enable
+    /// or a reset.
+    async fn set_replaced(&self, on: bool) {
+        self.status.write().await.replaced = on;
     }
 
     /// Makes `saved` the state, here and on disk. Callers hand over the mutated copy.
@@ -232,6 +247,7 @@ async fn set_enabled(app: &Shared, on: bool) -> Result<Value, AppError> {
         }
         saved.enabled = true;
         app.remote.persist(saved).await?;
+        app.remote.set_replaced(false).await; // a fresh enable dials from scratch
         app.remote.signal.send_replace(());
     } else {
         saved.enabled = false;
@@ -258,6 +274,7 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
     saved.install_id = Some(install_id);
     saved.host = Some(host);
     app.remote.persist(saved).await?;
+    app.remote.set_replaced(false).await; // a reset is the way out of a taken-over link
     app.remote.signal.send_replace(()); // an immediate redial under the new identity
     Ok(app.remote.view().await)
 }
@@ -343,8 +360,11 @@ async fn record_change(app: &Shared, kind: &str, via: Option<Extension<crate::au
 /// Spawned by `serve()` with the finished router: while remote access is enabled, keeps exactly
 /// one tunnel to the relay open, serving frames until the relay or the operator drops it, and
 /// redialing with exponential backoff (1 s doubling to 60 s, jittered, reset once the relay has
-/// accepted the hello — not by a bare TCP/WebSocket connect). A disable or reset tears the
-/// connection and every in-flight stream down at once.
+/// accepted the hello — not by a bare TCP/WebSocket connect). A close that says this tunnel was
+/// replaced — another mothership dialed on the same install key — is never redialed: the two
+/// motherships would keep replacing each other, so the supervisor parks instead, waiting on the
+/// switch/reset signal like the disabled state, until the operator re-enables or resets. A
+/// disable or reset tears the connection and every in-flight stream down at once.
 pub async fn run(app: Shared, router: Router) {
     let mut signal = app.remote.signal.subscribe();
     loop {
@@ -356,11 +376,13 @@ pub async fn run(app: Shared, router: Router) {
         let mut delay = RECONNECT_MIN;
         loop {
             let mut redial = false;
+            let mut replaced = false;
             tokio::select! {
-                accepted = connect_and_serve(&app, &router) => {
+                (accepted, was_replaced) = connect_and_serve(&app, &router) => {
                     if accepted {
                         delay = RECONNECT_MIN;
                     }
+                    replaced = was_replaced;
                 }
                 _ = signal.changed() => redial = true,
             }
@@ -369,6 +391,23 @@ pub async fn run(app: Shared, router: Router) {
             }
             if redial {
                 continue; // a reset wants the new identity live now, not after the backoff
+            }
+            if replaced {
+                // The relay handed this install to a newer tunnel: dialing again would take the
+                // link straight back, and the two motherships would replace each other forever.
+                // Park until the operator acts — a re-enable or reset signals, which dials again
+                // (a fresh successful connect clears the status), a disable waits upstairs.
+                eprintln!(
+                    "remote: the relay gave this link to a newer tunnel; parked until remote access is re-enabled or reset"
+                );
+                app.remote.set_replaced(true).await;
+                if signal.changed().await.is_err() {
+                    return; // the Remote is gone; so is the job
+                }
+                if !app.remote.enabled().await {
+                    break; // switched off while parked: the outer loop waits for the re-enable
+                }
+                continue;
             }
             tokio::select! {
                 _ = tokio::time::sleep(delay + jitter()) => {}
@@ -392,25 +431,26 @@ fn jitter() -> Duration {
     Duration::from_millis(u64::from(byte[0] % 128) * 4)
 }
 
-/// One live tunnel: dial, answer the challenge, serve frames. Answers `true` only once the relay
-/// has shown it accepted the hello — its first frame on the connection — so a relay that hangs up
-/// on a bad signature is not mistaken for a working tunnel (that would reset the backoff into a
-/// silent one-second redial loop). Everything spawned here is aborted when the future is dropped
-/// — relay drop, disable, or reset. It watches the signal through its own subscription, so the
-/// caller's stays free.
-async fn connect_and_serve(app: &Shared, router: &Router) -> bool {
+/// One live tunnel: dial, answer the challenge, serve frames. Answers `(accepted, replaced)`:
+/// `accepted` only once the relay has shown it took the hello — its first frame on the
+/// connection — so a relay that hangs up on a bad signature is not mistaken for a working tunnel
+/// (that would reset the backoff into a silent one-second redial loop); `replaced` when the close
+/// that ended it named a newer tunnel. Everything spawned here is aborted when the future is
+/// dropped — relay drop, disable, or reset. It watches the signal through its own subscription,
+/// so the caller's stays free.
+async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
     let saved = app.remote.saved().await;
     let (Some(install_id), Some(host)) = (saved.install_id, saved.host) else {
-        return false; // enabled without an identity cannot happen: enabling registers first
+        return (false, false); // enabled without an identity cannot happen: enabling registers first
     };
     let Ok(key) = load_key(&app.remote.dir) else {
         eprintln!("remote: cannot load the access key from {}", app.remote.dir.display());
-        return false;
+        return (false, false);
     };
     let relay = app.remote.relay().await;
     let Ok(request) = format!("{relay}/tunnel/{install_id}").into_client_request() else {
         eprintln!("remote: bad relay URL {relay:?}");
-        return false;
+        return (false, false);
     };
     let mut signal = app.remote.signal.subscribe();
     let ws = tokio::select! {
@@ -418,17 +458,24 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> bool {
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("remote: dialing {relay} failed: {e:#}");
-                return false;
+                return (false, false);
             }
         },
-        _ = signal.changed() => return false,
+        _ = signal.changed() => return (false, false),
     };
-    let accepted = serve_connection(app, router, ws, host).await;
+    let (accepted, replaced) = serve_connection(app, router, ws, host).await;
     app.remote.set_connected(false).await;
-    if !accepted {
+    if !accepted && !replaced {
         eprintln!("remote: the relay hung up before answering the hello (bad signature, or wrong install?); keeping the backoff");
     }
-    accepted
+    (accepted, replaced)
+}
+
+/// `true` for the close codes that mean "another tunnel took this install over": `4000`, which
+/// the relay sends today (`tunnel.js:114`), and `4409`, which docs/remote-tunnel.md pins for it.
+/// Either parks the client instead of redialing into a replacement war.
+fn is_replaced_close(code: u16) -> bool {
+    matches!(code, 4000 | 4409)
 }
 
 /// Dials the relay, waits for `{"t":"challenge","nonce"}` and answers
@@ -584,7 +631,14 @@ fn plausible_path(path: &str) -> bool {
 /// Sets the connection up and pumps it until the socket dies, pinging every [`PING_EVERY`] and
 /// giving up after [`DEAD_AFTER`] of silence. The connection only counts as accepted — the live
 /// link, and a backoff reset — once the relay's first frame arrives, proving it took the hello.
-async fn serve_connection(app: &Shared, router: &Router, ws: WebSocketStream<MaybeTlsStream<TcpStream>>, host: String) -> bool {
+/// Answers `(accepted, replaced)`: a close frame whose code says a newer tunnel took over sets
+/// `replaced` for the supervisor to park on, not redial.
+async fn serve_connection(
+    app: &Shared,
+    router: &Router,
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    host: String,
+) -> (bool, bool) {
     let (out, mut out_rx) = mpsc::channel(OUT_QUEUE);
     let (conns, conns_rx) = mpsc::channel(8);
     let conn = Arc::new(Conn {
@@ -615,6 +669,7 @@ async fn serve_connection(app: &Shared, router: &Router, ws: WebSocketStream<May
         }
     });
     let (mut accepted, mut last_frame) = (false, Instant::now());
+    let mut replaced = false;
     loop {
         tokio::select! {
             frame = stream.next() => {
@@ -627,7 +682,11 @@ async fn serve_connection(app: &Shared, router: &Router, ws: WebSocketStream<May
                         last_frame = Instant::now();
                         dispatch(&conn, router, &text);
                     }
-                    Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                    Some(Ok(tungstenite::Message::Close(frame))) => {
+                        replaced = frame.is_some_and(|f| is_replaced_close(u16::from(f.code)));
+                        break;
+                    }
+                    Some(Err(_)) | None => break,
                     // Any other frame — a ping above all — still proves the relay took the hello.
                     Some(Ok(_)) => {
                         if !accepted {
@@ -648,7 +707,7 @@ async fn serve_connection(app: &Shared, router: &Router, ws: WebSocketStream<May
         }
     }
     drop(cleanup);
-    accepted
+    (accepted, replaced)
 }
 
 /// One frame from the relay: a ping, a new stream, or traffic for an open one. Frames outside the
@@ -1092,7 +1151,8 @@ mod tests {
         response::Response,
         routing::{get, post},
     };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
 
     type RelayWs = WebSocketStream<tokio::net::TcpStream>;
 
@@ -1446,6 +1506,235 @@ mod tests {
         drop(next_tunnel(&mut tunnels).await);
         // The supervisor redials after about a second: the backoff floor plus jitter.
         next_tunnel(&mut tunnels).await;
+    }
+
+    /// The relay-side close of a live tunnel with `code`, the way the real relay hangs up.
+    async fn close_with(ws: &mut RelayWs, code: u16) {
+        ws.close(Some(CloseFrame {
+            code: code.into(),
+            reason: Default::default(),
+        }))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_replaced_tunnel_parks_until_the_operator_acts() {
+        let (app, router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        // The relay gives the link to a newer tunnel: the code it really sends is 4000 'replaced'
+        // (tunnel.js), the pinned one 4409. Either must park the supervisor, or two motherships
+        // on one install would keep replacing each other forever.
+        close_with(&mut ws, 4000).await;
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(tunnels.try_recv().is_err(), "nothing redials a replaced tunnel");
+        let view = app.remote.view().await;
+        assert_eq!(view["enabled"], true);
+        assert_eq!(view["connected"], false);
+        assert_eq!(view["replaced"], true, "the status names the takeover");
+        // The way out: a reset signals the supervisor, which dials at once under the fresh
+        // identity, and the reset itself clears the status.
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/remote/reset")
+            .header(header::HOST, "127.0.0.1:7878")
+            .header(header::AUTHORIZATION, format!("Bearer {}", app.api_token))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(router.clone().oneshot(request).await.unwrap().status(), StatusCode::OK);
+        let mut ws = next_tunnel(&mut tunnels).await;
+        assert_eq!(app.remote.view().await["replaced"], false, "the reset cleared the status");
+        // Taken over again, the other exit: a disable ends the parked state, and the re-enable
+        // dials again and clears the status.
+        close_with(&mut ws, 4000).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(app.remote.view().await["replaced"], true, "parked again");
+        switch(&app, &router, false).await;
+        switch(&app, &router, true).await;
+        let _ws = next_tunnel(&mut tunnels).await;
+        assert_eq!(app.remote.view().await["replaced"], false, "the re-enable cleared the status");
+    }
+
+    #[tokio::test]
+    async fn a_transient_close_still_redials() {
+        let (_app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        // 1012 (Service Restart) is a transient close, unlike 4000: the supervisor reconnects
+        // with the usual backoff.
+        close_with(&mut ws, 1012).await;
+        next_tunnel(&mut tunnels).await;
+    }
+
+    // -- The real relay, end to end -----------------------------------------
+    //
+    // `services/relay/scripts/local-relay.mjs` is the deployed relay for real: the real worker,
+    // a real InstallTunnel DO over a real WebSocket, a real registration. Only the D1 and the DO
+    // namespace are in-memory fakes, and the owner sign-in is bypassed with a request header.
+
+    /// Spawns the harness and returns it with its port; it prints one line, `listening <port>`,
+    /// to stdout, and exits when stdin closes or the returned `Child` is dropped. `None` skips:
+    /// `node` is not on PATH, which only CI counts as a failure.
+    async fn spawn_local_relay() -> Option<(tokio::process::Child, u16)> {
+        if tokio::process::Command::new("node").arg("--version").output().await.is_err() {
+            if std::env::var_os("CI").is_some() {
+                panic!("CI is set but node is not on PATH: the local-relay e2e cannot run");
+            }
+            eprintln!("skipping the local-relay e2e: node is not on PATH");
+            return None;
+        }
+        let mut relay = Command::new("node")
+            .arg("scripts/local-relay.mjs")
+            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/relay"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("node is on PATH but the local-relay harness would not spawn");
+        let mut stdout = tokio::io::BufReader::new(relay.stdout.take().unwrap());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(15), stdout.read_line(&mut line))
+            .await
+            .expect("the local-relay harness never announced a port")
+            .expect("reading the local-relay harness's stdout failed");
+        let port = line
+            .trim()
+            .strip_prefix("listening ")
+            .expect("the harness's one stdout line was not `listening <port>`")
+            .parse()
+            .expect("the harness's announced port was not a number");
+        Some((relay, port))
+    }
+
+    /// Waits, bounded, until `what` holds on the app's remote view.
+    async fn until(app: &Shared, what: impl Fn(&Value) -> bool, msg: &'static str) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !what(&app.remote.view().await) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect(msg);
+    }
+
+    /// The answer a tunnelled request must carry back through the real relay unharmed: a 201 with
+    /// a content-type, two cookies, and a body.
+    async fn demo() -> Response {
+        Response::builder()
+            .status(StatusCode::CREATED)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::SET_COOKIE, "one=1; Path=/; HttpOnly")
+            .header(header::SET_COOKIE, "two=2; Path=/")
+            .body(Body::from(r#"{"ok":true}"#.as_bytes().to_vec()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_rides_the_real_relay_end_to_end() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        tokio::spawn(run(app.clone(), Router::new().route("/api/demo", get(demo))));
+        // The real registration (the worker answers 201 from its D1) and the real dial; the DO's
+        // first ping, 5 s in, is the first frame, and that is what flips the status to connected.
+        set_enabled(&app, true).await.unwrap();
+        until(
+            &app,
+            |v| v["connected"] == true,
+            "the tunnel never connected to the real relay",
+        )
+        .await;
+        let (install, host) = {
+            let saved = app.remote.saved().await;
+            (saved.install_id.unwrap(), saved.host.unwrap())
+        };
+        // A plain HTTP/1.1 request, the shape a signed-in owner's browser produces once the
+        // harness's header stands in for the sign-in.
+        let mut io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        io.write_all(
+            format!("GET /api/demo HTTP/1.1\r\nhost: {host}\r\nx-local-relay-install: {install}\r\nconnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut raw = Vec::new();
+        // Bounded, because before the relay's proxy fix this hung instead of answering.
+        tokio::time::timeout(Duration::from_secs(10), io.read_to_end(&mut raw))
+            .await
+            .expect("the real relay never answered the tunnelled request")
+            .unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        assert!(raw.starts_with("HTTP/1.1 201"), "the handler's status: {raw:?}");
+        assert!(raw.to_ascii_lowercase().contains("content-type: application/json"), "{raw:?}");
+        assert_eq!(
+            raw.lines()
+                .filter(|line| line.to_ascii_lowercase().starts_with("set-cookie: "))
+                .count(),
+            2,
+            "both cookies as their own header lines: {raw:?}"
+        );
+        assert!(raw.trim_end().ends_with(r#"{"ok":true}"#), "the body intact: {raw:?}");
+    }
+
+    #[tokio::test]
+    async fn a_real_replacement_parks_the_losing_client() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let relay_url = format!("ws://127.0.0.1:{port}");
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(relay_url.clone()).await;
+        tokio::spawn(run(app.clone(), Router::new()));
+        set_enabled(&app, true).await.unwrap();
+        until(&app, |v| v["connected"] == true, "the first tunnel never connected").await;
+        // A second mothership that found the first's config dir: the same key and install id, the
+        // accident the replaced close exists for. Same install, so enabling dials without
+        // registering, and the relay hands the link over.
+        let (install, host) = {
+            let saved = app.remote.saved().await;
+            (saved.install_id.unwrap(), saved.host.unwrap())
+        };
+        let rival_root = temp_root();
+        let rival = test_app(rival_root.path());
+        rival.remote.set_relay(relay_url).await;
+        std::fs::create_dir_all(&rival.remote.dir).unwrap();
+        util::write_private(
+            &rival.remote.dir.join(KEY_FILE),
+            &std::fs::read(app.remote.dir.join(KEY_FILE)).unwrap(),
+        )
+        .unwrap();
+        rival
+            .remote
+            .persist(Saved {
+                enabled: false,
+                install_id: Some(install),
+                host: Some(host),
+            })
+            .await
+            .unwrap();
+        tokio::spawn(run(rival.clone(), Router::new()));
+        set_enabled(&rival, true).await.unwrap();
+        // The relay closed the first tunnel with 4000 'replaced'; the winner takes the link (its
+        // status flips when the DO's first ping arrives, up to 5 s later).
+        until(
+            &app,
+            |v| v["replaced"] == true,
+            "the replaced client never reported the takeover",
+        )
+        .await;
+        until(&rival, |v| v["connected"] == true, "the winning client never connected").await;
+        // The loser stays parked: a redial on the 1 s backoff would have taken the link back.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let first = app.remote.view().await;
+        assert_eq!(first["replaced"], true, "still parked");
+        assert_eq!(first["connected"], false);
+        let second = rival.remote.view().await;
+        assert_eq!(second["connected"], true, "the winner holds the link");
+        assert_eq!(second["replaced"], false);
     }
 
     #[tokio::test]

@@ -1366,7 +1366,7 @@ export function createMockApi(): Api {
   // ids wear the relay's shape: 20 base32 chars (services/relay/src/worker.js). One pairing code
   // waits at the relay, the shape of #534's view; confirming binds it, single-use.
   const remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
-  let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null };
+  let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
   let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
   const remotePairingState: RemotePairing = {
     owner: null,
@@ -2579,7 +2579,7 @@ export function createMockApi(): Api {
       // Like the server: a PUT that does not change the switch answers the view and records nothing.
       if (enabled === remoteState.enabled) return clone(remoteState);
       remoteState = enabled
-        ? { enabled: true, host: remoteHost, connected: true, since: now() }
+        ? { enabled: true, host: remoteHost, connected: true, since: now(), replaced: false }
         : { ...remoteState, enabled: false, connected: false, since: null };
       logActivity({ kind: enabled ? "remote.enable" : "remote.disable", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
       return clone(remoteState);
@@ -2588,7 +2588,7 @@ export function createMockApi(): Api {
       await sleep(300);
       remoteHost = `${remoteInstallId()}.my.colonizer.dev`;
       // A reset redials at once when the switch was on; the host comes back new either way.
-      remoteState = { ...remoteState, host: remoteHost, ...(remoteState.enabled ? { connected: true, since: now() } : {}) };
+      remoteState = { ...remoteState, host: remoteHost, replaced: false, ...(remoteState.enabled ? { connected: true, since: now() } : {}) };
       logActivity({ kind: "remote.reset", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
       return clone(remoteState);
     },
