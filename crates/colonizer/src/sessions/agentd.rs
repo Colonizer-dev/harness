@@ -222,6 +222,7 @@ mod tests {
             schema,
             egress: None,
             resume_dir: None,
+            requires: crate::modules::Requires::default(),
         }
     }
 
