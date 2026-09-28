@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { createBridge, mcpArgs, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -431,6 +431,78 @@ test('finding_file and the memory tools are only offered when the mothership swi
   runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
   assert.deepEqual(runner.turns()[0].mcp.tools, ['wait'], 'no findings switch and no memory dir leave only wait');
+
+  await stop(runner);
+});
+
+/** The `env` table mcpArgs hands the colonizer server, pulled back out of its `-c` JSON. */
+const mcpServerEnv = (args) =>
+  JSON.parse(args.find((arg) => arg.startsWith('mcp_servers.colonizer.env=')).slice('mcp_servers.colonizer.env='.length));
+
+test('mcpArgs forwards the loop switches into the colonizer server env; undefined drops out', () => {
+  const on = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' } }));
+  assert.equal(on.COLONIZER_LOOP, 'true');
+  assert.equal(on.COLONIZER_LOOP_SELF_PACED, 'true');
+  // The end-to-end loop test below inherits the runner's env anyway, so this unit check is what
+  // pins the forwarding: without the switches in the table, mcp.mjs never offers the loop tools.
+  const off = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: {} }));
+  assert.ok(!('COLONIZER_LOOP' in off) && !('COLONIZER_LOOP_SELF_PACED' in off));
+});
+
+test('the bridge turns /loop_next and /loop_stop into protocol events and refuses malformed ones', async () => {
+  const events = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event) });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 90, reason: 'review comments are due' }), { ok: true });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 3.5, reason: 'soon' }), { ok: true }, 'a fractional delay is rounded to the protocol\'s integer');
+    assert.deepEqual(await post('/loop_next', {}), { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 30 }), { error: 'loop_next needs a reason: what the next run should find or do' });
+    assert.deepEqual(await post('/loop_stop', { reason: 'the goal is met' }), { ok: true });
+    assert.deepEqual(await post('/loop_stop', { reason: '  ' }), { error: 'loop_stop needs a reason: why the loop should stop' });
+    assert.deepEqual(events, [
+      { type: 'loop_next', delay_minutes: 90, reason: 'review comments are due' },
+      { type: 'loop_next', delay_minutes: 4, reason: 'soon' },
+      { type: 'loop_stop', reason: 'the goal is met' },
+    ]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('a loop colony reports its pacing: loop_next with a clamped delay, and loop_stop', async (t) => {
+  const calls = [
+    { name: 'loop_next', arguments: { delay_minutes: 5, reason: 'review comments are due' } },
+    { name: 'loop_stop', arguments: { reason: 'the goal is met' } },
+  ];
+  const runner = startRunner({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true', CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'wrap up this run' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  // Both calls crossed the bridge and left the colony as protocol events, the delay clamped to the
+  // mothership's 15-minute floor.
+  assert.deepEqual(first('loop_next')(runner.events), { type: 'loop_next', delay_minutes: 15, reason: 'review comments are due' });
+  assert.deepEqual(first('loop_stop')(runner.events), { type: 'loop_stop', reason: 'the goal is met' });
+  assertSchema(runner.events);
+
+  const { mcp } = runner.turns()[0];
+  assert.deepEqual(mcp.tools, ['loop_next', 'loop_stop', 'wait']);
+  assert.deepEqual(mcp.calls[0], { name: 'loop_next', isError: false, text: 'Next run scheduled in 15 minutes.', error: null });
+  assert.deepEqual(mcp.calls[1], { name: 'loop_stop', isError: false, text: 'The loop is stopped; this is its last run.', error: null });
+
+  await stop(runner);
+});
+
+test('a loop colony on a fixed schedule gets loop_stop but no loop_next', async (t) => {
+  const runner = startRunner({ COLONIZER_LOOP: 'true', CODEX_FAKE_MCP_CALLS: '[]' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['loop_stop', 'wait'], 'only a self-paced loop schedules its next run');
 
   await stop(runner);
 });

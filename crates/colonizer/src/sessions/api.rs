@@ -1052,6 +1052,7 @@ mod tests {
                 schema: json!({}),
                 egress: None,
                 resume_dir: Some("/root/.claude/projects".into()),
+                loop_tools: false,
             }],
             |_| {},
         );
