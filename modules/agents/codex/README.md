@@ -36,14 +36,24 @@ leave the colony as `finding` and `memory_proposal` events, and so do a loop col
 under `COLONIZER_LOOP=true` — `loop_next` additionally when `COLONIZER_LOOP_SELF_PACED=true` — and
 `wait` always.
 
+The first tool in the list follows no switch: **`ask_user`** is the question channel
+(docs/protocol.md §2). A call POSTs to the bridge, which emits the `question` event, moves the
+status to `waiting_for_answer`, and holds the HTTP response until the matching `answer` command
+resolves it with `{answers, response}` and the status settles back. The `mcp_tool_call` item pair
+codex streams for the call is dropped — a question is never also a `tool_call`/`tool_result` — and
+while the call is parked `mcp.mjs` sends MCP progress notifications to hold it open (with
+`tool_timeout_sec` at 3600, codex's own timeout outlives any human). An `answer` naming an unknown
+id is warned about, and an interrupt, a turn end or a shutdown cancels every open ask
+(`{cancelled: true}`).
+
 ## Headless, not app-server
 
 Codex also speaks a bidirectional app-server protocol. This slice uses `codex exec` instead: one
 process per turn, a read-only JSONL stream, no daemon to keep alive. The cost is that nothing
-interactive crosses the boundary: an `answer` command is logged and ignored (the agent cannot ask
-the user anything yet), and `interrupt` SIGINTs the child (codex saves the session rollout
-continuously, so the partial turn stays resumable) and ends the turn as an error. Question routing
-is the follow-up.
+interactive crosses the boundary natively: `interrupt` SIGINTs the child (codex saves the session
+rollout continuously, so the partial turn stays resumable) and ends the turn as an error.
+Questions still reach the user — through the colonizer MCP server's `ask_user` (above), which the
+`answer` command answers.
 
 ## Pinned binary and preflight
 
@@ -96,8 +106,9 @@ background-worker split.
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-codex.mjs`, a stub codex CLI that records the argv,
 stdin prompt and env it received, and — when a test scripts `CODEX_FAKE_MCP_CALLS` — plays the
-model against the registered colonizer MCP server, so findings, memory, the loop tools and wait are
-tested end to end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The happy path's events are checked against the
+model against the registered colonizer MCP server, so findings, memory, the loop tools, wait and an
+ask-and-answer round trip are tested end to end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The
+happy path's events are checked against the
 required fields of `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
 
 ## What is not supported yet
@@ -107,7 +118,7 @@ required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
   preset images, and a custom image's colony at the runner's preflight.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
-- Questions (`answer` is ignored) and resuming a codex thread across a runner restart: the thread id
+- Resuming a codex thread across a runner restart: the thread id
   lives in the runner's memory and its session rollout in the runner's fresh `CODEX_HOME`, both gone
   when the colony's VM is.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
