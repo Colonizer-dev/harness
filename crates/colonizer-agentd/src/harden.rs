@@ -11,7 +11,10 @@
 //! makes async-signal-safe raw syscalls and a failure in any step fails the spawn (fail closed).
 //! agentd itself and the PTY shell (the human's terminal) are deliberately not filtered — only the
 //! runner child — and agentd's own non-dumpability and core limit are set at startup
-//! ([`self_guard`]) so a capability-less agent cannot read the daemon's memory or environ.
+//! ([`self_guard`]) so a capability-less agent cannot read the daemon's memory or environ. The
+//! unfiltered shell's file-borne key is out of the runner's hands: agentd seals the token file once
+//! it has read it ([`crate::seal`], issue #640), so a runner cannot read its way to `/v1/pty` to
+//! shed this profile.
 
 #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))]
 mod imp {

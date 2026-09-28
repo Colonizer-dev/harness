@@ -6,6 +6,7 @@ mod config;
 mod harden;
 mod pty;
 mod runner;
+mod seal;
 mod store;
 
 use axum::{
@@ -35,11 +36,13 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
-                       [--seccomp-profile] [--exec-hardened -- CMD [ARGS...]]
+                       [--seal-token] [--seccomp-profile] [--exec-hardened -- CMD [ARGS...]]
 
   --config PATH      session config            (default /colonizer/session.json)
   --token-file PATH  bearer token for the API  (default /colonizer/token)
   --state-dir DIR    event log directory       (default /var/lib/colonizer)
+  --seal-token       cover the token file with a read-only bind of /dev/null once it has been
+                     read, so no other process in the VM can read it; fail closed (seal.rs)
   --seccomp-profile  print the runner hardening profile as JSON and exit
   --exec-hardened    harden this process like a runner child, then exec CMD (after --)
   --version          print the version";
@@ -48,6 +51,7 @@ struct Args {
     config: PathBuf,
     token_file: PathBuf,
     state_dir: PathBuf,
+    seal_token: bool,
     exec: Vec<String>,
 }
 
@@ -58,6 +62,7 @@ impl Args {
             config: "/colonizer/session.json".into(),
             token_file: "/colonizer/token".into(),
             state_dir: "/var/lib/colonizer".into(),
+            seal_token: false,
             exec: Vec::new(),
         };
         let mut iter = argv.into_iter();
@@ -83,6 +88,7 @@ impl Args {
                     println!("{}", harden::profile_json());
                     return Ok(None);
                 }
+                "--seal-token" => args.seal_token = true,
                 // Everything after the flag (or a bare `--`) is the hardened child's argv, not ours.
                 "--exec-hardened" | "--" => {
                     args.exec = iter.collect();
@@ -151,6 +157,15 @@ async fn run(args: Args) -> Result<(), BoxError> {
         .to_string();
     if token.is_empty() {
         return Err(format!("{} is empty", args.token_file.display()).into());
+    }
+    // Issue #640: the token's only reader is this process, and it has now read it — so with
+    // --seal-token the path is covered before the listener, the runner or anything else exists,
+    // and a runner that reads /colonizer/token later finds an empty file instead of the bearer
+    // token that opens the unfiltered /v1/pty shell. A seal that fails or does not verify stops
+    // the start (fail closed), because a colony booting without it looks healthy while its agent
+    // can reach the terminal.
+    if args.seal_token {
+        seal::seal_token_path(&args.token_file).map_err(|e| format!("cannot seal {}: {e}", args.token_file.display()))?;
     }
     let store = Arc::new(
         EventStore::open(&args.state_dir).map_err(|e| format!("cannot open event log in {}: {e}", args.state_dir.display()))?,

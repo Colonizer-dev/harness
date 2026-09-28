@@ -1349,7 +1349,7 @@ mount --bind /proc/sys /proc/sys 2>/dev/null \
   && mount -o remount,bind,ro /proc/sys 2>/dev/null \
   || echo "colonizer: /proc/sys stays writable" >&2
 mount -o remount,ro /sys 2>/dev/null || echo "colonizer: /sys stays writable" >&2
-exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --state-dir /var/lib/colonizer
+exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --seal-token --state-dir /var/lib/colonizer
 "#;
 
 #[cfg(test)]
@@ -1660,6 +1660,22 @@ mod tests {
         ] {
             assert!(BOOT_SCRIPT.contains(marker), "hardening must contain {marker:?}");
         }
+    }
+
+    /// The exec passes `--seal-token` (issue #640): agentd covers /colonizer/token with a read-only
+    /// bind of /dev/null as soon as it has read it, so the runner child it spawns cannot read the
+    /// bearer token and reach the unfiltered /v1/pty shell with it.
+    #[test]
+    fn boot_script_passes_seal_token_to_agentd() {
+        let exec = BOOT_SCRIPT
+            .find("exec /opt/colonizer/bin/colonizer-agentd")
+            .expect("the script execs agentd");
+        let line = BOOT_SCRIPT[exec..].lines().next().expect("the exec line");
+        assert!(line.contains("--seal-token"), "the exec must pass --seal-token: {line}");
+        assert!(
+            line.contains("--token-file /colonizer/token"),
+            "the sealed path is still the token the daemon reads: {line}"
+        );
     }
 
     /// The Jev compaction switch mounts the payload only with the staged files and a key to go with them.

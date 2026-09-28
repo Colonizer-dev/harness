@@ -164,5 +164,8 @@ is held back as above.
   run without `CAP_SYS_ADMIN` and under a seccomp filter that answers `mount`,
   `umount2` and the namespace calls with `EPERM`, so the agent cannot undo a
   mask or a read-only bind. The daemon and the cockpit's terminal shell are not
-  filtered, so a person typing in that terminal can. See
+  filtered, so a person typing in that terminal can. The token-file route to
+  that terminal is closed for the agent, though: agentd seals `/colonizer/token`
+  after reading it (#640), leaving no reader the agent can reach for the
+  unfiltered shell's bearer token. See
   [In-guest hardening](architecture.md#in-guest-hardening).
