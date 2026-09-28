@@ -334,6 +334,13 @@ impl Registry {
     pub async fn name_of(&self, id: &str) -> Option<String> {
         self.tokens.read().await.iter().find(|t| t.id == id).map(|t| t.name.clone())
     }
+
+    /// The live token an id names, rebuilt exactly the way `authenticate` attaches one. A loop
+    /// (issue #627, loops.rs) stores only the creating token's id, and each firing needs the
+    /// limits, caps and budget back; a revoked token names nothing.
+    pub async fn scoped(&self, id: &str) -> Option<ScopedToken> {
+        self.tokens.read().await.iter().find(|t| t.id == id).map(Stored::scoped)
+    }
 }
 
 /// Trims an org list, refusing empties. Orgs are GitHub owners, so `acme/web` as an org is a typo
@@ -379,7 +386,8 @@ enum Need<'a> {
     /// A map route for one repository: read scope, then the repository against the token's
     /// limits — outside them the map reads as unknown (404), like an out-of-limits colony.
     Map { owner: &'a str, name: &'a str },
-    /// A launch route: the repository the body names is the handler's to check.
+    /// A launch route — starting a colony, or a loop mutation, each of which starts or reshapes
+    /// colonies: the body (or the loop) is the handler's to check.
     Launch,
     /// No scoped token: owner only.
     Owner,
@@ -396,6 +404,8 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
     let segs: Vec<&'a str> = path.split('/').skip(1).collect();
     let get = method == Method::GET;
     let post = method == Method::POST;
+    let put = method == Method::PUT;
+    let delete = method == Method::DELETE;
     match segs.as_slice() {
         // Reads: watch the install and its colonies, never drive them.
         ["api", "status" | "version"] if get => Need::Bare(Scope::Read),
@@ -418,10 +428,17 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Operate,
         },
-        // Launching: start a colony. Loops stay with the owner (issue #508's first slice): a loop
-        // spawns colonies on a schedule, out of reach of a token's caps, budget and external-input
-        // marking, so no scope of token may create or run one.
+        // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
+        // Loops (issue #627): listing loops and reading a loop's runs is a watch; creating,
+        // editing, deleting or running a loop can each start a colony, so they need launch —
+        // operate never reaches a loop mutation. Which loops a token may touch, and what its runs
+        // answer to, is the handlers' to check, where the loop is in hand.
+        ["api", "loops"] if get => Need::Bare(Scope::Read),
+        ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        ["api", "loops"] if post => Need::Launch,
+        ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
+        ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
@@ -762,17 +779,28 @@ mod tests {
             ));
             assert!(authorize(&app, &launch, &post, path).await.is_ok(), "launch {path}");
         }
-        // Loops are the owner's alone at any scope (issue #508's first slice): a loop spawns
-        // colonies on a schedule, out of reach of a token's caps, budget and marking.
+        // Loops (issue #627): listing a loop's runs is a read at every scope; every loop mutation
+        // can start or reshape a colony, so it takes launch — read and operate are refused.
+        for path in ["/api/loops", "/api/loops/loop_1/runs"] {
+            assert!(authorize(&app, &read, &get, path).await.is_ok(), "read {path}");
+            assert!(authorize(&app, &operate, &get, path).await.is_ok(), "operate {path}");
+            assert!(authorize(&app, &launch, &get, path).await.is_ok(), "launch {path}");
+        }
         for (method, path) in [
-            (&get, "/api/loops"),
             (&post, "/api/loops"),
+            (&Method::PUT, "/api/loops/loop_1"),
+            (&Method::DELETE, "/api/loops/loop_1"),
             (&post, "/api/loops/loop_1/run-now"),
         ] {
             assert!(
-                matches!(authorize(&app, &launch, method, path).await, Err(Deny::Forbidden(_))),
-                "{method} {path} must be owner-only"
+                matches!(authorize(&app, &read, method, path).await, Err(Deny::Forbidden(_))),
+                "read {method} {path}"
             );
+            assert!(
+                matches!(authorize(&app, &operate, method, path).await, Err(Deny::Forbidden(_))),
+                "operate {method} {path}"
+            );
+            assert!(authorize(&app, &launch, method, path).await.is_ok(), "launch {method} {path}");
         }
         // The management routes and every other route stay with the owner, at any scope.
         for (method, path) in [
@@ -971,13 +999,17 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn guard_router(app: &Shared) -> axum::Router<()> {
-        use axum::routing::{get, post};
+        use axum::routing::{get, post, put};
         Router::new()
             .route("/api/status", get(crate::status::status))
             .route("/api/sessions", get(crate::sessions::list).post(crate::sessions::create))
             .route("/api/sessions/{id}", get(crate::sessions::get))
             .route("/api/sessions/{id}/question", get(crate::sessions::question))
             .route("/api/sessions/{id}/answer", post(crate::sessions::answer))
+            .route("/api/loops", get(crate::loops::list).post(crate::loops::create))
+            .route("/api/loops/{id}", put(crate::loops::update).delete(crate::loops::delete))
+            .route("/api/loops/{id}/run-now", post(crate::loops::run_now))
+            .route("/api/loops/{id}/runs", get(crate::loops::runs))
             .route("/api/tokens", get(list).post(create))
             .route("/api/tokens/self", get(self_view))
             .layer(axum::middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
@@ -1058,6 +1090,19 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
         let body = body_text(res).await;
         assert!(body.contains("scope (read) does not cover POST /api/sessions"), "{body}");
+        // A loop mutation starts colonies, so creating a loop is refused at the guard too.
+        let res = router
+            .clone()
+            .oneshot(send(
+                Method::POST,
+                "/api/loops",
+                bearer,
+                Some(r#"{"name":"Triage","repo":"acme/web","prompt":"Triage","cadence":{"every":"interval","minutes":60}}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(body_text(res).await.contains("scope (read) does not cover POST /api/loops"));
         // Token management is the owner's alone, at any scope.
         for (method, uri) in [
             (Method::GET, "/api/tokens"),
@@ -1317,6 +1362,201 @@ mod tests {
         );
         let body = body_text(res).await;
         assert!(body.contains("agent module"), "{body}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A launch token keeps loops of its own (issue #627): the created loop records the token,
+    /// creation outside the repo limits and map-loop creation are refused, an owner's loop is not
+    /// in the list and reads as unknown everywhere, and an edit of its own loop keeps the token.
+    #[tokio::test]
+    async fn a_launch_token_creates_loops_under_its_token_and_sees_only_its_own() {
+        let root = root();
+        let (app, token) = app_with_token(
+            &root,
+            NewToken {
+                name: "cron".into(),
+                scope: "launch".into(),
+                orgs: Vec::new(),
+                repos: vec!["acme/web".into()],
+                max_concurrent: None,
+                budget_usd_per_day: None,
+            },
+        )
+        .await;
+        let tok_id = app.api_tokens.authenticate(&token).await.unwrap().id;
+        let bearer = Some(token.as_str());
+        let owner = Some(app.api_token.as_str());
+        let router = guard_router(&app);
+        let body =
+            r#"{"name":"Triage","repo":"acme/web","prompt":"Triage new issues","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, "/api/loops", bearer, Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        let made = body_json(res).await;
+        assert_eq!(
+            made["created_by_token"],
+            tok_id.as_str(),
+            "the loop records the token: {made}"
+        );
+        let mine = made["id"].as_str().unwrap().to_string();
+        // The owner still sees every loop.
+        let res = router
+            .clone()
+            .oneshot(send(Method::GET, "/api/loops", owner, None))
+            .await
+            .unwrap();
+        assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+
+        // Outside the repo limit: 403, the launch refusal's words. A map loop is refused outright:
+        // its runs would launch outside the token's caps and marking.
+        let outside = r#"{"name":"Spy","repo":"acme/api","prompt":"x","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, "/api/loops", bearer, Some(outside)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(body_text(res).await.contains("do not include acme/api"));
+        let map = r#"{"name":"Maps","repo":"acme/web","kind":"map","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, "/api/loops", bearer, Some(map)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert!(body_text(res).await.contains("map loop"));
+
+        // The list is filtered to the limits, as the colony list is: an owner's loop on another
+        // repository is not in it, and its id reads as unknown everywhere.
+        let owner_body = r#"{"name":"Owner's","repo":"other/web","prompt":"x","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, "/api/loops", owner, Some(owner_body)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        let res = router
+            .clone()
+            .oneshot(send(Method::GET, "/api/loops", bearer, None))
+            .await
+            .unwrap();
+        let listed = body_json(res).await;
+        let ids: Vec<&str> = listed.as_array().unwrap().iter().map(|l| l["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec![mine.as_str()], "only the token's own loop is listed: {listed}");
+        for (method, uri) in [
+            (Method::PUT, "/api/loops/owner_loop".to_string()),
+            (Method::DELETE, "/api/loops/owner_loop".to_string()),
+            (Method::POST, "/api/loops/owner_loop/run-now".to_string()),
+            (Method::GET, "/api/loops/owner_loop/runs".to_string()),
+        ] {
+            let res = router
+                .clone()
+                .oneshot(send(method.clone(), &uri, bearer, (method == Method::PUT).then_some(body)))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method} {uri} reads as unknown");
+        }
+        // Its own loop reads fine, and editing it keeps the token on the loop.
+        let res = router
+            .clone()
+            .oneshot(send(Method::GET, &format!("/api/loops/{mine}/runs"), bearer, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let renamed = r#"{"name":"Triage renamed","repo":"acme/web","prompt":"Triage new issues","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::PUT, &format!("/api/loops/{mine}"), bearer, Some(renamed)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        assert_eq!(
+            body_json(res).await["created_by_token"],
+            tok_id.as_str(),
+            "an edit cannot shed the token"
+        );
+        // And it deletes its own loop.
+        let res = router
+            .oneshot(send(Method::DELETE, &format!("/api/loops/{mine}"), bearer, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Run-now by the token passes the guard and the ownership check, and the colony it launches
+    /// carries the token (issue #627). After revocation the loop's next run-now is refused (409)
+    /// and the loop ends: nothing launches after revocation, even at the owner's hand.
+    #[tokio::test]
+    async fn run_now_on_a_token_loop_runs_under_the_token_until_it_is_revoked() {
+        let root = root();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // The smallest install `create` insists on, so the run-now launch completes here.
+        let app = crate::sessions::tests::app_that_can_create(&root);
+        let made = app
+            .api_tokens
+            .create(NewToken {
+                name: "cron".into(),
+                scope: "launch".into(),
+                orgs: Vec::new(),
+                repos: vec!["acme/app".into()],
+                max_concurrent: None,
+                budget_usd_per_day: None,
+            })
+            .await
+            .unwrap();
+        let tok_id = made.meta.id.clone();
+        let bearer = Some(made.token.as_str());
+        let router = guard_router(&app);
+        let body =
+            r#"{"name":"Triage","repo":"acme/app","prompt":"Triage new issues","cadence":{"every":"interval","minutes":60}}"#;
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, "/api/loops", bearer, Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        let id = body_json(res).await["id"].as_str().unwrap().to_string();
+        let res = router
+            .clone()
+            .oneshot(send(Method::POST, &format!("/api/loops/{id}/run-now"), bearer, None))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{}", body_text(res).await);
+        let run = body_json(res).await;
+        assert_eq!(
+            run["launched_by_token"],
+            tok_id.as_str(),
+            "the run-now colony knows the token it ran under: {run}"
+        );
+        // That run finished (the boot task is never polled; the test says so), so it holds the
+        // loop no longer.
+        let run_id = run["id"].as_str().unwrap().to_string();
+        app.sessions.write().await.iter_mut().for_each(|s| {
+            if s.id == run_id {
+                s.status = SessionStatus::Stopped;
+            }
+        });
+        // Revoking the token stops the loop at its next run, even at the owner's hand.
+        assert!(app.api_tokens.revoke(&tok_id).await.is_some());
+        let res = router
+            .oneshot(send(
+                Method::POST,
+                &format!("/api/loops/{id}/run-now"),
+                Some(app.api_token.as_str()),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT, "revocation stops the next run");
+        assert!(body_text(res).await.contains("revoked"));
+        let l = app.loops.get(&id).await.unwrap();
+        assert!(!l.enabled && l.next_run_at.is_none(), "the loop is ended");
+        assert_eq!(l.ended_reason.as_deref(), Some("its API token was revoked"));
+        assert_eq!(l.runs, 1, "nothing launched after the revocation");
         let _ = std::fs::remove_dir_all(root);
     }
 }

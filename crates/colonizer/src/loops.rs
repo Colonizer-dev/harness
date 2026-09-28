@@ -10,7 +10,9 @@
 use crate::schedule::{Cadence, next_run_after};
 use crate::sessions::{self, NewSession, Session, SessionStatus};
 use crate::{
-    ApiResult, App, Shared, client_error,
+    ApiResult, App, Shared,
+    api_tokens::ScopedToken,
+    client_error,
     util::{short_id, valid_repo, write_atomic},
 };
 use anyhow::Result;
@@ -68,6 +70,13 @@ pub struct Loop {
     pub name: String,
     pub org: String,
     pub repo: String,
+    /// The id of the scoped API token that created this loop (issue #627, api_tokens.rs), when one
+    /// did: every run is admitted against the token's org/repo limits, caps and budget and marked
+    /// as its external input, only this token may edit or run the loop, and revoking the token
+    /// ends it at its next run. `None` for anything the owner made. The token itself is never
+    /// stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by_token: Option<String>,
     /// A map loop over the whole org (`owner/*`): the repositories still to map in the current
     /// cycle. Server-owned — never taken from the API, emptied when the loop is updated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -380,6 +389,8 @@ fn loop_from(
         name,
         org,
         repo,
+        // Only `create` attaches a token; an update keeps the loop's existing one.
+        created_by_token: None,
         pending: Vec::new(),
         prompt,
         next_run_at: enabled.then(|| next_run_after(&req.cadence, now)),
@@ -400,13 +411,46 @@ fn loop_from(
     })
 }
 
-pub async fn list(State(app): State<Shared>) -> Json<Vec<Loop>> {
-    Json(app.loops.loops.read().await.clone())
+/// Every loop, filtered to the caller's org/repo limits when a scoped token asks — the way the
+/// colony list is filtered (issue #627).
+pub async fn list(State(app): State<Shared>, scoped: Option<axum::Extension<ScopedToken>>) -> Json<Vec<Loop>> {
+    let loops = app.loops.loops.read().await;
+    Json(
+        loops
+            .iter()
+            .filter(|l| scoped.as_ref().is_none_or(|axum::Extension(t)| t.covers(&l.org, &l.repo)))
+            .cloned()
+            .collect(),
+    )
 }
 
-pub async fn create(State(app): State<Shared>, Json(req): Json<NewLoop>) -> ApiResult<Loop> {
+pub async fn create(
+    State(app): State<Shared>,
+    scoped: Option<axum::Extension<ScopedToken>>,
+    Json(req): Json<NewLoop>,
+) -> ApiResult<Loop> {
     let now = Utc::now();
-    let l = loop_from(&app, req, format!("loop_{}", short_id()), now, now)?;
+    let mut l = loop_from(&app, req, format!("loop_{}", short_id()), now, now)?;
+    // A scoped launch token may keep its recurring work in a loop (issue #627): the loop records
+    // the token, and each run is admitted against the token's limits, caps and budget and marked
+    // as its external input, exactly like a launch the token made by hand. A map loop stays the
+    // owner's: its runs go through the Map view's path, which carries no token, so refusing one
+    // here is what keeps them from escaping both.
+    if let Some(token) = scoped.map(|axum::Extension(t)| t) {
+        if l.kind == LoopKind::Map {
+            return Err(client_error(
+                StatusCode::FORBIDDEN,
+                "a scoped API token cannot create a map loop; its runs would launch outside the token's caps and marking",
+            ));
+        }
+        if !token.covers(&l.org, &l.repo) {
+            return Err(client_error(
+                StatusCode::FORBIDDEN,
+                &format!("this API token's org/repo limits do not include {}", l.repo),
+            ));
+        }
+        l.created_by_token = Some(token.id);
+    }
     app.loops.loops.write().await.push(l.clone());
     app.loops.save().await?;
     Ok(Json(l))
@@ -414,17 +458,48 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewLoop>) -> ApiR
 
 /// Replaces a loop's settings; its id, creation time, run count and last run are kept, and the next
 /// run is recomputed. Re-enabling an ended loop clears why it ended.
-pub async fn update(State(app): State<Shared>, Path(id): Path<String>, Json(req): Json<NewLoop>) -> ApiResult<Loop> {
+pub async fn update(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<ScopedToken>>,
+    Json(req): Json<NewLoop>,
+) -> ApiResult<Loop> {
     let now = Utc::now();
     let existing = app
         .loops
         .get(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such loop"))?;
+    // A token reshapes only the loop it created: firing or editing an owner's loop would launch
+    // colonies under the owner's authority, uncapped and unmarked. The refusal reads as an unknown
+    // id, the way an out-of-limits colony does, so the token can probe nothing (issue #627).
+    if let Some(axum::Extension(token)) = &scoped
+        && existing.created_by_token.as_deref() != Some(token.id.as_str())
+    {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
+    }
+    // Whoever edits it, a token's loop keeps its creator and stays a colony loop — a map loop's
+    // runs would launch outside the token's caps and marking entirely.
+    if existing.created_by_token.is_some() && req.kind == LoopKind::Map {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "a loop created by an API token cannot become a map loop; delete it and create the map loop as the owner",
+        ));
+    }
     let mut l = loop_from(&app, req, id.clone(), existing.created_at, now)?;
     l.runs = existing.runs;
     l.last_run = existing.last_run;
     l.last_note = existing.last_note;
+    l.created_by_token = existing.created_by_token;
+    // An edit by the token keeps the loop inside its org/repo limits.
+    if let Some(axum::Extension(token)) = &scoped
+        && !token.covers(&l.org, &l.repo)
+    {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            &format!("this API token's org/repo limits do not include {}", l.repo),
+        ));
+    }
     if !l.enabled {
         l.ended_reason = existing.ended_reason;
     }
@@ -440,7 +515,22 @@ pub async fn update(State(app): State<Shared>, Path(id): Path<String>, Json(req)
     Ok(Json(l))
 }
 
-pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+pub async fn delete(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<ScopedToken>>,
+) -> ApiResult<Value> {
+    // A token deletes only the loop it created; anything else reads as unknown (issue #627).
+    if let Some(axum::Extension(token)) = &scoped {
+        let mine = app
+            .loops
+            .get(&id)
+            .await
+            .is_some_and(|l| l.created_by_token.as_deref() == Some(token.id.as_str()));
+        if !mine {
+            return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
+        }
+    }
     let removed = {
         let mut loops = app.loops.loops.write().await;
         let before = loops.len();
@@ -455,12 +545,23 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
 }
 
 /// Starts the loop's next run now, whatever its schedule — still one run at a time.
-pub async fn run_now(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+pub async fn run_now(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<ScopedToken>>,
+) -> ApiResult<Session> {
     let l = app
         .loops
         .get(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such loop"))?;
+    // A token runs only the loop it created: firing an owner's loop would launch colonies under
+    // the owner's authority, uncapped and unmarked. The refusal reads as an unknown id.
+    if let Some(axum::Extension(token)) = &scoped
+        && l.created_by_token.as_deref() != Some(token.id.as_str())
+    {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
+    }
     if let Some(live) = live_run_for(&app.sessions.read().await, &l) {
         return Err(client_error(
             StatusCode::CONFLICT,
@@ -480,9 +581,21 @@ pub async fn run_now(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
     }
 }
 
-/// The loop's colonies, newest first.
-pub async fn runs(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Vec<Session>> {
-    if app.loops.get(&id).await.is_none() {
+/// The loop's colonies, newest first. A scoped token reads the runs of any loop inside its
+/// org/repo limits; outside them the loop reads as unknown, never as a refusal (issue #627).
+pub async fn runs(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<ScopedToken>>,
+) -> ApiResult<Vec<Session>> {
+    let l = app
+        .loops
+        .get(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such loop"))?;
+    if let Some(axum::Extension(token)) = &scoped
+        && !token.covers(&l.org, &l.repo)
+    {
         return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
     }
     let origins = [format!("{ORIGIN_PREFIX}{id}"), crate::maps::loop_origin(&id)];
@@ -498,9 +611,33 @@ pub async fn runs(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
     Ok(Json(runs))
 }
 
+/// The token a loop's runs run under (issue #627): the loop stores only the creating token's id,
+/// and each firing rebuilds the token from the registry — the same view the guard attaches — so
+/// its org/repo limits, concurrency cap and budget admit the run and the colony is marked as the
+/// token's external input. A revoked token ends the loop and refuses the run: the scheduler must
+/// stop trying, and the loop's record says why.
+async fn run_token(app: &Shared, l: &Loop) -> Result<Option<ScopedToken>, crate::AppError> {
+    let Some(id) = l.created_by_token.as_deref() else {
+        return Ok(None);
+    };
+    match app.api_tokens.scoped(id).await {
+        Some(token) => Ok(Some(token)),
+        None => {
+            app.loops
+                .update(&l.id, |x| x.end("its API token was revoked".to_string()))
+                .await;
+            Err(client_error(
+                StatusCode::CONFLICT,
+                &format!("the loop's API token ({id}) was revoked; the loop is ended"),
+            ))
+        }
+    }
+}
+
 /// Launches a colony loop's run through the normal admission path and books the next.
 async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
+    let scoped = run_token(app, l).await?;
     let body = json!({
         "repo": l.repo,
         "title": format!("{} (loop, run {run})", l.name),
@@ -513,7 +650,7 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
     });
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
-    let Json(session) = sessions::create(State(app.clone()), None, Json(req)).await?;
+    let Json(session) = sessions::create(State(app.clone()), scoped.map(axum::Extension), Json(req)).await?;
     app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
     Ok(session)
 }
@@ -639,8 +776,13 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
                     let message = e.message().to_string();
                     app.loops
                         .update(&id, |x| {
-                            x.last_note = Some(format!("could not start at {}: {message}", now.format("%H:%M UTC")));
-                            x.next_run_at = Some(next_run_after(&x.cadence, now));
+                            // A launch that ended the loop itself — its API token was revoked —
+                            // keeps that end; any other refusal is a skipped tick with the reason,
+                            // tried again at the next slot.
+                            if x.enabled {
+                                x.last_note = Some(format!("could not start at {}: {message}", now.format("%H:%M UTC")));
+                                x.next_run_at = Some(next_run_after(&x.cadence, now));
+                            }
                             x.check_limits();
                         })
                         .await;
@@ -773,6 +915,7 @@ mod tests {
             name: "Triage".into(),
             org: "acme".into(),
             repo: "acme/web".into(),
+            created_by_token: None,
             pending: Vec::new(),
             prompt: "Triage new issues".into(),
             cadence,
@@ -885,15 +1028,19 @@ mod tests {
         map.repo = "acme/*".into();
         map.prompt = String::new();
         map.pending = vec!["acme/api".into()];
+        map.created_by_token = Some("tok_x".into());
         let json = serde_json::to_value(&map).unwrap();
         assert_eq!(json["kind"], "map");
         assert_eq!(json["pending"], json!(["acme/api"]));
+        assert_eq!(json["created_by_token"], "tok_x", "a token's loop keeps its token on disk");
         assert_eq!(serde_json::from_value::<Loop>(json).unwrap(), map);
 
         let mut old = serde_json::to_value(a_loop(Cadence::Interval { minutes: 60 })).unwrap();
         old.as_object_mut().unwrap().remove("kind");
+        old.as_object_mut().unwrap().remove("created_by_token");
         let l: Loop = serde_json::from_value(old).unwrap();
         assert_eq!(l.kind, LoopKind::Colony, "no kind field means the default");
+        assert_eq!(l.created_by_token, None, "a loop saved before tokens is the owner's");
         assert!(l.pending.is_empty());
     }
 
@@ -1130,6 +1277,144 @@ mod tests {
         stray.id = "stray".into();
         app.sessions.write().await.push(stray);
         on_stop(&app, "stray", "nope").await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- Token-created loops (issue #627): every run is admitted against the creating token's
+    // limits, caps and budget, and carries its marking, exactly like a hand launch.
+
+    fn a_token(max_concurrent: Option<u32>, repos: Vec<&str>) -> crate::api_tokens::NewToken {
+        crate::api_tokens::NewToken {
+            name: "cron".into(),
+            scope: "launch".into(),
+            orgs: Vec::new(),
+            repos: repos.into_iter().map(str::to_string).collect(),
+            max_concurrent,
+            budget_usd_per_day: None,
+        }
+    }
+
+    /// A test app whose config dir exists (a token creation writes through to it). The refusals
+    /// below all fire before `create` needs an agent module; only the launch that succeeds uses
+    /// the full fixture.
+    fn app_with_config(root: &FsPath) -> Shared {
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        crate::tests::test_app(root)
+    }
+
+    /// The smallest install `create` insists on, as in sessions' tests; the boot task a created
+    /// colony spawns is never polled, so nothing reaches a microVM.
+    fn app_that_can_create(root: &FsPath) -> Shared {
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        crate::sessions::tests::app_that_can_create(root)
+    }
+
+    #[tokio::test]
+    async fn a_token_loop_launches_its_colony_under_its_token() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-token-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let made = app.api_tokens.create(a_token(None, vec!["acme/app"])).await.unwrap();
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.repo = "acme/app".into();
+        l.created_by_token = Some(made.meta.id.clone());
+        app.loops.loops.write().await.push(l);
+        let now = utc(2026, 9, 24, 9, 0);
+        let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), now).await.unwrap();
+        assert_eq!(
+            session.launched_by_token.as_deref(),
+            Some(made.meta.id.as_str()),
+            "the colony knows the token its loop runs under"
+        );
+        assert_eq!(session.origin.as_deref(), Some("loop:loop_a"));
+        let l = app.loops.get("loop_a").await.unwrap();
+        assert_eq!(
+            (l.runs, l.last_run.as_ref().map(|r| r.session.as_str())),
+            (1, Some(session.id.as_str())),
+            "the run is booked like any other"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_token_loop_s_run_is_refused_at_its_token_s_concurrency_cap() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-cap-{}", short_id()));
+        let app = app_with_config(&root);
+        let made = app.api_tokens.create(a_token(Some(1), vec!["acme/app"])).await.unwrap();
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.repo = "acme/app".into();
+        l.created_by_token = Some(made.meta.id.clone());
+        app.loops.loops.write().await.push(l);
+        // Another colony of the same token holds the one place — it is not the loop's own run, so
+        // the one-run-at-a-time skip does not fire first.
+        let mut holder = colony("acme", SessionStatus::Running);
+        holder.id = "holder".into();
+        holder.repo = "acme/app".into();
+        holder.launched_by_token = Some(made.meta.id.clone());
+        app.sessions.write().await.push(holder);
+        let now = utc(2026, 9, 24, 9, 0);
+        fire_due(&app, now).await;
+        let l = app.loops.get("loop_a").await.unwrap();
+        assert!(l.last_run.is_none() && l.runs == 0, "nothing was launched");
+        assert!(
+            !app.sessions
+                .read()
+                .await
+                .iter()
+                .any(|s| s.origin.as_deref() == Some("loop:loop_a")),
+            "no colony was started"
+        );
+        let note = l.last_note.unwrap();
+        assert!(note.contains("concurrency cap"), "the tick's note is the refusal: {note}");
+        assert_eq!(
+            l.next_run_at,
+            Some(utc(2026, 9, 24, 10, 0)),
+            "the loop tries again at its next slot"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_loop_run_outside_its_token_s_repo_limits_is_refused_like_a_launch() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-limits-{}", short_id()));
+        let app = app_with_config(&root);
+        // The token's reach moved (or the owner moved the loop): the run refuses at the same gate
+        // a hand launch would, and the note says so.
+        let made = app.api_tokens.create(a_token(None, vec!["acme/api"])).await.unwrap();
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.created_by_token = Some(made.meta.id.clone());
+        app.loops.loops.write().await.push(l);
+        let now = utc(2026, 9, 24, 9, 0);
+        fire_due(&app, now).await;
+        let l = app.loops.get("loop_a").await.unwrap();
+        let note = l.last_note.unwrap();
+        assert!(note.contains("do not include acme/web"), "{note}");
+        assert_eq!(
+            (l.runs, l.enabled),
+            (0, true),
+            "refused, not ended: the limits may widen again"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn revoking_the_token_ends_its_loop() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-revoke-{}", short_id()));
+        let app = app_with_config(&root);
+        let made = app.api_tokens.create(a_token(None, vec![])).await.unwrap();
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.created_by_token = Some(made.meta.id.clone());
+        app.loops.loops.write().await.push(l);
+        assert!(app.api_tokens.revoke(&made.meta.id).await.is_some());
+        let now = utc(2026, 9, 24, 9, 0);
+        fire_due(&app, now).await;
+        let l = app.loops.get("loop_a").await.unwrap();
+        assert!(!l.enabled && l.next_run_at.is_none(), "the scheduler never picks it up again");
+        assert_eq!(l.ended_reason.as_deref(), Some("its API token was revoked"));
+        assert_eq!(l.runs, 0, "nothing was launched");
+        // The end survives a later tick: the loop is no longer due, and its record is untouched.
+        fire_due(&app, now).await;
+        let l = app.loops.get("loop_a").await.unwrap();
+        assert_eq!(l.last_note.as_deref(), Some("its API token was revoked"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

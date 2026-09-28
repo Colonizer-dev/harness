@@ -56,8 +56,18 @@ Only the Claude Code agent module has these two tools today. A loop whose coloni
 agent module still runs on its schedule, but its colonies cannot stop it, and a self-paced one runs
 every 24 hours.
 
-A loop also ends by itself after its **max runs**, or when its next run would fall past its **end
-date**.
+A loop also ends by itself after its **max runs**, when its next run would fall past its **end
+date**, or — at its next slot — when its API token has been revoked.
+
+## Tokens
+
+A loop can be created by a scoped API token as well as by the owner ([Scoped API
+tokens](cli.md#scoped-api-tokens)): the loop records the token, and every run is admitted against
+the token's org/repo limits, concurrency cap and daily budget and marked as external input,
+exactly like a colony the token launched by hand. Revoking the token ends the loop the next time
+it would run (a run-now answers 409), so nothing launches after revocation. The token lists every
+loop inside its limits, but edits and runs only the loops it created — an owner's loop reads as
+unknown to it — and map loops stay with the owner.
 
 ## Map refresh
 
