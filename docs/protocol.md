@@ -515,7 +515,7 @@ missing values mean the `default`.
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
   "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|parked|stopped|failed",
-  "branch": "colonizer/issue-12-ab12cd34", "base": "main", "org": "owner", "origin": null, "worktree": "/…",
+  "branch": "colonizer/issue-12-ab12cd34", "base": "main", "org": "owner", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
@@ -535,7 +535,7 @@ events, pty and shutdown), so the boot spec is the only per-colony number about 
 figures are omitted rather than faked. `null` on colonies booted before these fields existed.
 
 The example shows the common fields; the record carries more, and most optional ones are left out
-of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`,
+of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`, `parked`,
 `agent_session`, `pending_answer`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
