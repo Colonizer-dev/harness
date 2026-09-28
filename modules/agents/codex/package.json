@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Colonizer agent module: OpenAI's Codex CLI, headless",
   "scripts": {
-    "test": "node --test test/runner.test.mjs",
+    "test": "node --test test/runner.test.mjs test/mcp.test.mjs",
     "start": "node runner.mjs"
   },
   "license": "MIT",

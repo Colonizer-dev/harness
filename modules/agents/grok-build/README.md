@@ -17,6 +17,19 @@ event types are logged, never fatal. Every flag is from the upstream user guide
 upstream never shows a `cacheCreationInputTokens` bucket in `modelUsage`, so that one is read
 leniently and counts as zero when absent.
 
+## The colonizer MCP server
+
+At startup the runner registers a `colonizer` MCP server by writing `[mcp_servers.colonizer]` with
+`command`, `args` and `env` into `$GROK_HOME/config.toml` (26-config-reference.md; `GROK_CONFIG`
+overlays cannot add MCP servers): `mcp.mjs`, a dependency-free stdio server that the runner points at
+a loopback HTTP bridge held for the colony's life. `wait` (block instead of polling; grok's default
+`tool_timeout_sec` of 6000 s covers a wait's 1800 s cap) and `memory_search` run inside the server;
+`finding_file` and `memory_propose` cross the bridge and leave the colony as `finding` and
+`memory_proposal` events. The model sees the tools as `colonizer__<tool>`, and `--always-approve`
+auto-approves their calls. The tool list follows the same switches as the other modules: findings
+only under `COLONIZER_FINDINGS=true`, memory only when `COLONIZER_MEMORY_DIR` is mounted, `wait`
+always.
+
 ## Headless, not ACP
 
 Grok also speaks ACP (`grok agent stdio`, bidirectional — tool approvals and questions). This slice
@@ -72,7 +85,8 @@ The microVM is the boundary. Inside it:
 | Cross-session memory | **off** | `GROK_MEMORY=0` (05-configuration.md) |
 | Telemetry | **off** | `GROK_TELEMETRY_ENABLED=0` (05-configuration.md) |
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |
-| Hooks / plugins / MCP / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: all of these live under it (14-headless-mode.md "File Locations") |
+| Host config / OAuth token / hooks / plugins / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: these live under it (14-headless-mode.md "File Locations") |
+| Colonizer MCP tools | **on** | the runner-written `$GROK_HOME/config.toml` registers `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
 | Hooks / plugins / MCP / skills (project scope) | **not yet enforced** | no verified global off-switch; a colonized repo's `.grok/` could still contribute them (26-config-reference.md limits project config to MCP servers, plugins and permission) |
 
 Subagents and plan mode are left at grok's defaults; `--no-subagents`/`--no-plan` exist if a later
@@ -82,8 +96,10 @@ slice wants them off.
 
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv and env
-it received, and checks the happy path's events against the required fields of
-`docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
+it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the model against the registered
+colonizer MCP server, so findings, memory and wait are tested end to end. The happy path's events are
+checked against the required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
+contract tests.
 
 ## What remains
 
@@ -94,6 +110,5 @@ it received, and checks the happy path's events against the required fields of
 - Generic `requires.binaries` (and pins) preflight in Rust, so the harness fails a boot before the
   runner has to.
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
-- The colonizer MCP tools (findings, memory, wait) that the Claude module serves.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)

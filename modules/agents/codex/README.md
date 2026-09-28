@@ -21,6 +21,17 @@ docs](https://developers.openai.com/codex/noninteractive) and the [config
 reference](https://developers.openai.com/codex/config-reference), verified against `codex-cli
 0.156.1`.
 
+## The colonizer MCP server
+
+Each turn registers a `colonizer` MCP server with codex (`-c mcp_servers.colonizer.*` overrides,
+whose values are JSON and therefore valid TOML): `mcp.mjs`, a dependency-free stdio server that the
+runner points at a loopback HTTP bridge held for the colony's life. `wait` (block instead of
+polling; the server's `tool_timeout_sec` is raised to 3600 so a wait can run to its 1800 s cap) and
+`memory_search` run inside the server; `finding_file` and `memory_propose` cross the bridge and
+leave the colony as `finding` and `memory_proposal` events. The tool list follows the same switches
+as the other modules: findings only under `COLONIZER_FINDINGS=true`, memory only when
+`COLONIZER_MEMORY_DIR` is mounted, `wait` always.
+
 ## Headless, not app-server
 
 Codex also speaks a bidirectional app-server protocol. This slice uses `codex exec` instead: one
@@ -66,7 +77,8 @@ The microVM is the boundary. Inside it:
 | Update check | **off** | `-c check_for_update_on_startup=false` |
 | Prompt history | **off** | `-c history.persistence="none"`; the session rollout persists (resume needs it) |
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
-| Host config / OAuth token / MCP | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): all of these live under it; `BROWSER=/bin/false` as belt-and-braces |
+| Host config / OAuth token | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): these live under it; `BROWSER=/bin/false` as belt-and-braces |
+| Colonizer MCP tools | **on** | `-c mcp_servers.colonizer.*` overrides registering `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
 
 The model setting (`COLONIZER_MODEL`) is passed as `-m <model>` when set, as `openai/<model>` or a
 bare model id; **empty (the default) passes no `-m`, so Codex runs on the CLI's own default model**
@@ -78,8 +90,10 @@ background-worker split.
 
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-codex.mjs`, a stub codex CLI that records the argv,
-stdin prompt and env it received, and checks the happy path's events against the required fields of
-`docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
+stdin prompt and env it received, and — when a test scripts `CODEX_FAKE_MCP_CALLS` — plays the
+model against the registered colonizer MCP server, so findings, memory and wait are tested end to
+end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The happy path's events are checked against the
+required fields of `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
 
 ## What is not supported yet
 
@@ -87,6 +101,6 @@ stdin prompt and env it received, and checks the happy path's events against the
   "What remains" for the same gap); until then the preflight fails a codex colony at boot.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
-- Questions (`answer` is ignored), the colonizer MCP tools (memory, findings, wait), and resuming a
-  codex thread across a runner restart: the thread id lives in the runner's memory and its session
-  rollout in the runner's fresh `CODEX_HOME`, both gone when the colony's VM is.
+- Questions (`answer` is ignored) and resuming a codex thread across a runner restart: the thread id
+  lives in the runner's memory and its session rollout in the runner's fresh `CODEX_HOME`, both gone
+  when the colony's VM is.

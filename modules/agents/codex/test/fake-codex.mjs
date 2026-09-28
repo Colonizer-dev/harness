@@ -13,9 +13,15 @@
 //   CODEX_FAKE_STDERR        text to write to stderr before exiting
 //   CODEX_FAKE_SLEEP_MS      sleep before emitting, so a turn can be interrupted
 //   CODEX_FAKE_SLEEP_FIRST   when set, only the first invocation sleeps (later turns recover)
+//   CODEX_FAKE_MCP_CALLS     JSON array of {name, arguments}: play the model and drive the colonizer
+//                            MCP server the runner registered via its -c mcp_servers.colonizer.*
+//                            overrides (initialize, tools/list, one tools/call per entry); the tool
+//                            names and each call's outcome are recorded under `mcp`
 
+import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { createInterface } from 'node:readline';
 
 const argv = process.argv.slice(2);
 const recordPath = process.env.CODEX_FAKE_RECORD;
@@ -30,7 +36,7 @@ if (recordPath) {
 }
 
 // The env slice the tests assert on: the nesting decisions the runner must apply to every child.
-const record = () => {
+const record = (extra = {}) => {
   if (!recordPath) return;
   appendFileSync(
     recordPath,
@@ -42,6 +48,7 @@ const record = () => {
         CODEX_HOME: process.env.CODEX_HOME ?? null,
         CODEX_API_KEY: process.env.CODEX_API_KEY ? 'set' : 'unset',
       },
+      ...extra,
     })}\n`,
   );
 };
@@ -52,7 +59,56 @@ if (argv.includes('--version')) {
   process.exit(0);
 }
 
-record();
+/** The `-c mcp_servers.colonizer.*` overrides, JSON-parsed (the runner writes JSON.stringify values,
+ * which are valid TOML). */
+function mcpConfig(args) {
+  const cfg = {};
+  const prefix = 'mcp_servers.colonizer.';
+  for (const [i, arg] of args.entries()) {
+    if (args[i - 1] !== '-c' || !arg.startsWith(prefix)) continue;
+    const at = arg.indexOf('=', prefix.length);
+    try {
+      cfg[arg.slice(prefix.length, at)] = JSON.parse(arg.slice(at + 1));
+    } catch {
+      cfg[arg.slice(prefix.length, at)] = arg.slice(at + 1);
+    }
+  }
+  return cfg;
+}
+
+/** Play the model against the registered MCP server: initialize, tools/list, one tools/call per
+ * scripted entry. Resolves with the tool names and each call's outcome, for the record. */
+async function callMcp(cfg, calls) {
+  const child = spawn(cfg.command, cfg.args ?? [], { env: { ...process.env, ...cfg.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const pending = new Map();
+  let next = 0;
+  createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => {
+    const msg = JSON.parse(line);
+    const waiter = pending.get(msg.id);
+    if (waiter) {
+      pending.delete(msg.id);
+      waiter(msg);
+    }
+  });
+  const rpc = (method, params) =>
+    new Promise((resolve) => {
+      const id = next++;
+      pending.set(id, resolve);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+  await rpc('initialize', {});
+  const out = { tools: (await rpc('tools/list', {})).result?.tools?.map((t) => t.name) ?? [], calls: [] };
+  for (const { name, arguments: input } of calls) {
+    const reply = await rpc('tools/call', { name, arguments: input });
+    out.calls.push({ name, isError: reply.result?.isError === true, text: reply.result?.content?.[0]?.text ?? null, error: reply.error?.message ?? null });
+  }
+  child.kill('SIGKILL');
+  return out;
+}
+
+const cfg = mcpConfig(argv);
+const mcp = process.env.CODEX_FAKE_MCP_CALLS && cfg.command ? await callMcp(cfg, JSON.parse(process.env.CODEX_FAKE_MCP_CALLS)) : undefined;
+record(mcp ? { mcp } : {});
 
 const threadId = process.env.CODEX_FAKE_THREAD_ID ?? 'thread-fake-1';
 const defaultEvents = () => [
@@ -82,7 +138,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 if (process.env.CODEX_FAKE_SLEEP_MS && (!process.env.CODEX_FAKE_SLEEP_FIRST || invocation === 0)) {
   await sleep(Number(process.env.CODEX_FAKE_SLEEP_MS));
 }
-for (const event of events.length ? events : defaultEvents()) {
+// The scripted MCP calls appear as codex mcp_tool_call items, before the model's own events.
+const mcpItems = (mcp ?? { calls: [] }).calls.flatMap((call, i) => [
+  { type: 'item.started', item: { id: `item_mcp_${i + 1}`, type: 'mcp_tool_call', server: 'colonizer', tool: call.name, status: 'in_progress' } },
+  { type: 'item.completed', item: { id: `item_mcp_${i + 1}`, type: 'mcp_tool_call', server: 'colonizer', tool: call.name, status: call.isError ? 'failed' : 'completed', result: call.text ?? call.error ?? '' } },
+]);
+for (const event of [...mcpItems, ...(events.length ? events : defaultEvents())]) {
   if (process.env.CODEX_FAKE_NO_COMPLETE === '1' && event.type === 'turn.completed') continue;
   process.stdout.write(`${typeof event === 'string' ? event : JSON.stringify(event)}\n`);
 }
