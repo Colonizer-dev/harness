@@ -552,9 +552,15 @@ Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6
 `vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
-`capability,selinux` — so Landlock pinning waits for a libkrunfw with `CONFIG_SECURITY_LANDLOCK=y`
-and landlock in its LSM list, a tracked follow-up. The guest also boots `nomodule`, with no
-debugfs, tracefs or sysrq.
+`capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the
+kernel configs at `libkrun/libkrunfw` leave `CONFIG_SECURITY_LANDLOCK` unset (x86_64's
+`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.3
+still bundles the same 5.6.1 build. Pinning stays blocked upstream (issue #638) until a libkrunfw
+ships `CONFIG_SECURITY_LANDLOCK=y` with `landlock` in its LSM list — `CONFIG_SECURITY=y` on
+aarch64 — inside a microsandbox release we pin, since an msb bump is one-way (`MSB_HOME` is
+version-locked); building our own kernel is not on the table. Once such a stack is pinned,
+harden.rs would apply the ruleset to the runner child and fail closed on `ENOSYS`. The guest also
+boots `nomodule`, with no debugfs, tracefs or sysrq.
 
 **Layer 1 — boot.sh** (`crates/colonizer/src/boot.rs`), as root before agentd is exec'd:
 `dmesg_restrict=1`, `kptr_restrict=2`; `/proc` remounted `hidepid=invisible` (fallback `hidepid=2`);
@@ -591,7 +597,8 @@ before exec, fail-closed — a step that fails fails the spawn:
   dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
 
 What it does not do: the agent stays root — DAC still gives it every file in the guest, the
-read-only `/colonizer` mounts' contents included. No Landlock yet; denials make no agentd events
+read-only `/colonizer` mounts' contents included. No Landlock yet (issue #638); denials make no
+agentd events
 yet (`EPERM` in the tool, a kernel-log line); network is [sandbox-network.md](sandbox-network.md).
 
 Verification and re-verification: `cargo test -p colonizer-agentd` runs a behavioural probe that
