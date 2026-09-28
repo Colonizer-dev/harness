@@ -569,7 +569,10 @@ the human's terminal included, and sticks because Layer 3 denies `unshare`/`setn
 
 **Layer 2 — agentd itself** (`harden::self_guard`): non-dumpable, `RLIMIT_CORE` 0/0 — with the
 agent's missing `CAP_SYS_PTRACE` and hidepid from Layer 1, it can neither see nor read agentd's
-`/proc` entries.
+`/proc` entries. It also seals the session token (`seal.rs`, `--seal-token`): the bearer token is
+read once and the file is covered with a read-only bind of `/dev/null` before the listener or the
+runner exist, leaving no reader for its key that the agent can reach once the seal is down
+(issue #640).
 
 **Layer 3 — the agent process** (runner and every descendant), applied by agentd in `pre_exec`
 before exec, fail-closed — a step that fails fails the spawn:
@@ -584,7 +587,8 @@ before exec, fail-closed — a step that fails fails the spawn:
   syslog, fanotify — into `EPERM`, so a denial is an ordinary tool failure, not a kill. `clone3`
   returns `ENOSYS` so libc falls back to plain `clone`; `prctl(PR_SET_DUMPABLE)` and the
   `TIOCSTI`/`TIOCLINUX` terminal-injection ioctls are arg-gated. `SECCOMP_FILTER_FLAG_LOG` puts
-  denials in the kernel log where one exists. The terminal PTY is deliberately not filtered.
+  denials in the kernel log where one exists. The terminal PTY is deliberately not filtered — it is
+  the human's terminal, and the seal closes the token-file route to it for the agent (Layer 2).
 - agentd logs `hardening: seccomp denylist 51 rules fnv64=<fingerprint>, caps dropped 21, core
   dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
 

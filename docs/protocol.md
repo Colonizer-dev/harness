@@ -16,7 +16,7 @@ must be ignored (forward compatibility).
 | Path | Mode | Content |
 | --- | --- | --- |
 | `/colonizer/session.json` | ro | Session config (below) |
-| `/colonizer/token` | ro | Bearer token for agentd (single line) |
+| `/colonizer/token` | ro | Bearer token for agentd (single line). agentd seals the file once it has read it, so it reads empty for the rest of the boot |
 | `/colonizer/boot.sh` | ro | Boot script (image command) |
 | `/colonizer/mesh-authkey` | ro | Headscale pre-auth key (absent when mesh disabled) |
 | `/colonizer/path-policy` | ro | The path policy the boot script enforces before the agent starts: files masked or pinned read-only in the worktree ([path-policy.md](path-policy.md)). A missing list stops the boot |
@@ -199,7 +199,9 @@ Rules:
 
 ## 3. colonizer-agentd API (VM, port 7070)
 
-Every request requires `Authorization: Bearer <contents of /colonizer/token>`; otherwise `401`.
+Every request requires `Authorization: Bearer <token>`; otherwise `401`. The token is the line the
+mothership wrote to `<session>/vm/token`: agentd reads it once at boot and then seals the file
+(`--seal-token`), so the guest holds no reader for it — the mothership keeps its own host-side copy.
 Browsers never talk to agentd; only the harness does, over the mesh.
 
 agentd assigns each runner event a monotonically increasing `seq` (starting at 1) and `ts` (RFC 3339

@@ -70,10 +70,19 @@ a new namespace; the boot-script ordering guarantee (masks applied before
 `exec agentd`, runner then filtered) is asserted at `boot.rs:1277-1279` and tested
 `boot.rs:1550-1573`.
 
-*Verdict.* **Blocked** for the runner child. **Open** via the unfiltered PTY: a
-root shell obtained through `agentd`'s `/v1/pty` is not seccomp-filtered
-(`harden.rs:12-14`) and could `umount` the masks. Filed as a follow-up (see the
-"Open verdicts" section).
+*Verdict.* **Blocked** for the runner child, and the token-file route into the
+unfiltered PTY is closed too: the bearer token that opens `/v1/pty` is sealed
+once agentd has read it —
+`crates/colonizer-agentd/src/seal.rs::seal_token_path` binds `/dev/null` over the
+token path read-only at startup under `--seal-token`, before the listener or the
+runner exist (`main.rs::run`), so the runner's view of `/colonizer/token` is an
+empty file and its connection to `/v1/pty` 401s. The boot script passes the flag
+(`boot.rs` `BOOT_SCRIPT` exec line, tested `boot.rs::boot_script_passes_seal_token_to_agentd`;
+end to end in `colonizer-agentd`'s `seal_token_hides_the_token_from_the_runner_and_the_pty`,
+which also asserts the hardened child cannot `umount` the seal). The PTY itself
+stays unfiltered — it is the human's terminal, and the human holds the token
+outside the guest. The *network* route to the same token — a raw socket sniffing
+agentd's plaintext HTTP — is not closed by the seal; see the open verdict below.
 
 ### 3. Procfs / sysfs re-mount
 
@@ -93,7 +102,8 @@ continues).
 
 *Verdict.* **Blocked** for the runner child (mount-family + `unshare` denial;
 best-effort masks at boot). Actual kernel effect (hidepid honoured, `kcore` empty)
-is **KVM-verified**. Shares the PTY caveat of vector 2.
+is **KVM-verified**. Vector 2's PTY caveat is closed for the agent: the token that
+opened the unfiltered shell is sealed (see vector 2).
 
 ### 4. Execution of unknown binaries
 
@@ -155,8 +165,10 @@ unreachable from the VM.
 
 *Verdict.* **Blocked** for the runner child (ptrace-family denial + non-dumpable +
 hidepid; regression via the `harden.rs` probe tests and `agentd --exec-hardened`,
-`main.rs:136-139`). **Open** via the unfiltered PTY: a shell from `/v1/pty` runs
-unhardened and can ptrace. Same follow-up as vector 2.
+`main.rs:136-139`). The seal closes the token-file route into the unfiltered PTY
+(vector 2); the network route to the same token — raw-socket sniffing of agentd's
+plaintext traffic — is tracked separately (open verdicts). The shell stays
+unfiltered — it is the human's terminal.
 
 ### 7. Credential-path abuse
 
@@ -212,13 +224,30 @@ procedure.
 
 ## Open verdicts (follow-ups)
 
-- **Vectors 2 & 6 — the unfiltered PTY.** `agentd` filters only the runner child;
-  the `/v1/pty` shell is deliberately unfiltered for the human's terminal
-  (`harden.rs:12-14`, `docs/architecture.md:558`), but nothing enforces that the
-  PTY client *is* the human. A runner that reads `/colonizer/token` and connects to
-  `ws://127.0.0.1:7070/v1/pty` gets an unhardened root shell, shedding its own
-  seccomp/cap profile. Filed as a follow-up; it is a Layer-3 hardening-completeness
-  gap, not a microVM-boundary crossing.
+- **The network route to the agentd token.** The seal (#640) closes the file:
+  once it is down, `/colonizer/token` has no reader the agent can reach. With the
+  default mesh, though, `tailscaled` runs inside the guest, so the mothership's
+  HTTP to agentd — plaintext, bearer token in the `Authorization` header —
+  crosses the guest's own interfaces, and the runner keeps `CAP_NET_RAW`
+  (`harden.rs:58-65`) while the seccomp filter does not deny `socket`
+  (`harden.rs:72-94`): an `AF_PACKET` raw socket can sniff the token off the wire
+  and open `/v1/pty` with it, an unhardened root shell. Filed as a follow-up; a
+  Layer-3 hardening-completeness gap, not a microVM-boundary crossing.
+
+## Closed follow-ups
+
+- **Vectors 2 & 6 — the unfiltered PTY's token file (closed by #640).** `agentd`
+  filters only the runner child, and the `/v1/pty` shell is deliberately
+  unfiltered for the human's terminal (`harden.rs:12-14`, `docs/architecture.md`
+  In-guest hardening); nothing about the shell changed. What changed is who can
+  open it by file: a runner used to be able to read `/colonizer/token` and
+  connect to `ws://127.0.0.1:7070/v1/pty` for an unhardened root shell, shedding
+  its own seccomp/cap profile. `crates/colonizer-agentd/src/seal.rs::seal_token_path`
+  (applied under `--seal-token` before agentd binds its listener) closes that
+  route — no reader the agent can reach is left for the file, and the runner
+  profile cannot `umount` the seal. What remains is the network route to the same
+  token (the open verdict above); the file route was a Layer-3
+  hardening-completeness gap, not a microVM-boundary crossing.
 
 ## Manual KVM procedure
 
@@ -236,6 +265,7 @@ a scratch issue). Attach to the colony PTY and run each block from inside the gu
 |---|---|---|
 | 1 | `mount --bind /dev/null /colonizer/token; cat /colonizer/token` (as the runner user, not the PTY) | `mount`: `Operation not permitted` (seccomp) |
 | 2 | `umount2`/`umount /run/... mask` | `Operation not permitted` |
+| 2 | `cat /colonizer/token` as the runner (`agentd --exec-hardened -- cat /colonizer/token`), then open `ws://127.0.0.1:7070/v1/pty` with what it prints | empty read; the connection gets `401` (the token is sealed: a read-only bind of `/dev/null` over the path, `seal.rs`) |
 | 3 | `mount -t proc proc /tmp/p && cat /tmp/p/1/mem` | `mount` fails; if forced, `kcore`/`kallsyms` empty, `hidepid` hides pid 1 |
 | 5 | `curl -sS https://example.com` (not on the egress allowlist) | connection refused / blocked by msb policy |
 | 5 | from colony A, `ping`/`curl` colony B's mesh IP | no route / blocked by Headscale ACL |
@@ -245,8 +275,9 @@ a scratch issue). Attach to the colony PTY and run each block from inside the gu
 
 The seccomp-denial rows (1-3) can also be observed without KVM via
 `agentd --exec-hardened` and the `harden.rs` probe tests, which spawn a real
-hardened child on the test host; the microVM run additionally confirms the mask and
-egress *effects*.
+hardened child on the test host; the token-seal row is the same shape, asserted by
+the agentd integration tests wherever mounts are permitted. The microVM run
+additionally confirms the mask and egress *effects*.
 
 ## Release sign-off
 
