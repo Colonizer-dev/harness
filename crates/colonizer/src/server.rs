@@ -10,7 +10,7 @@ use crate::app::{Boot, load_sessions};
 use crate::config::{ModulesConfig, Settings};
 use crate::{
     App, Shared, StorageAlert, activity, api_tokens, auth, client_error, gateway, login_item, modules, remote, secrets, sessions,
-    usage,
+    uhp, usage,
 };
 use anyhow::{Context, Result, bail};
 use axum::{
@@ -98,6 +98,10 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         && let Some(scoped) = app.api_tokens.authenticate(&token).await
     {
         if let Err(deny) = api_tokens::authorize(&app, &scoped, req.method(), req.uri().path()).await {
+            // On the UHP surface the same verdicts wear the UHP error envelope (§7.7).
+            if uhp::is_uhp(req.uri().path()) {
+                return uhp::denied(deny);
+            }
             return deny.into_response();
         }
         req.extensions_mut().insert(auth::Authenticated(true));
@@ -107,6 +111,17 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
+    // The UHP surface answers its own refusals as envelopes, not pages. Discovery is how a client
+    // finds out this is a UHP server at all, so it is served before any credential check; every
+    // other `/uhp` path gets the envelope's authentication error (docs/protocol.md §7).
+    if uhp::is_uhp(&path) {
+        // `HEAD`, because axum's `get` serves it too and a client may probe before it reads.
+        if matches!(*req.method(), Method::GET | Method::HEAD) && path == uhp::DISCOVERY_PATH {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
+        return uhp::unauthenticated();
+    }
     if path == "/api" || path.starts_with("/api/") {
         if req.method() == Method::GET && path == "/api/status" {
             req.extensions_mut().insert(auth::Authenticated(false));
@@ -167,19 +182,21 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
     }
 }
 
-/// Every `/api` path no module route claims, answered as the API error it is (`#641`): before,
-/// it fell through to the SPA fallback and read as a 200 `text/html` success, so a probe for an
-/// unknown route looked like a page. The API fence is segment-aware — `/apiary` is a cockpit
-/// path — and a matched route never reaches this: the router stamps `MatchedPath` on what it
-/// matched, and only a request that fell to a fallback gets here without one. Which is also the
-/// invariant that API routes stay registered flat: a router `nest`ed under `/api` carries only
-/// `MatchedNestedPath`, so its real routes would read as unmatched and be answered 404. It
+/// Every `/api` or `/uhp` path no module route claims, answered as the API error it is (`#641`,
+/// `#650`): before, it fell through to the SPA fallback and read as a 200 `text/html` success, so
+/// a probe for an unknown route looked like a page. The API fence is segment-aware — `/apiary` is
+/// a cockpit path — and a matched route never reaches this: the router stamps `MatchedPath` on
+/// what it matched, and only a request that fell to a fallback gets here without one. Which is
+/// also the invariant that API routes stay registered flat: a router `nest`ed under `/api` carries
+/// only `MatchedNestedPath`, so its real routes would read as unmatched and be answered 404. It
 /// layers the web fallback too, so it needs no web dir and works the same when the UI was never
 /// built.
 async fn api_not_found(req: Request, next: Next) -> Response {
     let path = req.uri().path();
     if (path == "/api" || path.starts_with("/api/")) && req.extensions().get::<MatchedPath>().is_none() {
         client_error(StatusCode::NOT_FOUND, "no such API route").into_response()
+    } else if uhp::is_uhp(path) && req.extensions().get::<MatchedPath>().is_none() {
+        uhp::unmatched(path)
     } else {
         next.run(req).await
     }
@@ -237,6 +254,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::status::routes())
         .merge(crate::stream::routes())
         .merge(crate::telemetry::routes())
+        .merge(crate::uhp::routes())
         .merge(crate::update::routes())
         .merge(crate::upload::routes())
         .merge(crate::usage::routes())

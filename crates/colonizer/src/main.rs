@@ -96,6 +96,7 @@ mod stream;
 mod summaries;
 mod telemetry;
 mod timing;
+mod uhp;
 mod update;
 mod upload;
 mod usage;

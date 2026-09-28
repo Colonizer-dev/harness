@@ -439,6 +439,17 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
+        // UHP read surface (docs/protocol.md §7, #650): the same need as the /api routes over the
+        // same data. Discovery needs no credential at all — `host_guard` admits it before this
+        // runs — but is listed anyway, so a scoped token is not refused on a public route. The
+        // colony detail hides behind its owner's org/repo limits like `/api/sessions/{id}`.
+        ["uhp", "v1", "uhp" | "harnesses" | "models"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "harnesses", _] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,

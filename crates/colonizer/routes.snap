@@ -171,3 +171,9 @@
 /api/voice                                           GET    unauth=401    token=owner            activity=-
 /api/voice/key                                       PUT    unauth=401    token=owner            activity=settings.save
 /api/voice/transcribe                                POST   unauth=401    token=owner            activity=-
+/uhp/v1/harnesses                                    GET    unauth=401    token=read             activity=-
+/uhp/v1/harnesses/{harness_id}                       GET    unauth=401    token=read             activity=-
+/uhp/v1/models                                       GET    unauth=401    token=read             activity=-
+/uhp/v1/sessions                                     GET    unauth=401    token=read             activity=-
+/uhp/v1/sessions/{session_id}                        GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/uhp                                          GET    unauth=200    token=read             activity=-

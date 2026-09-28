@@ -2852,11 +2852,17 @@ to the [Unified Harness Protocol](https://unifiedharnessprotocol.org/) (UHP,
 version `2026-09-12`, draft), which extends the OpenAI Responses API, so that
 Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 
-**Status: proposed.** These tables are the contract to review before any code;
-each one is implemented in its own change afterwards. Until then nothing on the
-wire changes, and the *Colonizer today* column is what works; how that as-is
-surface measures against the UHP conformance suite is in
-[docs/conformance.md](conformance.md). The runner
+**Status: partly served.** The read-side core is on the wire since #650
+(`crates/colonizer/src/uhp.rs`): `GET /uhp/v1/uhp` (discovery), `GET
+/uhp/v1/harnesses` and `/uhp/v1/harnesses/{id}`, `GET /uhp/v1/models`, `GET
+/uhp/v1/sessions` and `/uhp/v1/sessions/{id}` — under `UHP-Version:
+2026-09-12`, with the UHP error envelope and version negotiation on every
+`/uhp` route. How that surface measures against the UHP conformance suite is in
+[docs/conformance.md](conformance.md). The rest of these tables are still the
+contract to review before their change: creating and continuing responses
+(`POST /uhp/v1/responses`, §7.3), SSE streaming (§7.4), files (§7.5) and
+cancellation (§7.6) are proposed, and the *Colonizer today* column is what
+works where the served routes are silent. The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the
 sandbox, the mesh and the publish path stay as they are: the standard names live
 on the mothership's API, not inside the microVM. The one exception is §7.5's

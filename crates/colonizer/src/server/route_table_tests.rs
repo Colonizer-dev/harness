@@ -7,7 +7,7 @@
 //! Regenerate with `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table`.
 //!
 //! How it reads the table without running a handler: the candidate paths are every `.route("/api…"`
-//! literal in the crate's sources, and each is asked with `OPTIONS`, a method no API route
+//! or `.route("/uhp…"` literal in the crate's sources, and each is asked with `OPTIONS`, a method no API route
 //! registers. The router answers from the matched route's method fallback, a 405 whose `Allow`
 //! header lists the methods the route has, and a probe route layer reports which route matched.
 use std::{collections::BTreeSet, path::Path};
@@ -23,7 +23,7 @@ use tower::ServiceExt as _;
 
 const SNAPSHOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/routes.snap");
 
-/// Every string literal passed to `.route(` under `src/`, that starts with `/api`.
+/// Every string literal passed to `.route(` under `src/`, that starts with `/api` or `/uhp`.
 fn candidate_paths() -> BTreeSet<String> {
     fn walk(dir: &Path, out: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
@@ -36,7 +36,7 @@ fn candidate_paths() -> BTreeSet<String> {
                     let rest = text[at + ".route(".len()..].trim_start();
                     if let Some(literal) = rest.strip_prefix('"')
                         && let Some(end) = literal.find('"')
-                        && literal[..end].starts_with("/api")
+                        && (literal[..end].starts_with("/api") || literal[..end].starts_with("/uhp"))
                     {
                         out.insert(literal[..end].to_string());
                     }
