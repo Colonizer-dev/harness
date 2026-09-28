@@ -611,6 +611,7 @@ pub async fn create(
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
         allowed_providers: None,
+        allowed_models: None,
         sensitivity: None,
         routed_cost_usd: None,
         routed_tokens: None,
