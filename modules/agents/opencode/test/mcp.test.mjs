@@ -64,3 +64,35 @@ test('mcp lists tools and forwards calls to the bridge', async () => {
     await bridge.close();
   }
 });
+
+test('COLONIZER_LOOP adds loop_stop; loop_next needs COLONIZER_LOOP_SELF_PACED', async () => {
+  const bridge = await stubBridge({ '/loop_stop': { stopped: true } });
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: 'tok', COLONIZER_LOOP: 'true' });
+  try {
+    const names = (await srv.call('tools/list', {})).result.tools.map((t) => t.name);
+    assert.deepEqual(names, ['ask_user', 'finding_file', 'memory_propose', 'loop_stop']);
+    const stop = await srv.call('tools/call', { name: 'loop_stop', arguments: { reason: 'all flakes fixed' } });
+    assert.equal(stop.result.isError, undefined); // forwarded, and the stub's reply came back
+    assert.equal(stop.result.content[0].text, '{"stopped":true}');
+    const next = await srv.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 30, reason: 'x' } });
+    assert.equal(next.error.code, -32602); // not offered, so never forwarded
+  } finally {
+    srv.stop();
+    await bridge.close();
+  }
+});
+
+test('a self-paced loop lists loop_next and forwards its arguments', async () => {
+  const bridge = await stubBridge({ '/loop_next': (b) => `Next run scheduled in ${b.delay_minutes} minutes.` });
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: 'tok', COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
+  try {
+    const tools = (await srv.call('tools/list', {})).result.tools;
+    assert.deepEqual(tools.map((t) => t.name), ['ask_user', 'finding_file', 'memory_propose', 'loop_next', 'loop_stop']);
+    assert.deepEqual(tools.find((t) => t.name === 'loop_next').inputSchema.required, ['delay_minutes', 'reason']);
+    const next = await srv.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 42, reason: 'CI reruns at 11' } });
+    assert.equal(next.result.content[0].text, 'Next run scheduled in 42 minutes.');
+  } finally {
+    srv.stop();
+    await bridge.close();
+  }
+});

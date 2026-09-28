@@ -1,11 +1,13 @@
 //! Loops: a saved prompt on a repository that launches a colony on a schedule — the mothership's
 //! version of Claude Code's `/loop`. A loop runs on a fixed cadence (every N minutes, daily,
-//! weekly, monthly, every N days) or self-paced, where each colony names its own next run with the
-//! `loop_next` tool, and any colony can end its loop with `loop_stop`. One run at a time: a tick
-//! that finds the previous run still live skips and says so. A map loop instead keeps a repository
-//! — or every repository of an org — mapped: each firing draws one map, exactly as the Map view
-//! would. Loops are operator configuration, saved to `<config_dir>/loops.json`; their runs are
-//! ordinary colonies tagged `origin: "loop:<id>"` (a map loop's: `map:loop:<id>`).
+//! weekly, monthly, every N days) or self-paced. On a module that serves the loop tools (its
+//! manifest says `loop_tools`, issue #643) a self-paced colony names its own next run with
+//! `loop_next`, and any colony can end its loop with `loop_stop`; on the others the brief names
+//! neither. One run at a time: a tick that finds the previous run still live skips and says so.
+//! A map loop instead keeps a repository — or every repository of an org — mapped: each firing
+//! draws one map, exactly as the Map view would. Loops are operator configuration, saved to
+//! `<config_dir>/loops.json`; their runs are ordinary colonies tagged `origin: "loop:<id>"`
+//! (a map loop's: `map:loop:<id>`).
 
 use crate::schedule::{Cadence, next_run_after};
 use crate::sessions::{self, NewSession, Session, SessionStatus};
@@ -238,21 +240,29 @@ pub fn clamp_next(delay_minutes: u64) -> u64 {
     delay_minutes.clamp(NEXT_MIN_MINUTES, NEXT_MAX_MINUTES)
 }
 
-/// What a colony launched by a loop is told about it, after the loop's own prompt.
-pub fn loop_instructions(l: &Loop, run: u32) -> String {
-    let pacing = if l.self_paced() {
+/// What a colony launched by a loop is told about it, after the loop's own prompt. `loop_tools`
+/// says whether the agent module the colony launches on serves the loop MCP tools (issue #643):
+/// with them the colony paces and stops the loop itself; without, the brief never mentions the
+/// tools and a self-paced loop simply comes round again in 24 hours.
+pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool) -> String {
+    let pacing = if l.self_paced() && loop_tools {
         format!(
             "This loop is self-paced: before you finish, call loop_next with how many minutes from now the next run should start ({NEXT_MIN_MINUTES} to {NEXT_MAX_MINUTES}) and why. If you don't, it runs again in 24 hours."
         )
+    } else if l.self_paced() {
+        "This loop is self-paced: it runs again in 24 hours.".to_string()
     } else {
         "It runs on a fixed schedule; you don't need to schedule the next run.".to_string()
     };
-    format!(
-        "{prompt}\n\n---\nYou are run {run} of the loop \"{name}\" on {repo}. {pacing} If the loop's goal is met, or it should not run again, call loop_stop with the reason. Publish only when this run changed something worth a pull request; a run that finds nothing to do ends without one.",
-        prompt = l.prompt.trim(),
-        name = l.name,
-        repo = l.repo,
-    )
+    let mut says = vec![format!("You are run {run} of the loop \"{}\" on {}.", l.name, l.repo), pacing];
+    if loop_tools {
+        says.push("If the loop's goal is met, or it should not run again, call loop_stop with the reason.".to_string());
+    }
+    says.push(
+        "Publish only when this run changed something worth a pull request; a run that finds nothing to do ends without one."
+            .to_string(),
+    );
+    format!("{prompt}\n\n---\n{brief}", prompt = l.prompt.trim(), brief = says.join(" "))
 }
 
 pub struct LoopStore {
@@ -638,10 +648,19 @@ async fn run_token(app: &Shared, l: &Loop) -> Result<Option<ScopedToken>, crate:
 async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
     let scoped = run_token(app, l).await?;
+    // Whether the brief may name the loop tools: the same resolution `sessions::create` is about
+    // to launch on — the repository's org's pick, else the install's (issue #643).
+    let owner = l.repo.split('/').next().unwrap_or_default();
+    let modules = app.modules.read().await.clone();
+    let loop_tools = app
+        .agents
+        .iter()
+        .find(|a| a.id == crate::orgs::effective_agent_module(&app.org_settings(owner), &modules))
+        .is_some_and(|a| a.loop_tools);
     let body = json!({
         "repo": l.repo,
         "title": format!("{} (loop, run {run})", l.name),
-        "instructions": loop_instructions(l, run),
+        "instructions": loop_instructions(l, run, loop_tools),
         "autopilot": l.autopilot,
         "allow_duplicate": true,
         "origin": format!("{ORIGIN_PREFIX}{}", l.id),
@@ -1211,12 +1230,45 @@ mod tests {
     #[test]
     fn colonies_are_told_their_run_and_how_to_pace_or_stop() {
         let paced = a_loop(Cadence::SelfPaced {});
-        let text = loop_instructions(&paced, 3);
+        let text = loop_instructions(&paced, 3, true);
         assert!(text.starts_with("Triage new issues"));
         assert!(text.contains("run 3 of the loop \"Triage\""));
         assert!(text.contains("loop_next") && text.contains("loop_stop"));
-        let fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1);
+        let fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, true);
         assert!(!fixed.contains("call loop_next") && fixed.contains("loop_stop"));
+
+        // A module without the loop tools (issue #643) is never told to call them, and a
+        // self-paced loop just says when it comes round again.
+        let plain_paced = loop_instructions(&paced, 3, false);
+        assert!(!plain_paced.contains("loop_next") && !plain_paced.contains("loop_stop"));
+        assert!(plain_paced.contains("This loop is self-paced: it runs again in 24 hours."));
+        let plain_fixed = loop_instructions(&a_loop(Cadence::Daily { hour: 9, minute: 0 }), 1, false);
+        assert!(!plain_fixed.contains("loop_next") && !plain_fixed.contains("loop_stop"));
+        assert!(plain_fixed.contains("fixed schedule"));
+    }
+
+    #[tokio::test]
+    async fn a_launch_briefs_its_colony_for_its_module_s_loop_tools() {
+        // The launch resolves the org's effective agent module — the one `sessions::create` is
+        // about to launch on — and names the loop tools only when that module serves them.
+        for tools in [true, false] {
+            let root = std::env::temp_dir().join(format!("colonizer-loops-brief-{tools}-{}", short_id()));
+            let mut app = crate::sessions::tests::app_that_can_create(&root);
+            std::sync::Arc::get_mut(&mut app).unwrap().agents[0].loop_tools = tools;
+            let mut l = a_loop(Cadence::SelfPaced {});
+            l.repo = "acme/app".into();
+            app.loops.loops.write().await.push(l);
+            let session = launch(&app, &app.loops.get("loop_a").await.unwrap(), utc(2026, 9, 24, 9, 0))
+                .await
+                .unwrap();
+            let brief = session.instructions.as_str();
+            assert_eq!(brief.contains("loop_next"), tools, "{tools}: {brief}");
+            assert_eq!(brief.contains("loop_stop"), tools, "{tools}: {brief}");
+            if !tools {
+                assert!(brief.contains("it runs again in 24 hours"), "{tools}: {brief}");
+            }
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[tokio::test]

@@ -1979,7 +1979,7 @@ export function createMockApi(): Api {
     {
       kind: "agent",
       provider: "claude-code",
-      providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner" }],
+      providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner", loop_tools: true }],
       enabled: true,
       settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
       schema: {

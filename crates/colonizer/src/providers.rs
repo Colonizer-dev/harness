@@ -1840,6 +1840,7 @@ mod tests {
             schema,
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 
