@@ -1110,6 +1110,8 @@ export interface AgentRef {
  * Who set a recorded line in motion (issue #312): an envelope field beside `seq`/`ts`/`agent` on every
  * line of `events.jsonl` and `harness.jsonl`, and on each stream event. Absent on lines recorded before
  * the field existed, which readers infer as before (a `watchdog-` message id, an answered question).
+ * Exception: a `memory_proposal`'s `origin` names the proposer (§6.2), not the envelope — those lines
+ * are never stamped (docs/agent-events.schema.json `#/$defs/origin`).
  */
 export const ORIGINS = [
   "user",
@@ -1139,7 +1141,17 @@ export type AgentEventBody =
   | { type: "thinking"; message_id: string; block_index: number; text: string }
   | { type: "tool_call"; message_id: string; tool_call_id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_call_id: string; output: string; is_error: boolean }
-  | { type: "question"; question_id: string; message_id?: string; questions: Question[] }
+  /**
+   * `risk` is the question's risk class (§2 rules), which routes the autonomy judge's ceiling (§6.2b);
+   * absent means workspace_write, and any value reads as above every ceiling until judged.
+   */
+  | {
+      type: "question";
+      question_id: string;
+      message_id?: string;
+      risk?: "read_only" | "workspace_write" | "publish_affecting" | "credential_adjacent";
+      questions: Question[];
+    }
   | { type: "question_answered"; question_id: string; answers: Answers; response?: string | null }
   | {
       type: "turn_end";
@@ -1153,7 +1165,13 @@ export type AgentEventBody =
   | { type: "log"; level: LogLevel; message: string }
   /** The model the colony's next turns use: sent at start with no `previous`, then after each `set_model` that took. */
   | { type: "model_changed"; model: string; previous: string | null }
-  /** A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent tags mean none. */
+  /**
+   * A proposed shared-memory note (docs/protocol.md §6.2). Absent or null scope means repo; absent
+   * tags mean none. The wire's `origin` on this one event names the proposer — "orchestrator",
+   * "subagent:<name>", "background:<name>" (§3 Origins) — not the envelope's, so it is not declared
+   * here: it would collide with `Sequenced`'s envelope `origin`, and the stream reads only the
+   * watermark off this body.
+   */
   | { type: "memory_proposal"; scope?: MemoryScope | null; title: string; content: string; tags?: string[] }
   /** A confirmed problem outside the task (§6.6), which the mothership files as a GitHub issue. */
   | { type: "finding"; title: string; body: string; evidence: string }

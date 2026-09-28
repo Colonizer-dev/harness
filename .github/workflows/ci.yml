@@ -371,3 +371,41 @@ jobs:
             ${{ runner.temp }}/colony-e2e/data/sessions
           if-no-files-found: ignore
           retention-days: 7
+
+  # The hermetic Unified Harness Protocol conformance run (issue #297): boots the mothership this
+  # build produces on loopback with throwaway config/data dirs — no KVM, no credentials, no colony —
+  # and fails when any check's outcome moved from the committed expectation in
+  # docs/uhp-conformance.json: a moved outcome is a protocol-behaviour change, re-measured
+  # deliberately with scripts/ci/uhp-conformance.sh --update and docs/conformance.md, never
+  # absorbed. The same script validates the claude-code runner's event fixture against
+  # docs/agent-events.schema.json, so the runner contract's schema cannot silently rot.
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same toolchain and cache family the rust job uses: stable, minimal profile, and the restore
+      # keys fall back to the rust job's cache, so usually only the mothership itself compiles.
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-conformance-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-conformance-${{ runner.os }}-
+            cargo-${{ runner.os }}-
+
+      # A debug build is enough: the suite only talks HTTP to it. --locked, like the rust job.
+      - name: Build the mothership
+        run: cargo build --locked -p colonizer-harness
+
+      # Hosted runners ship python3 with venv support; the script makes its own venv and installs
+      # the pinned suite into it.
+      - name: Hermetic UHP conformance run
+        run: sh scripts/ci/uhp-conformance.sh
