@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "codex",
   "name": "Codex",
-  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It cannot ask the user questions yet, and nothing stages the codex binary into the colony image.",
+  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It can ask the user questions through the colonizer MCP server, and nothing stages the codex binary into the colony image.",
   "protocol": "colonizer-runner/1",
   "loop_tools": true,
   "entry": [
