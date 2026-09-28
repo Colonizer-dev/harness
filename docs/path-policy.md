@@ -128,6 +128,24 @@ line, a kind the host does not write, or a lost policy file — each prints a
 clear message and stops the boot, since a policy the guest cannot enforce
 must not boot into a colony that assumes it was.
 
+**Guest, while the colony runs.** The binds above cover the paths that existed
+at boot. A checkout that appears later — a clone, a `git init`, a worktree or
+a submodule: any directory below the workspace with its own `.git` — gets its
+own enforcement: agentd watches the workspace (#648) and treats every such
+directory as a checkout root, binding each policy path relative to that root
+as the path appears, with the same mounts the boot script applies. The
+workspace root itself is not re-watched, so a `.env` created at the top of the
+worktree mid-session is still only reported at publish. A nested checkout's
+`.git/config` and `.git/hooks/` are protected too — the host's read-only
+git-dir mount covers only the root's, so here the watcher applies the binds
+the boot never had to. Like the boot, the watcher never follows a symlink;
+unlike the boot, it is best effort: a failed mount is a warn line on the
+colony, never a stopped daemon. Two things to know. A read that races the
+watcher can still see a just-created masked file — publish still applies. And
+a bound path cannot be deleted or renamed inside the guest (the bind holds the
+inode), so the agent cannot `rm -rf` a nested checkout that contains a masked
+or protected path; each bind that was applied is on the colony log.
+
 **`.git` is not a bind.** The git admin dir is mounted read-only at its own
 host path at boot already, so `.git/config` and `.git/hooks/` are beyond the
 colony's reach without a bind of their own; they are listed above for the
@@ -195,9 +213,6 @@ is held back as above.
 
 ## Not yet covered
 
-- **Paths created mid-session in nested checkouts** are caught only at
-  publish: the placeholders and binds exist for the paths that existed at
-  boot.
 - **The human's terminal can still unmount.** The colony runs as root inside
   its VM. Since in-guest hardening (#547), the agent and everything it spawns
   run without `CAP_SYS_ADMIN` and under a seccomp filter that answers `mount`,
