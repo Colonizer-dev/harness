@@ -46,6 +46,23 @@
         "description": "Model for the colony as xai-grok/<model> (grok-4.5 is the CLI's own default) or a bare xAI model id. Other providers are refused: grok talks to api.x.ai directly in this slice.",
         "default": "xai-grok/grok-4.5",
         "env": "COLONIZER_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Grok Build tool ids this colony never gets, passed as grok's headless --disallowed-tools denylist, such as run_terminal_cmd, write_file or web_fetch. web_search is always off already (the runner passes --disable-web-search) and the colonizer MCP tools are not covered by the denylist. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "run_terminal_cmd",
+          "read_file",
+          "write_file",
+          "search_replace",
+          "grep",
+          "list_dir",
+          "web_fetch",
+          "Agent"
+        ]
       }
     }
   }

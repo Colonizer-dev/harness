@@ -83,6 +83,7 @@ The microVM is the boundary. Inside it:
 | grok OS sandbox | **off** | `--sandbox off` explicitly (18-sandbox.md) |
 | Tool approval | **auto** | `--always-approve`: headless cannot answer a prompt; the microVM is the boundary |
 | Web search/fetch | **off** | `--disable-web-search` (backend host unverified; egress denies it anyway) |
+| Colony-disabled tools | **per setting** | the `disabled_tools` setting rides as grok's own headless denylist, `--disallowed-tools <ids>` (14-headless-mode.md); the colonizer MCP tools are not on it |
 | Cross-session memory | **off** | `GROK_MEMORY=0` (05-configuration.md) |
 | Telemetry | **off** | `GROK_TELEMETRY_ENABLED=0` (05-configuration.md) |
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |

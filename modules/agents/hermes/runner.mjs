@@ -16,6 +16,19 @@ export const DEFAULT_HERMES_HOME = '/tmp/colonizer-hermes';
 export const SESSION_FILE = 'colonizer-session-id';
 export const DISABLED_TOOLSETS = ['memory', 'skills', 'delegation', 'cronjob', 'tts', 'clarify'];
 export const MAX_TOOL_OUTPUT = 20_000;
+
+/** The full disabled-toolsets list a config carries: DISABLED_TOOLSETS plus the module.json
+ * `disabled_tools` names (trimmed, empties dropped, deduplicated — the harness validated each name
+ * against the manifest's "x-known-tools" at boot). Hermes can only switch off whole toolsets, so
+ * those names are toolset names; a single tool inside one cannot be turned off. */
+export function disabledToolsets(env = {}) {
+  const named = String(env.COLONIZER_DISABLED_TOOLS ?? '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  return [...new Set([...DISABLED_TOOLSETS, ...named])];
+}
+
 // Hermes falls back to local silently when another terminal backend is unusable, so the runner pins
 // local and refuses to start on anything else.
 const LOCAL_BACKEND = 'local';
@@ -96,8 +109,9 @@ export function parseRoutes(raw) {
  * Anthropic Messages wire, and the `model:` block naming the resolved pair. That block is load-bearing:
  * Hermes' first-run guard (`_has_any_provider_configured()`) ignores the top-level `providers:` map
  * and exits with "no API keys or providers found" unless `model.provider` points at one.
+ * `env`'s COLONIZER_DISABLED_TOOLS names extra whole toolsets to disable (disabledToolsets).
  */
-export function hermesConfig(routes, resolved = null) {
+export function hermesConfig(routes, resolved = null, env = {}) {
   const providers = {};
   for (const route of routes) {
     providers[`colonizer-${route.provider}`] = { api: route.base_url, transport: 'anthropic_messages', extra_headers: route.headers };
@@ -107,7 +121,7 @@ export function hermesConfig(routes, resolved = null) {
     memory: { memory_enabled: false, user_profile_enabled: false },
     skills: { write_approval: true },
     auxiliary: { background_review: { enabled: false } },
-    agent: { disabled_toolsets: [...DISABLED_TOOLSETS] },
+    agent: { disabled_toolsets: disabledToolsets(env) },
     providers,
   };
   if (resolved) config.model = { provider: resolved.provider, default: resolved.model };
@@ -190,7 +204,7 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
   const timeoutSecs = Number(env.COLONIZER_HERMES_TURN_TIMEOUT_SECS) || DEFAULT_TURN_TIMEOUT_SECS;
   let model = env.COLONIZER_MODEL ?? '';
   // Rewritten before every turn, so the file always names the model the CLI flags carry.
-  const writeConfig = (resolved) => writeFileSync(join(home, 'config.yaml'), `${JSON.stringify(hermesConfig(routes, resolved), null, 2)}\n`);
+  const writeConfig = (resolved) => writeFileSync(join(home, 'config.yaml'), `${JSON.stringify(hermesConfig(routes, resolved, env), null, 2)}\n`);
   const startup = resolveModel(model, routes);
   writeConfig(startup.ok ? startup : null);
   let announced = null; // the model clients were told about, in <provider>/<model> form
@@ -450,7 +464,7 @@ async function main() {
       `${probe.error}. This module needs hermes-agent v2026.9.24 in the colony image: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv, then pip install -e . Nothing stages that binary into the VM yet.`,
     );
   }
-  emit({ type: 'log', level: 'info', message: `hermes probe: ${probe.version}; terminal backend local; disabled toolsets: ${DISABLED_TOOLSETS.join(', ')}` });
+  emit({ type: 'log', level: 'info', message: `hermes probe: ${probe.version}; terminal backend local; disabled toolsets: ${disabledToolsets(process.env).join(', ')}` });
 
   await runAgent({ hermes: bin, commands, emit });
   process.exit(0);

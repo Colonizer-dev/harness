@@ -29,6 +29,7 @@ prints one non-JSON banner line per turn, which this runner surfaces as a `warn`
 | `COLONIZER_HERMES_BIN` | `hermes` | The hermes command (split on spaces) |
 | `COLONIZER_HERMES_HOME` | `/tmp/colonizer-hermes` | `HERMES_HOME`; the runner writes `config.yaml` (as JSON, valid YAML) and the session-id file here. The config carries a `model:` block naming the resolved provider and default, rewritten before every turn so it always matches the CLI flags — without it Hermes' first-run guard sees "no API keys or providers found" (it ignores the top-level `providers:` map) and exits |
 | `COLONIZER_MODEL` | none — required | `<provider>/<model>`, which must match a gateway route; anything else refuses the turn |
+| `COLONIZER_DISABLED_TOOLS` | empty | The module's Disabled tools setting: comma-separated Hermes toolset names appended (deduplicated) to the always-off list in `agent.disabled_toolsets`. Whole toolsets only — a single tool inside one (only `write_file` within `file`, say) cannot be turned off; `memory`, `skills`, `delegation`, `cronjob`, `tts` and `clarify` are always off already |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes from the mothership (`docs/protocol.md` §6.1); one becomes a Hermes provider `colonizer-<id>` on the Anthropic Messages wire with the colony header |
 | `COLONIZER_HERMES_TURN_TIMEOUT_SECS` | 3600 | Per-turn cap; exceeding it SIGTERMs Hermes and ends the turn with an error |
 

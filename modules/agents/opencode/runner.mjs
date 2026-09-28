@@ -73,8 +73,10 @@ export function preflight(model, routes) {
 }
 
 /** Inline config (OPENCODE_CONFIG_CONTENT): one `@ai-sdk/anthropic` provider per route in use,
- * pointing at the gateway, plus the colonizer MCP server. `timeout` maps `timeout_secs` to ms. */
-export function opencodeConfig({ routes, model, smallModel, mcp }) {
+ * pointing at the gateway, plus the colonizer MCP server. `timeout` maps `timeout_secs` to ms.
+ * `disabledTools` (harness-validated OpenCode tool ids) are denied on top of the `*` allow;
+ * `edit` is one permission for write, edit and apply_patch, and MCP tools are not covered. */
+export function opencodeConfig({ routes, model, smallModel, mcp, disabledTools = [] }) {
   const small = smallModel || model;
   const used = [];
   for (const m of [model, small]) { const s = splitModel(m, routes); if (!s.error && !used.some((u) => u.route.provider === s.route.provider)) used.push(s); }
@@ -86,7 +88,8 @@ export function opencodeConfig({ routes, model, smallModel, mcp }) {
     const context = s.route.context_tokens ?? DEFAULT_CONTEXT_TOKENS;
     provider[s.route.provider].models[s.name] = { name: s.name, limit: { context, output: Math.min(32_000, Math.floor(context / 4)) } };
   }
-  return { provider, model, small_model: small, permission: 'allow', autoupdate: false, share: 'disabled', ...(mcp ? { mcp } : {}) };
+  const permission = disabledTools.length ? { '*': 'allow', ...Object.fromEntries(disabledTools.map((id) => [id, 'deny'])) } : 'allow';
+  return { provider, model, small_model: small, permission, autoupdate: false, share: 'disabled', ...(mcp ? { mcp } : {}) };
 }
 
 // What the model needs that the config cannot say. Memory files are read, never written.
@@ -343,6 +346,9 @@ async function main() {
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
   const model = (env.COLONIZER_MODEL ?? '').trim();
   const smallExplicit = (env.COLONIZER_SMALL_MODEL ?? '').trim();
+  // Harness-level tool switch (module.json `disabled_tools`, names validated at boot): deny those
+  // tools in every turn's inline config, whatever else stays allowed.
+  const disabledTools = (env.COLONIZER_DISABLED_TOOLS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
   const fatal = preflight(model, routes);
   if (fatal) fail(fatal);
 
@@ -357,7 +363,7 @@ async function main() {
   writeFileSync(instrPath, `${INSTRUCTIONS}\n`);
   const makeEnv = (bridge, current = model) => ({
     ...env,
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, mcp: { colonizer: { type: 'local', command: [process.execPath, join(moduleDir, 'mcp.mjs')], environment: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token }, timeout: MCP_TIMEOUT_MS } } }), instructions: [instrPath] }),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, disabledTools, mcp: { colonizer: { type: 'local', command: [process.execPath, join(moduleDir, 'mcp.mjs')], environment: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token }, timeout: MCP_TIMEOUT_MS } } }), instructions: [instrPath] }),
     OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
   });
 

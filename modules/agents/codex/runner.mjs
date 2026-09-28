@@ -154,10 +154,23 @@ export function mcpArgs({ url, token, env }) {
   return Object.entries(server).flatMap(([key, value]) => ['-c', `mcp_servers.colonizer.${key}=${JSON.stringify(value)}`]);
 }
 
+/** The `-c` override that switches a module.json `disabled_tools` name off (upstream config
+ * reference: the `features.*` keys are flags, `web_search` a mode whose "disabled" rides as a TOML
+ * string, like the other quoted values). The harness validated each name against the manifest's
+ * "x-known-tools" at boot, so the lookup is total; unknown names drop out anyway. */
+const TOOL_OFF = {
+  shell: 'features.shell_tool=false',
+  web_search: 'web_search="disabled"',
+  view_image: 'features.view_image=false',
+};
+
 /** One headless codex turn (`codex exec --json`): the prompt rides stdin (`-`), exec-level options
  * come before the `resume` subcommand (which takes no `-c`), and the nesting decisions from the
- * README applied. `mcp` carries the colonizer server's `-c` overrides (mcpArgs). */
-export function turnArgs({ model, threadId, mcp = [] }) {
+ * README applied. `mcp` carries the colonizer server's `-c` overrides (mcpArgs); `disabledTools`
+ * the `disabled_tools` names, each a `-c` override behind exec's `--strict-config`, so a drifted
+ * key fails the turn instead of silently keeping the tool (`apply_patch` and MCP tools have no
+ * switch). */
+export function turnArgs({ model, threadId, mcp = [], disabledTools = [] }) {
   const args = [
     '--json', // events as JSONL on stdout (developers.openai.com/codex/noninteractive)
     '--skip-git-repo-check', // the runner may sit anywhere; the colony VM is the boundary
@@ -165,6 +178,9 @@ export function turnArgs({ model, threadId, mcp = [] }) {
     '-c', 'check_for_update_on_startup=false', // no update checks inside a colony (upstream config reference)
     '-c', 'history.persistence="none"', // no prompt history file; the session rollout stays (resume needs it)
     '-c', 'otel.metrics_exporter="none"', // product analytics off (upstream config reference)
+    ...(disabledTools.length
+      ? ['--strict-config', ...disabledTools.flatMap((tool) => (TOOL_OFF[tool] ? ['-c', TOOL_OFF[tool]] : []))]
+      : []),
     ...mcp,
   ];
   if (model) args.push('-m', model);
@@ -227,7 +243,7 @@ export function mergeUsage(totals, model, usage) {
 /** Runs one turn as a codex child, emitting the mapped protocol events as they arrive; resolves with
  * the turn's codex thread id once the child exits. `interrupt()` SIGINTs the child (codex saves the
  * session rollout continuously) and escalates to SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals, mcp = [] }) {
+export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals, mcp = [], disabledTools = [] }) {
   let child = null;
   let interrupted = false;
   // The thread id to carry into the next turn: whatever `thread.started` named last, else the one
@@ -241,7 +257,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
     let completed = null;
     let failed = null;
     let failure = null;
-    child = spawnFn(codexBin(env), turnArgs({ model, threadId, mcp }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawnFn(codexBin(env), turnArgs({ model, threadId, mcp, disabledTools }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
     // The prompt rides stdin (`-` as the prompt argument): an issue brief can be far larger than
     // an argv slot, and a child that exits early must not turn a broken pipe into a crash.
     child.stdin.on('error', () => {});
@@ -378,6 +394,13 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const pending = [];
   const totals = { models: {} };
   let n = 0;
+  // Harness-level tool switch (module.json `disabled_tools`): each name rides every turn as a `-c`
+  // override behind `--strict-config`. The harness validated the names against the manifest's
+  // "x-known-tools" at boot; here they are only trimmed, with empties dropped.
+  const disabledTools = String(env.COLONIZER_DISABLED_TOOLS ?? '')
+    .split(',')
+    .map((tool) => tool.trim())
+    .filter(Boolean);
 
   // One bridge for the runner's life; the colonizer MCP server codex spawns each turn points at it.
   const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true' });
@@ -402,7 +425,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, mcp });
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, mcp, disabledTools });
         try {
           const result = await turn.done;
           threadId = result.threadId ?? threadId;

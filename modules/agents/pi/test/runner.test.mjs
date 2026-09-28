@@ -66,6 +66,7 @@ test('piArgs builds the RPC command line; piEnv pins the agent dir and hides the
   const base = ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--provider', 'fake', '--model', 'm', '--append-system-prompt', SYSTEM_PROMPT_APPEND];
   assert.deepEqual(piArgs({ provider: 'fake', modelId: 'm' }), base);
   assert.deepEqual(piArgs({ provider: 'fake', modelId: 'm', effort: 'max' }), [...base.slice(0, 8), '--thinking', 'max', ...base.slice(8)]);
+  assert.deepEqual(piArgs({ provider: 'fake', modelId: 'm', disabledTools: ['write', 'bash'] }), [...base, '--exclude-tools', 'write,bash']);
   assert.ok(EFFORT_LEVELS.has('minimal') && !EFFORT_LEVELS.has(''));
   assert.deepEqual(piEnv({ COLONIZER_MODEL_ROUTES: '["...token..."]', HOME: '/root' }, '/tmp/pi-dir'), {
     HOME: '/root',
@@ -219,6 +220,21 @@ test('a turn streams text, reports a tool call and capped result, and settles on
   assert.deepEqual(turn.model_usage, { 'fake/some-model': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 2 } });
   assert.deepEqual(s.events.filter((event) => event.type === 'status').map((event) => event.state), ['idle', 'working', 'idle', 'exited']);
   assert.deepEqual(s.pi.spawnArgs, piArgs({ provider: 'fake', modelId: 'some-model' }));
+});
+
+test('disabled tools reach pi as one --exclude-tools argument', async () => {
+  const pi = new FakePi();
+  pi.onCommand = (command) => pi.respond(command);
+  const commands = commandQueue();
+  const done = runAgent({ spawnPi: ({ args }) => ((pi.spawnArgs = args), pi), commands, emit: () => {}, selection: SELECTION, disabledTools: ['write', 'bash'], graceMs: 50 });
+  commands.push({ type: 'shutdown' });
+  await done;
+  assert.deepEqual(pi.spawnArgs, [
+    '--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates',
+    '--provider', 'fake', '--model', 'some-model',
+    '--append-system-prompt', SYSTEM_PROMPT_APPEND,
+    '--exclude-tools', 'write,bash',
+  ]);
 });
 
 test('a provider error turn fails the turn with the error message', async () => {

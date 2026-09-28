@@ -114,9 +114,11 @@ export function buildModelsConfig(routes, model, effort = '') {
   };
 }
 
-/** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note. */
-export function piArgs({ provider, modelId, effort = '' }) {
-  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND];
+/** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note
+ * and, when the harness switched tools off, an --exclude-tools denylist on top of Pi's default
+ * read, bash, edit, write set. */
+export function piArgs({ provider, modelId, effort = '', disabledTools = [] }) {
+  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
 }
 
 /**
@@ -197,7 +199,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Drives one Pi RPC process through the runner contract. `spawnPi` (the real spawn, injected for
  * tests) gets Pi's args and env; `selection` is what the model setting resolved to.
  */
-export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selection, effort = '', env = process.env, cwd = process.cwd(), graceMs = 5000 }) {
+export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selection, effort = '', disabledTools = [], env = process.env, cwd = process.cwd(), graceMs = 5000 }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -216,7 +218,7 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
   const modelUsage = new Map(); // "provider/model" -> cumulative tokens
   const pendingResponses = new Map(); // request id → response handler
 
-  const child = spawnPi({ args: piArgs({ ...selection, effort }), env, cwd });
+  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools }), env, cwd });
   child.stdin.on('error', () => {}); // Pi gone: the exit path reports it, not a broken pipe
 
   /**
@@ -517,13 +519,16 @@ async function main() {
 
   const effort = (process.env.COLONIZER_EFFORT ?? '').trim();
   if (effort && !EFFORT_LEVELS.has(effort)) emit({ type: 'log', level: 'warn', message: `ignoring COLONIZER_EFFORT=${effort}; expected one of ${['', ...EFFORT_LEVELS].join(', ')}` });
+  // Harness-level tool switch (module.json `disabled_tools`, names validated at boot): pi drops
+  // them from its default active set via --exclude-tools.
+  const disabledTools = (process.env.COLONIZER_DISABLED_TOOLS ?? '').split(',').map((name) => name.trim()).filter(Boolean);
 
   // The module directory is mounted read-only, so Pi's configuration lives in a fresh private
   // directory: models.json is written 0600 and holds the colony's gateway token in its headers.
   const agentDir = mkdtempSync(join(tmpdir(), 'colonizer-pi-'));
   writeFileSync(join(agentDir, 'models.json'), `${JSON.stringify(buildModelsConfig(routes, model, effort))}\n`, { mode: 0o600 });
   try {
-    await runAgent({ commands, emit, selection: resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', env: piEnv(process.env, agentDir), cwd: process.cwd() });
+    await runAgent({ commands, emit, selection: resolveModel(routes, model), effort: EFFORT_LEVELS.has(effort) ? effort : '', disabledTools, env: piEnv(process.env, agentDir), cwd: process.cwd() });
   } finally {
     rmSync(agentDir, { recursive: true, force: true });
   }

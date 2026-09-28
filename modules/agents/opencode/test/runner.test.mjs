@@ -73,6 +73,11 @@ test('config maps a local auth:none route onto the gateway', () => {
   assert.equal(archPlatform({ arch: 'x64', cpuinfo: 'flags : sse' }), 'linux-x64-baseline');
 });
 
+test('disabled tools deny just those ids and leave everything else allowed', () => {
+  const cfg = opencodeConfig({ routes: ROUTES, model: 'local/fake', smallModel: '', disabledTools: ['bash', 'webfetch'] });
+  assert.deepEqual(cfg.permission, { '*': 'allow', bash: 'deny', webfetch: 'deny' });
+});
+
 test('preflight names the fix for every unrouted model', () => {
   for (const bad of ['', 'deepseek-flash', 'local/', 'x/y']) assert.match(preflight(bad, ROUTES), /Settings → Providers/);
   assert.equal(preflight('local/fake', ROUTES), null);
