@@ -85,6 +85,14 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "waiting_for_answer" }))).toBe(true);
   });
 
+  it("is false once the question has been answered and only a slot is waited for (issue #667)", () => {
+    const suspended = { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" };
+    const answered = { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:05:00Z" };
+    expect(needsYou(session({ status: "waiting_for_answer", suspended, pending_answer: answered }))).toBe(false);
+    // Without the answer stored, the same colony is still very much yours.
+    expect(needsYou(session({ status: "waiting_for_answer", suspended }))).toBe(true);
+  });
+
   it("is true for any attention flag, whatever its reason", () => {
     for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
       expect(needsYou(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(true);

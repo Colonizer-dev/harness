@@ -286,8 +286,14 @@ A colony waiting on its user holds a slot while doing nothing. Past a grace peri
 mothership tears the microVM down but keeps the worktree and the agent's own session transcript, the colony holds
 no parallel slot (the queue advances), and the status stays `waiting_for_answer` — the question stays answerable
 in the cockpit, over the events WebSocket, at `POST /api/sessions/{id}/answer`, and from the phone, exactly as
-before. The answer is persisted on the colony (`pending_answer`) before it is acknowledged, and the next queue
-tick brings the colony back ahead of new launches through the same slot admission every boot answers to: a fresh
+before. The answer is persisted on the colony (`pending_answer`, with `answered_at` recording when it arrived)
+before it is acknowledged. When a slot is free, the next queue tick brings the colony back through the same slot
+admission every boot answers to, ahead of new launches; when it is not, the colony stays `waiting_for_answer`
+with `suspended` and `pending_answer` both set — that pair, not a new status, is what "answered, waiting for a
+slot" reads as, and the answer-hold log line says whether a slot is free, how many answered colonies stand
+ahead, or that launches are paused. The restore pass takes answered colonies in answer order — `answered_at`,
+falling back to the suspension's own time for records saved before answers kept one, ties by colony id — still
+ahead of fresh launches, which the queue admits only after it. Either way the restore is a fresh
 microVM in which the runner resumes its own session — `COLONIZER_RESUME_SESSION` carries the `agent_session` id;
 the module declares where it keeps transcripts in `session_resume.dir`, and the harness mounts the colony's
 `transcripts/` directory there — with the answer as its first message. `pending_answer` is cleared only once a
