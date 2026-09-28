@@ -57,6 +57,7 @@ use tokio_tungstenite::{
 mod agentd;
 mod api;
 mod attention;
+mod files;
 mod launch;
 mod model;
 mod persist;

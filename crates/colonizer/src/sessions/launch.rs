@@ -1314,7 +1314,7 @@ mod tests {
     #[tokio::test]
     async fn colonies_of_a_switched_off_org_stay_listed_and_resume() {
         let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
-        let listed = list(State(app.clone()), None).await.0;
+        let listed = list_bare(State(app.clone()), None).await.0;
         let kept = listed.iter().find(|s| s.id == "kept").unwrap();
         assert_eq!(kept.org, "acme", "the colony is still in the list");
         // The real resume path, not just its gate: the org's switch does not make `resume` refuse

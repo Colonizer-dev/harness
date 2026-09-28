@@ -2157,21 +2157,59 @@ fn strip_nested_git(root: &FsPath) -> Result<Vec<PathBuf>> {
 /// blocks until a writer turns up, and a publisher parked on that would hang; it is a no-op on the
 /// regular files that get this far.
 pub(crate) fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<String> {
-    use std::io::Read;
+    let bytes = read_regular_file_bytes(path, cap).map_err(|e| match e {
+        RegularFileRead::TooLarge(_) => std::io::Error::other("not a regular file within the size cap"),
+        RegularFileRead::Unreadable(e) => e,
+    })?;
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("not valid UTF-8"))
+}
+
+/// Why [`open_regular_file`] refused a file the VM may have written. The size cap is its own
+/// answer (`TooLarge`, e.g. the §7.5 artifact routes' 413); everything else — a symlink, a
+/// FIFO, a vanished file — reads as "not there" to its callers.
+pub(crate) enum RegularFileRead {
+    /// A regular file, but larger than the cap it was asked for.
+    TooLarge(u64),
+    /// Not openable as a regular file within the cap: the OS error says which.
+    Unreadable(std::io::Error),
+}
+
+/// Opens and handles a file the VM may have written through a single fd it cannot redirect: the
+/// same [`read_regular_file`] trick with the read left to the caller, so the §7.5 artifact
+/// routes can size a tar header from the fstat and stream from the same handle. `O_NOFOLLOW`
+/// refuses a symlinked final component outright, and the handle is fstat'ed before anything is
+/// read, so only a regular file within `cap` bytes is ever handed over. `O_NONBLOCK` is for the
+/// same trick with a FIFO: opening one for reading blocks until a writer turns up, and a caller
+/// parked on that would hang; it is a no-op on the regular files that get this far.
+pub(crate) fn open_regular_file(path: &FsPath, cap: u64) -> Result<std::fs::File, RegularFileRead> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.len() > cap {
-        return Err(std::io::Error::other("not a regular file within the size cap"));
+        .open(path)
+        .map_err(RegularFileRead::Unreadable)?;
+    let meta = file.metadata().map_err(RegularFileRead::Unreadable)?;
+    if !meta.is_file() {
+        return Err(RegularFileRead::Unreadable(std::io::Error::other("not a regular file")));
     }
-    let mut content = String::new();
-    file.take(cap + 1).read_to_string(&mut content)?;
-    if content.len() > cap as usize {
-        return Err(std::io::Error::other("grew past the size cap while being read"));
+    if meta.len() > cap {
+        return Err(RegularFileRead::TooLarge(cap));
     }
-    Ok(content)
+    Ok(file)
+}
+
+/// [`read_regular_file`] for bytes, so a binary artifact survives the trip: same handle, same
+/// cap, with the grew-past-the-cap re-check after the read, since the VM can append meanwhile.
+pub(crate) fn read_regular_file_bytes(path: &FsPath, cap: u64) -> Result<Vec<u8>, RegularFileRead> {
+    use std::io::Read;
+    let file = open_regular_file(path, cap)?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(RegularFileRead::Unreadable)?;
+    if bytes.len() > cap as usize {
+        return Err(RegularFileRead::TooLarge(cap));
+    }
+    Ok(bytes)
 }
 
 /// Reads `pr.md` written by the VM. It must be a regular file (not a symlink to a host secret):
