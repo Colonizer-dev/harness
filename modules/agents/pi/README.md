@@ -32,9 +32,10 @@ cockpit has run on it yet. CI runs the fake-Pi tests (`npm test` in this directo
 | --- | --- | --- |
 | `COLONIZER_MODEL` | none | The model Pi runs on, as `<provider>/<model>` for a provider configured under Settings → Providers |
 | `COLONIZER_EFFORT` | none | Thinking level passed as `--thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` |
+| `COLONIZER_DISABLED_TOOLS` | none | Pi tool names passed as `--exclude-tools`, e.g. `bash`, `write`, on top of the default read, bash, edit, write set; grep, find and ls are never enabled in a colony, so listing them disables nothing |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1); set by the mothership, not by hand |
 
-Both settings are edited in the cockpit as the module's `model` and `effort` settings.
+All three settings are edited in the cockpit as the module's `model`, `effort` and `disabled_tools` settings.
 
 ## Models
 

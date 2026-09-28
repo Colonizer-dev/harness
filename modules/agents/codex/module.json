@@ -59,6 +59,18 @@
         "description": "Accepted for parity with the other agent modules, but unused: headless codex exec has no background-worker split, every turn runs on the orchestrator model.",
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Codex tool names this colony never gets: shell (the shell tool), web_search or view_image. Each rides every turn as a -c config override, behind --strict-config so a key codex stops recognising fails the turn instead of silently keeping the tool. apply_patch (Codex's own file-editing tool) and MCP tools cannot be turned off. Empty disables nothing.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "shell",
+          "web_search",
+          "view_image"
+        ]
       }
     }
   }

@@ -687,7 +687,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     for line in providers::connection_disabled_tool_lines(&used) {
         app.session_log(id, "info", line).await;
     }
-    match providers::harness_disabled_tool_lines(&agent.id, &runner_env) {
+    match providers::harness_disabled_tool_lines(&agent, &runner_env) {
         Ok(lines) => {
             for line in lines {
                 app.session_log(id, "info", line).await;

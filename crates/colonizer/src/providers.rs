@@ -7,6 +7,7 @@
 use crate::{
     ApiResult, App, Shared, client_error, config_unreadable,
     gateway::{COLONY_HEADER, DEFAULT_TIMEOUT_SECS, forget_probe, health},
+    modules::AgentModule,
     orgs::effective_agent,
     provider_quota,
     sessions::agent_env,
@@ -691,21 +692,28 @@ pub fn connection_disabled_tool_lines(providers: &[Provider]) -> Vec<String> {
 }
 
 /// The boot log lines for the harness half of the tool policy (#295): one per tool the agent module
-/// disables via `COLONIZER_DISABLED_TOOLS` (comma-separated [`KNOWN_TOOLS`] names), or the message the
-/// boot refuses with when a name is not a Claude Code built-in. Missing or empty means nothing disabled.
-pub fn harness_disabled_tool_lines(backend: &str, runner_env: &Map<String, Value>) -> Result<Vec<String>, String> {
+/// disables via `COLONIZER_DISABLED_TOOLS` (comma-separated names), or the message the boot refuses
+/// with when a name is not one the module knows. A module's names are its own — the `x-known-tools`
+/// list on its `disabled_tools` schema property, the CLI's native tool names — falling back to
+/// Claude Code's [`KNOWN_TOOLS`] when it declares none. Missing or empty means nothing disabled.
+pub fn harness_disabled_tool_lines(agent: &AgentModule, runner_env: &Map<String, Value>) -> Result<Vec<String>, String> {
     let Some(raw) = runner_env.get("COLONIZER_DISABLED_TOOLS").and_then(Value::as_str) else {
         return Ok(Vec::new());
     };
+    let known: Vec<&str> = agent.schema["properties"]["disabled_tools"]["x-known-tools"]
+        .as_array()
+        .map(|names| names.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_else(|| KNOWN_TOOLS.to_vec());
     let mut lines = Vec::new();
     for name in raw.split(',').map(str::trim).filter(|name| !name.is_empty()) {
-        if !KNOWN_TOOLS.contains(&name) {
+        if !known.contains(&name) {
             return Err(format!(
-                "agent module '{backend}' setting 'disabled_tools': unknown tool '{name}' (known: {})",
-                KNOWN_TOOLS.join(", ")
+                "agent module '{}' setting 'disabled_tools': unknown tool '{name}' (known: {})",
+                agent.id,
+                known.join(", ")
             ));
         }
-        lines.push(format!("tool '{name}' disabled (level: harness, harness: '{backend}')"));
+        lines.push(format!("tool '{name}' disabled (level: harness, harness: '{}')", agent.id));
     }
     Ok(lines)
 }
@@ -1819,6 +1827,21 @@ mod tests {
         assert_eq!(config_error(&[provider("ok")]), None);
     }
 
+    /// The smallest agent module, with `schema` as its settings schema.
+    fn agent_module(id: &str, schema: Value) -> AgentModule {
+        AgentModule {
+            id: id.into(),
+            name: id.into(),
+            description: String::new(),
+            dir: PathBuf::from("/opt/colonizer/agent"),
+            entry: vec!["runner.mjs".into()],
+            needs_claude: false,
+            schema,
+            egress: None,
+            resume_dir: None,
+        }
+    }
+
     #[test]
     fn disabled_tool_lines_name_their_level_and_source() {
         let mut proxy = provider("proxy");
@@ -1831,27 +1854,59 @@ mod tests {
             ]
         );
 
+        // No `x-known-tools` on the schema property, so the names are Claude Code's built-ins.
+        let claude = agent_module("claude-code", json!({"type": "object", "properties": {}}));
         let mut env = Map::new();
         env.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch , Write"));
         assert_eq!(
-            harness_disabled_tool_lines("claude-code", &env).unwrap(),
+            harness_disabled_tool_lines(&claude, &env).unwrap(),
             vec![
                 "tool 'WebSearch' disabled (level: harness, harness: 'claude-code')",
                 "tool 'Write' disabled (level: harness, harness: 'claude-code')",
             ]
         );
         assert_eq!(
-            harness_disabled_tool_lines("claude-code", &Map::new()).unwrap(),
+            harness_disabled_tool_lines(&claude, &Map::new()).unwrap(),
             Vec::<String>::new()
         );
         let mut unknown = Map::new();
         unknown.insert("COLONIZER_DISABLED_TOOLS".into(), json!("WebSearch, Sed"));
         assert_eq!(
-            harness_disabled_tool_lines("claude-code", &unknown),
+            harness_disabled_tool_lines(&claude, &unknown),
             Err(format!(
                 "agent module 'claude-code' setting 'disabled_tools': unknown tool 'Sed' (known: {})",
                 KNOWN_TOOLS.join(", ")
             ))
+        );
+    }
+
+    #[test]
+    fn a_module_validates_disabled_tools_against_its_own_names() {
+        let codex = agent_module(
+            "codex",
+            json!({"type": "object", "properties": {"disabled_tools": {
+                "type": "string", "env": "COLONIZER_DISABLED_TOOLS", "x-known-tools": ["shell", "web_search", "view_image"]
+            }}}),
+        );
+        // The module's native tool names are accepted.
+        let mut env = Map::new();
+        env.insert("COLONIZER_DISABLED_TOOLS".into(), json!("shell, view_image"));
+        assert_eq!(
+            harness_disabled_tool_lines(&codex, &env).unwrap(),
+            vec![
+                "tool 'shell' disabled (level: harness, harness: 'codex')",
+                "tool 'view_image' disabled (level: harness, harness: 'codex')",
+            ]
+        );
+        // A Claude Code name is refused, and the message lists the module's own names.
+        let mut claude_name = Map::new();
+        claude_name.insert("COLONIZER_DISABLED_TOOLS".into(), json!("Write"));
+        assert_eq!(
+            harness_disabled_tool_lines(&codex, &claude_name),
+            Err(
+                "agent module 'codex' setting 'disabled_tools': unknown tool 'Write' (known: shell, web_search, view_image)"
+                    .into()
+            )
         );
     }
 

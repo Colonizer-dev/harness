@@ -30,6 +30,29 @@
         "description": "The only model this agent runs on, as <provider>/<model>. It must name a provider added in Settings, which the colony reaches through the mothership's provider gateway — the key stays host-side and the colony needs no provider egress. Nous Portal models (nous/…) are refused: Portal credits are a prepaid pool the gateway cannot account for. Empty is refused too: headless Hermes has no default to fall back on.",
         "default": "",
         "env": "COLONIZER_MODEL"
+      },
+      "disabled_tools": {
+        "type": "string",
+        "title": "Disabled tools",
+        "description": "Comma-separated Hermes toolset names this colony never gets, such as web, browser or computer_use, appended (deduplicated) to the runner's always-off list in config.yaml. The names are whole toolsets: a single tool inside one (only write_file within file, say) cannot be turned off. memory, skills, delegation, cronjob, tts and clarify are always off already. Empty disables nothing beyond that.",
+        "default": "",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "x-known-tools": [
+          "terminal",
+          "file",
+          "web",
+          "search",
+          "browser",
+          "vision",
+          "code_execution",
+          "todo",
+          "session_search",
+          "connections",
+          "image_gen",
+          "video",
+          "x_search",
+          "computer_use"
+        ]
       }
     }
   }

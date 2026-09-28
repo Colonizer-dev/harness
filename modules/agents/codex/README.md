@@ -77,6 +77,7 @@ The microVM is the boundary. Inside it:
 | Update check | **off** | `-c check_for_update_on_startup=false` |
 | Prompt history | **off** | `-c history.persistence="none"`; the session rollout persists (resume needs it) |
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
+| Colony-disabled tools | **per setting** | the `disabled_tools` setting: `shell`, `web_search` and `view_image` become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, passed with `--strict-config` (an exec flag) so a key codex stops recognising fails the turn loudly; `apply_patch` and MCP tools have no switch |
 | Host config / OAuth token | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): these live under it; `BROWSER=/bin/false` as belt-and-braces |
 | Colonizer MCP tools | **on** | `-c mcp_servers.colonizer.*` overrides registering `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
 

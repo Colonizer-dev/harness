@@ -118,6 +118,13 @@ test('turnArgs carries every nesting flag, the model, and the resume id', () => 
   assert.deepEqual(pair(args, '-r'), ['-r', 'sess-1']);
   const bare = turnArgs({ promptFile: '/tmp/p.txt' });
   assert.ok(!bare.includes('-m') && !bare.includes('-r'), 'no model and nothing to resume means neither flag');
+  assert.ok(!bare.includes('--disallowed-tools'), 'an empty disabled_tools list passes no denylist');
+});
+
+test('turnArgs passes a non-empty disabled_tools list as --disallowed-tools', () => {
+  const args = turnArgs({ promptFile: '/tmp/p.txt', model: 'grok-4.5', sessionId: 'sess-1', disabledTools: ['run_terminal_cmd', 'write_file'] });
+  assert.deepEqual(pair(args, '--disallowed-tools'), ['--disallowed-tools', 'run_terminal_cmd,write_file'], 'the denylist rides comma-joined');
+  assert.ok(args.indexOf('--disallowed-tools') < args.indexOf('-m'), 'the denylist rides with the other headless flags');
 });
 
 test('a turn streams mapped events and the child carries the nesting flags', async (t) => {
@@ -192,6 +199,23 @@ test('the second turn resumes the first turn’s grok session, with cumulative c
   assert.deepEqual(pair(turns[1].argv, '-r'), ['-r', 'sess-fake-1'], 'the second turn resumes the end event’s sessionId');
   assert.equal(second.cost_usd, 0.02, 'cost_usd is cumulative for the colony');
   assert.deepEqual(second.model_usage, { 'grok-4.5': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } });
+
+  await stop(runner);
+});
+
+test('a disabled_tools colony denies the named tools on every turn, resume included', async (t) => {
+  const runner = startRunner({ COLONIZER_DISABLED_TOOLS: 'run_terminal_cmd, write_file' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  const turns = runner.turns();
+  for (const [i, invocation] of turns.entries()) {
+    assert.deepEqual(pair(invocation.argv, '--disallowed-tools'), ['--disallowed-tools', 'run_terminal_cmd,write_file'], `turn ${i + 1} carries the denylist`);
+  }
 
   await stop(runner);
 });

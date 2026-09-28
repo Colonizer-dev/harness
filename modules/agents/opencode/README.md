@@ -24,6 +24,7 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 | --- | --- | --- |
 | `COLONIZER_MODEL` | required | Agent model as `<provider>/<model>` from Settings → Providers, e.g. `local/deepseek-v4-flash` |
 | `COLONIZER_SMALL_MODEL` | main model | Model for titles and summaries, same `<provider>/<model>` form |
+| `COLONIZER_DISABLED_TOOLS` | none | OpenCode tool ids every call of is denied (`permission` deny on top of the allow-all), e.g. `bash`, `webfetch`; `edit` covers write, edit and apply_patch as one, and MCP tools are not covered |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.5) |
 | `COLONIZER_FINDINGS` | off | `true` emits `finding` events for `colonizer_finding_file` calls |
 | `COLONIZER_MEMORY_DIR` | unset | Shared memory the model may read (`{repo,org,global}/notes/*.md`) |

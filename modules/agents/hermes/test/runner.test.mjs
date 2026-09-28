@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, hermesConfig, probeHermes, resolveModel, runAgent } from '../runner.mjs';
+import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, disabledToolsets, hermesConfig, probeHermes, resolveModel, runAgent } from '../runner.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STUB = join(HERE, 'fake-hermes.mjs');
@@ -171,6 +171,20 @@ test('the written config pins the local backend, switches Hermes extras off, and
     },
   });
   assert.deepEqual(hermesConfig([]).agent.disabled_toolsets, DISABLED_TOOLSETS);
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+});
+
+test('the disabled_tools setting names extra toolsets, appended deduplicated to the always-off list', async () => {
+  assert.deepEqual(disabledToolsets({}), DISABLED_TOOLSETS, 'an empty setting leaves the hardcoded list');
+  assert.deepEqual(disabledToolsets({ COLONIZER_DISABLED_TOOLS: ' web , browser,, web, terminal ' }), [...DISABLED_TOOLSETS, 'web', 'browser', 'terminal'], 'names are trimmed, empties dropped, repeats collapsed');
+  assert.deepEqual(disabledToolsets({ COLONIZER_DISABLED_TOOLS: 'file, memory' }), [...DISABLED_TOOLSETS, 'file'], 'an always-off name is not appended twice');
+
+  const h = harness({ COLONIZER_DISABLED_TOOLS: 'web, browser' });
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'configure' });
+  await waitFor(h.events, (e) => e.type === 'turn_end', 'turn_end');
+  const { config } = h.readRecord();
+  assert.deepEqual(config.agent.disabled_toolsets, [...DISABLED_TOOLSETS, 'web', 'browser'], 'the written config carries the appended list');
   h.commands.push({ type: 'shutdown' });
   await h.done;
 });

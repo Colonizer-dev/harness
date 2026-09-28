@@ -23,6 +23,27 @@
   },
   "settings": {
     "properties": {
+      "disabled_tools": {
+        "default": "",
+        "description": "Comma-separated OpenCode tool names this colony is never allowed to call, such as bash, webfetch or task; the tools stay in the model's context but every call is denied. edit covers write, edit and apply_patch as one permission, so those cannot be switched off separately, and MCP tools are not covered. Empty disables nothing.",
+        "env": "COLONIZER_DISABLED_TOOLS",
+        "title": "Disabled tools",
+        "type": "string",
+        "x-known-tools": [
+          "bash",
+          "edit",
+          "read",
+          "glob",
+          "grep",
+          "webfetch",
+          "websearch",
+          "task",
+          "todowrite",
+          "question",
+          "skill",
+          "lsp"
+        ]
+      },
       "model": {
         "default": "",
         "description": "Model for the agent as <provider>/<model> from Settings → Providers, e.g. local/deepseek-v4-flash. Required: OpenCode colonies reach models only through the gateway.",

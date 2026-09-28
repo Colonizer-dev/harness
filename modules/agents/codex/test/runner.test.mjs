@@ -117,7 +117,20 @@ test('turnArgs carries the --json framing, the nesting overrides, and the resume
   assert.deepEqual(args.slice(args.indexOf('resume')), ['resume', 'thread-1', '-'], 'resume names the thread, then the stdin prompt');
   const fresh = turnArgs({});
   assert.ok(!fresh.includes('-m') && !fresh.includes('resume'), 'no model and nothing to resume means neither');
+  assert.ok(!fresh.includes('--strict-config'), 'no disabled tools means no --strict-config');
   assert.equal(fresh[fresh.length - 1], '-', 'the prompt is always stdin');
+});
+
+test('turnArgs turns disabled_tools names into -c overrides behind --strict-config, exec level', () => {
+  const args = turnArgs({ model: 'gpt-5.2', threadId: 'thread-1', disabledTools: ['shell', 'web_search', 'view_image'] });
+  assert.ok(args.includes('--strict-config'), 'a non-empty list arms --strict-config');
+  for (const override of ['features.shell_tool=false', 'web_search="disabled"', 'features.view_image=false']) {
+    assert.ok(args.includes(override), `missing the ${override} override`);
+  }
+  assert.ok(args.indexOf('--strict-config') < args.indexOf('resume'), 'the overrides ride exec level, before the resume subcommand');
+  for (const override of ['features.shell_tool=false', 'web_search="disabled"', 'features.view_image=false']) {
+    assert.equal(args[args.indexOf(override) - 1], '-c', `${override} rides its own -c`);
+  }
 });
 
 test('a turn streams mapped events and the child carries the nesting env', async (t) => {
@@ -196,6 +209,27 @@ test('the second turn resumes the first turn’s thread, with cumulative token t
   assert.ok(!turns[0].argv.includes('resume'), 'the first turn starts a fresh thread');
   assert.deepEqual(turns[1].argv.slice(turns[1].argv.indexOf('resume'), -1), ['resume', 'thread-fake-1'], 'the second turn resumes thread.started’s id');
   assert.deepEqual(second.model_usage, { 'gpt-5.2': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } }, 'model_usage is cumulative for the colony');
+
+  await stop(runner);
+});
+
+test('a disabled_tools colony passes the -c overrides on every turn, resume included', async (t) => {
+  const runner = startRunner({ COLONIZER_DISABLED_TOOLS: 'shell, web_search' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  const turns = runner.turns();
+  for (const [i, invocation] of turns.entries()) {
+    assert.ok(invocation.argv.includes('--strict-config'), `turn ${i + 1} arms --strict-config`);
+    assert.ok(invocation.argv.includes('features.shell_tool=false'), `turn ${i + 1} switches the shell tool off`);
+    assert.ok(invocation.argv.includes('web_search="disabled"'), `turn ${i + 1} switches web search off`);
+    assert.ok(!invocation.argv.includes('features.view_image=false'), `turn ${i + 1} leaves view_image alone`);
+  }
+  assert.ok(turns[1].argv.indexOf('--strict-config') < turns[1].argv.indexOf('resume'), 'the second turn rides the overrides exec level, before resume');
 
   await stop(runner);
 });
