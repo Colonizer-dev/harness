@@ -72,6 +72,23 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 | `agent` | `COLONIZER_ACP_AGENT` | `gemini` (the verified preset: `gemini --experimental-acp`) or `custom` |
 | `command` | `COLONIZER_ACP_COMMAND` | With `custom`: the full command line including arguments, quotes respected |
 | `model` | `COLONIZER_MODEL` | Meant to pick the model with `session/set_model` at boot, but **not applied yet**: the runner never reads `COLONIZER_MODEL`, so the agent runs on its own default. Switching the model from the cockpit (a `set_model` command) does work, when the agent advertises models |
+| `exec_policy` | `COLONIZER_EXEC_POLICY` | The layered exec policy rules ([below](#exec-policy)) |
+
+## Exec policy
+
+Commands the agent asks permission for (ACP `tool_call` `kind` `execute`) meet the same layered exec
+policy as Claude Code's Bash commands
+([#471](https://github.com/Colonizer-dev/harness/issues/471)): the built-in default layer, the
+`exec_policy` setting (`COLONIZER_EXEC_POLICY`; when it is empty, the install's `exec_policy`
+setting is carried over here) and `.colonizer/exec-policy.json` in the worktree.
+`execpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test. A
+`deny` answers the request with the agent's `reject_once` option (any other `reject*` kind, else
+`cancelled`) and no question is shown; an `allow` answers with `allow_once` (any other `allow*`
+kind — with neither, the question surfaces as usual); an `ask` surfaces the question with the rule
+and its reason on the card, answered like any other.
+
+The fence only sees commands the agent asks permission for: calls the agent runs without asking are
+not checked, so the policy is guidance, and the microVM is the boundary.
 
 ## Verified and planned agents
 
@@ -98,16 +115,13 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 
 - No `plan` event type in colonizer-runner/1: plans render as a `thinking` checklist.
 - No resume: a stopped colony starts a fresh ACP session (no `agent_session`, no `session/load`).
-- The autopilot/exec policy from [#471](https://github.com/Colonizer-dev/harness/issues/471) is not
-  wired in: tool calls arrive with the colony's own egress and path policy as the only fence, and
-  every permission question surfaces to the user.
 - ACP names no token or cost figures, so `turn_end.cost_usd` is always null.
 
 ## Tests
 
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-acp-agent.mjs`, a scriptable fake ACP agent, driven by
-the custom-command setting. Every `session/update` type, the permission flow, the fs and terminal
-surface, and the failure paths are covered. CI runs `npm test` in this directory (the "Test the ACP
-runner" step). These stubbed tests are all CI exercises: the end-to-end colony job runs only the
-claude-code module.
+the custom-command setting. Every `session/update` type, the permission flow, the exec policy gate,
+the fs and terminal surface, and the failure paths are covered. CI runs `npm test` in this directory
+(the "Test the ACP runner" step). These stubbed tests are all CI exercises: the end-to-end colony
+job runs only the claude-code module.

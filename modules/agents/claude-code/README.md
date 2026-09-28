@@ -118,6 +118,11 @@ stays the egress policy's business; ask `writes-outside-repo`), **install** (the
 rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. Note
 this is guidance in front of the model, like the delegation gate — not a boundary; the microVM is.
 
+Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, Hermes, OpenCode and
+Pi do not — the harness refuses to launch a colony on one of them while a policy is set (the
+install's `exec_policy` setting, or a repo `.colonizer/exec-policy.json`), naming the module and
+where the policy came from, so a set policy is never silently ignored.
+
 ## Waiting
 
 Every colony also gets `mcp__colonizer_wait__wait` from an in-process MCP server (`colonizer_wait`),

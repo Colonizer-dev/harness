@@ -63,6 +63,9 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
   (`status error`, non-zero exit, the pinned install command in the message) when it is missing, so
   a colony that picks this module stops there.
 - No ACP question channel, so the module cannot ask you anything.
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).
 - No end-to-end colony run: the live verification above used a fake Anthropic-wire gateway and no
   microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic, and the
   in-VM preflight has only run against the stub. Not `SHIPPING`.

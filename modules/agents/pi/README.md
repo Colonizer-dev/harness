@@ -65,7 +65,9 @@ neither does model tier routing (`route_per_task` with `model_low`/`model_high`)
 is the only model. Pi has no way to ask a question — `answer` commands warn, and the appended system
 prompt tells the model to choose and say so — and none of the in-process MCP tools exist: shared
 memory (`memory_search`/`memory_propose`), the findings tool and `wait`. Briefs that name them ask
-for the equivalent work done directly.
+for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
+not applied either: the harness refuses to launch a Pi colony while one is set (the install's
+`exec_policy` setting, or a repo `.colonizer/exec-policy.json`).
 
 ## Develop
 

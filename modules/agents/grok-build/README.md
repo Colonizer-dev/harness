@@ -126,3 +126,6 @@ keyed on the same verdict the test asserts.
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a grok-build colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).

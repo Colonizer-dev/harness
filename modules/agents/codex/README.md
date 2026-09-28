@@ -104,3 +104,6 @@ required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
 - Questions (`answer` is ignored) and resuming a codex thread across a runner restart: the thread id
   lives in the runner's memory and its session rollout in the runner's fresh `CODEX_HOME`, both gone
   when the colony's VM is.
+- The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
+  launch a codex colony while one is set (the install's `exec_policy` setting, or a repo
+  `.colonizer/exec-policy.json`).

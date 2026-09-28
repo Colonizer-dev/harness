@@ -25,6 +25,11 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    | `session_resume` | yes, optional | Item 9 |
    | `kind`, `protocol` | no | Every shipped module sets `"kind": "agent"` and `"protocol": "colonizer-runner/1"`; do the same |
 
+   Declaring an `exec_policy` setting is a promise that the runner enforces the [exec policy](../modules/agents/claude-code/README.md#exec-policy)
+   in that variable (Claude Code and ACP do). Without it, the harness refuses to launch the module
+   while a policy is set — the install's `exec_policy` setting or a repo `.colonizer/exec-policy.json`
+   — rather than run the agent unguarded.
+
 2. **Egress declaration.** Add `egress: { "api": [...], "auth": [...], "telemetry": [...],
    "extra": [...] }` — bare hostnames, a leading `*.` allowed for wildcards (subdomains only:
    `*.sentry.io` covers `o1.sentry.io`, not `sentry.io`). Any other key, or a scheme, port or

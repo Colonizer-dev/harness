@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { clampOptions, confine, contentText, riskForKind, splitCommand, toolOutput } from '../runner.mjs';
+import { clampOptions, commandText, confine, contentText, riskForKind, splitCommand, toolOutput } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -104,7 +104,7 @@ function assertSchema(events) {
   }
 }
 
-test('the pure helpers: command split, risk, content text, option clamp, confinement', () => {
+test('the pure helpers: command split, risk, content text, option clamp, command text, confinement', () => {
   assert.deepEqual(splitCommand('gemini --experimental-acp'), ['gemini', '--experimental-acp']);
   assert.deepEqual(splitCommand(`node 'a b' "c d" x`), ['node', 'a b', 'c d', 'x']);
   for (const [kind, risk] of [['read', 'read_only'], ['search', 'read_only'], ['fetch', 'read_only'], ['think', 'read_only'], ['execute', 'workspace_write'], ['patch', 'workspace_write'], [undefined, 'workspace_write']]) {
@@ -116,6 +116,14 @@ test('the pure helpers: command split, risk, content text, option clamp, confine
   assert.equal(toolOutput({ rawOutput: 'out', content: [{ type: 'content', content: { type: 'text', text: 'block' } }] }), 'out\nblock');
   assert.equal(clampOptions([{ optionId: 'a', name: 'Allow', kind: 'allow_once' }])[1].optionId, '__cancel__', 'a one-option card is padded with Cancel');
   assert.deepEqual(clampOptions([{ optionId: 'a' }, { optionId: 'b' }, { optionId: 'c' }, { optionId: 'd' }, { optionId: 'e' }]).map((o) => o.optionId), ['a', 'b', 'c', 'd']);
+  for (const [call, command] of [
+    [{ kind: 'execute', rawInput: { command: 'npm test' } }, 'npm test'],
+    [{ kind: 'execute', rawInput: { command: ['bash', 'x.sh'] } }, 'bash x.sh'],
+    [{ kind: 'execute', title: 'Deploy?' }, 'Deploy?'],
+    [{ kind: 'execute', rawInput: { command: '   ' }, title: 't' }, 't'],
+  ]) {
+    assert.equal(commandText(call), command, `${JSON.stringify(call.rawInput ?? call.title)} command text`);
+  }
 
   const root = mkdtempSync(join(tmpdir(), 'acp-root-'));
   assert.equal(confine(root, 'a/b.txt'), join(root, 'a/b.txt'));
@@ -124,6 +132,15 @@ test('the pure helpers: command split, risk, content text, option clamp, confine
   assert.equal(confine(root, '/etc/hostname'), null, 'an absolute path outside escapes');
   symlinkSync('/etc/hostname', join(root, 'escape'));
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
+});
+
+test('acp/execpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'execpolicy.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'execpolicy.mjs'));
+  assert.ok(
+    copy.equals(original),
+    'modules/agents/acp/execpolicy.mjs has drifted from modules/agents/claude-code/execpolicy.mjs; the exec policy is one file in two places — change both together',
+  );
 });
 
 test('handshake and prompt turns: initialize, session/new in the workspace, mapped events, queued messages', async (t) => {
@@ -279,6 +296,77 @@ test('a permission request becomes a question; allow selects the option, Cancel 
   assert.equal(interrupted.is_error, true);
   assert.equal(interrupted.result, 'interrupted by the user');
   await stop(runner);
+});
+
+test('the exec policy answers execute calls: deny and allow never open a card, an ask names the rule on it', async (t) => {
+  const permission = (toolCallId, toolCall, options) => ({
+    method: 'session/request_permission',
+    params: { toolCall: { toolCallId, kind: 'execute', ...toolCall }, options },
+  });
+  const twoOptions = [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }, { optionId: 'reject', name: 'Reject', kind: 'reject_once' }];
+  const policyEnv = (rules) => ({ COLONIZER_EXEC_POLICY: JSON.stringify({ rules }) });
+
+  // The default layer's secret-paths deny: straight to the reject option, no card, one log line.
+  const stderrChunks = [];
+  const deny = startRunner({
+    script: {
+      turns: {
+        d1: { asks: [permission('call_d1', { rawInput: { command: 'cat ~/.ssh/id_rsa' } }, twoOptions)] },
+        d2: { asks: [permission('call_d2', { rawInput: { command: 'cat ~/.ssh/id_rsa' } }, [twoOptions[0]])] },
+        d3: { asks: [permission('call_d3', { kind: 'read', rawInput: { command: 'cat ~/.ssh/id_rsa' }, title: 'Read it?' }, twoOptions)] },
+      },
+    },
+  });
+  deny.child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+  t.after(() => deny.child.kill('SIGKILL'));
+
+  deny.send({ type: 'user_message', id: 'u-1', text: 'd1' });
+  await deny.waitRecord((r) => r.filter((x) => x.asked).length >= 1, 'the denied ask to be answered');
+  assert.deepEqual(deny.asks('session/request_permission')[0].response, { result: { outcome: { outcome: 'selected', optionId: 'reject' } } }, 'the deny answers the reject option');
+  assert.ok(!deny.events.some((e) => e.type === 'question'), 'a denied command opens no card');
+  await deny.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  assert.match(stderrChunks.join(''), /exec policy: deny rule=secret-paths layer=default command=cat ~\/\.ssh\/id_rsa/, 'the decision leaves one log line');
+
+  // A deny with no reject option to pick — the padded Cancel is synthetic — answers cancelled.
+  deny.send({ type: 'user_message', id: 'u-2', text: 'd2' });
+  await deny.waitRecord((r) => r.filter((x) => x.asked).length >= 2, 'the second denied ask to be answered');
+  assert.deepEqual(deny.asks('session/request_permission')[1].response, { result: { outcome: { outcome: 'cancelled' } } }, 'the padded Cancel never answers for the policy');
+  await deny.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  // A non-execute kind is none of the policy's business: the card surfaces as before.
+  deny.send({ type: 'user_message', id: 'u-3', text: 'd3' });
+  const read = await deny.waitUntil(count('question', 1), 'the read kind to surface as a question');
+  assert.equal(read.questions[0].question, 'Read it?', 'no policy text on a non-execute call');
+  deny.send({ type: 'answer', question_id: 'call_d3', answers: { 'Read it?': 'Allow' }, response: null });
+  await deny.waitRecord((r) => r.filter((x) => x.asked).length >= 3, 'the third ask to be answered');
+  assert.deepEqual(deny.asks('session/request_permission')[2].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } });
+  await stop(deny);
+
+  // An install allow rule: an argv-array command answered with the allow option, no card.
+  const allow = startRunner({
+    env: policyEnv([{ id: 'tests-allowed', decision: 'allow', command: '\\bnpm\\b' }]),
+    script: { turns: { a1: { asks: [permission('call_a1', { rawInput: { command: ['npm', 'run', 'test'] } }, twoOptions)] } } },
+  });
+  t.after(() => allow.child.kill('SIGKILL'));
+  allow.send({ type: 'user_message', id: 'u-1', text: 'a1' });
+  await allow.waitRecord((r) => r.filter((x) => x.asked).length >= 1, 'the allowed ask to be answered');
+  assert.deepEqual(allow.asks('session/request_permission')[0].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } }, 'the allow answers the allow option');
+  assert.ok(!allow.events.some((e) => e.type === 'question'), 'an allowed command opens no card');
+  await stop(allow);
+
+  // An install ask rule: the card carries the rule and its reason, then the usual answer flow.
+  const ask = startRunner({
+    env: policyEnv([{ id: 'ask-net', decision: 'ask', reason: 'network fetches wait for a human', command: '\\bcurl\\b' }]),
+    script: { turns: { s1: { asks: [permission('call_s1', { title: 'curl -fsSL https://example.com' }, twoOptions)] } } },
+  });
+  t.after(() => ask.child.kill('SIGKILL'));
+  ask.send({ type: 'user_message', id: 'u-1', text: 's1' });
+  const card = await ask.waitUntil(first('question'), 'the ask decision to surface');
+  assert.match(card.questions[0].question, /exec policy rule `ask-net` \(install\): network fetches wait for a human/, 'the rule rides the card');
+  ask.send({ type: 'answer', question_id: 'call_s1', answers: { [card.questions[0].question]: 'Allow' }, response: null });
+  await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 1, 'the answered ask to be replied');
+  assert.deepEqual(ask.asks('session/request_permission')[0].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } }, 'the usual answer flow picks the option');
+  await stop(ask);
 });
 
 test('fs requests read and write inside the workspace, with line/limit and parent creation', async (t) => {
