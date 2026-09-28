@@ -744,6 +744,7 @@ mod tests {
             keep_worktree: false,
             attention: None,
             suspended: None,
+            parked: None,
             agent_session: None,
             pending_answer: None,
             last_activity_at: Some(now),

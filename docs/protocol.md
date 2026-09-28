@@ -323,7 +323,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
-| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed`/`parked` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch. **409** while the colony is live, queued or publishing. Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `DELETE /api/sessions/{id}` | Forgets a colony that is not live and not publishing. Its logs are archived first (`<data>/archive/`, see [colonies.md](colonies.md#the-log-archive)); if archiving fails, nothing is deleted. Then the worktree, local branch and record go. `?purge_logs=true` also removes the colony's archive bundles. Answers `{deleted, leftover, archived, purged_bundles, purge_error}`. **404** for an unknown id; **409** `stop the colony first` while it is live or publishing |
@@ -434,6 +434,9 @@ this section is the API contract.
 holds it: one `queued`, live (`starting`, `running`, `waiting_for_answer`, `idle`), `publishing`,
 or `pr_opened` — answered **409** naming the holder, its state, and its PR URL when one is open.
 Terminal states (`stopped`, `failed`, `no_changes`, `merged`, `closed`) free the issue for a retry.
+Parking ([#213]) frees it locally the same way — but the colony's claim on GitHub stays: a park is
+a pause, the colony is expected to come back, and the claim is what keeps a second colony off the
+issue until it does (or until a stop, which does release).
 A fast pre-check reads under a read lock and the authoritative claim re-checks while the admission
 write lock is held, so two launches racing each other cannot both slip through; the loser gets its
 holder back for the 409. The cockpit warns inline before submit — "already held by `<id>`", with a
@@ -511,7 +514,7 @@ missing values mean the `default`.
 ```json
 {
   "id": "ab12cd34", "repo": "owner/repo", "issue": 12, "issue_title": "…",
-  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|stopped|failed",
+  "status": "queued|starting|running|waiting_for_answer|idle|publishing|pr_opened|merged|closed|no_changes|parked|stopped|failed",
   "branch": "colonizer/issue-12-ab12cd34", "base": "main", "org": "owner", "worktree": "/…",
   "sandbox": "colonizer-ab12cd34", "mesh": {"name": "colonizer-ab12cd34", "ip": "100.64.0.3"},
   "agent": "claude-code", "autopilot": false,
@@ -532,7 +535,7 @@ events, pty and shutdown), so the boot spec is the only per-colony number about 
 figures are omitted rather than faked. `null` on colonies booted before these fields existed.
 
 The example shows the common fields; the record carries more, and most optional ones are left out
-of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`,
+of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`, `parked`,
 `agent_session`, `pending_answer`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
@@ -553,6 +556,28 @@ from the `agent_session` event (§2), what a resumed boot continues. `pending_an
 answer that arrived while the colony was suspended, `{question_id, prompt}`: persisted before the
 answer is acknowledged and cleared only once a boot has delivered it, so a failed boot or a
 mothership restart never loses it. All three are absent on a colony that has never been suspended.
+
+`parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
+`parked` — not live, so it holds no parallel slot, and not terminal either, so it is never
+auto-reclaimed and its spend is not settled — with the record
+`{at, reason, resets_at?, vm_kept}`: `at` (RFC 3339), the `reason` it parked
+(`provider_quota_exhausted` when the provider's plan ran out (§6.5), `hold_timeout` when an
+autopilot hold outlived its slot), `resets_at` — the provider's reset words verbatim, only when the
+reason names one — and `vm_kept`, whether the park left the microVM running. Parking persists the
+record and the `provider_quota_exhausted`/`hold_timeout` attention flag (the cockpit banner's
+resume ticket) in one step before any teardown, and the worktree and branch always stay. With the
+`resume` module's `discard_vm` on (the default) the microVM is removed — but only after git verified
+the worktree reads back; a worktree that cannot be verified (or `discard_vm` off) keeps the
+microVM running idle instead, and `vm_kept` says so. `null` (or absent) on a colony that has never
+been parked; cleared on resume. Resume semantics: a `vm_kept` park resumes warm — the running
+microVM is kept and the idle agent is prompted to continue — while any other resume is cold: a
+fresh microVM boots on the kept worktree, first tearing down a microVM the park kept if the
+`discard_vm` setting changed meanwhile, and the brief carries a short digest of the previous run's
+event log so the agent picks up where it left off. If the warm path is not achievable (restart
+dropped the agent link, slot taken, setting changed), resume falls back to cold and the log says
+why. The choice lives on a module: kind `resume`, provider `default` (the only one, and always on —
+the module is required), whose `discard_vm` setting (boolean, default `true`) is what parking reads.
+Read with `GET /api/modules`, changed with `PUT /api/modules/resume`.
 
 `merged_at`, `pr_opened_at` and `ci_state` come from the PR watcher's `gh pr view` (`mergedAt`,
 `createdAt`, `statusCheckRollup`), and for colonies merged before they existed from a best-effort
@@ -677,7 +702,8 @@ ended with nothing to push (`no_changes`), **and** is older than `COLONIZER_RECL
 (default 12 h) past its last update. `stopped` and `failed` colonies are never reclaimed, since they can
 be resumed. The sweep runs every five minutes and also removes microVMs no colony owns. Reclaiming removes the worktree and local branch exactly like manual
 cleanup — and carries the same trade-off: a reclaimed colony is unresumable, because resume boots a
-fresh microVM on the kept worktree and there is no worktree left.
+fresh microVM on the kept worktree and there is no worktree left. A `parked` colony ([#213]) is
+never reclaimed: it is paused, not finished, and its worktree is the run it may yet resume.
 
 What the sweeper never takes: a colony with no `pr_url` (other than `no_changes`, which has nothing to lose). Unpushed work may be the only copy of the
 agent's changes, so it is never auto-deleted — `GET /api/storage` lists it under `unpushed` for a
@@ -1885,11 +1911,11 @@ and `model_error`, set by the gateway when an upstream model call fails (§6.5) 
 provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
 watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
 it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
-(see §6.5 "Quota exhaustion"): `status` `stopped` with the worktree kept, and `attention.reason`
+(see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
 announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
-(default 30) parks the same way: an `idle` colony with `attention.reason` `autopilot_held` past the
-timeout is stopped with its worktree kept and `attention.reason` `hold_timeout`, so its microVM slot
+(default 30) parks the same way ([#213]): an `idle` colony with `attention.reason` `autopilot_held`
+past the timeout parks with `attention.reason` `hold_timeout`, so its microVM slot
 frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
 while staying resumable. Within the timeout a held colony still counts against the parallel limits.
 
@@ -2299,10 +2325,12 @@ says (the status poll's `model_providers` applies the plain rate rule only). `GE
 is used) is exhausted — `kind: "provider"` — or when the Claude account itself hit a session,
 weekly, hourly or Opus limit — `kind: "account"`, with or without providers — with the earliest reset and the queue holder's own `reason`. A paused queue
 admits nothing; the overview banners the reason. A colony whose turn dies on an exhausted provider
-is parked: `status` `stopped` with the worktree kept (reused until #213 adds a real `Parked`
-state, so slots release and resume works today) and `attention.reason`
-`provider_quota_exhausted`. The queue's 5 s tick requeues parked colonies whose provider recovered
-— reset passed, or the provider deleted — and leaves the rest parked.
+is parked ([#213]): `status` `parked` with a `parked` record (see `Session` above), the worktree
+kept, its slot released and `attention.reason` `provider_quota_exhausted`. The queue's 5 s tick
+resumes parked colonies whose provider recovered — reset passed, or the provider deleted — requeueing
+ones whose park discarded the microVM and routing a kept-VM park through the resume endpoint, which
+resumes it warm when it can and falls back to cold otherwise. Colonies whose provider is still
+exhausted stay parked.
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
@@ -2954,7 +2982,7 @@ the same answer, no second microVM, no new spend.
 | Provider failure | `harness_error` / `provider_error` in a failed response; `model_unavailable` (422) if refused up front | attention `model_error` (an upstream 4xx or 5xx ended the last turn); gateway `api_error`, `overloaded_error`, `authentication_error` | 5xx and overload: yes, with backoff. Auth: no, until the credentials are fixed | No: a retry is a new turn and spends tokens |
 | Agent stall | `harness_error` / `colonizer_agent_stalled` | watchdog `stalled` while nudging, then `nudges_exhausted`; both show in `metadata.colonizer_attention` while the response is `in_progress`, and the code applies once the colony is stopped after `nudges_exhausted` | Yes: a follow-up or Resume | No |
 | Rate limited | `rate_limit_error` / `rate_limited` (429) | an upstream 429 through the gateway | Yes, after `Retry-After` | Yes |
-| Quota exhausted | `rate_limit_error` / `quota_exhausted` (429) | attention `provider_quota_exhausted`; the colony is parked `stopped` | No, until the plan resets; Colonizer resumes parked colonies itself | Yes |
+| Quota exhausted | `rate_limit_error` / `quota_exhausted` (429) | attention `provider_quota_exhausted`; the colony is parked ([#213]) | No, until the plan resets; Colonizer resumes parked colonies itself | Yes |
 | Budget stop | no error: `status: "incomplete"`, `incomplete_details.reason` `colonizer_spend_budget`, `colonizer_host_disk_quota` or `colonizer_max_session_length` | `stopped` with `error` "passed its spend budget …"; gateway **403** `permission_error` once over; `stopped` past the host-disk quota; the microVM stopped at the max session length | No, until the budget is raised; then Resume | Yes |
 | Cancelled | no error: `status: "cancelled"` | Stop, `interrupt` | Nothing to retry: continue or Resume | Yes |
 | Internal | `server_error` (500); `colonizer_publish_interrupted` in a failed response | **500** `{"error": …}`; a restart mid-publish | Yes, with backoff | Yes, except create without `Idempotency-Key` |

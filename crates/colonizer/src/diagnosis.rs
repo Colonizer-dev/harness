@@ -257,9 +257,9 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
             Some(state("booting", text, None))
         }
         Running | WaitingForAnswer | Idle => {
-            // Parked colonies never reach here: quota exhaustion stops them with a
-            // `provider_quota_exhausted` attention (events.rs), and an expired autopilot hold
-            // stops them with `hold_timeout` (queue.rs) — `Stopped` below reads as terminal.
+            // Parked colonies never reach here: they are not live, and neither a quota park
+            // (`provider_quota_exhausted`, events.rs) nor a hold-timeout park (`hold_timeout`,
+            // queue.rs) is a state the diagnosis reads as working or finished.
             // Provider failure outranks the human wait: the tail's most recent `assistant_text`
             // with no `user_message` after it, when it classifies as exhaustion (its reset words
             // ride along verbatim), else the quota attention flag on its own, naming no reset.

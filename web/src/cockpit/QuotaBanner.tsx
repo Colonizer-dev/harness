@@ -27,17 +27,20 @@ export function quotaPauseKind(quota: StatusQuota): QuotaPauseKind {
 }
 
 /**
- * Colonies the quota pause parked: stopped, flagged `provider_quota_exhausted`, worktree kept — the
- * frontend-visible half of the backend's `resume_quota_parked` predicate (which also requires a
- * worktree the status poll never shows). The per-colony Resume buttons already cover exactly these
- * (`!live && !cleaned_up && (stopped || failed)`), so resume-all resumes nothing they could not.
+ * Colonies the quota pause parked — the frontend-visible half of the backend's
+ * `resume_quota_parked` predicate (which also requires a worktree the status poll never shows).
+ * A current mothership marks them with status `parked` (issue #213); older builds left them
+ * `stopped` with the `provider_quota_exhausted` attention flag, which still counts so an old
+ * list does not lose its resume-all. The per-colony Resume buttons already cover exactly these
+ * (`!live && !cleaned_up && (parked || stopped || failed)`), so resume-all resumes nothing
+ * they could not.
  */
 export function quotaParkedSessions(sessions: Session[]): Session[] {
   return sessions.filter(
     (session) =>
-      session.status === "stopped" &&
-      session.attention?.reason === "provider_quota_exhausted" &&
-      !session.cleaned_up,
+      !session.cleaned_up &&
+      (session.status === "parked" ||
+        (session.status === "stopped" && session.attention?.reason === "provider_quota_exhausted")),
   );
 }
 

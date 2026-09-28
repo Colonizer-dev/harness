@@ -943,9 +943,22 @@ mod tests {
         let mut manual = colony("acme", SessionStatus::Running);
         manual.id = "manual".into();
         manual.created_at = Utc::now();
+        // A colony the operator parked before hitting the burn-down stop: parked is not live and
+        // not queued, so the stop has nothing to halt — a park is a pause, and the operator's
+        // resume is what ends one (issue #213).
+        let mut parked = colony("acme", SessionStatus::Parked);
+        parked.id = "burn-parked".into();
+        parked.origin = Some("burn_down".into());
+        parked.created_at = Utc::now();
+        parked.parked = Some(sessions::Park {
+            at: Utc::now(),
+            reason: "hold_timeout".into(),
+            resets_at: None,
+            vm_kept: true,
+        });
         std::fs::create_dir_all(app.session_dir("burn-live")).unwrap();
         std::fs::create_dir_all(app.session_dir("burn-queued")).unwrap();
-        *app.sessions.write().await = vec![live, queued, manual];
+        *app.sessions.write().await = vec![live, queued, manual, parked];
 
         let response = stop(State(app.clone())).await;
         assert_eq!(response.into_response().status(), StatusCode::NO_CONTENT);
@@ -963,6 +976,15 @@ mod tests {
                 by("manual").status,
                 SessionStatus::Running,
                 "a colony the operator started is untouched"
+            );
+            assert_eq!(
+                by("burn-parked").status,
+                SessionStatus::Parked,
+                "a parked burn-down colony stays parked"
+            );
+            assert!(
+                by("burn-parked").parked.as_ref().is_some_and(|p| p.vm_kept),
+                "its park record is untouched too"
             );
         }
         let (modules, _) = ModulesConfig::load(&app.modules_file()).unwrap();

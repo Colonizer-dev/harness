@@ -21,7 +21,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf, parkedLabel } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -307,12 +307,16 @@ export function SessionView({
                 {busy === "catch_up" ? <Spinner /> : <IconBranch size={15} />} Catch up
               </Button>
             )}
-            {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed") && (
+            {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed" || session.status === "parked") && (
               <Button
                 variant="primary"
                 disabled={busy !== null}
                 onClick={() => act("resume", (a, id) => a.resumeSession(id))}
-                title="Boot a fresh microVM on this colony's worktree and continue where it stopped"
+                title={
+                  session.status === "parked"
+                    ? "Boot a fresh microVM on this colony's worktree and continue where it parked"
+                    : "Boot a fresh microVM on this colony's worktree and continue where it stopped"
+                }
               >
                 {busy === "resume" ? <Spinner /> : <IconPower size={15} />} Resume
               </Button>
@@ -381,6 +385,17 @@ export function SessionView({
         {session.error && (
           <div role="alert" className="mt-3 rounded-lg bg-err-soft px-3 py-2 text-[13px] text-err [overflow-wrap:anywhere]">
             {session.error}
+          </div>
+        )}
+        {session.status === "parked" && (
+          <div role="status" className="mt-3 flex flex-wrap items-center gap-x-2 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+            <IconAlert size={14} className="shrink-0" />
+            <span className="font-semibold">Parked — {parkedLabel(session.parked) || "out of tokens"}</span>
+            <span className="opacity-80">
+              {session.parked?.vm_kept
+                ? "The microVM is kept running idle and its parallel slot freed; Resume continues in it, warm."
+                : "The microVM is stopped and its parallel slot freed; Resume brings the colony back."}
+            </span>
           </div>
         )}
         {diagnosis && (

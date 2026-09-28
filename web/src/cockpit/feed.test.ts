@@ -8,6 +8,7 @@ import {
   RETURNED,
   dayLabel,
   feedEntries,
+  feedEntry,
   feedKind,
   headlineFor,
   heldSlots,
@@ -227,6 +228,26 @@ describe("overview buckets, counts and filters", () => {
   it("restores the whole list when the filter is cleared — a second click or the counts", () => {
     expect(overviewSessions(list, null).map((s) => s.id)).toEqual(list.map((s) => s.id));
     expect(overviewSessions([], "returned")).toEqual([]);
+  });
+});
+
+// Parked colonies (issue #213): out of tokens, resumable — never hidden by the buckets.
+describe("parked colonies", () => {
+  const parked = session({
+    id: "parked",
+    status: "parked",
+    parked: { at: "2026-09-18T09:12:00Z", reason: "provider_quota_exhausted", resets_at: "2026-09-19T07:54:00Z", vm_kept: true },
+  });
+
+  it("counts as needing action so no bucket hides it", () => {
+    expect(matchesOverviewFilter(parked, "need you")).toBe(true);
+    expect(matchesOverviewFilter(parked, "live")).toBe(false);
+    expect(overviewCounts([parked])).toEqual({ live: 0, "need you": 1, returned: 0, queued: 0 });
+  });
+
+  it("lands on the stopped line's kind, with its own words saying why", () => {
+    expect(feedKind(parked)).toBe("stopped");
+    expect(feedEntry(parked).text).toMatch(/^webshop#42 is parked — provider quota exhausted · resumes .+/);
   });
 });
 

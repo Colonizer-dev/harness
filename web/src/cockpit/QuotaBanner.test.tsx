@@ -68,6 +68,15 @@ const parked = (id: string, overrides: Partial<Session> = {}) =>
     ...overrides,
   });
 
+/** How a current mothership says it (issue #213): status `parked` with the park record attached. */
+const nativelyParked = (id: string, overrides: Partial<Session> = {}) =>
+  session({
+    id,
+    status: "parked",
+    parked: { at: "2026-09-18T09:12:00Z", reason: "provider_quota_exhausted", resets_at: "2026-09-19T07:54:00Z", vm_kept: true },
+    ...overrides,
+  });
+
 const markup = (quotaValue: StatusQuota | null | undefined, sessions: Session[]) =>
   renderToStaticMarkup(<QuotaBanner quota={quotaValue} sessions={sessions} onResumeAll={() => {}} onDismiss={() => {}} />);
 
@@ -75,15 +84,17 @@ describe("quotaParkedSessions", () => {
   it("parks stopped, quota-flagged colonies with a kept worktree — and nothing else", () => {
     const sessions = [
       parked("parked"),
+      nativelyParked("native"),
       // A quota flag on a live colony is not parked; neither is a parked colony already cleaned up.
       session({ id: "live", attention: { reason: "provider_quota_exhausted", since: "2026-09-18T09:12:00Z", nudges: 0 } }),
       parked("cleaned", { cleaned_up: true }),
+      nativelyParked("native-cleaned", { cleaned_up: true }),
       // A plain stop (or a stall, or a failure) parks nothing: resume-all must not touch it.
       session({ id: "plain-stop", status: "stopped" }),
       session({ id: "failed", status: "failed", attention: { reason: "provider_quota_exhausted", since: "2026-09-18T09:12:00Z", nudges: 0 } }),
       session({ id: "stalled", status: "stopped", attention: { reason: "stalled", since: "2026-09-18T09:12:00Z", nudges: 1 } }),
     ];
-    expect(quotaParkedSessions(sessions).map((s) => s.id)).toEqual(["parked"]);
+    expect(quotaParkedSessions(sessions).map((s) => s.id)).toEqual(["parked", "native"]);
   });
 });
 

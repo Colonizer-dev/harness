@@ -974,6 +974,10 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
         x.status = SessionStatus::Publishing;
         x.publishing_holds_slot = was_live;
         x.error = None;
+        // A published park is over (issue #213): the record described a pause this publish ends,
+        // and keeping it would promise a reset or a warm resume that is no longer pending. Parked
+        // is the only status a claim can arrive here wearing that carries one.
+        x.parked = None;
     }
     (allowed, was_live)
 }
@@ -981,6 +985,9 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
 /// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
 /// state a publish makes sense from. A failed or no-changes publish can be retried directly — the
 /// worktree, the committed branch and the remote are all still there, so no new microVM is booted.
+/// A parked colony (issue #213) publishes the same way: its worktree and branch are kept and its
+/// microVM may be gone, and refusing it would make the operator resume — boot a microVM against a
+/// provider that may still be exhausted — just to ship the work the park interrupted.
 ///
 /// Issue #98: this single gate covers commit, push, and PR creation together today. The split is
 /// `commit_allowed` → `push_allowed` → `pr_allowed` below: each later effect needs the earlier one
@@ -998,6 +1005,7 @@ pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree:
             | SessionStatus::Stopped
             | SessionStatus::Failed
             | SessionStatus::NoChanges
+            | SessionStatus::Parked
     ) && !cleaned_up
         && has_worktree
 }
@@ -1622,7 +1630,7 @@ mod tests {
     #[test]
     fn only_a_colony_with_a_worktree_and_no_publish_in_flight_can_publish() {
         use SessionStatus::*;
-        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges] {
+        for status in [Running, WaitingForAnswer, Idle, Stopped, Failed, NoChanges, Parked] {
             assert!(can_publish(status, false, true), "{status:?}");
         }
         // A colony still in the queue or booting has no worktree to publish, one that is publishing is
@@ -1630,10 +1638,29 @@ mod tests {
         for status in [Queued, Starting, Publishing, PrOpened] {
             assert!(!can_publish(status, false, true), "{status:?}");
         }
-        for status in [Running, Stopped, Failed, NoChanges] {
+        for status in [Running, Stopped, Failed, NoChanges, Parked] {
             assert!(!can_publish(status, true, true), "cleaned up: {status:?}");
             assert!(!can_publish(status, false, false), "no worktree: {status:?}");
         }
+    }
+
+    /// Publishing a parked colony (issue #213) is the cold push a stopped one takes: no slot held,
+    /// and the park record goes — the pause it described ends with the publish.
+    #[test]
+    fn publishing_a_parked_colony_claims_no_slot_and_ends_the_park() {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.git_admin_dir = Some("git".into());
+        s.parked = Some(Park {
+            at: Utc::now(),
+            reason: "provider_quota_exhausted".into(),
+            resets_at: None,
+            vm_kept: false,
+        });
+        let (allowed, was_live) = claim_publish(&mut s);
+        assert!(allowed && !was_live, "a parked colony publishes cold, like a stopped one");
+        assert_eq!(s.status, SessionStatus::Publishing);
+        assert!(!s.holds_slot(), "no microVM, no publish slot");
+        assert!(s.parked.is_none(), "the publish ends the pause");
     }
 
     // ----- the retarget glue, against a stand-in for GitHub, the record and the log -----

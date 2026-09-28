@@ -16,9 +16,11 @@ pub(crate) fn cleared_attention_message(attention: &Option<Value>) -> Option<Str
 /// Startup migration, run in `serve` next to the org backfill and before `recover`: colonies
 /// persisted as finished while still carrying an attention flag predate the clearing every
 /// terminal transition now does. A finished colony that still carries one looks like it needs
-/// attention it no longer does, so drop the flag from every terminal colony that has one — except a
-/// quota-parked colony, whose flag is its resume ticket: stripping it would strand the colony,
-/// parked with no reason for the queue to ever requeue. Returns how many flags were cleared.
+/// attention it no longer does, so drop the flag from every terminal colony that has one — except
+/// the legacy quota-parked shape, whose flag is its resume ticket: stripping it would strand the
+/// colony, parked with no reason for the queue to ever requeue. A real `Parked` colony (issue #213)
+/// is not terminal, so this migration never looks at it — park flags are tickets by construction.
+/// Returns how many flags were cleared.
 pub(crate) fn clear_stale_attention(sessions: &mut [Session]) -> usize {
     let mut cleared = 0;
     for s in sessions.iter_mut() {

@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Session } from "../types";
-import { StatusBadge, occupiesSlot, statusLabel } from "./ui";
+import { StatusBadge, occupiesSlot, parkedLabel, statusLabel } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -40,6 +40,38 @@ describe("statusLabel", () => {
 
   it("ignores a stale suspended flag once the colony is live again", () => {
     expect(statusLabel(session({ status: "running", suspended }))).toBe("Working");
+  });
+});
+
+describe("parkedLabel", () => {
+  const parked = (overrides: Partial<NonNullable<Session["parked"]>> = {}) => ({
+    at: "2026-09-26T10:00:00Z",
+    reason: "provider_quota_exhausted",
+    vm_kept: true,
+    ...overrides,
+  });
+
+  it("says the park reason in human words", () => {
+    expect(parkedLabel(parked())).toBe("provider quota exhausted");
+    expect(parkedLabel(parked({ reason: "hold_timeout" }))).toBe("hold timed out");
+  });
+
+  it("names the reset in local words when the provider gave one", () => {
+    const line = parkedLabel(parked({ resets_at: "2026-09-27T14:05:00Z" }));
+    // The exact clock words shift with the test run's locale and timezone; the shape must not.
+    expect(line).toMatch(/^provider quota exhausted · resumes .+/);
+    expect(line).toBe(parkedLabel({ ...parked(), resets_at: "2026-09-27T16:05:00+02:00" }));
+  });
+
+  it("drops the resume half without a reset, and an unparseable one too", () => {
+    expect(parkedLabel(parked({ resets_at: undefined }))).toBe("provider quota exhausted");
+    expect(parkedLabel(parked({ resets_at: "not a timestamp" }))).toBe("provider quota exhausted");
+  });
+
+  it("shows an unknown reason spelled out, and nothing without a park record", () => {
+    expect(parkedLabel(parked({ reason: "something_new" }))).toBe("something new");
+    expect(parkedLabel(null)).toBe("");
+    expect(parkedLabel(undefined)).toBe("");
   });
 });
 

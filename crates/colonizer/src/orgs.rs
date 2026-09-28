@@ -440,6 +440,19 @@ pub fn suspend_after(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "suspend_after_minutes").clamp(1, 1440) as i64)
 }
 
+/// Whether parking a colony (quota exhaustion, an expired hold — issue #213) tears its microVM
+/// down, from the resume module. On by default: the cold resume it buys is the only resume that
+/// works after a restart, and an idle microVM holds real memory. Off, the microVM stays running
+/// while the colony parks and a resume is warm. A module config written before the setting existed
+/// reads the schema default — as does a hand-edited `false` that is not a boolean, since a broken
+/// value must never be read as "drop the machine".
+pub fn discard_vm(modules: &ModulesConfig) -> bool {
+    let schema = schema_for("resume", &modules.resume.provider, &[]);
+    setting(&modules.resume, &schema, "discard_vm")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
 pub fn org_enabled(org: &OrgSettings) -> bool {
@@ -1244,6 +1257,33 @@ mod tests {
         // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
         configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
+    }
+
+    /// Parking discards the microVM unless the operator said otherwise, and a value the schema
+    /// never wrote is read as the default rather than as "drop the machine": a broken `false`
+    /// keeping a VM is a leak, a broken `true` dropping one blind is data loss.
+    #[test]
+    fn discard_vm_defaults_on_and_reads_false_only_when_meaning_it() {
+        let modules = ModulesConfig::default();
+        assert!(discard_vm(&modules), "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured.resume.settings.insert("discard_vm".into(), json!(false));
+        assert!(!discard_vm(&configured), "the operator's word wins");
+        configured.resume.settings.insert("discard_vm".into(), json!(true));
+        assert!(discard_vm(&configured));
+        // A hand-edited value that is not a boolean at all falls back to the default; but a saved
+        // `false` is honoured even when the provider is one this build does not ship — `setting`
+        // reads what the operator saved before it reaches for a schema default, and a provider id
+        // drifting must not silently turn "keep my machine" into "drop it".
+        configured.resume.settings.insert("discard_vm".into(), json!("yes please"));
+        assert!(discard_vm(&configured));
+        let mut bogus = ModulesConfig::default();
+        bogus.resume.provider = "bogus".into();
+        bogus.resume.settings.insert("discard_vm".into(), json!(false));
+        assert!(
+            !discard_vm(&bogus),
+            "the saved false survives a provider this build does not know"
+        );
     }
 
     /// A hand-edited or restored modules.json is read as-is — `validate_settings` only guards the

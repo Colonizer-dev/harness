@@ -11,6 +11,8 @@ export type SessionStatus =
   | "merged"
   | "closed"
   | "no_changes"
+  /** Out of tokens (provider quota, or the autopilot hold timed out): stopped but resumable (issue #213). */
+  | "parked"
   | "stopped"
   | "failed";
 
@@ -132,6 +134,14 @@ export interface Session {
    * older mothership builds omit the field.
    */
   suspended?: { at: string; snapshot: string | null; reason: string; path: string } | null;
+  /**
+   * Set while the colony is parked for tokens (issue #213): the provider's quota ran out, or the
+   * autopilot hold timed out, so the mothership stopped the microVM and freed its parallel slot
+   * until tokens return. `status` reads `parked`, the worktree is kept, and Resume
+   * (POST /api/sessions/{id}/resume) brings the colony back. `resets_at` is the provider's own
+   * reset time when it named one. Older mothership builds omit the whole field.
+   */
+  parked?: { at: string; reason: string; resets_at?: string; vm_kept: boolean } | null;
   /** The stored answer between the user sending it and the re-boot; opaque to the UI (issue #562). */
   pending_answer?: unknown;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
