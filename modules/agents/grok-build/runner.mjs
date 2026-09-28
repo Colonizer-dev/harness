@@ -21,6 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 // The named preflight problems (README, "Preflight"): each is the detail on the `status error`
 // event and the prefix of the log that says how to fix it.
 export const MISSING_CREDENTIAL = 'GROK_CREDENTIAL_MISSING';
+export const WORKSPACE_UNTRUSTABLE = 'GROK_WORKSPACE_UNTRUSTABLE';
 export const MISSING_BINARY = 'GROK_BINARY_MISSING';
 export const VERSION_DRIFT = 'GROK_VERSION_DRIFT';
 export const MODEL_PROVIDER = 'GROK_MODEL_PROVIDER';
@@ -55,8 +56,26 @@ function versionOf(bin, spawnFn) {
   });
 }
 
+/** Whether folder trust could never gate this workspace and would auto-trust it instead: upstream's
+ * trust store refuses a root of the filesystem root or the home directory (`is_unsafe_trust_root`),
+ * and an unrecordable key resolves Trusted even headless with `GROK_FOLDER_TRUST=1` — so a colony
+ * parked at either path would load its project-scope `.grok/` config in spite of the forced gate.
+ * A checkout merely *inside* $HOME keys on the checkout (upstream `workspace_key` falls back to the
+ * cwd when the git root is over-broad), so only the cwd itself refuses. Returns the offending root,
+ * or null when the workspace is gateable. */
+export function untrustableWorkspace(cwd, home) {
+  const root = realpathSync(cwd);
+  if (dirname(root) === root) return root; // the filesystem root keys itself
+  try {
+    if (home && realpathSync(home) === root) return root;
+  } catch {
+    // A home that does not exist cannot equal the workspace.
+  }
+  return null;
+}
+
 /** The checks that must pass before any grok process is spawned: fail loudly, not on a prompt. */
-export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
+export async function preflight({ env, cwd = process.cwd(), spawnFn = spawn, pin = readPin() }) {
   if (!String(env.XAI_API_KEY ?? '').trim()) {
     return {
       code: MISSING_CREDENTIAL,
@@ -64,6 +83,17 @@ export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
         'XAI_API_KEY is unset or empty, and the colony never runs browser OAuth (grok login). ' +
         'Add an xAI API key from console.x.ai as a colony secret named XAI_API_KEY for host api.x.ai, ' +
         'so the mothership injects it into this colony (README, "Credential story").',
+    };
+  }
+  const untrustable = untrustableWorkspace(cwd, env.HOME);
+  if (untrustable) {
+    return {
+      code: WORKSPACE_UNTRUSTABLE,
+      message:
+        `the workspace is "${untrustable}", which grok's folder trust auto-trusts instead of gating ` +
+        '(a trust root of the home directory or the filesystem root can never be recorded in ' +
+        'trusted_folders.toml), so project-scope .grok/ config would load in spite of GROK_FOLDER_TRUST=1. ' +
+        'Run the colony from a dedicated worktree instead.',
     };
   }
   const bin = grokBin(env);
@@ -175,6 +205,12 @@ export function childEnv(env, home) {
     ...env,
     BROWSER: '/bin/false', // belt-and-braces: nothing may open a browser, and this runner never runs grok login
     GROK_HOME: home,
+    // The folder-trust gate forced on (env beats a `[folder_trust] enabled` kill-switch in any
+    // config): headless, with a fresh GROK_HOME's empty trust store, the workspace resolves
+    // untrusted and grok skips project-scope .grok/ MCP servers, plugins, hooks and skills
+    // (and project LSP/instructions). '0' would switch the gate off, so an inherited host
+    // value must never pass through — the runner never passes --trust instead.
+    GROK_FOLDER_TRUST: '1',
     GROK_MEMORY: '0', // no cross-session memory (05-configuration.md)
     GROK_TELEMETRY_ENABLED: '0', // product analytics off (05-configuration.md)
     GROK_DISABLE_AUTOUPDATER: '1', // no update checks inside a colony (14-headless-mode.md)

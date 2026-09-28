@@ -3,7 +3,8 @@
 // for a headless prompt (`-p`/`--prompt-file`) emits scripted streaming-json events, so the tests
 // can drive every path without xAI, a key or a network. Behaviour is steered by env vars:
 //
-//   GROK_FAKE_RECORD        append one JSON line {argv, prompt, env} per invocation here
+//   GROK_FAKE_RECORD        append one JSON line {argv, prompt, env, tty, trustedFolders} per
+//                           invocation here
 //   GROK_FAKE_VERSION       what `--version` prints (default 1.0.34, the pinned version)
 //   GROK_FAKE_SCRIPT        NDJSON file of streaming-json events to emit instead of the defaults
 //   GROK_FAKE_SESSION_ID    overrides the `end` event's sessionId
@@ -41,12 +42,17 @@ const record = (extra = {}) => {
       prompt: promptFile ? readFileSync(promptFile, 'utf8') : argv.includes('-p') ? (argv[argv.indexOf('-p') + 1] ?? null) : null,
       env: {
         BROWSER: process.env.BROWSER ?? null,
+        GROK_FOLDER_TRUST: process.env.GROK_FOLDER_TRUST ?? null,
         GROK_HOME: process.env.GROK_HOME ?? null,
         GROK_MEMORY: process.env.GROK_MEMORY ?? null,
         GROK_TELEMETRY_ENABLED: process.env.GROK_TELEMETRY_ENABLED ?? null,
         GROK_DISABLE_AUTOUPDATER: process.env.GROK_DISABLE_AUTOUPDATER ?? null,
         XAI_API_KEY: process.env.XAI_API_KEY ? 'set' : 'unset',
       },
+      // The folder-trust preconditions the runner must hold: a headless child (no TTY on the pipes
+      // grok resolves trust from) and a GROK_HOME whose trust store has no recorded grant.
+      tty: { stdin: process.stdin.isTTY === true, stderr: process.stderr.isTTY === true },
+      trustedFolders: process.env.GROK_HOME ? existsSync(join(process.env.GROK_HOME, 'trusted_folders.toml')) : false,
       ...extra,
     })}\n`,
   );
