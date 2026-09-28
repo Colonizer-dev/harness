@@ -27,10 +27,11 @@ The seam between them is the `ExecutionBackend` trait
 (`crates/colonizer/src/execution.rs`). Its methods mirror the sandbox module's
 `boot`, `remove`, `running`, and `pull` signatures with `msb` folded into the backend
 (plus node_id/capabilities added for placement), so the local backend
-delegates with zero adaptation. Nothing calls through the trait yet: colony boot
-(`crates/colonizer/src/boot.rs`) still pulls the image and boots the microVM through
-the sandbox module directly. Wiring the launch path over to the trait is a later
-slice, deliberately, so this one changes no behavior.
+delegates with zero adaptation. The colony launch path goes through it: boot
+(`crates/colonizer/src/boot.rs`) pulls the image and boots the microVM, teardown
+(`crates/colonizer/src/lifecycle.rs`) removes it, and the liveness checks ask it
+what is running — all against the local backend, with no behavior change. A
+remote outpost is a second backend behind the same trait.
 
 ## Trust
 
@@ -104,7 +105,8 @@ another machine.
   when its colonies' work actually merges, not when it says the work went well.
 - **No remote execution of any kind.** No node enrollment, no worktree shipping, no
   cross-machine mesh join.
-- **No caller migration.** The launch path still calls the sandbox module directly;
-  moving it onto the trait is a separate, reviewable step.
+- **No caller migration.** The launch path still called the sandbox module directly
+  when this slice shipped; it moved onto the trait later
+  ([#625](https://github.com/Colonizer-dev/harness/issues/625)).
 - **No capability enforcement.** Labels are advertised, not verified. A node that
   claims `gpu` is believed until its colonies say otherwise.

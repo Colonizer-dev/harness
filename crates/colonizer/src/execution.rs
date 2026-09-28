@@ -5,21 +5,21 @@
 //! which ones are running. This module names that boundary as a trait so a
 //! future remote outpost can host colonies without the control plane changing.
 //!
-//! [`LocalBackend`] is the only backend today. It delegates to
-//! [`crate::sandbox`] with no behavior change; nothing else in the harness
-//! calls through this trait yet. Wiring callers over to it is a later slice.
+//! The colony path goes through the trait, via the `execution` field on
+//! [`crate::app::App`]: `boot.rs` pulls the image and boots the microVM,
+//! `lifecycle::teardown_vm` and reclaim's auto-reclaim remove it, and the
+//! liveness checks (the minute-tick watchdog, the restart sweep, warm resume)
+//! ask it what is running. [`LocalBackend`] is the only backend; it delegates
+//! to [`crate::sandbox`] with no behavior change.
 //!
-//! `pull` is included because it is part of the launch path today
-//! (`boot.rs` checks the image cache, pulls, then boots). The
-//! cache-inspection helpers (`is_cached`, `cached_images`) stay as
-//! [`crate::sandbox`] free functions: they describe the local image cache,
-//! not an execution primitive, and the Setup pane's pre-pull keeps calling
-//! them directly.
-
-//! Nothing calls through the trait yet — wiring the launch path over is a
-//! later slice, deliberately — so the whole module reads as dead code until
-//! then. This allow goes away with that slice.
-#![allow(dead_code)]
+//! Some calls stay on [`crate::sandbox`] free functions on purpose. The image
+//! cache is not a trait method: `boot.rs` checks `sandbox::is_cached` before a
+//! launch because it describes the local image cache, not an execution
+//! primitive, and the Setup pane's pre-pull keeps calling the sandbox
+//! functions directly. The reclaim sweep's orphan pass stays there too: it
+//! enumerates every sandbox with `sandbox::all` — not a trait method — and
+//! removes the ones no session owns with `sandbox::running` and
+//! `sandbox::remove`.
 
 use std::{collections::HashSet, future::Future, pin::Pin};
 
@@ -44,8 +44,8 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// functions on purpose: `boot` takes `&BootSpec`, `remove` takes `&str`,
 /// `running` returns the running names, and `pull` fetches an image.
 /// Boxed futures instead of `async fn` keep the trait object-safe so the
-/// harness can hold a `Box<dyn ExecutionBackend>` and dispatch without
-/// knowing which backend it has.
+/// harness can hold an `Arc<dyn ExecutionBackend>` (as `App.execution` does)
+/// and dispatch without knowing which backend it has.
 pub trait ExecutionBackend: Send + Sync {
     /// Boot a detached microVM running `spec.command` as its main process.
     fn boot<'a>(&'a self, spec: &'a crate::sandbox::BootSpec) -> BoxFuture<'a, anyhow::Result<()>>;
@@ -106,14 +106,14 @@ impl ExecutionBackend for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn the_backend_trait_is_object_safe() {
-        // The harness will hold `Box<dyn ExecutionBackend>` so dispatch does
-        // not depend on which backend is behind it. This fails to compile if
-        // the trait ever stops being object-safe.
-        let backend: Box<dyn ExecutionBackend> = Box::new(LocalBackend::new("msb"));
+        // The harness holds an `Arc<dyn ExecutionBackend>` (`App.execution`) so
+        // dispatch does not depend on which backend is behind it. This fails
+        // to compile if the trait ever stops being object-safe.
+        let backend: Arc<dyn ExecutionBackend> = Arc::new(LocalBackend::new("msb"));
         assert_eq!(backend.node_id(), NodeId("local".to_string()));
     }
 

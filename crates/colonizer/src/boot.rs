@@ -1177,7 +1177,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             spec.image
         ))
         .await;
-        if let Err(e) = sandbox::pull(&app.cfg.msb, &spec.image).await {
+        if let Err(e) = app.execution.pull(&spec.image).await {
             // Not fatal: `msb run` will try the pull again and report properly.
             log.info(format!(
                 "pre-pull of {} did not finish ({e:#}); the boot will pull it",
@@ -1193,7 +1193,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         spec.name, spec.image, spec.cpus, spec.memory
     ))
     .await;
-    sandbox::boot(&app.cfg.msb, &spec).await?;
+    app.execution.boot(&spec).await?;
     // The pull is its own phase above, so this is the VM itself — unless the
     // pre-pull failed, in which case `msb run` pulls and this absorbs it.
     mark_phase(app, id, &mut timing, "vm-boot").await;

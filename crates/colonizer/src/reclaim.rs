@@ -243,7 +243,7 @@ pub async fn sweep_once(app: &Shared, cfg: &ReclaimConfig) -> SweepReport {
         match lifecycle::cleanup_one(app, &id).await {
             Ok(s) => {
                 // Manual cleanup leaves the VM to the operator, but the automatic path must not leak one.
-                sandbox::remove(&app.cfg.msb, &s.sandbox).await;
+                app.execution.remove(&s.sandbox).await;
                 app.session_log(&id, "info", "automatically reclaimed: its pull request holds the work, so the worktree was removed and the colony is now unresumable".into()).await;
                 report.reclaimed.push(id);
             }

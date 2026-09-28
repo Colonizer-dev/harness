@@ -129,6 +129,9 @@ pub struct App {
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
+    /// The execution seam (execution.rs): boots, removes and lists the microVMs colonies run on.
+    /// Local microsandbox today; a remote outpost is a second backend behind the same trait.
+    pub execution: Arc<dyn crate::execution::ExecutionBackend>,
     /// The fleet view's peer half (issue #231): last-known `HostSummary` per configured peer base URL,
     /// so a peer that goes quiet still shows its last real numbers instead of nulls. This machine's
     /// own entry is never cached here — `crate::fleet::self_summary` always computes it live.
@@ -235,6 +238,7 @@ impl App {
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             deja: crate::deja::Deja::default(),
+            execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),
             fleet_cache: crate::fleet::FleetCache::new(),
             gateway: crate::gateway::Gateway::new(&cfg.data_dir)?,
             github_viewer: Mutex::new(None),

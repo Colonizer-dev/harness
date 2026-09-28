@@ -9,9 +9,9 @@
 //! passing one ends a colony exactly the way the max session length does.
 
 use crate::{
-    ApiResult, App, Shared, archive, client_error, github, orgs, providers,
-    sandbox::{self},
-    spend,
+    ApiResult, App, Shared, archive, client_error,
+    execution::ExecutionBackend,
+    github, orgs, providers, spend,
     util::{
         dir_size,
         faults::{self, Op},
@@ -45,7 +45,7 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
     if s.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || s.local_port.is_some() {
         let _ = tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await;
     }
-    sandbox::remove(&app.cfg.msb, &s.sandbox).await;
+    app.execution.remove(&s.sandbox).await;
     // A deleted colony's worktree is gone with it, and its record must not gain a log line back.
     if let Some(admin) = s.git_admin_dir.as_deref()
         && app.session(&s.id).await.is_some()
@@ -73,16 +73,16 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
     }
 }
 
-/// `sandbox::running` with the restart's patience. A failed `msb ls` says nothing about the
+/// The backend's `running` with the restart's patience. A failed `msb ls` says nothing about the
 /// colonies, and this pass runs once — there is no next tick to skip to, as `watch_sandboxes`
 /// skips its own — so it waits for `msb` to answer before it decides anything: unknown must not
 /// read as "nothing is running", which would tear down every live colony's microVM. After a host
 /// reboot the microsandbox daemon can come up after the harness, so the wait is unbounded, with
 /// the agent link's backoff shape (see `events::agent_link`): 1s, doubling, capped at 10s.
-async fn running_or_wait(msb: &str) -> HashSet<String> {
+async fn running_or_wait(execution: &dyn ExecutionBackend) -> HashSet<String> {
     let mut backoff = Duration::from_secs(1);
     loop {
-        match sandbox::running(msb).await {
+        match execution.running().await {
             Ok(running) => return running,
             Err(e) => eprintln!("recover: `msb ls` failed, asking again in {backoff:?}: {e:#}"),
         }
@@ -104,7 +104,7 @@ pub async fn recover(app: &Shared) {
     // below is a compare-and-set, so a publish, resume or stop that claimed the colony in
     // between is not clobbered.
     let sessions = app.sessions.read().await.clone();
-    let running = running_or_wait(&app.cfg.msb).await;
+    let running = running_or_wait(app.execution.as_ref()).await;
     for s in sessions {
         // The snapshot above moves under this loop: the HTTP API admits resumes, stops and
         // publishes while it works down the colonies. Take the colony's lifecycle lock and
@@ -297,7 +297,7 @@ pub async fn watch_sandboxes(app: Shared) {
     loop {
         tick.tick().await;
         // A failed `msb ls` says nothing about the colonies, so leave them alone until it answers again.
-        let Ok(running) = sandbox::running(&app.cfg.msb).await else {
+        let Ok(running) = app.execution.running().await else {
             continue;
         };
         // Bound to a local first: a read guard in the `for` expression would live for the whole loop and
@@ -1033,7 +1033,7 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         return None;
     }
     let rt = app.runtimes.lock().await.get(id).cloned()?;
-    if !sandbox::running(&app.cfg.msb).await.ok()?.contains(&s.sandbox) {
+    if !app.execution.running().await.ok()?.contains(&s.sandbox) {
         return None;
     }
     let modules = app.modules.read().await.clone();
@@ -2345,15 +2345,18 @@ mod tests {
     // -- recover after a harness restart -------------------------------------------------------
 
     /// A stand-in `msb` running `body` on every call, so a `recover` pass has a binary to ask —
-    /// as on a real host — instead of waiting out a `PATH` that has none. The pattern is main.rs's
-    /// wedged-probe test: an executable script, then `Arc::get_mut`, which only works before the
-    /// `Shared` is cloned.
+    /// as on a real host — instead of waiting out a `PATH` that has none. Points both `cfg.msb`
+    /// (the status probe and the reclaim sweep exec it directly) and the execution backend (the
+    /// colony launch path) at it. The pattern is the wedged-probe test: an executable script,
+    /// then `Arc::get_mut`, which only works before the `Shared` is cloned.
     fn stand_in_msb(app: &mut Shared, root: &std::path::Path, body: &str) {
         use std::os::unix::fs::PermissionsExt;
         let msb = root.join("msb");
         std::fs::write(&msb, format!("#!/bin/sh\n{body}")).unwrap();
         std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Arc::get_mut(app).unwrap().cfg.msb = msb.display().to_string();
+        let app = Arc::get_mut(app).unwrap();
+        app.cfg.msb = msb.display().to_string();
+        app.execution = Arc::new(crate::execution::LocalBackend::new(msb.display().to_string()));
     }
 
     /// Parks a `recover` pass behind a colony's lifecycle lock, flips the colony in that window —
