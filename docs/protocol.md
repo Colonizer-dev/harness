@@ -360,15 +360,19 @@ longer counts; `budget_usd_per_day`: the most its colonies created this UTC day 
 routed together).
 
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
-  limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, the
-  events WebSocket, the `GET /api/maps/…` reads, and `GET /api/tokens/self`. The terminal
-  WebSocket is owner only.
+  limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
+  `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
+  `GET /api/maps/…` reads, and `GET /api/tokens/self`. The terminal WebSocket is owner only.
 - `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
-- `launch` adds starting colonies: `POST /api/sessions`. Loops stay owner-only: a loop spawns
-  colonies on a schedule, out of reach of a token's caps, budget and marking, so `/api/loops*` is
-  in no scope.
+- `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
+  `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`. A loop a token creates records the
+  token; each run is admitted against the token's limits, caps and budget and marked as external
+  input. Revoking the token ends the loop the next time it would run (run-now answers **409**), so
+  nothing launches after revocation. A token edits and runs only the loops it created — an owner's
+  loop reads as **404** — and map loops, whose runs launch outside any token's caps, stay
+  owner-only.
 
 Anything else is **403** naming the token's scope and the route; a colony- or map-scoped route for
 a repository outside the token's org/repo limits is **404**, the same answer an unknown id gets, so
@@ -3049,11 +3053,11 @@ Bearer token and `Origin` like the other writes.
 
 | Route | What it does |
 |---|---|
-| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, kind, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}` — plus, on a map loop over `owner/*`, `pending`: the repositories still to map in the current org cycle (server-owned; a body without it still reads, as `[]`). `next_run_at` is null once the loop has ended. |
-| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, kind? ("colony"), tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. A map loop (`kind: "map"`) ignores `prompt` and may hold `owner/*` — every repository of the org; a colony loop may not. |
-| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count and last run are kept, and the next run is recomputed (`pending` restarts empty). |
+| `GET /api/loops` | Every loop: `{id, name, org, repo, prompt, cadence, kind, tz_offset_minutes, model, subagent_model, autopilot, max_runs, end_at, enabled, next_run_at, runs, last_run: {session, at}, last_note, ended_reason, created_at}` — plus, on a map loop over `owner/*`, `pending`: the repositories still to map in the current org cycle (server-owned; a body without it still reads, as `[]`), and `created_by_token` when a scoped API token created the loop. `next_run_at` is null once the loop has ended. |
+| `POST /api/loops` | Creates one from `{name, repo, prompt, cadence, kind? ("colony"), tz_offset_minutes?, model?, subagent_model?, autopilot? (true), max_runs?, end_at?, enabled? (true)}`. A `<provider>/<model>` must name a configured provider. A map loop (`kind: "map"`) ignores `prompt` and may hold `owner/*` — every repository of the org; a colony loop may not. A scoped launch token (above) creates a loop only inside its org/repo limits and only as a colony loop; the answer records its id in `created_by_token`. |
+| `PUT /api/loops/{id}` | Replaces its settings; id, creation time, run count, last run and `created_by_token` are kept, and the next run is recomputed (`pending` restarts empty). |
 | `DELETE /api/loops/{id}` | Removes the loop; its past colonies stay. |
-| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight (not checked for an org-wide map loop), or when a map loop had nothing to map. |
+| `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight (not checked for an org-wide map loop), when a map loop had nothing to map, or when the loop's API token was revoked (the loop is ended). |
 | `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`, a map loop's `map:loop:<id>`), newest first. |
 
 `cadence` is tagged by `every`, all times UTC: `{"every":"interval","minutes":60}` (15–10080),

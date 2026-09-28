@@ -181,13 +181,20 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 
 | Scope | What it may call |
 | :--- | :--- |
-| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
+| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, `GET /api/loops` and `/api/loops/{id}/runs`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/stop`, `/resume` |
-| `launch` | Start colonies: `POST /api/sessions` |
+| `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
-Everything else is the owner's at any scope — token management itself, settings, secrets,
-publishing, and loops (a loop spawns colonies on a schedule, out of reach of any token's caps and
-budget). The enforcement is the same for every client of the API, the CLI included.
+Everything else is the owner's at any scope — token management itself, settings, secrets, and
+publishing. The enforcement is the same for every client of the API, the CLI included.
+
+A launch token may keep its recurring work in loops: a loop it creates records the token, and each
+run is admitted against the token's org/repo limits, concurrency cap and daily budget and marked as
+external input, exactly like a colony the token launched by hand; a run a cap refuses is recorded
+in the loop's note. Revoking the token ends each of its loops the next time it would run — a
+run-now answers 409 — so nothing launches after revocation. The token lists every loop inside its
+limits, but edits and runs only the loops it created; an owner's loop reads as unknown to it, and a
+map loop (whose runs launch outside any token's caps) is the owner's alone.
 
 - **Org and repo limits** are conjunctions: a colony counts as covered only when an `--org` entry
   matches its repository's owner *and* a `--repo` entry matches its repository, each empty list
@@ -215,5 +222,3 @@ budget). The enforcement is the same for every client of the API, the CLI includ
 - Following a pull request's checks: `colonizer pr` prints the checks state once, when the
   mothership knows it, but nothing waits on it.
 - Token management in the Settings UI — the CLI (owner token) and the API are the only ways.
-- Loops are out of every scoped token's reach, by design, until a token-shaped way to hold loops
-  to caps and budgets exists.
