@@ -194,7 +194,7 @@ impl Remote {
 }
 
 // ---------------------------------------------------------------------------
-// The API: `GET`/`PUT /api/remote`, `POST /api/remote/reset`.
+// The API: `GET`/`PUT /api/remote`, `POST /api/remote/reset`; the pairing routes follow.
 // ---------------------------------------------------------------------------
 
 /// `GET /api/remote`
@@ -268,7 +268,17 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
             &format!("could not read the minted key: {e}"),
         )
     })?;
-    let (install_id, host) = register(&app.remote.relay().await, &key).await?;
+    let relay = app.remote.relay().await;
+    let (install_id, host) = register(&relay, &key).await?;
+    // The old install's owner binding goes with the old link (#534: "reset link" unbinds): signed
+    // with the old key, before it is overwritten. Best effort — the new install starts unowned
+    // whatever happens here, and the old host has no tunnel left to forward to.
+    let old = app.remote.saved().await.install_id;
+    if let (Some(old), Ok(old_key)) = (old, read_key(&app.remote.dir))
+        && let Err(e) = signed_call(&relay, &old, &old_key, Method::DELETE, "/owner", None).await
+    {
+        eprintln!("remote: could not unbind the old link's owner at the relay: {}", e.message());
+    }
     util::write_private(&app.remote.dir.join(KEY_FILE), doc.as_ref())?;
     let mut saved = app.remote.saved().await;
     saved.install_id = Some(install_id);
@@ -296,6 +306,15 @@ fn load_key(dir: &Path) -> Result<Ed25519KeyPair> {
         }
         Err(e) => return Err(anyhow!("could not read {}: {e}", path.display())),
     };
+    Ed25519KeyPair::from_pkcs8(&bytes)
+        .map_err(|e| anyhow!("could not parse {} ({e}); POST /api/remote/reset replaces it", path.display()))
+}
+
+/// The stored key pair, never minted: the signed relay calls must sign with the key the relay
+/// registered, and a fresh key would only ever earn a `401 bad signature`.
+fn read_key(dir: &Path) -> Result<Ed25519KeyPair> {
+    let path = dir.join(KEY_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| anyhow!("could not read {}: {e}", path.display()))?;
     Ed25519KeyPair::from_pkcs8(&bytes)
         .map_err(|e| anyhow!("could not parse {} ({e}); POST /api/remote/reset replaces it", path.display()))
 }
@@ -351,6 +370,213 @@ async fn record_change(app: &Shared, kind: &str, via: Option<Extension<crate::au
     entry.target = Some("remote access".into());
     entry.section = Some("remote".into());
     activity::record(app, entry).await;
+}
+
+// ---------------------------------------------------------------------------
+// Pairing (#534, #599): the relay parks a GitHub sign-in behind a six-digit code, and the local
+// cockpit decides who owns the link. Every route here is a signed call to the relay's install
+// endpoints (services/relay/src/worker.js `signed`): headers `x-colonizer-ts` (unix seconds) and
+// `x-colonizer-sig`, standard base64 of Ed25519 over `METHOD\npath\nts\nbody`, with the key the
+// relay registered. The relay holds the codes, their expiry and single use; the mothership holds
+// the key that may confirm one, so a browser can neither mint nor confirm a pairing on its own.
+// ---------------------------------------------------------------------------
+
+/// What a pairing code must look like before it is worth a relay round trip; the relay applies
+/// the same rule (400).
+fn is_pairing_code(code: &str) -> bool {
+    code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// One signed call to `<relay>/api/installs/<install_id><suffix>`: the relay's status and its JSON
+/// answer (`Value::Null` for an empty one). Failing to reach the relay at all is a 502.
+async fn signed_call(
+    relay: &str,
+    install_id: &str,
+    key: &Ed25519KeyPair,
+    method: Method,
+    suffix: &str,
+    body: Option<&Value>,
+) -> Result<(StatusCode, Value), AppError> {
+    let bad = |message: String| client_error(StatusCode::BAD_GATEWAY, &message);
+    let url = reqwest::Url::parse(&format!("{}/api/installs/{install_id}{suffix}", http_base(relay)?))
+        .map_err(|e| bad(format!("bad relay URL: {e}")))?;
+    let raw = body.map(Value::to_string).unwrap_or_default();
+    let ts = Utc::now().timestamp();
+    // The relay rebuilds this from the URL it received, so it signs the path as sent: a relay base
+    // with a path prefix is signed with the prefix.
+    let message = format!("{method}\n{}\n{ts}\n{raw}", url.path());
+    let sig = util::b64_encode(key.sign(message.as_bytes()).as_ref());
+    let mut request = reqwest::Client::new()
+        .request(method, url)
+        .header("x-colonizer-ts", ts.to_string())
+        .header("x-colonizer-sig", sig);
+    if body.is_some() {
+        request = request.header(header::CONTENT_TYPE, "application/json").body(raw);
+    }
+    let answer = tokio::time::timeout(REGISTER_WAIT, request.send())
+        .await
+        .map_err(|_| bad("the relay did not answer in time".into()))?
+        .map_err(|e| bad(format!("could not reach the relay: {e}")))?;
+    let status = StatusCode::from_u16(answer.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = answer
+        .bytes()
+        .await
+        .map_err(|e| bad(format!("the relay's answer broke off: {e}")))?;
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    Ok((status, value))
+}
+
+/// The same signed call, for this install: its identity and key, or a 409 when remote access has
+/// never been switched on (no link, so nothing to pair).
+async fn install_call(app: &Shared, method: Method, suffix: &str, body: Option<&Value>) -> Result<(StatusCode, Value), AppError> {
+    let Some(install_id) = app.remote.saved().await.install_id else {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "remote access has no link yet; switch it on first",
+        ));
+    };
+    let key = read_key(&app.remote.dir).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
+    signed_call(&app.remote.relay().await, &install_id, &key, method, suffix, body).await
+}
+
+/// A relay answer the cockpit is not meant to see as-is: a 401 means the relay no longer knows this
+/// key (or the clock is off by minutes), a 404 on the install that the relay forgot it. Both are a
+/// broken link, so a 502 naming what happened, never a status the cockpit would read as its own.
+fn relay_refused(status: StatusCode, answer: &Value) -> AppError {
+    let said = answer["error"].as_str().unwrap_or("no reason given");
+    let hint = match status {
+        StatusCode::UNAUTHORIZED => {
+            "; the relay does not accept this install's key — is the clock right? A reset registers a new one"
+        }
+        StatusCode::NOT_FOUND => "; the relay does not know this install — a reset registers it again",
+        _ => "",
+    };
+    client_error(
+        StatusCode::BAD_GATEWAY,
+        &format!("the relay refused ({status}: {said}){hint}"),
+    )
+}
+
+/// The activity line for a pairing decision; the target is the GitHub account it was about.
+async fn record_pairing(app: &Shared, kind: &str, login: Option<&str>, via: Option<Extension<crate::auth::Via>>) {
+    let mut entry = activity::Entry::new(kind, "you");
+    entry.via = activity::via_name(via.map(|Extension(v)| v));
+    entry.target = Some(login.map_or_else(|| "remote access".to_string(), |login| format!("@{login}")));
+    entry.section = Some("remote".into());
+    activity::record(app, entry).await;
+}
+
+/// `GET /api/remote/pairing`: the relay's view, as is —
+/// `{"owner": {"github_login"} | null, "pending": [{"code", "github_login", "expires_at"}]}`.
+pub async fn pairing(State(app): State<Shared>) -> ApiResult<Value> {
+    match install_call(&app, Method::GET, "/pairing", None).await? {
+        (StatusCode::OK, view) => Ok(Json(view)),
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CodeRequest {
+    code: String,
+}
+
+/// Refuses a request that came through the tunnel. Binding an owner decides who may reach the
+/// link at all, so it happens only on this machine: were it reachable through the tunnel, anyone
+/// who got a request through could pair themselves. The marker is an extension only the tunnel
+/// client sets (see [`Tunnelled`]), never a header a peer could send.
+fn local_only(tunnelled: Option<&Extension<Tunnelled>>, what: &str) -> Result<(), AppError> {
+    match tunnelled {
+        Some(_) => Err(client_error(
+            StatusCode::FORBIDDEN,
+            &format!("{what} only from the cockpit on this machine, not through the remote link"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// `POST /api/remote/pairing/confirm {"code"}`: binds the GitHub account waiting behind that code
+/// as the link's owner. Local only. 400 for a code that is not six digits, 404 for an unknown,
+/// expired or already-used code, 409 when an owner is already bound — the relay's answers.
+pub async fn confirm_pairing(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+    Json(body): Json<CodeRequest>,
+) -> ApiResult<Value> {
+    local_only(tunnelled.as_ref(), "confirm a pairing code")?;
+    if !is_pairing_code(&body.code) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "code must be 6 digits"));
+    }
+    let request = json!({ "code": body.code });
+    match install_call(&app, Method::POST, "/pairing/confirm", Some(&request)).await? {
+        (StatusCode::OK, answer) => {
+            record_pairing(&app, "remote.pair", answer["owner"]["github_login"].as_str(), via).await;
+            Ok(Json(answer))
+        }
+        (status @ (StatusCode::BAD_REQUEST | StatusCode::CONFLICT), answer) => Err(client_error(
+            status,
+            answer["error"].as_str().unwrap_or("the relay refused the code"),
+        )),
+        // The relay's 404 is ambiguous: an unknown install says `unknown install`, a code that is
+        // gone says `no such pairing`. Only the second is the cockpit's 404.
+        (StatusCode::NOT_FOUND, answer) if answer["error"] == "no such pairing" => Err(client_error(
+            StatusCode::NOT_FOUND,
+            "no such pairing: the code is wrong, expired or already used",
+        )),
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
+}
+
+/// `POST /api/remote/pairing/reject {"code"}`: drops one pending pairing, so that sign-in never
+/// becomes the owner. Local only, like confirming. 404 for a code that is not pending.
+pub async fn reject_pairing(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+    Json(body): Json<CodeRequest>,
+) -> ApiResult<Value> {
+    local_only(tunnelled.as_ref(), "reject a pairing code")?;
+    if !is_pairing_code(&body.code) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "code must be 6 digits"));
+    }
+    let request = json!({ "code": body.code });
+    match install_call(&app, Method::POST, "/pairing/reject", Some(&request)).await? {
+        (StatusCode::OK, answer) => {
+            record_pairing(&app, "remote.pair_reject", answer["github_login"].as_str(), via).await;
+            Ok(Json(answer))
+        }
+        (StatusCode::BAD_REQUEST, answer) => Err(client_error(
+            StatusCode::BAD_REQUEST,
+            answer["error"].as_str().unwrap_or("the relay refused the code"),
+        )),
+        (StatusCode::NOT_FOUND, answer) if answer["error"] == "no such pairing" => Err(client_error(
+            StatusCode::NOT_FOUND,
+            "no such pairing: the code is wrong, expired or already used",
+        )),
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
+}
+
+/// `DELETE /api/remote/owner`: unbinds the link's owner and drops every pending pairing; the
+/// owner's sessions at the relay stop working on their next request. The next sign-in pairs anew.
+/// Local only: an unbind that cut the link's owner off mid-session is this machine's call.
+pub async fn unbind_owner(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+) -> Result<StatusCode, AppError> {
+    local_only(tunnelled.as_ref(), "unbind the owner")?;
+    match install_call(&app, Method::DELETE, "/owner", None).await? {
+        (StatusCode::NO_CONTENT | StatusCode::OK, _) => {
+            record_pairing(&app, "remote.unpair", None, via).await;
+            Ok(StatusCode::NO_CONTENT)
+        }
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,6 +1365,10 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/remote", routing::get(status).put(put))
         .route("/api/remote/reset", routing::post(reset))
+        .route("/api/remote/pairing", routing::get(pairing))
+        .route("/api/remote/pairing/confirm", routing::post(confirm_pairing))
+        .route("/api/remote/pairing/reject", routing::post(reject_pairing))
+        .route("/api/remote/owner", routing::delete(unbind_owner))
 }
 
 #[cfg(test)]
@@ -1300,6 +1530,10 @@ mod tests {
         Router::new()
             .route("/api/remote", get(status).put(put))
             .route("/api/remote/reset", post(reset))
+            .route("/api/remote/pairing", get(pairing))
+            .route("/api/remote/pairing/confirm", post(confirm_pairing))
+            .route("/api/remote/pairing/reject", post(reject_pairing))
+            .route("/api/remote/owner", axum::routing::delete(unbind_owner))
             .route("/api/activity", get(crate::activity::list))
             .route("/api/stream", get(crate::stream::handler))
             .route("/api/big", get(big_answer))
@@ -1735,6 +1969,339 @@ mod tests {
         let second = rival.remote.view().await;
         assert_eq!(second["connected"], true, "the winner holds the link");
         assert_eq!(second["replaced"], false);
+    }
+
+    // -- Pairing (#599) ------------------------------------------------------
+
+    /// A local cockpit call through the real guard: loopback Host, the owner's bearer token.
+    async fn local(router: &Router, app: &Shared, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, "127.0.0.1:7878")
+            .header(header::AUTHORIZATION, format!("Bearer {}", app.api_token));
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        let request = request
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap();
+        let res = router.clone().oneshot(request).await.unwrap();
+        let status = res.status();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// One plain HTTP/1.1 exchange with the local relay under `host`: status, headers, body.
+    async fn relay_http(port: u16, path: &str, host: &str, cookie: Option<&str>) -> (u16, Vec<(String, String)>, String) {
+        let mut io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let cookie = cookie.map(|c| format!("cookie: {c}\r\n")).unwrap_or_default();
+        io.write_all(format!("GET {path} HTTP/1.1\r\nhost: {host}\r\n{cookie}connection: close\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), io.read_to_end(&mut raw))
+            .await
+            .expect("the local relay answered in time")
+            .unwrap();
+        let raw = String::from_utf8(raw).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+        let mut lines = head.lines();
+        let status = lines.next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        (status, headers, body.to_string())
+    }
+
+    /// The relay's owner sign-in on `host` as GitHub account `account` (`<id>:<login>`, which the
+    /// harness's GitHub stub answers): /_auth, then the callback with the state and the OAuth
+    /// cookie it set. Answers the callback's status and body — 200 with the pairing page for an
+    /// unowned install, 302 into the cockpit for its owner, 403 for anyone else.
+    async fn sign_in(port: u16, host: &str, account: &str) -> (u16, String) {
+        let (status, headers, _) = relay_http(port, "/_auth?next=/", host, None).await;
+        assert_eq!(status, 302, "/_auth starts the GitHub sign-in");
+        let location = &headers.iter().find(|(k, _)| k == "location").unwrap().1;
+        let state = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+        let cookie = headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with("__Host-colonizer_oauth="))
+            .map(|(_, v)| v.split(';').next().unwrap().to_string())
+            .unwrap();
+        let (status, _, body) = relay_http(
+            port,
+            &format!("/_auth/callback?state={state}&code={account}"),
+            host,
+            Some(&cookie),
+        )
+        .await;
+        (status, body)
+    }
+
+    /// The six digits on the relay's pairing page.
+    fn code_on(page: &str) -> String {
+        let code = page
+            .split("class=\"pairing-code\"")
+            .nth(1)
+            .and_then(|rest| rest.split('>').nth(1))
+            .and_then(|rest| rest.split('<').next())
+            .expect("the pairing page shows a code")
+            .to_string();
+        assert!(is_pairing_code(&code), "a six-digit code: {code:?}");
+        code
+    }
+
+    /// A code that is well formed but not `code`.
+    fn other_code(code: &str) -> String {
+        if code == "000000" { "000001".into() } else { "000000".into() }
+    }
+
+    #[tokio::test]
+    async fn pairing_binds_an_owner_through_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        // The real registration; no tunnel is needed for pairing, which is all signed HTTP.
+        set_enabled(&app, true).await.unwrap();
+        let host = app.remote.saved().await.host.unwrap();
+
+        let (status, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view, json!({"owner": null, "pending": []}));
+
+        // The first sign-in parks a code; the local cockpit sees it, with the account behind it.
+        let (status, page) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "an unowned install shows the pairing page: {page}");
+        let code = code_on(&page);
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(view["owner"], Value::Null);
+        assert_eq!(view["pending"][0]["code"], code.as_str());
+        assert_eq!(view["pending"][0]["github_login"], "alice");
+
+        // A wrong code is refused: malformed here (400), unknown at the relay (404).
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({"code": "12345"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let wrong = other_code(&code);
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": wrong })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // The right code binds the owner, once.
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer, json!({"owner": {"github_login": "alice"}}));
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a code is single-use");
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(view, json!({"owner": {"github_login": "alice"}, "pending": []}));
+
+        // The relay now lets the owner straight through and refuses anyone else.
+        let (status, _) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 302, "the owner's sign-in goes straight through");
+        let (status, _) = sign_in(port, &host, "5555:mallory").await;
+        assert_eq!(status, 403, "another GitHub account is refused");
+
+        // Unbind clears the binding: the next sign-in pairs anew.
+        let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(view, json!({"owner": null, "pending": []}));
+        let (status, page) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "unbound, the old owner pairs again: {page}");
+
+        // A code expires: once the relay has moved it into the past, confirming it is a 404, and
+        // the cockpit no longer lists it.
+        let expiring = code_on(&page);
+        let mut io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let install = app.remote.saved().await.install_id.unwrap();
+        io.write_all(
+            format!("POST /_local/expire-pairings?install={install} HTTP/1.1\r\nhost: x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        io.read_to_end(&mut Vec::new()).await.unwrap();
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": expiring })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "an expired code is refused");
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(view["pending"], json!([]));
+
+        // Reject drops a pending code, so it can no longer be confirmed.
+        let (_, page) = sign_in(port, &host, "5555:mallory").await;
+        let rejected = code_on(&page);
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/reject",
+            Some(json!({ "code": rejected })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(answer["github_login"], "mallory");
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": rejected })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Reset link also unbinds: the old host's owner is gone, so it pairs anew.
+        let (_, page) = sign_in(port, &host, "4242:alice").await;
+        let code = code_on(&page);
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "after a reset the old link has no owner left");
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(view, json!({"owner": null, "pending": []}), "the new link starts unowned");
+
+        // Each decision is in the activity log, as its own kind.
+        let kinds = activity_kinds(&app).await;
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.pair").count(), 2);
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.pair_reject").count(), 1);
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.unpair").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn pairing_decisions_are_refused_through_the_tunnel() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        // The owner's own token, through the real tunnel: the guard admits it, the handler does not.
+        let headers = json!([
+            ["Authorization", format!("Bearer {}", app.api_token)],
+            ["Content-Type", "application/json"]
+        ]);
+        for (id, method, path) in [
+            ("c", "POST", "/api/remote/pairing/confirm"),
+            ("r", "POST", "/api/remote/pairing/reject"),
+            ("u", "DELETE", "/api/remote/owner"),
+        ] {
+            ws.send(req_frame(id, method, path, headers.clone())).await.unwrap();
+            ws.send(body_frame(id, br#"{"code":"123456"}"#)).await.unwrap();
+            let (status, _, body) = read_response(&mut ws, id, path).await;
+            assert_eq!(status, 403, "{path} through the tunnel: {}", String::from_utf8_lossy(&body));
+            assert!(String::from_utf8_lossy(&body).contains("on this machine"));
+        }
+        let kinds = activity_kinds(&app).await;
+        assert!(!kinds.iter().any(|k| k.starts_with("remote.pair") || k == "remote.unpair"));
+    }
+
+    #[tokio::test]
+    async fn a_scoped_token_cannot_reach_the_pairing_routes() {
+        let root = temp_root();
+        std::fs::create_dir_all(root.path().join("config")).unwrap();
+        let app = test_app(root.path());
+        let router = remote_router(&app, idle_park());
+        for scope in ["read", "operate", "launch"] {
+            let made = app
+                .api_tokens
+                .create(crate::api_tokens::NewToken {
+                    name: format!("t-{scope}"),
+                    scope: scope.into(),
+                    orgs: Vec::new(),
+                    repos: Vec::new(),
+                    max_concurrent: None,
+                    budget_usd_per_day: None,
+                })
+                .await
+                .unwrap();
+            for (method, path) in [
+                (Method::GET, "/api/remote/pairing"),
+                (Method::POST, "/api/remote/pairing/confirm"),
+                (Method::POST, "/api/remote/pairing/reject"),
+                (Method::DELETE, "/api/remote/owner"),
+            ] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri(path)
+                    .header(header::HOST, "127.0.0.1:7878")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", made.token))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"code":"123456"}"#))
+                    .unwrap();
+                let status = router.clone().oneshot(request).await.unwrap().status();
+                assert_eq!(status, StatusCode::FORBIDDEN, "{scope} token, {method} {path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pairing_without_a_link_is_a_conflict_not_a_relay_call() {
+        let root = temp_root();
+        let app = test_app(root.path());
+        let router = remote_router(&app, idle_park());
+        let (status, answer) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        let (status, _) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({"code": "123456"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

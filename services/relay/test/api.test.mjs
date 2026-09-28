@@ -284,6 +284,41 @@ test('an expired pairing cannot be confirmed, and expired rows are never listed'
   assert.equal(confirm.status, 404);
 });
 
+test('rejecting a pairing drops just that code, signed, and it can then be neither confirmed nor rejected', async () => {
+  const { env, db } = setup();
+  const key = await ed25519Key();
+  const { install } = await register(env, key.publicKey);
+  const now = Math.floor(Date.now() / 1000);
+  for (const [code, login] of [
+    ['111111', 'mallory'],
+    ['222222', 'owner'],
+  ]) {
+    await db.prepare('INSERT INTO pairings (install_id, code, github_id, github_login, expires_at) VALUES (?, ?, ?, ?, ?)')
+      .bind(install.install_id, code, login === 'owner' ? 4242 : 6666, login, now + 60)
+      .run();
+  }
+  const rejectPath = `/api/installs/${install.install_id}/pairing/reject`;
+  const confirmPath = `/api/installs/${install.install_id}/pairing/confirm`;
+  const send = async (path, body, headers) =>
+    worker.fetch(new Request(`https://${DOMAIN}${path}`, { method: 'POST', headers: headers ?? (await sigHeaders(key, 'POST', path, now, body)), body }), env, NO_CTX);
+  const body = JSON.stringify({ code: '111111' });
+
+  // Unsigned is refused like every mothership endpoint; a malformed code is 400.
+  assert.equal((await send(rejectPath, body, {})).status, 401);
+  assert.equal((await send(rejectPath, JSON.stringify({ code: '12ab56' }))).status, 400);
+
+  const rejected = await send(rejectPath, body);
+  assert.equal(rejected.status, 200);
+  assert.deepEqual(await rejected.json(), { github_login: 'mallory' });
+  assert.equal((await send(rejectPath, body)).status, 404);
+  assert.equal((await send(confirmPath, body)).status, 404);
+  // The other sign-in still waits, and the install is still unowned.
+  const left = (await db.prepare('SELECT code FROM pairings WHERE install_id = ?').bind(install.install_id).all()).results;
+  assert.deepEqual(left.map((row) => row.code), ['222222']);
+  const row = await db.prepare('SELECT owner_github_id FROM installs WHERE id = ?').bind(install.install_id).first();
+  assert.equal(row.owner_github_id, null);
+});
+
 test('a proxied request carries the relay headers, loses the relay cookie and keeps the cockpit cookies', async () => {
   const { env, forwarded } = setup();
   const { install } = await register(env);

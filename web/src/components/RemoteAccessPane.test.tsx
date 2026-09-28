@@ -49,8 +49,10 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain("123 456");
     expect(html).toContain("@octocat");
     expect(html).toContain("expires in 7 min");
-    expect(html).toContain("Confirm");
+    expect(html).toContain(">Confirm</button>");
+    expect(html).toContain(">Reject</button>");
     expect(html).toContain("same code");
+    expect(html).not.toContain(">Unbind</button>"); // no owner yet
   });
 
   it("says the tunnel is offline — reconnecting while enabled but not connected", () => {
@@ -64,10 +66,13 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain("text-warn"); // the takeover is a warning, not a quiet offline
   });
 
-  it("shows the owner once paired, and hides pairing entirely without an endpoint", () => {
+  it("shows the owner with Unbind once paired, and hides pairing until the view arrives", () => {
     const paired = pane(onConnected, { owner: { github_login: "octocat" }, pending: [] });
     expect(paired).toContain("Paired with @octocat");
+    expect(paired).toContain(">Unbind</button>");
+    expect(paired).not.toContain("Unbind @octocat?"); // behind its two-step confirm
     expect(paired).not.toContain(">Confirm</button>");
+    expect(paired).not.toContain(">Reject</button>");
     expect(pane(onConnected, null)).not.toContain("Pairing");
   });
 

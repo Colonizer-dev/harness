@@ -2728,10 +2728,36 @@ answers the current view and records nothing.
 
 A fresh key, registered at once and persisted in place of the old identity; if the switch was on
 the tunnel redials immediately under it. The way to retire a key that leaked. It answers the new
-view.
+view. Before the old key is replaced, the old install's owner is unbound at the relay (a signed
+`DELETE`, best effort), so the new link starts unowned and the old one has no owner left.
 
 The three switches record `remote.enable`, `remote.disable` and `remote.reset` in the activity
 log (§6.9), with actor `you`, but only when the state actually changes.
+
+#### Pairing: `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject`, `DELETE /api/remote/owner`
+
+The relay forwards only the install's bound owner. The first GitHub sign-in on the link gets a
+six-digit, single-use code that expires after 10 minutes, and the local cockpit confirms it (#534,
+#599). Each route is one signed call to the relay's `…/api/installs/<install_id>/…` endpoint:
+`x-colonizer-ts` in Unix seconds and `x-colonizer-sig`, Ed25519 by the install key over
+`METHOD\npath\nts\nbody`, standard base64. [remote-tunnel.md](remote-tunnel.md#pairing-and-the-owner)
+has the relay side.
+
+- `GET /api/remote/pairing` answers the relay's view as is:
+  `{"owner": {"github_login": "octocat"} | null, "pending": [{"code": "481516", "github_login": "octocat", "expires_at": 1790000600}]}`.
+- `POST /api/remote/pairing/confirm {"code": "481516"}` binds that code's GitHub account and answers
+  `{"owner": {"github_login": "octocat"}}`. **400** unless six digits, **404** for an unknown,
+  expired or already-used code, **409** when an owner is already bound. Records `remote.pair`.
+- `POST /api/remote/pairing/reject {"code"}` drops one pending code and answers
+  `{"github_login": "…"}`; **400**/**404** as for confirm. Records `remote.pair_reject`.
+- `DELETE /api/remote/owner` unbinds the owner and drops pending codes: **204**. The owner's relay
+  sessions end on their next request. Records `remote.unpair`.
+
+All four are owner-only (a scoped token gets **403**). Confirm, reject and unbind are
+**local-only**: a request carrying the tunnel's `Tunnelled` marker gets **403**, so nothing that
+arrives through the link can bind, refuse or drop an owner. **409** means remote access was never
+switched on (no install to pair); a relay that cannot be reached, or answers `401`/`404` for the
+install itself, is a **502** naming it.
 
 #### The tunnel, version 1
 

@@ -166,6 +166,12 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return "You switched remote access off";
     case "remote.reset":
       return "You reset the remote access link";
+    case "remote.pair":
+      return `You paired ${target || "a GitHub account"} with the remote access link`;
+    case "remote.pair_reject":
+      return `You turned down a remote access sign-in from ${target || "a GitHub account"}`;
+    case "remote.unpair":
+      return "You unbound the remote access link's owner";
     case "workspace.enable":
       return `You switched the ${target || entry.org || ""} workspace on`;
     case "workspace.disable":

@@ -1,7 +1,8 @@
 // The relay worker (issues #532 and #534). Two kinds of host land here, matched case-insensitively:
 //
 //   my.colonizer.dev            the apex: install registration, the mothership's tunnel dial, and the
-//                               signed mothership endpoints (pairing view + confirm, owner unbind);
+//                               signed mothership endpoints (pairing view, confirm and reject, owner
+//                               unbind);
 //   <install>.my.colonizer.dev  one subdomain per install: owner sign-in under /_auth, everything else
 //                               proxied to the install's tunnel DO once a valid session is present.
 //
@@ -21,6 +22,7 @@ const PATH_INSTALL_ID = '([a-z2-7]{16,})';
 const TUNNEL_PATH = new RegExp(`^/tunnel/${PATH_INSTALL_ID}$`);
 const PAIRING_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing$`);
 const CONFIRM_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing/confirm$`);
+const REJECT_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing/reject$`);
 const OWNER_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/owner$`);
 
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567'; // 20 chars = 100 bits of install id
@@ -53,6 +55,9 @@ async function apex(request, env, url) {
   if (method === 'GET' && (id = PAIRING_PATH.exec(path))) return signed(request, env, url, id[1], (install) => pairingView(env, install));
   if (method === 'POST' && (id = CONFIRM_PATH.exec(path))) {
     return signed(request, env, url, id[1], (install, rawBody) => confirmPairing(env, install, rawBody));
+  }
+  if (method === 'POST' && (id = REJECT_PATH.exec(path))) {
+    return signed(request, env, url, id[1], (install, rawBody) => rejectPairing(env, install, rawBody));
   }
   if (method === 'DELETE' && (id = OWNER_PATH.exec(path))) return signed(request, env, url, id[1], (install) => unbind(env, install));
   return json({ error: 'not found' }, 404);
@@ -183,6 +188,32 @@ async function confirmPairing(env, install, rawBody) {
   ]);
   if (!results[0].meta.changes) return json({ error: 'owner already bound' }, 409);
   return json({ owner: { github_login: pairing.github_login } });
+}
+
+/** Rejecting a pairing deletes just that code, so the sign-in behind it never becomes the owner; the
+ * browser that got it has to start over. Unknown and expired codes are the same 404 as a confirm's. */
+async function rejectPairing(env, install, rawBody) {
+  const code = pairingCode(rawBody);
+  if (code === null) return json({ error: 'code must be 6 digits' }, 400);
+  const now = Math.floor(Date.now() / 1000);
+  const pairing = await env.DB.prepare('SELECT github_login, expires_at FROM pairings WHERE install_id = ? AND code = ?')
+    .bind(install.id, code)
+    .first();
+  if (!pairing || pairing.expires_at <= now) return json({ error: 'no such pairing' }, 404);
+  await env.DB.prepare('DELETE FROM pairings WHERE install_id = ? AND code = ?').bind(install.id, code).run();
+  return json({ github_login: pairing.github_login });
+}
+
+/** The `code` of a signed confirm or reject body: six digits, or null for anything else. */
+function pairingCode(rawBody) {
+  let body;
+  try {
+    body = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  const code = body?.code;
+  return typeof code === 'string' && /^\d{6}$/.test(code) ? code : null;
 }
 
 /** Unbind ("reset link" in the cockpit): drop the owner and the pending pairings in one transaction.

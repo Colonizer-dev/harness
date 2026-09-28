@@ -453,11 +453,17 @@ mothership then dials out an encrypted tunnel to the Colonizer relay (`wss://my.
 Turning it off closes the tunnel and drops every request in flight.
 
 - **Your link** appears once the relay has answered. Copy it, or show a QR code for a phone camera.
-- The link asks for a GitHub sign-in. The first sign-in shows a six-digit code, which you confirm
-  under **Pairing**. After that, only that GitHub account can sign in. The cockpit behind the link
-  still asks for its own token, as for any new browser.
-- **Reset link** makes a new identity and link. The old link stops working. Use it if a link
-  leaks.
+- The link asks for a GitHub sign-in. The first sign-in shows a six-digit code that expires after
+  10 minutes. It appears under **Pairing** with the GitHub account that asked. **Confirm** it if
+  your phone shows the same code; after that, only that GitHub account can sign in. **Reject** it
+  if you did not just sign in. The cockpit behind the link still asks for its own token, as for
+  any new browser.
+- Once paired, **Pairing** names the owner. **Unbind** (asked twice) removes it: the owner's
+  sign-in stops working at once, and the next sign-in shows a new code.
+- Confirm, Reject and Unbind work only in the cockpit on this machine. Through the link they are
+  refused, so nobody who reaches the link can pair themselves.
+- **Reset link** makes a new identity and link. The old link stops working, and its owner is
+  unbound. Use it if a link leaks.
 
 The link exposes this cockpit, including colony terminals, and nothing else on the machine. See
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
