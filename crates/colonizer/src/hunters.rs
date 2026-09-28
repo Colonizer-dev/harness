@@ -1,9 +1,10 @@
 //! Pluggable security-hunter modules (Strix, Shannon) for a future red-team run stage to drive
 //! against a target: on-demand, checksum-verified, never vendored — Strix is Apache-2.0 and Shannon
 //! is AGPL-3.0, so both are kept clear of the binary by shelling out rather than linking. Each
-//! hunter's `Manifest` says how to install it, how to scan with it, and which parser would read its
-//! output; findings parse into the same `Finding` the orchestrator flow files. Adding a hunter is a
-//! manifest plus a parser (see docs/security-hunters.md).
+//! hunter's `Manifest` says how to install it, how to scan with it, and which parser reads its
+//! output; `scan` renders that template, runs the installed binary and parses the artifacts into the
+//! same `Finding` the orchestrator flow files. Adding a hunter is a manifest plus a parser (see
+//! docs/security-hunters.md).
 
 use crate::{ApiResult, Shared, client_error, findings::Finding};
 use anyhow::{Context, Result, bail};
@@ -810,6 +811,249 @@ pub async fn probe_handler(State(app): State<Shared>, Path(id): Path<String>) ->
     Ok(Json(json!({"manifest": m, "installed": installed, "probe": p})))
 }
 
+/// How a finished scan ended: the hunter reported vulnerabilities, or it ran clean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanStatus {
+    /// The hunter exited 0 and its artifacts parsed into no findings.
+    Clean,
+    /// The hunter reported vulnerabilities (Strix exits 2) or its artifacts parsed into findings.
+    Findings,
+}
+
+/// The gateway endpoint a scan's LLM traffic is pinned to. Required — not an `Option` — because
+/// hunter LLM spend that bypasses the gateway is spend nobody can see, so "scan without the
+/// gateway" is not a choice this runner offers (docs/security-hunters.md).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gateway {
+    /// The gateway's base URL, set as the manifest's `gateway_env` var (`LLM_API_BASE` for Strix).
+    pub base_url: String,
+    /// The token presented to the gateway, set as [`API_KEY_ENV`].
+    pub token: String,
+}
+
+/// Everything one scan needs: what to run, what to scan, where to work, and where the hunter's LLM
+/// calls must go.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanRequest {
+    /// The installed hunter binary (see [`installed_binary`]); `scan` runs this program and takes
+    /// the manifest's `scan` template for its arguments.
+    pub binary: PathBuf,
+    /// The target repository directory, substituted into the template's `{target}`.
+    pub target: PathBuf,
+    /// Scan mode substituted into the template's `{mode}` (Strix: `quick`, `standard` or `deep`).
+    pub mode: String,
+    /// Working and output directory: the command runs here, its artifacts are looked for under it,
+    /// and `{out}` substitutes this path.
+    pub work_dir: PathBuf,
+    /// The LiteLLM model string the hunter runs on, set as [`MODEL_ENV`] (`STRIX_LLM`).
+    pub model: String,
+    /// Where the hunter's LLM calls go. Required: spend that bypasses the gateway is invisible.
+    pub gateway: Gateway,
+}
+
+/// What one finished scan produced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScanOutcome {
+    /// [`ScanStatus::Clean`] or [`ScanStatus::Findings`].
+    pub status: ScanStatus,
+    /// The hunter's exit code (Strix: 0 clean, 2 vulnerabilities found).
+    pub exit_code: Option<i32>,
+    /// Findings parsed from the primary artifact — the first entry of the manifest's `output`.
+    pub findings: Vec<Finding>,
+    /// Directory under `work_dir` the hunter wrote its run into (Strix: `strix_runs/<run-name>`).
+    pub run_dir: Option<PathBuf>,
+    /// `llm_usage.cost` from the hunter's `run.json`, when it reported one, so a run's spend is
+    /// visible in the outcome and not only on the gateway's meter.
+    pub cost_usd: Option<f64>,
+}
+
+/// A scan that has not finished after this long is killed: long enough for a deep Strix run, short
+/// enough that a wedged agent cannot hold the run stage forever.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// The hunter's run metadata file, looked for beside the primary artifact for its `llm_usage.cost`.
+const RUN_METADATA: &str = "run.json";
+
+/// The manifest carries only the base-URL env (`gateway_env`); the model string, the gateway token
+/// and the telemetry opt-out have no manifest slot, so their env names are Strix's until a second
+/// hunter needs different ones.
+const MODEL_ENV: &str = "STRIX_LLM";
+const API_KEY_ENV: &str = "LLM_API_KEY";
+const TELEMETRY_ENV: &str = "STRIX_TELEMETRY";
+
+/// Splits the manifest's `scan` template into argv, substituting `{target}`/`{mode}`/`{out}` in
+/// place so a standalone placeholder becomes one argv entry and a path with spaces survives whole —
+/// no shell ever sees the command. The template's first word names the program for documentation;
+/// [`scan`] runs the installed binary instead of it. A brace left over after substitution is an
+/// unknown placeholder, refused rather than handed to the hunter as a garbage argument.
+fn render_scan(template: &str, target: &str, mode: &str, out: &str) -> Result<Vec<String>> {
+    let mut words = template.split_whitespace();
+    let Some(_program) = words.next() else {
+        bail!("the scan template is empty");
+    };
+    words
+        .map(|word| {
+            let rendered = word.replace("{target}", target).replace("{mode}", mode).replace("{out}", out);
+            if rendered.contains('{') || rendered.contains('}') {
+                bail!("the scan template word `{word}` holds an unknown placeholder");
+            }
+            Ok(rendered)
+        })
+        .collect()
+}
+
+/// The installed binary to run, once its pinned version is on disk:
+/// `<data>/hunters/<id>/<version>/<binary>`.
+#[allow(dead_code)] // Consumed by the red-team run stage once it drives these modules.
+fn installed_binary(app: &Shared, m: &Manifest) -> Option<PathBuf> {
+    let version = installed(app, m)?;
+    Some(root(app, m.id).join(version).join("strix"))
+}
+
+/// Runs one manifest-driven scan: renders the `scan` template into argv ([`render_scan`]), runs the
+/// installed binary in `work_dir` with the hunter pinned to the gateway, then reads the run's
+/// primary artifact back through the manifest's parser. Refuses a manifest-only stub. Fatal exits
+/// (Strix: anything but 0 and 2), a missing binary, a missing target, a deadline overrun and
+/// unreadable artifacts are `Err`s; a finished run is a [`ScanOutcome`] either way.
+#[allow(dead_code)] // Consumed by the red-team run stage once it drives these modules; exercised by the unit tests below.
+pub(crate) async fn scan(m: &Manifest, req: &ScanRequest) -> Result<ScanOutcome> {
+    scan_with(m, req, SCAN_TIMEOUT).await
+}
+
+/// The body of [`scan`], taking the deadline explicitly so tests do not wait [`SCAN_TIMEOUT`].
+#[allow(dead_code)]
+async fn scan_with(m: &Manifest, req: &ScanRequest, deadline: Duration) -> Result<ScanOutcome> {
+    if !m.available {
+        bail!("{} is a manifest-only stub in this build; nothing drives it yet", m.name);
+    }
+    if !req.binary.is_file() {
+        bail!(
+            "the {} binary is not installed at {}; POST /api/hunters/{}/install first",
+            m.id,
+            req.binary.display(),
+            m.id
+        );
+    }
+    if !req.target.is_dir() {
+        bail!("the scan target {} is not a directory", req.target.display());
+    }
+    tokio::fs::create_dir_all(&req.work_dir)
+        .await
+        .context("creating the scan working directory")?;
+    let argv = render_scan(
+        m.scan,
+        &req.target.to_string_lossy(),
+        &req.mode,
+        &req.work_dir.to_string_lossy(),
+    )?;
+
+    let mut cmd = Command::new(&req.binary);
+    cmd.args(&argv)
+        .current_dir(&req.work_dir)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .env(m.gateway_env, &req.gateway.base_url)
+        .env(API_KEY_ENV, &req.gateway.token)
+        .env(MODEL_ENV, &req.model)
+        .env(TELEMETRY_ENV, "0");
+
+    let output = tokio::time::timeout(deadline, cmd.output())
+        .await
+        .with_context(|| format!("the {} scan timed out after {deadline:?}", m.id))?
+        .with_context(|| format!("failed to start the {} scan", m.id))?;
+
+    let exit_code = output.status.code();
+    // The runner takes Strix's headless convention as the rule: 0 clean, 2 vulnerabilities found,
+    // anything else — including death by signal — fatal, with the stderr carried back.
+    if !matches!(exit_code, Some(0) | Some(2)) {
+        bail!(
+            "the {} scan failed ({}): {}",
+            m.id,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let Some(primary) = m.output.first() else {
+        bail!("the {} manifest lists no output artifacts", m.id);
+    };
+    let run_dir = match newest_run_dir(&req.work_dir, primary).await? {
+        Some(run_dir) => run_dir,
+        None if exit_code == Some(2) => bail!(
+            "the {} scan exited 2 (vulnerabilities found) but wrote no {primary} under {}",
+            m.id,
+            req.work_dir.display()
+        ),
+        // A clean exit with no artifacts is a clean scan: nothing to parse, nothing to bill.
+        None => {
+            return Ok(ScanOutcome {
+                status: ScanStatus::Clean,
+                exit_code,
+                findings: Vec::new(),
+                run_dir: None,
+                cost_usd: None,
+            });
+        }
+    };
+
+    let artifact_path = run_dir.join(primary);
+    let artifact = tokio::fs::read_to_string(&artifact_path)
+        .await
+        .with_context(|| format!("reading {}", artifact_path.display()))?;
+    let findings = normalize(m.findings_format, &artifact).context("parsing the hunter's findings")?;
+    let cost_usd = run_cost(&run_dir.join(RUN_METADATA)).await;
+    Ok(ScanOutcome {
+        status: if exit_code == Some(2) || !findings.is_empty() {
+            ScanStatus::Findings
+        } else {
+            ScanStatus::Clean
+        },
+        exit_code,
+        findings,
+        run_dir: Some(run_dir),
+        cost_usd,
+    })
+}
+
+/// The newest directory under `work_dir` — itself included — holding the primary artifact,
+/// searching at most three levels deep (Strix writes `strix_runs/<run-name>/vulnerabilities.json`,
+/// which this finds without knowing either name) and reading metadata without following symlinks,
+/// so a planted link cannot point the run stage outside `work_dir`.
+async fn newest_run_dir(work_dir: &FsPath, primary: &str) -> Result<Option<PathBuf>> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut stack = vec![(work_dir.to_path_buf(), 0u8)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+            continue;
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let Ok(meta) = tokio::fs::symlink_metadata(&path).await else {
+                continue;
+            };
+            if meta.is_file() && entry.file_name() == primary {
+                let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(when, _)| modified > *when) {
+                    best = Some((modified, dir.clone()));
+                }
+            } else if meta.is_dir() && depth < 3 {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(best.map(|(_, dir)| dir))
+}
+
+/// `llm_usage.cost` out of the hunter's run metadata, when it wrote one.
+async fn run_cost(path: &FsPath) -> Option<f64> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str::<Value>(&text)
+        .ok()?
+        .get("llm_usage")?
+        .get("cost")?
+        .as_f64()
+}
+
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
@@ -1384,5 +1628,167 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // The scan tests drive `scan` against a fake hunter: a `strix` shell script that plays the part
+    // of the installed binary, writing artifacts and exits as the manifest says Strix does.
+
+    fn scan_request(binary: PathBuf, work: &FsPath) -> ScanRequest {
+        ScanRequest {
+            binary,
+            target: work.join("target"),
+            mode: "quick".into(),
+            work_dir: work.join("out"),
+            model: "gateway/gemini-2.5-flash".into(),
+            gateway: Gateway {
+                base_url: "https://gateway.example".into(),
+                token: "tok".into(),
+            },
+        }
+    }
+
+    async fn write_script(dir: &FsPath, body: &str) -> PathBuf {
+        let path = dir.join("strix");
+        tokio::fs::write(&path, body).await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .await
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn the_scan_template_renders_to_argv_without_a_shell() {
+        let argv = render_scan(
+            "strix -n --target {target} --scan-mode {mode}",
+            "/repo with spaces",
+            "quick",
+            "/out",
+        )
+        .expect("the strix template renders");
+        assert_eq!(
+            argv,
+            ["-n", "--target", "/repo with spaces", "--scan-mode", "quick"],
+            "a standalone placeholder becomes one argv entry, spaces and all"
+        );
+        assert_eq!(
+            render_scan("hunter -o {out}", "/t", "quick", "/o").expect("an embedded placeholder renders"),
+            ["-o", "/o"],
+            "a placeholder inside a word is replaced in place"
+        );
+        assert!(
+            render_scan("strix --x {nope}", "/t", "quick", "/o").is_err(),
+            "an unknown placeholder is refused, not passed through"
+        );
+        assert!(
+            render_scan("   ", "/t", "quick", "/o").is_err(),
+            "an empty template is refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scan_runs_the_binary_pins_the_gateway_and_pulls_the_cost() {
+        let work = test_root("scan");
+        std::fs::create_dir_all(work.join("target")).unwrap();
+        let binary = write_script(
+            &work,
+            r#"#!/bin/sh
+echo "$@" > argv.txt
+env | grep -E '^(LLM_API_BASE|LLM_API_KEY|STRIX_LLM|STRIX_TELEMETRY)=' > env.txt
+mkdir -p strix_runs/run-1
+cat > strix_runs/run-1/vulnerabilities.json <<'EOF'
+[{"id":"vuln-0001","title":"RCE in login","severity":"high"}]
+EOF
+printf '{"status":"completed","llm_usage":{"cost":0.42}}' > strix_runs/run-1/run.json
+exit 2
+"#,
+        )
+        .await;
+        let req = scan_request(binary, &work);
+
+        let outcome = scan(&strix(), &req).await.expect("the scan runs");
+
+        assert_eq!(outcome.status, ScanStatus::Findings, "exit 2 means findings");
+        assert_eq!(outcome.exit_code, Some(2));
+        assert_eq!(outcome.findings.len(), 1, "the artifact parses into findings");
+        assert!(outcome.findings[0].title.contains("RCE"), "{}", outcome.findings[0].title);
+        assert_eq!(outcome.run_dir, Some(req.work_dir.join("strix_runs/run-1")));
+        assert_eq!(outcome.cost_usd, Some(0.42), "run.json's cost surfaces in the outcome");
+
+        let argv = std::fs::read_to_string(req.work_dir.join("argv.txt")).unwrap();
+        assert!(
+            argv.contains(&format!("--target {}", req.target.display())) && argv.contains("--scan-mode quick"),
+            "the argv came from the manifest template: {argv}"
+        );
+        let env = std::fs::read_to_string(req.work_dir.join("env.txt")).unwrap();
+        for expected in [
+            "LLM_API_BASE=https://gateway.example",
+            "LLM_API_KEY=tok",
+            "STRIX_LLM=gateway/gemini-2.5-flash",
+            "STRIX_TELEMETRY=0",
+        ] {
+            assert!(env.contains(expected), "the child saw {expected}: {env}");
+        }
+
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_clean_scan_is_no_findings_and_no_cost() {
+        let work = test_root("scan-clean");
+        std::fs::create_dir_all(work.join("target")).unwrap();
+        let binary = write_script(&work, "#!/bin/sh\nexit 0\n").await;
+
+        let outcome = scan(&strix(), &scan_request(binary, &work)).await.expect("clean");
+
+        assert_eq!(outcome.status, ScanStatus::Clean);
+        assert_eq!(outcome.exit_code, Some(0));
+        assert!(outcome.findings.is_empty() && outcome.run_dir.is_none() && outcome.cost_usd.is_none());
+
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scan_refuses_stub_hunters_missing_binaries_and_fatal_exits() {
+        let work = test_root("scan-refuse");
+        std::fs::create_dir_all(work.join("target")).unwrap();
+
+        let err = scan(&shannon(), &scan_request(work.join("strix"), &work))
+            .await
+            .expect_err("the stub refuses");
+        assert!(err.to_string().contains("stub"), "{err:#}");
+
+        let err = scan(&strix(), &scan_request(work.join("absent"), &work))
+            .await
+            .expect_err("no binary, no scan");
+        assert!(err.to_string().contains("not installed"), "{err:#}");
+
+        let binary = write_script(&work, "#!/bin/sh\necho boom >&2\nexit 1\n").await;
+        let err = scan(&strix(), &scan_request(binary, &work))
+            .await
+            .expect_err("exit 1 is fatal");
+        assert!(err.to_string().contains("boom"), "the stderr comes back: {err:#}");
+
+        let binary = write_script(&work, "#!/bin/sh\nexit 2\n").await;
+        let err = scan(&strix(), &scan_request(binary, &work))
+            .await
+            .expect_err("exit 2 promises vulnerabilities the artifacts must back up");
+        assert!(err.to_string().contains("vulnerabilities.json"), "{err:#}");
+
+        std::fs::remove_dir_all(&work).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_overruns_its_deadline_is_killed() {
+        let work = test_root("scan-deadline");
+        std::fs::create_dir_all(work.join("target")).unwrap();
+        // `exec` replaces the shell with sleep, so the kill lands on the process itself.
+        let binary = write_script(&work, "#!/bin/sh\nexec sleep 30\n").await;
+
+        let err = scan_with(&strix(), &scan_request(binary, &work), Duration::from_millis(200))
+            .await
+            .expect_err("the deadline refuses");
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+
+        std::fs::remove_dir_all(&work).unwrap();
     }
 }
