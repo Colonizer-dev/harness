@@ -1796,6 +1796,48 @@ export interface RemotePairing {
 }
 
 // ---------------------------------------------------------------------------
+// Scoped API tokens (issue #646): GET/POST /api/tokens, DELETE /api/tokens/{id}
+// (docs/cli.md, "Scoped API tokens")
+// ---------------------------------------------------------------------------
+
+/** How much a token may do, ordered so `read` < `operate` < `launch` — each adds to the last. */
+export type ApiTokenScope = "read" | "operate" | "launch";
+
+/** One token's metadata, as GET /api/tokens answers: never the secret, never its hash. */
+export interface ApiTokenMeta {
+  id: string;
+  name: string;
+  scope: ApiTokenScope;
+  /** The GitHub owners the token stays inside; empty means no limit of this kind. */
+  orgs: string[];
+  /** The `owner/repo` repositories the token stays inside; empty means no limit of this kind. */
+  repos: string[];
+  /** The most colonies it may keep unfinished; absent when uncapped. */
+  max_concurrent?: number;
+  /** The most model spend its colonies may run up per UTC day; absent when uncapped. */
+  budget_usd_per_day?: number;
+  /** RFC3339. */
+  created_at: string;
+  /** RFC3339; absent until its first use, and refreshed at most once a minute, in memory only. */
+  last_used_at?: string;
+}
+
+/** POST /api/tokens: what the cockpit's create form collects. */
+export interface NewApiToken {
+  name: string;
+  scope: ApiTokenScope;
+  orgs?: string[];
+  repos?: string[];
+  max_concurrent?: number;
+  budget_usd_per_day?: number;
+}
+
+/** POST /api/tokens' answer: the plaintext, shown exactly once, next to the metadata. */
+export interface CreatedApiToken extends ApiTokenMeta {
+  token: string;
+}
+
+// ---------------------------------------------------------------------------
 // Chat: a direct conversation with a model, no colony (GET/POST /api/chat, docs/protocol.md)
 // ---------------------------------------------------------------------------
 
