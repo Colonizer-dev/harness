@@ -444,7 +444,10 @@ pub(crate) async fn start_queued(app: &Shared) {
                 // without one (can_resume). Booting a resumed colony as fresh would try to create the worktree it
                 // already has, so the queue carries the resume through.
                 let resume = next.git_admin_dir.is_some();
-                tokio::spawn(boot(app.clone(), next.id.clone(), resume));
+                // Issue #98: the queue's admission is the approval when it boots a colony that
+                // already has a worktree — a fresh Resume grant, checked in `boot`.
+                let grant = resume.then(|| crate::lifecycle::mint_resume_grant(next, "queue"));
+                tokio::spawn(boot(app.clone(), next.id.clone(), resume, grant));
             }
         }
     }
@@ -715,7 +718,11 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             "answer in hand; booting a fresh microVM to resume the agent's session with it".into(),
         )
         .await;
-        tokio::spawn(boot(app.clone(), id, s.git_admin_dir.is_some()));
+        let resume = s.git_admin_dir.is_some();
+        // Issue #98: delivering the answer boots a kept worktree — the same authorized effect as
+        // any other resume, so it carries its own fresh grant into `boot`.
+        let grant = resume.then(|| crate::lifecycle::mint_resume_grant(&s, "harness"));
+        tokio::spawn(boot(app.clone(), id, resume, grant));
     }
 }
 
@@ -796,7 +803,7 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         // microVM, the discard setting, admission — so a colony an operator just resumed or
         // stopped is not doubled, and one it cannot warm-resume lands on the cold path. A
         // refusal (409, 404) means the park is no longer this tick's to recover.
-        let _ = crate::lifecycle::resume(State(app.clone()), Path(id)).await;
+        let _ = crate::lifecycle::resume(State(app.clone()), Path(id), None).await;
     }
 }
 

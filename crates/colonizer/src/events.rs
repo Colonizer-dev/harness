@@ -775,7 +775,23 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
         app.session_log(&id, "warn", message).await;
         return;
     }
-    let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md")).await;
+    // Issue #98: the independent validation is the approval. A FileIssue grant is minted over the
+    // exact bytes that would be filed — reviewer the validator, builder the colony — and
+    // `findings::file` re-checks it against what it renders before any gh call.
+    let grant = {
+        let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
+        let candidate = findings::candidate_hash(&finding, &s, co_author.as_ref());
+        crate::authority::Grant::mint(
+            &s.id,
+            &finding.title,
+            vec![crate::authority::Effect::FileIssue],
+            candidate,
+            "finding-validator",
+            &s.id,
+            crate::authority::GRANT_TTL_SECS,
+        )
+    };
+    let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md"), &grant).await;
     let (level, message, entry) = match &outcome {
         Ok(findings::Filed::Issue(url)) => (
             "info",

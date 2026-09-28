@@ -908,10 +908,26 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
         Autopilot::Publish => {
             if crate::authority::external_writes_blocked() {
                 app.session_log(&id, "warn", crate::events::AUTOPILOT_BLOCKED.into()).await;
-            } else if app.session(&id).await.is_some_and(|s| s.status.is_live()) {
+            } else if let Some(s) = app.session(&id).await.filter(|s| s.status.is_live()) {
+                // Issue #98: the confirmed verdict is the approval. The host verifier mints the
+                // publish grant — reviewer is the verifier, builder the colony's agent — bound to
+                // the tree the publish would commit right now (the same computation the operator's
+                // click binds) plus the pr.md bytes; checked at each effect site inside the publish.
+                let grant = match crate::publish::mint_publish_grant(&app, &s, "host-verifier").await {
+                    Ok(grant) => grant,
+                    Err(e) => {
+                        app.session_log(
+                            &id,
+                            "warn",
+                            format!("autopilot: not publishing, the publish approval could not be bound: {e:#}"),
+                        )
+                        .await;
+                        return;
+                    }
+                };
                 app.session_log(&id, "info", "autopilot: the claim checked out, publishing".into())
                     .await;
-                crate::publish::publish_session(app.clone(), id).await;
+                crate::publish::publish_session(app.clone(), id, Some(grant)).await;
             } else {
                 app.session_log(&id, "info", "autopilot: not publishing, the colony is no longer live".into())
                     .await;

@@ -108,7 +108,43 @@ async fn resume_digest(dir: &std::path::Path) -> Option<String> {
     Some(block)
 }
 
-pub(crate) async fn boot(app: Shared, id: String, resume: bool) {
+/// Boots one colony. `resume` says the boot brings a kept worktree back rather than creating one;
+/// such a boot is an authorized effect (issue #98): the caller mints a fresh `Resume` grant at the
+/// real approval (the operator's press, the queue's admission, the quota recovery) and this is the
+/// one place every resume boot passes through, so the check lives here and denies — with the
+/// reason — any resume it was not handed.
+pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<crate::authority::Grant>) {
+    if resume
+        && let Some(s) = app.session(&id).await
+        && let Err(deny) = crate::authority::authorize_opt(
+            grant.as_ref(),
+            &crate::authority::Effect::Resume,
+            &crate::lifecycle::resume_candidate(&s),
+            crate::authority::now_unix(),
+        )
+    {
+        let message = format!("resume refused: not authorized ({})", deny.reason);
+        app.session_log(&id, "error", format!("session failed to start: {message}"))
+            .await;
+        let mut attention = None;
+        app.update_session(&id, |s| {
+            if s.status != SessionStatus::Starting {
+                return false;
+            }
+            s.status = SessionStatus::Failed;
+            s.error = Some(truncate(&message, 2000));
+            attention = s.clear_attention();
+            true
+        })
+        .await;
+        app.note_cleared_attention(&id, attention).await;
+        // Failed without ever opening a pull request: it frees the issue for a retry, on GitHub as
+        // well as locally, the same as a boot that fails after starting.
+        if let Some(s) = app.session(&id).await {
+            crate::claims::spawn_release_if_needed(app.clone(), &s);
+        }
+        return;
+    }
     if let Err(e) = boot_inner(&app, &id, resume).await {
         let message = format!("{e:#}");
         let Some(s) = app.session(&id).await else { return };
