@@ -438,7 +438,7 @@ what would be removed before you apply it.
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
 - **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, Updates ([updates.md](updates.md)), Usage data ([usage-data.md](usage-data.md)),
+  access, API tokens, Updates ([updates.md](updates.md)), Usage data ([usage-data.md](usage-data.md)),
   Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
@@ -469,6 +469,24 @@ The link exposes this cockpit, including colony terminals, and nothing else on t
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
 [protocol.md](protocol.md#610-remote-access-tunnel) for the routes, and
 [remote-access-review.md](remote-access-review.md) for the security review.
+
+### API tokens
+
+**Settings → API tokens.**
+
+A scoped token is a named key for a CLI, an agent or a CI job, so the per-install owner token stays
+where it belongs. The pane lists every token: its name and scope, its org and repo limits ("all
+repositories" when there are none), its launch caps ("no caps" when uncapped), the day it was made,
+and when it was last used — a stamp that moves at most once a minute.
+
+**Create a token** takes a name, a scope (`read` watches, `operate` also drives colonies that
+exist, `launch` also starts them), optional org and repo limits, and optional caps: the most
+concurrent colonies and a model-spend budget per UTC day. The new token's plaintext is shown once
+with a Copy button, and nothing can read it back afterwards — copy it before pressing **Done**.
+
+**Revoke** asks for confirmation, then the token stops authenticating at once. The same three verbs are
+`colonizer token create|list|revoke`; what each scope may call is in
+[cli.md](cli.md#scoped-api-tokens).
 
 ### Notifications and Web Push
 
@@ -511,7 +529,7 @@ Each setting can follow the global default or be overridden for this workspace:
 - **Models**: **Agent module** (which agent runs this workspace's colonies), Orchestrator, Subagents
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
-  several are early: some cannot ask you questions, and the Codex and ACP agent binaries are not
+  several are early: Pi cannot ask you questions, and the Codex and ACP agent binaries are not
   yet staged into the colony image. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
