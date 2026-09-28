@@ -291,13 +291,14 @@ async fn hold_answer(
                 x.pending_answer = Some(PendingAnswer {
                     question_id: answer.question_id.clone(),
                     prompt: prompt.clone(),
+                    answered_at: Some(Utc::now()),
                 });
             }
             was
         })
         .await;
     match stored {
-        Some((_, true)) => {
+        Some((x, true)) => {
             // The question is closed as of now, in the same terms the runner closes it, so a
             // restart's replay (which skips host chain lines only for the reconnect cursor, not
             // for the question) finds no question still open. The answers travel too, so the
@@ -318,10 +319,29 @@ async fn hold_answer(
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;
             }
+            // Where the colony stands in the restore line (issue #667), read off the same admission
+            // the restore pass answers to, so the log says what the next ticks will do with it.
+            // The pause is the tick's own hold on the restore pass (`start_queued` skips it while
+            // either pause stands), so the note never promises a resume the tick cannot make.
+            let modules = app.modules.read().await.clone();
+            let paused = crate::reclaim::admission_paused(app).await || crate::providers::quota_status(app).await.paused;
+            // Resolved before the admission read: `org_settings` reads the orgs file with blocking IO.
+            let org_settings = app.org_settings(&x.org);
+            let note = {
+                let sessions = app.sessions.read().await;
+                crate::queue::restore_line_note(
+                    &sessions,
+                    &x,
+                    orgs::global_max_parallel(&modules) as usize,
+                    orgs::org_max_parallel(&org_settings),
+                    crate::queue::repo_limit(&modules, &org_settings),
+                    paused,
+                )
+            };
             app.session_log(
                 id,
                 "info",
-                "answer received while suspended; it is kept on the colony and delivered when it resumes".into(),
+                format!("answer received while suspended; it is kept on the colony and delivered when it resumes; {note}"),
             )
             .await;
         }
@@ -1052,6 +1072,7 @@ mod tests {
                 schema: json!({}),
                 egress: None,
                 resume_dir: Some("/root/.claude/projects".into()),
+                loop_tools: false,
             }],
             |_| {},
         );

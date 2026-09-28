@@ -21,7 +21,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isLive, minutesAgo, orgOf, parkedLabel } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -110,7 +110,9 @@ export function SessionView({
   const showTerminal = interfaces.terminal;
   const showChat = interfaces.chat || !showTerminal;
   const split = showChat && showTerminal;
-  const waiting = state.agentState === "waiting_for_answer" || session.status === "waiting_for_answer";
+  // An answered-waiting colony (issue #667) has had its answer already: it is queued for a slot, not waiting on you.
+  const waiting =
+    (state.agentState === "waiting_for_answer" || session.status === "waiting_for_answer") && !isAnsweredWaiting(session);
   const attention = session.attention ?? null;
   // The stack, resolved against the full colony list: a parent that has aged out of the list reads
   // as the raw id rather than a crash, and the children count is why a blocked review is explained.

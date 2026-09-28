@@ -559,9 +559,15 @@ absent for a plain launch.
 only reason and path this build writes are the two shown; `snapshot` is what a real VM memory
 snapshot would carry, always `null` today. `agent_session` is the runner's own conversation id
 from the `agent_session` event (§2), what a resumed boot continues. `pending_answer` holds an
-answer that arrived while the colony was suspended, `{question_id, prompt}`: persisted before the
-answer is acknowledged and cleared only once a boot has delivered it, so a failed boot or a
-mothership restart never loses it. All three are absent on a colony that has never been suspended.
+answer that arrived while the colony was suspended, `{question_id, prompt, answered_at?}`:
+persisted before the answer is acknowledged and cleared only once a boot has delivered it, so a
+failed boot or a mothership restart never loses it. `answered_at` (RFC 3339) is when the answer
+arrived, and is left out of records saved before answers kept one — those restore by the
+suspension's own time. A colony with `suspended` and `pending_answer` both set, status still
+`waiting_for_answer`, is answered and waiting for a slot ([#667]): no new status is invented for
+it, restores take such colonies in answer order ahead of fresh launches, and the cockpit shows
+"Answered · resumes when a slot frees" with the colony's place in line (its rank among the
+answered ones by that same order). All three are absent on a colony that has never been suspended.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never
@@ -3078,6 +3084,9 @@ A loop's colony emits two runner events (§2), acted on only for colonies whose 
 
 `loop_next` sets a self-paced loop's `next_run_at` to now + `delay_minutes` (clamped to 15–1440); a
 fixed loop only notes it. `loop_stop` disables the loop and records `ended_reason: "stopped by the
-colony: <reason>"`. The runner offers `mcp__colonizer_loop__loop_stop` when the mothership sets `COLONIZER_LOOP=true`, and
-`mcp__colonizer_loop__loop_next` only when it also sets `COLONIZER_LOOP_SELF_PACED=true`; subagents are
-refused. A self-paced loop whose colony never calls `loop_next` runs again a day later.
+colony: <reason>"`. Which runner offers the tools is the module's `loop_tools` manifest flag
+([loops.md](loops.md)): Claude Code serves them as `mcp__colonizer_loop__loop_stop` when the
+mothership sets `COLONIZER_LOOP=true`, and `mcp__colonizer_loop__loop_next` only when it also sets
+`COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build and OpenCode runners
+gate the same two tools on the same env under their own names. A self-paced loop whose colony never
+calls `loop_next` runs again a day later.
