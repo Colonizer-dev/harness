@@ -1,7 +1,7 @@
 //! The `colonizer` command line, built on clap: the commands that run against this machine
 //! (`version`, `update`, `open`, `login-item`, `telemetry`), and the client commands that drive a
 //! mothership already running somewhere — here or across a tailnet (`launch`, `list`, `status`,
-//! `logs`, `diff`, `ask`, `answer`, `stop`, `resume`, `pr`, `map`, `token`, `mcp`).
+//! `logs`, `diff`, `ask`, `answer`, `stop`, `resume`, `pr`, `map`, `loop`, `token`, `mcp`).
 //!
 //! With no subcommand at all the binary starts the mothership, exactly as it always has.
 //!
@@ -10,10 +10,11 @@
 
 use crate::{Settings, auth, util};
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, FixedOffset};
 use clap::{ArgAction, CommandFactory as _, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -75,7 +76,7 @@ Exit codes:
   1  error: the mothership is unreachable, refused, or something else went wrong
   2  usage: the arguments name no command this build knows
   3  unauthorized or forbidden: the token is missing, unknown (401) or not allowed (403)
-  4  not found: no such colony or token (404)
+  4  not found: no such colony, loop or token (404)
   5  conflict (409), or `ask`/`answer` on a colony that is not asking anything
   6  a launch cap was refused (429)
 
@@ -194,6 +195,12 @@ enum Command {
         #[arg(long, value_enum)]
         scope: Option<McpScope>,
     },
+    /// Manage loops: saved prompts that launch a colony on a schedule — the cockpit's Loops page
+    /// from a terminal. `colonizer loop create --help` shows the cadence grammar
+    Loop {
+        #[command(subcommand)]
+        command: LoopCommand,
+    },
     /// Manage the mothership's scoped API tokens (the owner token only)
     Token {
         #[command(subcommand)]
@@ -275,6 +282,81 @@ impl TokenScope {
             Self::Read => "read",
             Self::Operate => "operate",
             Self::Launch => "launch",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+enum LoopCommand {
+    /// List every loop this token may see: id, name, repository, cadence, state and next run, in your local time.
+    List,
+    /// Create a loop: a saved prompt on a repository that launches a colony on a schedule
+    ///
+    /// The cadence takes `30m`/`2h`, `7d`, `14d@03:00`, `daily@09:00`, `weekly@mon@09:00`,
+    /// `monthly@15@09:00` or `self`; clock times are your local time, stored UTC. `--kind map`
+    /// refreshes the architecture map instead of running the prompt.
+    Create {
+        /// The repository to run on, as owner/repo; owner/* for a map loop covers every repository of the org
+        #[arg(value_name = "OWNER/REPO")]
+        repo: String,
+        /// When it runs — see above for the grammar
+        #[arg(value_name = "CADENCE")]
+        cadence: String,
+        /// A name that says what it is for ("Triage new issues"); the lists show it
+        #[arg(long)]
+        name: String,
+        /// What each run should do
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Read the prompt from a file (`-` reads stdin) instead of --prompt
+        #[arg(long, value_name = "PATH")]
+        prompt_file: Option<PathBuf>,
+        /// What a run does: colony (the prompt) or map (refresh the architecture map; the prompt is not used)
+        #[arg(long, value_enum, default_value_t = LoopKindArg::Colony)]
+        kind: LoopKindArg,
+        /// Run each colony's orchestrator on this model instead of what routing would pick
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Run the colonies' subagents on this model
+        #[arg(long, value_name = "MODEL")]
+        subagent_model: Option<String>,
+        /// Open the pull request automatically once a run finishes cleanly and has written its PR description
+        #[arg(long)]
+        autopilot: bool,
+        /// Keep autopilot off: a finished run waits for you to open the pull request
+        #[arg(long, conflicts_with = "autopilot")]
+        no_autopilot: bool,
+        /// End the loop after this many runs
+        #[arg(long)]
+        max_runs: Option<u32>,
+        /// Create it paused: nothing runs until `loop start`
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Start the loop's next run now, whatever its schedule; while a run is live this is a conflict (exit 5)
+    Run { id: String },
+    /// Pause a loop: its settings are kept, and nothing runs until `loop start`
+    Stop { id: String },
+    /// Enable a paused or ended loop again; the next run is booked from its cadence
+    Start { id: String },
+    /// Delete a loop. Its past colonies stay.
+    Delete { id: String },
+}
+
+/// What a loop's runs do, as `--kind` spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum LoopKindArg {
+    /// A colony working from the prompt (the default)
+    Colony,
+    /// An architecture-map refresh; the prompt is not used
+    Map,
+}
+
+impl LoopKindArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Colony => "colony",
+            Self::Map => "map",
         }
     }
 }
@@ -424,6 +506,19 @@ impl Machine {
             .http
             .delete(self.url(path))
             .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| Fail::Transport(anyhow::anyhow!("no mothership answering on {}: {e}", self.base)))?;
+        Self::body(response).await
+    }
+
+    /// PUT with a JSON body, expecting one back: the loops edit route replaces the whole loop.
+    async fn put(&self, path: &str, body: &Value) -> Result<Value, Fail> {
+        let response = self
+            .http
+            .put(self.url(path))
+            .bearer_auth(&self.token)
+            .json(body)
             .send()
             .await
             .map_err(|e| Fail::Transport(anyhow::anyhow!("no mothership answering on {}: {e}", self.base)))?;
@@ -1065,6 +1160,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             })
             .await
         }
+        Command::Loop { command } => loop_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
     }
 }
@@ -1172,6 +1268,382 @@ fn limit_note(token: &Value) -> String {
         list(token["orgs"].as_array(), "*"),
         list(token["repos"].as_array(), "*")
     )
+}
+
+// ---------------------------------------------------------------------------
+// Loops: the cockpit's Loops page, driven from a terminal.
+// ---------------------------------------------------------------------------
+
+async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        match command {
+            LoopCommand::List => {
+                let loops = machine.get("/api/loops").await?;
+                if json {
+                    println!("{}", pretty(&loops)?);
+                    return Ok(EXIT_OK);
+                }
+                let rows = loops.as_array().cloned().unwrap_or_default();
+                // A person sees a word, a script sees an empty stdout and a 0.
+                if rows.is_empty() {
+                    eprintln!("no loops");
+                    return Ok(EXIT_OK);
+                }
+                let offset = local_offset_minutes();
+                for l in &rows {
+                    let state = if l["enabled"] == json!(true) {
+                        "enabled"
+                    } else if l["ended_reason"].is_string() {
+                        "ended"
+                    } else {
+                        "paused"
+                    };
+                    let next = l["next_run_at"]
+                        .as_str()
+                        .map(|iso| local_stamp(iso, offset))
+                        .unwrap_or_else(|| "—".into());
+                    println!(
+                        "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {}",
+                        l["id"].as_str().unwrap_or("?"),
+                        util::truncate(l["name"].as_str().unwrap_or("?"), 26),
+                        l["repo"].as_str().unwrap_or("?"),
+                        describe_cadence(&l["cadence"], offset),
+                        state,
+                        next
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+            LoopCommand::Create {
+                repo,
+                cadence,
+                name,
+                prompt,
+                prompt_file,
+                kind,
+                model,
+                subagent_model,
+                autopilot,
+                no_autopilot,
+                max_runs,
+                disabled,
+            } => {
+                let offset = local_offset_minutes();
+                let cadence = parse_cadence(&cadence, offset).map_err(anyhow::Error::msg)?;
+                let prompt = match (prompt, prompt_file) {
+                    (Some(text), None) => text,
+                    (None, Some(path)) => read_prompt(&path)?,
+                    (Some(_), Some(_)) => {
+                        return Err(Fail::Transport(anyhow::anyhow!("use --prompt or --prompt-file, not both")));
+                    }
+                    (None, None) => String::new(),
+                };
+                if kind != LoopKindArg::Map && prompt.trim().is_empty() {
+                    return Err(Fail::Transport(anyhow::anyhow!(
+                        "a colony loop needs a prompt (--prompt TEXT or --prompt-file PATH); a map loop needs neither"
+                    )));
+                }
+                if kind == LoopKindArg::Map && !prompt.trim().is_empty() {
+                    eprintln!("note: a map loop ignores the prompt; it refreshes the repository's map");
+                }
+                let body = json!({
+                    "name": name,
+                    "repo": repo,
+                    "prompt": prompt,
+                    "cadence": cadence,
+                    "kind": kind.as_str(),
+                    // This machine's offset now, the field the cockpit sends with its own saves, so
+                    // the loop's clock times can be shown in the operator's local time.
+                    "tz_offset_minutes": offset,
+                    "model": model,
+                    "subagent_model": subagent_model,
+                    // No flag at all: the server's default (on) decides.
+                    "autopilot": if autopilot { Some(true) } else if no_autopilot { Some(false) } else { None },
+                    "max_runs": max_runs,
+                    "enabled": if disabled { Some(false) } else { None },
+                });
+                let created = machine
+                    .post("/api/loops", Some(&body))
+                    .await?
+                    .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+                if json {
+                    println!("{}", pretty(&created)?);
+                } else {
+                    let when = created["next_run_at"]
+                        .as_str()
+                        .map(|iso| format!("next run {}", local_stamp(iso, offset)))
+                        .unwrap_or_else(|| "paused".into());
+                    println!(
+                        "loop {} created (\"{}\" on {}, {when})",
+                        created["id"].as_str().unwrap_or("?"),
+                        created["name"].as_str().unwrap_or("?"),
+                        created["repo"].as_str().unwrap_or("?")
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+            LoopCommand::Run { id } => {
+                let session = machine
+                    .post(&format!("/api/loops/{id}/run-now"), None)
+                    .await?
+                    .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+                if json {
+                    println!("{}", pretty(&session)?);
+                } else {
+                    println!(
+                        "colony {} started for loop {id} ({})",
+                        session["id"].as_str().unwrap_or("?"),
+                        session["status"].as_str().unwrap_or("queued")
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+            LoopCommand::Stop { id } => set_loop_enabled(&machine, &id, false, json).await,
+            LoopCommand::Start { id } => set_loop_enabled(&machine, &id, true, json).await,
+            LoopCommand::Delete { id } => {
+                let deleted = machine.delete(&format!("/api/loops/{id}")).await?;
+                if json {
+                    println!("{}", pretty(&deleted)?);
+                } else {
+                    println!("loop {id} deleted; its past colonies stay");
+                }
+                Ok(EXIT_OK)
+            }
+        }
+    })
+    .await
+}
+
+/// `loop stop`/`loop start`: the loop's own fields PUT back with `enabled` flipped — the exact edit
+/// the cockpit's switch makes, since the route replaces the whole loop. The id is found in the list
+/// first, so an unknown one reads as the 404 (exit 4) it is.
+async fn set_loop_enabled(machine: &Machine, id: &str, enabled: bool, json: bool) -> Result<i32, Fail> {
+    let loops = machine.get("/api/loops").await?;
+    let l = loops
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|l| l["id"].as_str() == Some(id))
+        .ok_or_else(|| Fail::Server {
+            status: 404,
+            message: format!("no such loop: {id}"),
+        })?;
+    let body = json!({
+        "name": l["name"],
+        "repo": l["repo"],
+        "prompt": l["prompt"],
+        "cadence": l["cadence"],
+        "kind": l["kind"],
+        "tz_offset_minutes": l["tz_offset_minutes"],
+        "model": l["model"],
+        "subagent_model": l["subagent_model"],
+        "autopilot": l["autopilot"],
+        "max_runs": l["max_runs"],
+        "end_at": l["end_at"],
+        "enabled": enabled,
+    });
+    let updated = machine.put(&format!("/api/loops/{id}"), &body).await?;
+    if json {
+        println!("{}", pretty(&updated)?);
+        return Ok(EXIT_OK);
+    }
+    // The update can end the loop again (its run limit, say), so say what the server now has.
+    let state = if updated["enabled"] == json!(true) {
+        match updated["next_run_at"].as_str() {
+            Some(at) => format!("enabled; next run {}", local_stamp(at, local_offset_minutes())),
+            None => "enabled".to_string(),
+        }
+    } else {
+        match updated["ended_reason"].as_str() {
+            Some(reason) => format!("ended: {reason}"),
+            None => "paused".to_string(),
+        }
+    };
+    println!("loop {id} {state}");
+    Ok(EXIT_OK)
+}
+
+/// The prompt from `--prompt-file`: a path, or `-` for stdin.
+fn read_prompt(path: &std::path::Path) -> Result<String, Fail> {
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        std::io::stdin()
+            .read_to_string(&mut text)
+            .map_err(|e| Fail::Transport(anyhow::anyhow!("could not read the prompt from stdin: {e}")))?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path).map_err(|e| Fail::Transport(anyhow::anyhow!("could not read {}: {e}", path.display())))
+}
+
+/// Weekday names, Monday first — the stored `weekday` counts from Monday too.
+const WEEKDAYS: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+/// This machine's current UTC offset in minutes, the field the cockpit sends with a loop so its
+/// clock times can be shown in the operator's local time.
+fn local_offset_minutes() -> i32 {
+    chrono::Local::now().offset().local_minus_utc() / 60
+}
+
+/// `hour:minute` shifted by a zone offset: the shifted `(hour, minute)` and how many whole days the
+/// shift turned the clock (a UTC 23:00 read at UTC+2 is a `+1`). Pure, so tests fix the zone.
+fn shifted_time(hour: u32, minute: u32, offset_minutes: i32) -> (u32, u32, i32) {
+    let total = hour as i32 * 60 + minute as i32 + offset_minutes;
+    let minutes = total.rem_euclid(24 * 60);
+    ((minutes / 60) as u32, (minutes % 60) as u32, total.div_euclid(24 * 60))
+}
+
+/// The cadence `loop create` takes, as the stored JSON it becomes: `30m`/`2h` (an interval in
+/// minutes), `1d`–`7d` (whole days, still an interval, like the composer's `/loop`), `14d@03:00`
+/// (every N days at a local time of day), `daily@HH:MM`, `weekly@mon…sun|0…6@HH:MM`,
+/// `monthly@1…31@HH:MM` or `self`/`self-paced`. Clock times arrive local and are stored UTC
+/// (`offset_minutes` negated here). Only the shape is checked — ranges stay the server's
+/// `Cadence::check`, whose error surfaces verbatim. Pure, so tests fix the zone.
+fn parse_cadence(spec: &str, offset_minutes: i32) -> Result<Value, String> {
+    let grammar = "try 30m, 2h, 7d, 14d@03:00, daily@09:00, weekly@mon@09:00, monthly@15@09:00 or self";
+    let time = |text: &str| -> Result<Value, String> {
+        let Some((h, m)) = text.split_once(':') else {
+            return Err(format!("\"{text}\" is not a time of day (HH:MM)"));
+        };
+        match (h.trim().parse::<u32>(), m.trim().parse::<u32>()) {
+            (Ok(h), Ok(m)) if h <= 23 && m <= 59 => {
+                let (h, m, _) = shifted_time(h, m, -offset_minutes);
+                Ok(json!({ "hour": h, "minute": m }))
+            }
+            _ => Err(format!("\"{text}\" is not a time of day (HH:MM, 00:00 to 23:59)")),
+        }
+    };
+    let weekday = |text: &str| -> Result<u32, String> {
+        let names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        let t = text.trim().to_lowercase();
+        if let Some(i) = names.iter().position(|n| t.starts_with(n)) {
+            return Ok(i as u32);
+        }
+        t.parse::<u32>()
+            .map_err(|_| format!("\"{text}\" is not a weekday (mon to sun, or 0 to 6 with Monday 0)"))
+    };
+    let spec = spec.trim();
+    // A duration (`30m`, `2h`, `14d@03:00`) or a keyword (`daily@09:00`, `self`).
+    if let Some((count, unit)) = split_duration(spec) {
+        return match unit {
+            'm' | 'h' => {
+                if spec.contains('@') {
+                    return Err(format!("\"{spec}\" is not a cadence: {grammar}"));
+                }
+                let minutes = count.saturating_mul(if unit == 'h' { 60 } else { 1 });
+                Ok(json!({ "every": "interval", "minutes": minutes }))
+            }
+            // An anchored every-N-days cadence, whatever the count; up to a week a bare `Nd` stays
+            // an interval, and past one the time of day is what makes it anchored instead.
+            'd' => match spec.split_once('@') {
+                Some((_, t)) => {
+                    let at = time(t.trim())?;
+                    Ok(json!({ "every": "every_days", "days": count, "hour": at["hour"], "minute": at["minute"] }))
+                }
+                None if count <= 7 => Ok(json!({ "every": "interval", "minutes": count.saturating_mul(24 * 60) })),
+                None => Err(format!("{count}d is past a week; name the time of day: {count}d@09:00")),
+            },
+            _ => Err(format!("\"{spec}\" is not a cadence: {grammar}")),
+        };
+    }
+    let (word, rest) = match spec.split_once('@') {
+        Some((w, r)) => (w.trim().to_lowercase(), Some(r.trim())),
+        None => (spec.to_lowercase(), None),
+    };
+    match (word.as_str(), rest) {
+        ("self" | "self-paced" | "self_paced", None) => Ok(json!({ "every": "self_paced" })),
+        ("daily", Some(t)) => {
+            let at = time(t)?;
+            Ok(json!({ "every": "daily", "hour": at["hour"], "minute": at["minute"] }))
+        }
+        ("weekly", Some(t)) => {
+            let Some((day, t)) = t.split_once('@') else {
+                return Err("weekly needs a day and a time: weekly@mon@09:00".to_string());
+            };
+            let at = time(t)?;
+            Ok(json!({ "every": "weekly", "weekday": weekday(day)?, "hour": at["hour"], "minute": at["minute"] }))
+        }
+        ("monthly", Some(t)) => {
+            let Some((day, t)) = t.split_once('@') else {
+                return Err("monthly needs a day and a time: monthly@15@09:00".to_string());
+            };
+            let at = time(t)?;
+            let day = day
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| format!("\"{}\" is not a day of the month", day.trim()))?;
+            Ok(json!({ "every": "monthly", "day": day, "hour": at["hour"], "minute": at["minute"] }))
+        }
+        _ => Err(format!("\"{spec}\" is not a cadence: {grammar}")),
+    }
+}
+
+/// `30m` → `(30, 'm')`, `14d` (also `14d@03:00`) → `(14, 'd')`: a count and one of the composer's
+/// unit spellings (m/min/minute(s), h/hr/hour(s), d/day(s)), case-insensitive. `None` for anything
+/// else, so `daily@09:00` falls through to the keyword forms. The count fits `u64`; range checks
+/// are the server's.
+fn split_duration(spec: &str) -> Option<(u64, char)> {
+    let base = spec.split('@').next()?;
+    let digits: String = base.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let count = digits.parse().ok()?;
+    match base[digits.len()..].trim().to_lowercase().as_str() {
+        "m" | "min" | "mins" | "minute" | "minutes" => Some((count, 'm')),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some((count, 'h')),
+        "d" | "day" | "days" => Some((count, 'd')),
+        _ => None,
+    }
+}
+
+/// A stored cadence in words for `loop list`, its clock times moved into the viewer's local time,
+/// the way the cockpit's Loops page shows them.
+fn describe_cadence(cadence: &Value, offset_minutes: i32) -> String {
+    let field = |name: &str| cadence[name].as_u64().unwrap_or(0) as u32;
+    let at = |h: u32, m: u32| {
+        let (h, m, _) = shifted_time(h, m, offset_minutes);
+        format!("{h:02}:{m:02}")
+    };
+    match cadence["every"].as_str() {
+        Some("interval") => {
+            let minutes = cadence["minutes"].as_u64().unwrap_or(0);
+            let (n, unit) = if minutes > 0 && minutes.is_multiple_of(24 * 60) {
+                (minutes / (24 * 60), "day")
+            } else if minutes > 0 && minutes.is_multiple_of(60) {
+                (minutes / 60, "hour")
+            } else {
+                (minutes, "minute")
+            };
+            format!("every {n} {unit}{}", if n == 1 { "" } else { "s" })
+        }
+        Some("daily") => format!("every day at {}", at(field("hour"), field("minute"))),
+        Some("weekly") => {
+            let (h, m, days) = shifted_time(field("hour"), field("minute"), offset_minutes);
+            let weekday = (field("weekday") as i32 + days).rem_euclid(7) as usize;
+            format!("every {} at {h:02}:{m:02}", WEEKDAYS[weekday])
+        }
+        Some("monthly") => format!(
+            "every month on day {} at {}",
+            field("day"),
+            at(field("hour"), field("minute"))
+        ),
+        Some("every_days") => format!("every {} days at {}", field("days"), at(field("hour"), field("minute"))),
+        Some("self_paced") => "self-paced".to_string(),
+        _ => format!("{cadence}"),
+    }
+}
+
+/// A stored UTC timestamp as a short local `%Y-%m-%d %H:%M`, for the list's and a run's next-run
+/// note. A timestamp this build cannot read prints as itself.
+fn local_stamp(iso: &str, offset_minutes: i32) -> String {
+    let zone = FixedOffset::east_opt(offset_minutes * 60);
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .zip(zone)
+        .map(|(at, zone)| at.with_timezone(&zone).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| iso.to_string())
 }
 
 /// The client-side `--org`/`--status` filters of `list`: everything the mothership already sent
@@ -1489,6 +1961,33 @@ mod tests {
             &["pr", "abc123"][..],
             &["map", "acme/app"][..],
             &["map", "acme/app", "--find", "login"][..],
+            &["loop", "list"][..],
+            &[
+                "loop",
+                "create",
+                "acme/app",
+                "--name",
+                "Triage",
+                "--prompt",
+                "Triage new issues",
+                "daily@09:00",
+            ][..],
+            &[
+                "loop",
+                "create",
+                "acme/app",
+                "--name",
+                "Maps",
+                "--kind",
+                "map",
+                "--max-runs",
+                "6",
+                "14d@03:00",
+            ][..],
+            &["loop", "run", "loop_x1"][..],
+            &["loop", "stop", "loop_x1"][..],
+            &["loop", "start", "loop_x1"][..],
+            &["loop", "delete", "loop_x1"][..],
             &["mcp"][..],
             &["mcp", "--scope", "launch"][..],
             &["token", "list"][..],
@@ -1865,5 +2364,140 @@ mod tests {
             pending_question(&machine, "zzz").await.unwrap_err().exit_code(),
             EXIT_NOT_FOUND
         );
+    }
+
+    // -- Loops ------------------------------------------------------------------
+
+    /// The cadence grammar parses into the shapes the stored `Cadence` takes, with local clock
+    /// times moved to UTC (here UTC+2); ranges stay the server's business.
+    #[test]
+    fn the_cadence_grammar_parses_into_the_stored_shapes() {
+        let at = |spec: &str| parse_cadence(spec, 120).unwrap();
+        assert_eq!(at("30m"), json!({ "every": "interval", "minutes": 30 }));
+        assert_eq!(
+            at("2H"),
+            json!({ "every": "interval", "minutes": 120 }),
+            "units read in any case"
+        );
+        assert_eq!(at("7d"), json!({ "every": "interval", "minutes": 7 * 24 * 60 }));
+        assert_eq!(
+            at("daily@09:00"),
+            json!({ "every": "daily", "hour": 7, "minute": 0 }),
+            "local 09:00 is 07:00 UTC"
+        );
+        // The shift wraps over midnight: 01:00 at UTC+2 is 23:00 UTC the day before.
+        assert_eq!(at("daily@01:00"), json!({ "every": "daily", "hour": 23, "minute": 0 }));
+        assert_eq!(
+            at("weekly@mon@09:00"),
+            json!({ "every": "weekly", "weekday": 0, "hour": 7, "minute": 0 })
+        );
+        assert_eq!(
+            at("weekly@3@09:00"),
+            json!({ "every": "weekly", "weekday": 3, "hour": 7, "minute": 0 }),
+            "a numeric weekday counts from Monday, like the stored cadence"
+        );
+        assert_eq!(
+            at("monthly@15@09:00"),
+            json!({ "every": "monthly", "day": 15, "hour": 7, "minute": 0 })
+        );
+        assert_eq!(
+            at("14d@03:00"),
+            json!({ "every": "every_days", "days": 14, "hour": 1, "minute": 0 })
+        );
+        assert_eq!(at("Self-paced"), json!({ "every": "self_paced" }));
+        // The interval's 15-minute floor is the server's check, not the parser's.
+        assert_eq!(parse_cadence("5m", 0).unwrap(), json!({ "every": "interval", "minutes": 5 }));
+        for bad in [
+            "",
+            "hourly",
+            "daily",
+            "daily@25:00",
+            "weekly@mon",
+            "weekly@nod@09:00",
+            "14d",
+            "2h@09:00",
+        ] {
+            assert!(parse_cadence(bad, 0).is_err(), "{bad:?} should not parse");
+        }
+    }
+
+    /// `loop list` describes a cadence in words with its clock times in the viewer's zone.
+    #[test]
+    fn a_cadence_describes_itself_in_local_words() {
+        assert_eq!(
+            describe_cadence(&json!({ "every": "interval", "minutes": 90 }), 0),
+            "every 90 minutes"
+        );
+        assert_eq!(
+            describe_cadence(&json!({ "every": "interval", "minutes": 1440 }), 0),
+            "every 1 day"
+        );
+        assert_eq!(
+            describe_cadence(&json!({ "every": "daily", "hour": 7, "minute": 0 }), 120),
+            "every day at 09:00"
+        );
+        assert_eq!(
+            describe_cadence(&json!({ "every": "weekly", "weekday": 0, "hour": 23, "minute": 0 }), 120),
+            "every Tuesday at 01:00",
+            "a UTC evening is the next day east of it"
+        );
+        assert_eq!(describe_cadence(&json!({ "every": "self_paced" }), 0), "self-paced");
+    }
+
+    /// The next run prints as a short local timestamp; an unreadable one prints as itself.
+    #[test]
+    fn the_next_run_prints_as_a_local_stamp() {
+        assert_eq!(local_stamp("2026-09-29T07:30:00Z", 120), "2026-09-29 09:30");
+        assert_eq!(local_stamp("not a timestamp", 0), "not a timestamp");
+    }
+
+    /// `loop stop` reads the loop's fields back and PUTs them with `enabled: false` — the exact
+    /// edit the cockpit's switch makes — and an unknown id is a 404 (exit 4), not a silent ok.
+    #[tokio::test]
+    async fn stop_puts_the_loops_own_fields_back_disabled() {
+        use axum::{Json, Router, routing::get, routing::put};
+        use std::sync::{Arc, Mutex};
+
+        let sent = Arc::new(Mutex::new(None));
+        let saved = sent.clone();
+        let app = Router::new()
+            .route(
+                "/api/loops",
+                get(|| async {
+                    Json(json!([{
+                        "id": "loop_a", "name": "Triage", "repo": "acme/web", "prompt": "Triage new issues",
+                        "cadence": {"every": "daily", "hour": 7, "minute": 0}, "kind": "colony",
+                        "tz_offset_minutes": 120, "autopilot": true, "enabled": true,
+                    }]))
+                }),
+            )
+            .route(
+                "/api/loops/loop_a",
+                put(move |Json(body): Json<Value>| {
+                    let saved = saved.clone();
+                    async move {
+                        *saved.lock().unwrap() = Some(body);
+                        Json(json!({ "id": "loop_a", "enabled": false, "ended_reason": null }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let machine = Machine::for_tests(format!("http://{addr}"), "col".into());
+        assert_eq!(set_loop_enabled(&machine, "loop_a", false, false).await.unwrap(), EXIT_OK);
+        let body = sent.lock().unwrap().take().unwrap();
+        assert_eq!(body["name"], json!("Triage"));
+        assert_eq!(body["repo"], json!("acme/web"));
+        assert_eq!(body["prompt"], json!("Triage new issues"));
+        assert_eq!(body["cadence"], json!({"every": "daily", "hour": 7, "minute": 0}));
+        assert_eq!(body["kind"], json!("colony"));
+        assert_eq!(body["tz_offset_minutes"], json!(120));
+        assert_eq!(body["autopilot"], json!(true));
+        assert_eq!(body["enabled"], json!(false), "the only change a pause makes");
+
+        let err = set_loop_enabled(&machine, "loop_z", false, false).await.unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_NOT_FOUND, "an unknown loop reads as not-found");
     }
 }
