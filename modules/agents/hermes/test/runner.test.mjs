@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, disabledToolsets, hermesConfig, probeHermes, resolveModel, runAgent } from '../runner.mjs';
+import { AsyncQueue, backendRefusal, DISABLED_TOOLSETS, disabledToolsets, hermesConfig, MCP_TIMEOUT_SECS, probeHermes, resolveModel, runAgent } from '../runner.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STUB = join(HERE, 'fake-hermes.mjs');
@@ -37,8 +37,17 @@ function harness(env = {}) {
     ...(env.FAKE_HERMES_MODE ? { FAKE_HERMES_MODE: env.FAKE_HERMES_MODE } : {}),
     ...(env.COLONIZER_HERMES_TURN_TIMEOUT_SECS ? { COLONIZER_HERMES_TURN_TIMEOUT_SECS: env.COLONIZER_HERMES_TURN_TIMEOUT_SECS } : {}),
   };
-  const done = runAgent({ hermes: ['node', STUB], commands, emit: (event) => events.push(event), env: childEnv, home });
-  return { home, record, events, commands, done, readRecord: () => JSON.parse(readFileSync(record, 'utf8')) };
+  let bridge = null;
+  const done = runAgent({ hermes: ['node', STUB], commands, emit: (event) => events.push(event), env: childEnv, home, onReady: (b) => (bridge = b) });
+  /** POSTs to the runner's loopback bridge the way the colonizer MCP server would (polls for the
+   * bridge, which runAgent brings up asynchronously before its first reply). */
+  const askBridge = async (path, body) => {
+    const deadline = Date.now() + 5000;
+    while (!bridge && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    const res = await fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) });
+    return res.json();
+  };
+  return { home, record, events, commands, done, askBridge, readRecord: () => JSON.parse(readFileSync(record, 'utf8')) };
 }
 
 const waitFor = (events, predicate, what, timeoutMs = 15_000) =>
@@ -162,6 +171,7 @@ test('the written config pins the local backend, switches Hermes extras off, and
   assert.equal(config.skills.write_approval, true);
   assert.deepEqual(config.auxiliary.background_review, { enabled: false });
   assert.deepEqual(config.agent.disabled_toolsets, DISABLED_TOOLSETS);
+  assert.ok(DISABLED_TOOLSETS.includes('clarify'), "Hermes' own clarify toolset stays off: ask_user replaces it");
   assert.deepEqual(config.model, { provider: 'colonizer-deepseek', default: 'deepseek-flash' });
   assert.deepEqual(config.providers, {
     'colonizer-deepseek': {
@@ -170,7 +180,18 @@ test('the written config pins the local backend, switches Hermes extras off, and
       extra_headers: { 'x-colonizer-colony': 'tok-1' },
     },
   });
+  // The colonizer MCP server rides in the config: the same mcp.mjs the other modules vendor, with
+  // only the bridge coordinates in its env (mcp.mjs's gating hides the findings, memory and loop
+  // tools) and a timeout that can hold an ask open for a human.
+  const colonizer = config.mcp_servers.colonizer;
+  assert.equal(colonizer.command, process.execPath);
+  assert.deepEqual(colonizer.args, [join(HERE, '..', 'mcp.mjs')]);
+  assert.match(colonizer.env.COLONIZER_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(colonizer.env.COLONIZER_BRIDGE_TOKEN, /^[0-9a-f]{32}$/);
+  assert.deepEqual(Object.keys(colonizer.env).sort(), ['COLONIZER_BRIDGE_TOKEN', 'COLONIZER_BRIDGE_URL']);
+  assert.equal(colonizer.timeout, MCP_TIMEOUT_SECS);
   assert.deepEqual(hermesConfig([]).agent.disabled_toolsets, DISABLED_TOOLSETS);
+  assert.equal(hermesConfig([], null).mcp_servers, undefined, 'no mcpServers argument writes no mcp_servers block');
   h.commands.push({ type: 'shutdown' });
   await h.done;
 });
@@ -294,10 +315,70 @@ test('a turn that exceeds the timeout is terminated with an error', async () => 
   await h.done;
 });
 
-test('an answer command warns: headless Hermes has no question channel', async () => {
+test('ask_user asks the user over the bridge, and the answer finishes the turn', async () => {
+  const h = harness({ FAKE_HERMES_MODE: 'ask' });
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'restart the service?' });
+  const question = await waitFor(h.events, (e) => e.type === 'question', 'the question event');
+  assert.equal(question.question_id, 'q-1');
+  assert.deepEqual(question.questions, [
+    {
+      question: 'Proceed with the restart?',
+      header: 'Restart',
+      multi_select: false,
+      options: [
+        { label: 'Yes', description: 'restart now', preview: null },
+        { label: 'No', description: '', preview: null },
+      ],
+    },
+  ]);
+  await waitFor(h.events, (e) => e.type === 'status' && e.state === 'waiting_for_answer', 'the waiting-for-answer status');
+
+  h.commands.push({ type: 'answer', question_id: 'q-1', answers: { Restart: 'Yes' }, response: 'go ahead' });
+  const answered = await waitFor(h.events, (e) => e.type === 'question_answered', 'the question_answered event');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: 'q-1', answers: { Restart: 'Yes' }, response: 'go ahead' });
+  const end = await waitFor(h.events, (e) => e.type === 'turn_end', 'the turn to finish');
+  assert.equal(end.is_error, false);
+  assert.match(end.result, /^Answered: /);
+  assert.equal(count(h.events, 'tool_call'), 0, 'a question is never also a tool_call (§2)');
+  assert.equal(count(h.events, 'tool_result'), 0);
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  assertConforms(h.events);
+});
+
+test('an interrupt during a parked ask cancels it, and the model sees the cancellation', async () => {
+  const h = harness({ FAKE_HERMES_MODE: 'ask', FAKE_HERMES_IGNORE_SIGTERM: '1' });
+  h.commands.push({ type: 'user_message', id: 'initial', text: 'restart the service?' });
+  await waitFor(h.events, (e) => e.type === 'question', 'the question event');
+  h.commands.push({ type: 'interrupt' });
+  const end = await waitFor(h.events, (e) => e.type === 'turn_end', 'the turn to end');
+  assert.equal(end.is_error, false, 'the SIGTERM-immune fake lives on to finish its turn with the cancellation');
+  assert.match(end.result, /cancelled/);
+  assert.ok(h.events.some((e) => e.type === 'log' && /interrupt: terminating/.test(e.message)));
+  assert.equal(h.events.some((e) => e.type === 'question_answered'), false, 'a cancelled ask is never an answer');
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  assertConforms(h.events);
+});
+
+test('an answer without an open question warns', async () => {
   const h = harness();
-  h.commands.push({ type: 'answer', question_id: 'q1', answers: {}, response: null });
-  await waitFor(h.events, (e) => e.type === 'log' && /question channel/.test(e.message), 'warn log');
+  h.commands.push({ type: 'answer', question_id: 'q-404', answers: {}, response: null });
+  const logged = await waitFor(h.events, (e) => e.type === 'log' && /no open question/.test(e.message), 'the warn log');
+  assert.equal(logged.level, 'warn');
+  h.commands.push({ type: 'shutdown' });
+  await h.done;
+  assertConforms(h.events);
+});
+
+test('the bridge parks /ask until answer, and cancelAll releases a parked ask as cancelled', async () => {
+  const h = harness();
+  const parked = h.askBridge('/ask', { questions: [{ question: 'Which color?', header: 'Paint', multiSelect: true, options: [{ label: 'Blue', description: 'the calm one' }] }] });
+  const question = await waitFor(h.events, (e) => e.type === 'question', 'the question event');
+  assert.deepEqual(question.questions, [{ question: 'Which color?', header: 'Paint', multi_select: true, options: [{ label: 'Blue', description: 'the calm one', preview: null }] }]);
+  assert.equal(await Promise.race([parked.then(() => 'settled'), new Promise((r) => setTimeout(() => r('parked'), 100))]), 'parked', 'the ask holds until an answer or a cancel');
+  h.commands.push({ type: 'answer', question_id: question.question_id, answers: { Paint: 'Blue' }, response: null });
+  assert.deepEqual(await parked, { answers: { Paint: 'Blue' }, response: null }, 'the answer command releases the parked HTTP response');
   h.commands.push({ type: 'shutdown' });
   await h.done;
   assertConforms(h.events);
