@@ -177,6 +177,7 @@ pub(crate) fn app_that_can_create(root: &std::path::Path) -> Shared {
         dir,
         entry: vec!["run".into()],
         needs_claude: false,
+        requires: crate::modules::Requires::default(),
         schema: json!({}),
         egress: None,
         resume_dir: None,

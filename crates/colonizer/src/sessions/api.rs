@@ -1048,6 +1048,7 @@ mod tests {
                 dir: std::path::PathBuf::from("/opt/colonizer/agent"),
                 entry: vec!["runner.mjs".into()],
                 needs_claude: false,
+                requires: crate::modules::Requires::default(),
                 schema: json!({}),
                 egress: None,
                 resume_dir: Some("/root/.claude/projects".into()),

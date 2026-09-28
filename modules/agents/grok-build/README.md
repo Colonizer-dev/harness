@@ -106,9 +106,9 @@ contract tests.
 - Mothership-side xAI key push into boot secrets (`boot.rs`) and provider-gateway routing for
   `xai-grok` models; today only a user-added `XAI_API_KEY` colony secret works.
 - Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`, so a
-  colony does not depend on grok being preinstalled in the image.
-- Generic `requires.binaries` (and pins) preflight in Rust, so the harness fails a boot before the
-  runner has to.
+  colony does not depend on grok being preinstalled in the image. (The harness now refuses a launch
+  or boot on a stock preset image, where grok is never present; a custom image is still only
+  checked by the runner's in-VM preflight.)
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
