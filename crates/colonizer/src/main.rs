@@ -57,6 +57,7 @@ mod maps;
 mod mcp;
 mod mem0;
 mod memory;
+mod merge_train;
 mod mesh;
 mod modules;
 mod notify;

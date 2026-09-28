@@ -61,7 +61,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `codex`, `pi`, `hermes` and `grok-build` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
-| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
+| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done; its optional merge train squash-merges open colony pull requests afterward (see [Merge train](#merge-train)) |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
@@ -326,6 +326,47 @@ whose contract — atomic replaces, at-least-once appends that readers deduplica
 is what will let the per-session files under `data/sessions/<id>/` move onto other backends in follow-ups. That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
+
+### Merge train
+
+The publish module's optional merge train takes over after a pull request opens: a background tick, about
+every two minutes, walks every colony whose pull request is still open and squash-merges it — per
+repository, at most one merge per tick. It is off by default and separate from the `automerge` setting,
+which merges a fix colony's pull request after a review passes.
+
+Five `publish` settings drive it (all off/empty by default, shown in the cockpit's Settings form):
+
+- `merge_train` — `off` (the install default) or `on`.
+- `merge_train_overrides` — comma-separated `owner=on|off` or `owner/repo=on|off`; a repo entry beats an
+  org entry beats `merge_train`.
+- `merge_train_deny_orgs` — comma-separated orgs the train never merges in, whatever the overrides say —
+  how a production organisation stays out.
+- `merge_train_authors` — comma-separated GitHub logins or emails allowed as commit authors; empty means
+  the identity Colonizer publishes as. A pull request with any commit by another author is refused.
+- `merge_train_forbid` — comma-separated case-insensitive substrings; a pull request whose commit messages
+  contain one — a forbidden attribution such as `Co-Authored-By: …`, for instance — is refused.
+
+A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
+no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
+branch's own CI is green. The merge is a squash with `--match-head-commit` that deletes the branch — never
+a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
+to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
+for exactly those readings. The one case the watcher never sees — a pull request whose head does not
+contain the current base tip even when GitHub reports CLEAN (it does when the repository does not require
+up-to-date branches and the pull request's CI ran on an older main) — the train brings up to date itself
+through the same path, once per base commit under the repository's worktree lock, and it merges on a later
+tick once the fresh CI is green. After a merge the train
+re-reads the other pull requests' mergeability until GitHub stops reporting UNKNOWN, so the next tick sees
+the tree as it now is. Stacked pull requests work: the parent merges without deleting its branch (deleting
+it would close the child for good), the publish watcher retargets the child to the base branch, and the
+child merges on a later tick. Every merge and every skip — with its reason, logged when the reason
+changes — lands in the colony's session log and the activity feed, and the whole train honours the
+external-writes kill switch.
+
+`GET /api/merge-train` (read scope for API tokens; §4 in [protocol.md](protocol.md)) reports the train per
+repository — state, base branch and its CI verdict, the last merge, and each open pull request as
+`next`, `waiting_ci`, `needs_rebase`, `waiting`, `skipped` (with the reason) or `merged`. The cockpit shows
+one Merge-train row per repository: next up, waiting on CI, needs rebase, skipped and why.
 
 ## Per-colony limits
 

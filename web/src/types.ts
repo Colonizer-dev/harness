@@ -2145,3 +2145,33 @@ export interface ActivityQuery {
   repo?: string;
   q?: string;
 }
+
+/** One colony's pull request and where it stands in its repository's merge train (issue #671). */
+export interface MergeTrainPr {
+  session: string;
+  pr_url: string;
+  title: string;
+  status: "next" | "waiting_ci" | "needs_rebase" | "waiting" | "skipped" | "merged";
+  /** Why the pull request stands where it does — always set, for every status. */
+  reason: string;
+}
+
+/** Per-repository merge-train state: the base branch's CI, the train's last merge and the queued pull requests. */
+export interface MergeTrainRepo {
+  repo: string;
+  /** `on` while the train drives the repository, `off` before opt-in, `denied` when the org sits on `merge_train_deny_orgs`. */
+  state: "on" | "off" | "denied";
+  /** The repository's default branch; null when the train is off or denied here, or it could not be read. */
+  base: string | null;
+  base_ci: "green" | "pending" | "failing" | "unknown";
+  /** When the mothership last looked; null before the first pass. */
+  checked_at: string | null;
+  /** The train's most recent merge; null until it merged one. */
+  last_merge: { pr_url: string; at: string } | null;
+  prs: MergeTrainPr[];
+}
+
+/** GET /api/merge-train (issue #671): empty until a repository opts in. */
+export interface MergeTrainStatus {
+  repos: MergeTrainRepo[];
+}

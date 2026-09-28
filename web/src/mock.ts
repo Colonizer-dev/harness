@@ -3633,6 +3633,8 @@ export function createMockApi(): Api {
       return clone(run);
     },
     loops: () => later(() => loopList.map(clone)),
+    // The mock has no train driving anything; an empty answer keeps the cockpit block hidden.
+    mergeTrain: () => later(() => ({ repos: [] })),
     createLoop: async (body) => {
       await sleep(200);
       const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
