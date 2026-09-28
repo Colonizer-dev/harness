@@ -1,7 +1,8 @@
-// Direct tests for mcp.mjs, the colonizer MCP stdio server: the tool list's gating, memory_search
-// against a mounted notes dir, the loop tools' bridge forwarding and clamp, and wait's refusals,
-// match and timeout-with-tail. The end-to-end path (bridge forwarding, the runner's -c
-// registration) is covered in runner.test.mjs.
+// Direct tests for mcp.mjs, the colonizer MCP stdio server: the tool list's gating (ask_user is
+// always listed; the rest follows the switches), ask_user's forwarding and cancelled answer,
+// memory_search against a mounted notes dir, the loop tools' bridge forwarding and clamp, and
+// wait's refusals, match and timeout-with-tail. The end-to-end path (bridge forwarding, the
+// runner's -c registration) is covered in runner.test.mjs.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -16,9 +17,14 @@ function startServer(env) {
   // A minimal env on purpose: a colony shell can carry COLONIZER_FINDINGS/COLONIZER_MEMORY_DIR.
   const child = spawn(process.execPath, [new URL('../mcp.mjs', import.meta.url).pathname], { env, stdio: ['pipe', 'pipe', 'inherit'] });
   const pending = new Map();
+  const notifications = [];
   let next = 0;
   createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => {
     const msg = JSON.parse(line);
+    if (msg.id === undefined) {
+      notifications.push(msg);
+      return;
+    }
     const waiter = pending.get(msg.id);
     if (waiter) {
       pending.delete(msg.id);
@@ -31,7 +37,7 @@ function startServer(env) {
       pending.set(id, resolve);
       child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
-  return { child, call, stop: () => child.kill('SIGKILL') };
+  return { child, call, notifications, stop: () => child.kill('SIGKILL') };
 }
 
 const resultText = (reply) => reply.result?.content?.[0]?.text ?? `rpc error: ${reply.error?.message ?? 'none'}`;
@@ -65,7 +71,7 @@ test('the tool list follows the switches, and memory_search reads the mounted no
   const srv = startServer({ COLONIZER_MEMORY_DIR: dir });
   try {
     assert.equal((await srv.call('initialize', {})).result.protocolVersion, '2024-11-05');
-    assert.deepEqual((await srv.call('tools/list', {})).result.tools.map((t) => t.name), ['memory_search', 'memory_propose', 'wait']);
+    assert.deepEqual((await srv.call('tools/list', {})).result.tools.map((t) => t.name), ['ask_user', 'memory_search', 'memory_propose', 'wait']);
     const hit = await srv.call('tools/call', { name: 'memory_search', arguments: { query: 'waitrooms' } });
     assert.equal(hit.result.isError, undefined);
     assert.match(resultText(hit), /\[repo\] Wait rooms \(/);
@@ -82,13 +88,13 @@ test('the tool list follows the switches, and memory_search reads the mounted no
 test('the loop tools follow the loop switches: loop_stop for a loop colony, loop_next only when it is self-paced', async () => {
   const paced = startServer({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
   try {
-    assert.deepEqual((await paced.call('tools/list', {})).result.tools.map((t) => t.name), ['loop_next', 'loop_stop', 'wait']);
+    assert.deepEqual((await paced.call('tools/list', {})).result.tools.map((t) => t.name), ['ask_user', 'loop_next', 'loop_stop', 'wait']);
   } finally {
     paced.stop();
   }
   const fixed = startServer({ COLONIZER_LOOP: 'true' });
   try {
-    assert.deepEqual((await fixed.call('tools/list', {})).result.tools.map((t) => t.name), ['loop_stop', 'wait'], 'a fixed-schedule loop gets no loop_next');
+    assert.deepEqual((await fixed.call('tools/list', {})).result.tools.map((t) => t.name), ['ask_user', 'loop_stop', 'wait'], 'a fixed-schedule loop gets no loop_next');
   } finally {
     fixed.stop();
   }
@@ -186,5 +192,34 @@ test('a growing last line is matched from its own bytes only, and non-regular fi
     assert.match(resultText(await wait({ reason: 'dir', file: dir, pattern: 'x' })), /^Could not wait: .* is a directory; only a regular file can be watched\.$/);
   } finally {
     srv.stop();
+  }
+});
+
+test('ask_user is always listed and forwards to the bridge, parking until the answer arrives', async () => {
+  const bridge = await startBridge({ answers: { Color: 'Blue' }, response: 'blue is fine' });
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: 't' });
+  try {
+    assert.equal((await srv.call('initialize', {})).result.protocolVersion, '2024-11-05');
+    assert.equal((await srv.call('tools/list', {})).result.tools[0].name, 'ask_user');
+    const ask = await srv.call('tools/call', { name: 'ask_user', arguments: { questions: [{ question: 'Color?', header: 'Paint', options: [{ label: 'Blue', description: 'the calm one' }] }] }, _meta: { progressToken: 7 } });
+    assert.deepEqual(JSON.parse(resultText(ask)), { answers: { Color: 'Blue' }, response: 'blue is fine' });
+    assert.equal(bridge.seen[0].path, '/ask');
+    assert.deepEqual(bridge.seen[0].body.questions, [{ question: 'Color?', header: 'Paint', options: [{ label: 'Blue', description: 'the calm one' }] }]);
+  } finally {
+    srv.stop();
+    await bridge.close();
+  }
+});
+
+test('a cancelled ask comes back as a tool error, not an rpc failure', async () => {
+  const bridge = await startBridge({ cancelled: true });
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: 't' });
+  try {
+    const ask = await srv.call('tools/call', { name: 'ask_user', arguments: { questions: [{ question: 'Still there?', options: [{ label: 'Yes' }] }] } });
+    assert.equal(ask.result.isError, true);
+    assert.equal(resultText(ask), 'The question was cancelled before the user answered.');
+  } finally {
+    srv.stop();
+    await bridge.close();
   }
 });
