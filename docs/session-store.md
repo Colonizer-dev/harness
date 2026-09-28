@@ -83,7 +83,8 @@ interface or a documented local-only behavior:
 The interface covers the session index and per-session files only. Everything else under the data
 dir stays where it is: git state (`worktrees/`, the bare clones in `repos/`) is referenced by
 absolute paths inside the records and is no use remotely; mesh state (`mesh/`), headroom, hunters,
-maps, memory and plugins are other modules' own stores; the top-level journals (`spend.jsonl`,
+maps, memory and plugins are other modules' own stores, and so are the log archive (`archive/`)
+and the answer and HTTP caches (`cache/`); the top-level journals (`spend.jsonl`,
 `routing.jsonl`, `provider-usage.json`, `provider-quota.json`, `redteam.json`) are outside session
 storage. Settings (`orgs.json`, `providers.json`, `modules.json`, `claude-accounts.json`) live in
 the config dir. MicroVM disks belong to microsandbox and were never in the data dir.
@@ -112,9 +113,12 @@ A failed migration leaves the source untouched and, short of that final index ch
 destination without an index; just point back, or fix the destination and run `migrate` again —
 it is a copy, not a move.
 
-There is no CLI entry point yet: this slice wires `persist_sessions`' index write through the
-default `LocalDirStore` and exercises the procedure in tests
+There is no CLI entry point yet. Two callers go through the default `LocalDirStore` today:
+`persist_sessions` (`sessions/persist.rs`) writes the index through it, and the log archive
+(`archive.rs`) reads a finished colony's files through `list_files` and `read_file`. Startup still
+reads `sessions.json` straight from disk (`app.rs`, `load_sessions`), and the per-session writes
+still use the file helpers. The migration procedure is exercised in tests
 (`store::tests::a_migration_round_trips_local_to_memory_and_back_byte_for_byte`,
 `a_dry_run_migration_counts_without_writing`, `a_migration_refuses_a_destination_that_already_holds_colonies`,
 `a_failed_migration_leaves_the_source_whole_and_the_destination_without_an_index`), with the
-reads, the per-session file writes and the command to follow.
+startup read, the per-session file writes and a command still to follow.

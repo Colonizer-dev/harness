@@ -48,9 +48,11 @@ plus `status error` with the name as `detail`:
 `api.openai.com` with it — no `codex login`, no browser (verified against 0.156.1; the upstream
 docs name it as the variable for non-interactive runs). On the same probe, `OPENAI_API_KEY` alone
 was **not** picked up by `codex exec` in a fresh `CODEX_HOME`, so the runner re-exports it to the
-child as `CODEX_API_KEY` — either secret works, but name the colony secret `CODEX_API_KEY`. Like every colony credential, the key is added in Settings →
-Secrets for host `api.openai.com`; a ChatGPT plan sign-in is still not a credential
-([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](../../docs/decisions.md)).
+child as `CODEX_API_KEY` — either variable works for the runner, but name the colony secret
+`CODEX_API_KEY`: the cockpit refuses colony secrets whose names start with `OPENAI_`, which are
+reserved for the mothership's own credentials. Like every colony credential, the key is added in the
+cockpit's Secrets view for host `api.openai.com`; a ChatGPT plan sign-in is still not a credential
+([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](../../../docs/decisions.md)).
 
 ## Nesting decisions
 
@@ -83,7 +85,8 @@ stdin prompt and env it received, and checks the happy path's events against the
 
 - The `codex` binary in the colony image: nothing fetches or stages it (see the grok-build module's
   "What remains" for the same gap); until then the preflight fails a codex colony at boot.
-- Mothership-side push of the OpenAI key into boot secrets (`sessions.rs`), like grok-build's.
+- Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
+  same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
 - Questions (`answer` is ignored), the colonizer MCP tools (memory, findings, wait), and resuming a
   codex thread across a runner restart: the thread id lives in the runner's memory and its session
   rollout in the runner's fresh `CODEX_HOME`, both gone when the colony's VM is.

@@ -828,7 +828,7 @@ async fn run_tests(
         ],
         env: Vec::new(),
         secrets: Vec::new(),
-        // The same public-internet profile a colony boots with (sessions.rs `colony_network`), so
+        // The same public-internet profile a colony boots with (`colony_network` in boot.rs), so
         // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
         // to nothing of the harness's. Left empty, msb's own default would decide instead.
         net_profiles: vec!["public".into()],

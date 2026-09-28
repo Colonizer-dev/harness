@@ -24,7 +24,9 @@ node scripts/changelog.mjs new 123 added --text '**One-line summary.** What chan
   dropped.
 
 `node scripts/changelog.mjs check` validates every fragment. CI runs it on each pull request and
-fails one that edits `CHANGELOG.md` outside a release.
+fails one that edits `CHANGELOG.md` outside a release, unless the pull request carries the
+`changelog-edit` label (for a deliberate correction to an entry already released). A code change
+with no fragment only gets a warning.
 
 ## If your branch edited CHANGELOG.md
 

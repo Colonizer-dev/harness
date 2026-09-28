@@ -5,8 +5,8 @@ working GitHub repositories in microVMs), read one's status or pending question,
 or resume it, or launch a new one. It is a client of the mothership's HTTP API — the same
 `--host` and token resolution as every CLI command, so everything [cli.md](cli.md) says about
 naming a mothership and choosing a token applies here too. The protocol travels on stdin/stdout;
-the server's own notes (one startup line naming how many tools it serves and at what scope) go to
-stderr.
+the server's own notes go to stderr: one startup line naming how many tools it serves and at what
+scope, for example `colonizer mcp: serving 6 of 10 tools at scope read`.
 
 ## The tools
 
@@ -20,11 +20,11 @@ The tool set is the token's scope, resolved once at startup from the mothership
 | `colony_question` | read | `id` | the question the colony is waiting on: `question_id`, `risk`, and the questions with their options; plain text when nothing is pending |
 | `colony_pr` | read | `id` | one sentence: the pull request URL and state (checks state when known), or that there is none yet |
 | `colony_diff` | read | `id`, `stat_only?` | everything the colony changed against its base branch: `{id, repo, base, files, added, removed, diff, truncated}`; `stat_only` omits the diff text |
-| `search_repo_map` | read | `repo`, `query` | the repository's architecture map searched for components matching the query — a label, id, type, source path, or a file under one — with the connections that touch each hit; a tool error when the repository has no map yet |
+| `search_repo_map` | read | `repo`, `query` | `{repo, revision, query, components}`: the components of the repository's architecture map matching the query — a label, id, type, source path, or a file under one — each with the connections that touch it; a tool error when the repository has no map yet |
 | `answer_colony` | operate | `id`, `answer` | a confirmation. The answer matches the pending question the way `colonizer answer` does: an option's 1-based number, its whole label, or free text |
 | `stop_colony` | operate | `id` | a confirmation; the microVM goes away, the worktree is kept for a later resume |
 | `resume_colony` | operate | `id` | a confirmation with the colony's new status |
-| `launch_colony` | launch | `repo`, `issue?`, `task?`, `model?`, `autopilot?` | `{id, status}` of the new colony |
+| `launch_colony` | launch | `repo`, `issue?`, `task?`, `model?`, `autopilot?` | `{id, status}` of the new colony. `autopilot` means the mothership opens the pull request by itself when the agent finishes cleanly; omitted, the install's setting decides. An issue another colony holds, or an epic, is refused (409): this tool cannot override those guards |
 
 ## Scopes
 
@@ -46,10 +46,17 @@ startup, `colonizer mcp` exits instead of serving a tool set that would only be 
 
 ## Installing it
 
-Claude Code:
+Claude Code, on the machine that runs the mothership (the owner token is read from the local
+install, and the session is read-only):
 
 ```sh
 claude mcp add colonizer -- colonizer mcp
+```
+
+The same, allowed to answer, stop and resume colonies:
+
+```sh
+claude mcp add colonizer -- colonizer mcp --scope operate
 ```
 
 With a scoped token in the server's environment (the flags go before the server name):

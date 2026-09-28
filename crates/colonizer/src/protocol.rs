@@ -1,5 +1,5 @@
 //! The agent event contract as a Rust type. `docs/protocol.md` §2 keeps the prose and
-//! `docs/agent-events.schema.json` the machine-readable schema for all fifteen event types; this
+//! `docs/agent-events.schema.json` the machine-readable schema for every event type; this
 //! enum is the slice of that contract the harness itself acts on (#73 item 4), and the committed
 //! fixture `modules/agents/claude-code/test/fixtures/events.jsonl` proves the runner's real output
 //! deserialises into it.

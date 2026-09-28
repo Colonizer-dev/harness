@@ -9,18 +9,24 @@ one browser origin, and cookies and storage could leak between users. The link i
 key — the relay demands the owner's sign-in before forwarding anything, and the cockpit's own auth
 still applies behind it.
 
-**Status.** This is the pinned v1 wire contract for issue #531; nothing is implemented yet. #532
-builds the relay (`services/relay`), #533 the mothership tunnel client and `/api/remote`, #534 the
-owner sign-in at the relay, #535 the cockpit settings toggle and badge, #536 the security review.
-Where this document pins something the issue text did not have — the `ready` frame, the `cancel`
-frame, the close codes, the header pair format, the 101 accept — it says so.
+**Status.** This is the pinned v1 wire contract for issue #531. It was written before the code.
+Both halves now exist on `main`: the relay (`services/relay`, #532/#534, PR #555), the mothership
+tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558), the cockpit
+switch, link and badge (#535, PR #575), and the security review
+([remote-access-review.md](remote-access-review.md), #536). The relay is not deployed, and the
+feature does not work end to end yet: the two halves do not follow this contract in several
+places, listed in [Where the code differs today](#where-the-code-differs-today). The client as
+built is described in [protocol.md §6.10](protocol.md#610-remote-access-tunnel). Where this
+document pins something the issue text did not have — the `ready` frame, the `cancel` frame, the
+close codes, the header pair format, the 101 accept — it says so.
 
 ## Install identity
 
 On first enable the mothership generates an Ed25519 key pair and stores it under
 `<config_dir>/remote/`: the directory 0700, the key file 0600, written the way `auth.rs` writes the
 api-token (through `util::write_private`, `crates/colonizer/src/util.rs:328`). The exact file names
-are #533's choice. The seed is never logged and never leaves the mothership.
+are #533's choice; it chose `<config_dir>/remote/key` (PKCS#8) and `<config_dir>/remote/state.json`
+(the switch, `install_id` and `host`). The seed is never logged and never leaves the mothership.
 
 The mothership registers the public key:
 
@@ -43,7 +49,8 @@ unpadded (DNS labels are case-insensitive). `host` is `<install_id>.my.colonizer
 mothership stores the seed and the returned `install_id`/`host` under `<config_dir>/remote/`.
 
 Disabling remote access keeps the key, so re-enabling gives the same link. A separate "forget"
-action (#535, implemented in #533) deletes it.
+action (#535, implemented in #533) deletes it. (As built, that action is `POST /api/remote/reset`,
+the cockpit's "Reset link": it mints and registers a new key in place of the old one.)
 
 **Encodings (pinned).** Every binary value on the wire — `public_key`, `nonce`, `sig`, body
 chunks, binary `ws_msg` data — is standard base64 with padding (RFC 4648 §4).
@@ -217,10 +224,10 @@ the mothership never sees relay credentials. It adds no client-identifying heade
 Today the cockpit answers to loopback only. `host_guard` (`crates/colonizer/src/server.rs`)
 rejects any `Host` that is not `localhost`, `127.0.0.1`, `[::1]`, the bind host or in
 `COLONIZER_ALLOWED_HOSTS`, then requires the per-install API token (`crates/colonizer/src/auth.rs`)
-as `Authorization: Bearer` or the `colonizer_token` cookie; cookie-authenticated writes and
-WebSocket upgrades must also carry an `Origin` that matches the `Host` header (#375,
-`server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/`, host-only, and carries no
-`Secure` today (`auth.rs:131–133`).
+as `Authorization: Bearer` or the `colonizer_token` cookie (or a scoped `col_…` API token, Bearer
+only); cookie-authenticated writes and WebSocket upgrades must also carry an `Origin` that matches
+the `Host` header (#375, `server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/` with a
+one-year `Max-Age`, host-only, and carries no `Secure` today (`auth.rs:134–136`).
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the
 cockpit auth run unchanged; the relay does not bypass either. The tunnel client marks each request
@@ -265,6 +272,13 @@ Both answer with the same body:
 
 The relay's pairing flow and the cockpit badge belong to #534/#535 and are not defined here.
 
+As built (#558), the API differs from this sketch. `GET` and `PUT /api/remote` answer
+`{"enabled", "host", "connected", "since"}` — the bare host rather than a URL, a `connected`
+boolean rather than a `state`, and no `error` field — and a third route, `POST /api/remote/reset`,
+replaces the key and the link. A failed registration is a `502` on the `PUT` and the switch stays
+off. [protocol.md §6.10](protocol.md#610-remote-access-tunnel) has the details
+(`crates/colonizer/src/remote.rs:146-160`, `:1078-1084`).
+
 ## Test vector
 
 Both implementations must agree on these exact bytes. The key is RFC 8032 §7.1 TEST 1; Ed25519 is
@@ -301,6 +315,84 @@ And the resulting hello frame:
 
 Computed with Node's `crypto.sign`; verified independently with
 `openssl pkeyutl -verify -rawin` (OpenSSL 3.0.20) and the RFC 8032 reference algorithm.
+
+## Where the code differs today
+
+The contract above is unchanged. This list records where `services/relay/src` and
+`crates/colonizer/src/remote.rs` on `main` do something else, so a reader does not take the
+contract as a description of the code. Each item needs either a code change or an explicit
+amendment to the contract; none is decided here.
+
+**Handshake**
+
+- The relay sends the nonce as base64url without padding (`randomToken(32)`,
+  `services/relay/src/tunnel.js:70`), not standard padded base64.
+- Both sides sign and verify the nonce *as the text it arrived in*, not its decoded 32 bytes:
+  the message is the UTF-8 string `nonce + install_id + ts` (`protocol.js:80-82`,
+  `remote.rs:465`). The test vector above follows the contract, so it does not match what the
+  code signs. The client also refuses a nonce longer than 1 KiB (`remote.rs:78`).
+- The relay accepts a `ts` within ±300 s, not ±60 s (`TS_SKEW`, `protocol.js:21`).
+- There is no `ready` frame. The relay sends nothing after a good hello; the client counts the
+  relay's first frame of any kind (normally the first `ping`, up to 20 s later) as acceptance
+  (`remote.rs:615-640`).
+- The close codes are not the ones pinned. The relay closes a missing, wrong or late hello and an
+  unknown `version` with `1008`, a 17th concurrent pending handshake with `1013`, a replaced
+  tunnel with `4000` and an idle one with `1000` (`tunnel.js:62-120`). An unknown `install_id` is
+  an HTTP `404` before the upgrade, and a dial without `Upgrade: websocket` a `426`
+  (`worker.js:116-118`). The client does not look at close codes: every close, including a
+  replacement, is redialed with the 1–60 s backoff (`remote.rs:348-385`).
+
+**Registration**
+
+- `POST /api/installs` is not idempotent: every call answers `201` with a new `install_id`, even
+  for a key already registered, and there is no `200` (`worker.js:61-87`). A body over 1 KiB is a
+  `413`. The id is always 20 characters.
+
+**Frames and streams**
+
+- The relay sends `req` and `ws_open` headers as a JSON object of name to value, with repeated
+  headers joined by `, `, not as `[name, value]` pairs (`stripHopByHop`, `protocol.js:46-66`).
+  The client accepts either shape (`remote.rs:1027-1052`).
+- The client sends `res` headers as `[name, value]` pairs, as pinned, but the relay's
+  `stripHopByHop` iterates an array as `[index, pair]` and throws, so a tunnelled response never
+  reaches the browser. This is finding R1 in the security review, and it is still open.
+- Neither side implements `cancel`; both ignore it.
+- The client does not answer `ws_open` with a `101` `res`. It starts sending `ws_msg` at once, and
+  refuses with `ws_close` instead of a `res`: `1013` when all 32 slots are busy, `1008` for a
+  duplicate id or a bad path, `1014` when the inner upgrade fails (`remote.rs:830-895`). The relay
+  accepts the browser's socket before the mothership has answered (`tunnel.js:293-300`).
+- The relay treats a request as a WebSocket only when `upgrade` is exactly `websocket`
+  (case-insensitive), not when it merely contains the token (`tunnel.js:247`).
+- The client strips every `sec-websocket-*` header from `ws_open`, `sec-websocket-protocol`
+  included, so subprotocols cannot be negotiated (`remote.rs:1045-1048`; review note L4).
+- Neither side closes the tunnel on an oversized chunk or text frame. The relay fails just that
+  stream when a body chunk decodes to more than 49152 bytes, and closes the browser socket `1009`
+  on an oversized binary `ws_msg`; text `ws_msg` has no size check on either side, and the client
+  keeps tungstenite's default 64 MiB message limit (review finding R5). The client caps a whole
+  request body at 10 MiB (`413`) and waits at most 60 s per body frame (`408`).
+- When the tunnel closes, the relay closes browser WebSockets with `1012`, not `1001`
+  (`tunnel.js:133`).
+- The relay also limits each install to a 120-request burst refilled at 20 per second, answering
+  `429` past it, and answers a response head that takes over 60 s with `504` (`tunnel.js:12-20`,
+  `:241`, `:266`).
+
+**Headers**
+
+- The relay does not strip `Domain` from `set-cookie` (review finding R4), and joins repeated
+  `set-cookie` headers into one value.
+- The mothership never answers `400` for a wrong or repeated `host`: it drops whatever `host` the
+  relay sent and sets its own tunnel host (`remote.rs:786`, `:1047`).
+- The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:134-136`;
+  review finding R4).
+
+**Owner sign-in**
+
+- The relay only forwards a browser whose GitHub account is the install's bound owner, and binding
+  one needs the mothership to confirm a pairing code with a signed request
+  (`POST /api/installs/<id>/pairing/confirm`). The mothership has no code for the signed pairing
+  endpoints yet: `GET /api/remote/pairing` and `POST /api/remote/pairing/confirm`, which the
+  cockpit calls, are not routes (`crates/colonizer/routes.snap`), so the cockpit hides the pairing
+  block and no install can get an owner.
 
 ## What is not colony work
 

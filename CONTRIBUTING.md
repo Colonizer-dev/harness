@@ -28,7 +28,7 @@ the `changelog-edit` label.
 Every list you touch is alphabetical, one entry per line, so parallel pull requests add their lines
 in different places:
 
-1. `mod <name>;` in `crates/colonizer/src/main.rs`.
+1. `mod <name>;` in `crates/colonizer/src/main.rs`, with the module in `crates/colonizer/src/<name>.rs`.
 2. Routes: `pub(crate) fn routes() -> axum::Router<crate::Shared>` in your module, and
    `.merge(crate::<name>::routes())` in `server::api_routes`. Then regenerate the route table with
    `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` and commit
@@ -48,9 +48,16 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 node --test scripts/test/*.test.mjs
+node scripts/check-doc-links.mjs                    # every relative link and #anchor in the Markdown resolves
+node scripts/changelog.mjs check                    # the changelog.d/ fragments are well-formed
 sh scripts/ci/check-exec-bits.sh
 (cd web && npm ci && npm run build && npm test)     # when web/ changed
+(cd modules/agents/<id> && npm test)                # when that agent module changed; run npm ci first where it has a package-lock.json
+node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.json
 ```
+
+`check-doc-links.mjs` takes file names to check only those (`node scripts/check-doc-links.mjs
+docs/cli.md`). If you rename a heading, search for its old anchor: other pages may link to it.
 
 A new shebang script needs its executable bit in the index (`git update-index --chmod=+x <file>`);
 `check-exec-bits.sh` fails without it.

@@ -151,6 +151,11 @@ jobs:
       - name: Test
         run: node --test scripts/test/*.test.mjs
 
+      # Every relative link and #anchor in the tracked Markdown must resolve, so a renamed doc or a
+      # reworded heading fails the pull request that did it instead of a reader's click later.
+      - name: Check documentation links
+        run: node scripts/check-doc-links.mjs
+
       # Pending changelog entries are fragments under changelog.d/, one file per change, so parallel
       # pull requests never collide in CHANGELOG.md. This validates every fragment and, on a pull
       # request, fails one that edits CHANGELOG.md unless it is the release (it adds the section for

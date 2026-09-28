@@ -26,9 +26,10 @@ export const DEFAULT_REPO = 'Colonizer-dev/harness';
 // The ci.yml job ids, which are the status-check contexts: no job there has a `name:` override or a
 // matrix, and all six run on every pull_request with no path filter, so requiring them cannot block
 // a pull request that never triggered them. Left out, deliberately:
-// - `colony-smoke` (ci.yml): a self-hosted KVM job skipped unless vars.COLONIZER_KVM_RUNNER is set;
-//   until the repository has such a runner it never reports, and a required check that never
-//   reports would block every merge.
+// - `colony-e2e` (ci.yml): a real colony in a KVM microVM on every pull request; it can flake on a
+//   runner difference, and a retry is cheaper than a blocked merge (the job's own comment says so).
+// - `relay` (ci.yml): the remote-access relay Worker's tests. It runs on every pull request but has
+//   not been added to the required set.
 // - `vulnerabilities` and `sbom` (supply-chain.yml): a newly published advisory can turn the audit
 //   red with no commit at all — the weekly scheduled run is the detection path — and an SBOM is
 //   provenance evidence, not a gate. Requiring either would block merges on news, not on the change.
