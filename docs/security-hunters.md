@@ -2,10 +2,12 @@
 
 What ships today: one `Manifest` per hunter, a `hunters.lock` pin per platform, an operator
 opt-in (`COLONIZER_HUNTER_INSTALL=1`) guarding a Linux-only, race-free, checksum-verified
-on-demand install, and a capability probe. No scan runs yet: the Strix and SARIF parsers exist
-but nothing calls them, hunter LLM traffic is not routed anywhere, and no run stage drives
-these modules. In the cockpit's red-team wizard, Strix and Shannon are disabled cards marked
-"Coming soon", and the red-team API refuses them with a 400; only the colony swarm runs (see
+on-demand install, a capability probe, and a manifest-driven scan runner (`hunters::scan`) that
+renders the `scan` template, runs the installed binary, and parses the artifacts back into
+`Finding`s. What is still missing is the red-team run stage that decides when scans happen (and
+which still refuses external hunters), and orchestrator validation of the findings.
+In the cockpit's red-team wizard, Strix and Shannon are still disabled cards marked "Coming soon",
+and the red-team API refuses them with a 400; only the colony swarm runs (see
 [red-team.md](red-team.md#operating-it)).
 
 ## On demand, verified, never vendored
@@ -31,10 +33,10 @@ Each hunter is a `Manifest` in `crates/colonizer/src/hunters.rs` (`builtin()`), 
 | `runtime` | `binary` (downloaded) or `node` (via npx) |
 | `needs_docker` | Whether a scan needs a Docker daemon |
 | `install` | The only supported install path: the `POST /api/hunters/{id}/install` route, which installs the pinned, checksum-verified artifact from `hunters.lock` behind the `COLONIZER_HUNTER_INSTALL` opt-in |
-| `scan` | Headless scan invocation template with `{target}`/`{mode}`/`{out}` placeholders |
-| `output` | Run-relative filenames the hunter writes |
+| `scan` | Headless scan invocation template with `{target}`/`{mode}`/`{out}` placeholders; `scan` substitutes them as whole argv entries and runs the installed binary |
+| `output` | Run-relative filenames the hunter writes; the first entry is the findings artifact `scan` parses |
 | `findings_format` | Which parser reads the output: `strix_json` or `sarif` |
-| `gateway_env` | Env var that would point the hunter's LLM client at the Colonizer gateway, once routing exists (planned, not implemented) |
+| `gateway_env` | Env var `scan` sets to the gateway's base URL for a run (the token goes to `LLM_API_KEY`); the gateway is required for scanning |
 | `available` | True once a parser plus a checksum pin ship; false is a manifest-only stub |
 
 ## The two runtimes
@@ -71,9 +73,40 @@ disk — and the binary lands atomically (a uniquely-named temp file in the vers
 to `0o555`, then renamed over the final path), so a failed download never leaves a half-written
 binary behind and readers never see one mid-write.
 
+## Running a scan
+
+`hunters::scan(manifest, request)` is the manifest-driven scan runner. It refuses a hunter that is
+a manifest-only stub, checks the binary is installed and the target is a directory, renders the
+`scan` template into argv (placeholders become whole argv entries — no shell), and runs the
+installed binary with the working directory set to the request's `work_dir`, where it then looks
+for the run's artifacts — at most three levels deep, never following symlinks. Strix writes
+`strix_runs/<run-name>/vulnerabilities.json`, which that finds without knowing either name.
+
+- **Gateway required.** A scan always routes the hunter's LLM traffic through the Colonizer
+  gateway: `ScanRequest.gateway` (base URL plus token) is a required field, `gateway_env` carries
+  the base URL, and the token goes to `LLM_API_KEY`. There is no "scan without the gateway" choice
+  to make accidentally — a caller with no gateway has no scan — because hunter LLM spend that
+  bypasses the gateway is spend nobody can see. Spend stays visible twice: the gateway meters
+  every call, and `scan` also copies `llm_usage.cost` out of the hunter's own `run.json` into the
+  `ScanOutcome` it returns.
+- **Model and telemetry.** The request's model string lands in `STRIX_LLM` (Strix's LiteLLM model
+  var) and `STRIX_TELEMETRY=0` is set so Strix does not phone home; those env names live as
+  constants until a second hunter needs different ones.
+- **Exit codes.** The runner takes Strix's headless convention as the rule: 0 clean, 2
+  vulnerabilities found, anything else (or death by signal) a fatal `Err` carrying the stderr.
+  Exit 2 with no readable primary artifact is also an error: a claimed vulnerability must have
+  artifacts behind it.
+- **Outcome.** `ScanOutcome` carries the status (`clean` or `findings`), the exit code, the parsed
+  `Finding`s (first `output` entry through the manifest's parser), the run directory, and
+  `cost_usd` when the hunter reported one.
+- **Timeout.** A scan still running after four hours is killed and reported as an `Err` — long
+  enough for a deep run, short enough that a wedged agent cannot hold the run stage forever.
+- **Docker first.** `scan` does not itself check readiness: the run stage that drives it must
+  refuse to start a hunter whose probe is not ready, and a `needs_docker` hunter (Strix) still
+  needs a Docker daemon inside the colony microVM (see above).
+
 ## Planned, not implemented (tracked in #216)
 
-- Hunter LLM traffic routed through the gateway (`gateway_env`, landing in `routed_cost_usd`).
 - Findings flowing through orchestrator validation subject to `MAX_PER_COLONY`.
 - A red-team run driving hunters: refusing to start one whose probe is not ready, or serialising
   installs (installs already serialise themselves per hunter; see above).
@@ -89,10 +122,14 @@ binary behind and readers never see one mid-write.
 
 ## Current state
 
-Strix is phase one: manifest, pinned lock, opt-in install, probe, and two parsers
-(`parse_strix`, `parse_sarif`) that exist but are not wired to anything — no scan runs, no
-findings flow. Shannon is a manifest-only stub (phase 2): its manifest, install command, scan
-template and SARIF format are recorded, but there is no download and no driving run yet.
+Strix is phase one: manifest, pinned lock, opt-in install, probe, two parsers (`parse_strix`,
+`parse_sarif`), and a scan runner that wires them end to end — template to argv, artifacts to
+`Finding`s, cost into the outcome. Nothing decides when a scan happens yet, and colonies have no
+Docker daemon, so no scan runs today. Shannon is a manifest-only stub (phase 2): its manifest,
+install command, scan template and SARIF format are recorded, but there is no download and no
+driving run yet — `scan` refuses it. The cockpit module gallery will extend the existing
+`/api/plugins` surface rather than adding a parallel one, and the `logo` field is a name only
+until that gallery renders it.
 
 In the cockpit, the red-team wizard calls the probe for both hunters and shows them as disabled
 "Coming soon" cards with bundled logo images; the manifest's `logo` field is not used there.
