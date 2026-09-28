@@ -9,10 +9,10 @@
 //!
 //! Shadow measurement only: nothing here changes what compaction keeps or drops, and nothing reads
 //! the ledger to make a decision. The ledger lives in the data dir, outliving per-colony cleanup
-//! the way `routing.jsonl` does, because stage 2's bench-wide report grades colonies against each
-//! other. Known limitation: a pass the plugin computed but did not apply (`applied: false`, the
-//! fallback path) is not measured — nothing was removed from the transcript, so there is nothing
-//! for a later call to be a reread of.
+//! the way `routing.jsonl` does, because the bench-wide report (`scripts/bench.mjs jev`) grades
+//! colonies against each other over it. Known limitation: a pass the plugin computed but did not
+//! apply (`applied: false`, the fallback path) is not measured — nothing was removed from the
+//! transcript, so there is nothing for a later call to be a reread of.
 //!
 //! The match is deliberately coarse: same tool name, same canonical input, nothing smarter.
 //! Provenance is not distinguished (an orchestrator call and a subagent's with equal arguments are
@@ -265,9 +265,9 @@ pub(crate) async fn note_tool_call(app: &Shared, id: &str, rt: &Arc<Runtime>, ev
 
 /// The measurement's one visible heartbeat, in the colony's harness log when a reread lands: the
 /// running precision/recall over every decision row in the ledger, all colonies together — that is
-/// what stage 2's report will be over, and a person watching a colony should not have to wait for
-/// it to see the ladder working. The whole-ledger read happens per reread, which is rare by
-/// construction (a decision is confirmed at most once).
+/// what the bench-wide report (`scripts/bench.mjs jev`) is over, and a person watching a colony
+/// should not have to wait for it to see the ladder working. The whole-ledger read happens per
+/// reread, which is rare by construction (a decision is confirmed at most once).
 async fn report_metrics(app: &Shared, id: &str, original: &str) {
     let rows = read_rows(&app.jev_ladder_file());
     let m = precision_recall(&rows, PREDICTED_THRESHOLD);
