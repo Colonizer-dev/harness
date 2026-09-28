@@ -34,7 +34,10 @@ pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
     app.update_session(id, |x| x.publish_stage = Some(stage)).await;
 }
 
-pub async fn publish_session(app: Shared, id: String) {
+/// Runs one claimed publish: tears the microVM down, then drives `github::publish` with the
+/// approval minted where the publish was started — the Create PR press or autopilot's verdict —
+/// so every external effect inside can check itself against it (issue #98).
+pub async fn publish_session(app: Shared, id: String, grant: Option<crate::authority::Grant>) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
     let Some(current) = app.session(&id).await else { return };
     if let Err(e) = github::check_publish_branch(&current.branch, current.base.as_deref().unwrap_or_default()) {
@@ -75,7 +78,7 @@ pub async fn publish_session(app: Shared, id: String) {
         // repo on the host are all a publish needs, and claiming to have removed one would be a lie.
         log.info("publishing the kept worktree (no microVM is running)").await;
     }
-    match github::publish(&app, &s, &log).await {
+    match github::publish(&app, &s, &log, grant.as_ref()).await {
         Ok(github::Published::NoChanges) => {
             app.update_session(&id, |x| {
                 x.status = SessionStatus::NoChanges;
@@ -936,7 +939,11 @@ async fn run_retargets(ops: &impl RetargetOps, children: &[Session], destination
     }
 }
 
-pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+pub async fn publish(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    via: Option<axum::Extension<crate::auth::Via>>,
+) -> ApiResult<Session> {
     let s = app
         .session(&id)
         .await
@@ -950,8 +957,51 @@ pub async fn publish(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
             "this session can't be published right now",
         ));
     }
-    tokio::spawn(publish_session(app.clone(), id.clone()));
+    // Issue #98: the click is the approval. The grant is minted here — reviewer is who clicked,
+    // builder the colony's agent — bound to the tree the publish would commit and the pr.md bytes
+    // this screen reviewed, carried in memory only, and checked at each effect site inside the
+    // publish. A mint failure (git that cannot answer) refuses the click: nothing approved,
+    // nothing published.
+    let reviewer = crate::activity::via_name(via.map(|ext| ext.0)).unwrap_or_default();
+    if reviewer.is_empty() {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "no authenticated caller to approve the publish",
+        ));
+    }
+    let grant = mint_publish_grant(&app, &s, &reviewer)
+        .await
+        .map_err(|e| client_error(StatusCode::CONFLICT, &format!("could not bind the publish candidate: {e:#}")))?;
+    tokio::spawn(publish_session(app.clone(), id.clone(), Some(grant)));
     Ok(Json(s))
+}
+
+/// Mints the publish grant at a real approval (issue #98): the operator's Create PR press
+/// ([`publish`]) or autopilot's confirmed verdict (`verify::after_turn`). Bound to the tree the
+/// publish would commit right now plus the pr.md bytes the approval reviewed; held in memory
+/// only, so a restart — or a mere TTL lapse — un-approves. `reviewer` is who approved; the
+/// builder is the colony's agent, always a different party.
+pub(crate) async fn mint_publish_grant(app: &App, s: &Session, reviewer: &str) -> anyhow::Result<crate::authority::Grant> {
+    let tree = github::approval_candidate_tree(app, s).await?;
+    let (_, body) = github::read_pr_description(&app.session_dir(&s.id).join("out"), s);
+    let candidate = crate::authority::bind_candidate(&[tree.as_bytes(), body.as_bytes()]);
+    let task = match s.issue {
+        Some(number) => format!("issue-{number}"),
+        None => "free".to_string(),
+    };
+    Ok(crate::authority::Grant::mint(
+        &s.id,
+        &task,
+        vec![
+            crate::authority::Effect::Commit,
+            crate::authority::Effect::Push,
+            crate::authority::Effect::OpenPr,
+        ],
+        candidate,
+        reviewer,
+        &format!("agent:{}", s.agent),
+        crate::authority::GRANT_TTL_SECS,
+    ))
 }
 
 /// Claims a colony for the background publish: the status flip, the slot decision and the error
@@ -989,13 +1039,13 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
 /// microVM may be gone, and refusing it would make the operator resume — boot a microVM against a
 /// provider that may still be exhausted — just to ship the work the park interrupted.
 ///
-/// Issue #98: this single gate covers commit, push, and PR creation together today. The split is
-/// `commit_allowed` → `push_allowed` → `pr_allowed` below: each later effect needs the earlier one
-/// plus its own `authority::Effect` grant (`needs_independent_review` is true for all three), and
-/// PR creation additionally needs the candidate bound via `publish_candidate_hash` before it runs.
-/// The three helpers delegate to this gate plus the #84 kill-switch (`claim_publish` goes through
-/// `pr_allowed`); they exist so each external effect can grow its own grant check without
-/// re-deriving the lifecycle preconditions.
+/// Issue #98: the per-effect grant checks (`Commit`/`Push`/`OpenPr`) live at their effect sites
+/// inside `github::run_publish_with`, against the grant minted at the press that started the
+/// publish. The split below (`commit_allowed` → `push_allowed` → `pr_allowed`) stays as the
+/// lifecycle preconditions plus the #84 kill-switch — `claim_publish` goes through `pr_allowed`
+/// before anything is claimed or torn down — while the authority question ("was this exact
+/// candidate approved, and by whom?") is answered where the effect runs, against the candidate
+/// bound by `publish_candidate_hash` at approval time.
 pub(crate) fn can_publish(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     matches!(
         status,
@@ -1022,19 +1072,19 @@ pub(crate) const RETARGET_BLOCKED: &str = "external writes are blocked (COLONIZE
 /// The per-effect split of `can_publish` (issue #98): local commit first, then push, then PR —
 /// each ordered check assumes the earlier effects are granted and adds its own. Each fails closed
 /// while external writes are blocked (issue #84); otherwise they delegate to the single lifecycle
-/// gate, and a future per-effect grant check has one named place per effect to live.
+/// gate. The grant check for each effect is not here but at the effect site in
+/// `github::run_publish_with`, where the candidate being committed, pushed or described can be
+/// recomputed against the approval; these gates decide whether a publish may claim the colony at
+/// all.
 pub(crate) fn commit_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
-    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Commit));
     !crate::authority::external_writes_blocked() && can_publish(status, cleaned_up, has_worktree)
 }
 
 pub(crate) fn push_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
-    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::Push));
     !crate::authority::external_writes_blocked() && commit_allowed(status, cleaned_up, has_worktree)
 }
 
 pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
-    debug_assert!(crate::authority::needs_independent_review(&crate::authority::Effect::OpenPr));
     !crate::authority::external_writes_blocked() && push_allowed(status, cleaned_up, has_worktree)
 }
 

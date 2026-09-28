@@ -12,12 +12,17 @@
 //! differently). An approval names one hash; `authorize` grants exactly that
 //! candidate and nothing else.
 //!
-//! Scaffolding (issue #98): most of the grant machinery is not wired yet, so the
-//! module stays allow(dead_code). Issue #84 binds the first checks: the publish
-//! path (`Commit`/`Push`/`OpenPr`) and finding filing (`FileIssue`) consult the
-//! `external_writes_blocked` kill-switch below and fail closed when it is set.
-
-#![allow(dead_code)]
+//! Grants are values, minted at a real approval event and passed down the call
+//! chain to the effect site; they are never persisted, so nothing approved before
+//! a harness restart survives it (`requires_reauth_after_restart`). Wired today:
+//! the publish path mints at the operator's Create PR press and at autopilot's
+//! confirmed verdict and checks `Commit`/`Push`/`OpenPr` at their effect sites in
+//! `github::run_publish_with`; finding filing mints `FileIssue` after the
+//! independent validation and checks it in `findings::file` before any `gh` call;
+//! the resume paths mint `Resume` per boot and check it in `boot`, and
+//! `lifecycle::recover` denies `Recover` against the grant a restart necessarily
+//! destroyed. Every path also consults the `external_writes_blocked` kill-switch,
+//! which fails closed when it is set.
 
 use ring::digest;
 
@@ -25,11 +30,15 @@ use ring::digest;
 /// blanket "may publish" that covers commit, push, and PR creation together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect {
+    /// Agent command execution. Checked at the execution sink, not wired yet.
+    #[allow(dead_code)]
     Execute,
     Commit,
     Push,
     OpenPr,
     FileIssue,
+    /// Any other external call. Checked at its sink, not wired yet.
+    #[allow(dead_code)]
     External,
     Resume,
     Recover,
@@ -62,6 +71,54 @@ pub struct Grant {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Deny {
     pub reason: &'static str,
+}
+
+/// How long a freshly minted grant stays valid: fifteen minutes. An approval is
+/// meant to cover the work it reviewed while the trail is hot — a publish, a
+/// filing, a resume — not to outlive it; anything still unspent after that needs
+/// approving again, and the expiry check (`authorize`) denies the rest.
+pub const GRANT_TTL_SECS: u64 = 15 * 60;
+
+/// The harness's one wall clock, in seconds since the epoch. `authorize` compares
+/// `now_unix` against a grant's `expires_unix`; centralised so every check and
+/// every expiry test read the same shape of time.
+pub fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+impl Grant {
+    /// Mints a grant at a real approval event: a fresh nonce, an expiry `ttl_secs`
+    /// seconds out, and the candidate hash the approval reviewed, carried twice —
+    /// in the authority (what was approved) and as `candidate_hash` (what
+    /// `authorize` compares against). `reviewer` and `builder` must name different
+    /// parties for anything `needs_independent_review` covers; both must be
+    /// non-empty either way.
+    pub fn mint(
+        colony: &str,
+        task: &str,
+        effects: Vec<Effect>,
+        candidate: String,
+        reviewer: &str,
+        builder: &str,
+        ttl_secs: u64,
+    ) -> Grant {
+        Grant {
+            authority: Authority {
+                colony: colony.to_string(),
+                task: task.to_string(),
+                nonce: crate::util::random_token(),
+                expires_unix: now_unix() + ttl_secs,
+                effects,
+                candidate: Some(candidate.clone()),
+            },
+            candidate_hash: candidate,
+            reviewer: reviewer.to_string(),
+            builder: builder.to_string(),
+        }
+    }
 }
 
 /// Whether the effect needs a reviewer independent of the builder. Commits,
@@ -175,6 +232,14 @@ pub fn authorize(grant: &Grant, want_effect: &Effect, want_candidate: &str, now_
     Ok(())
 }
 
+/// [`authorize`] for the call sites that carry the grant down an async chain as an
+/// `Option`: `None` — no mint, or a grant a restart destroyed — is the first and
+/// hardest denial, not a silent pass.
+pub fn authorize_opt(grant: Option<&Grant>, want_effect: &Effect, want_candidate: &str, now_unix: u64) -> Result<(), Deny> {
+    let grant = grant.ok_or(Deny { reason: "missing-grant" })?;
+    authorize(grant, want_effect, want_candidate, now_unix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +341,42 @@ mod tests {
             assert!(!needs_independent_review(&e), "{e:?}");
         }
         assert!(requires_reauth_after_restart(), "restarts always re-authorize");
+    }
+
+    #[test]
+    fn a_minted_grant_authorizes_its_own_candidate_and_nothing_else() {
+        let candidate = bind_candidate(&[b"tree", b"body"]);
+        let g = Grant::mint(
+            "colony",
+            "issue-1",
+            vec![Effect::Commit, Effect::Push, Effect::OpenPr],
+            candidate.clone(),
+            "reviewer",
+            "builder",
+            GRANT_TTL_SECS,
+        );
+        assert!(!g.authority.nonce.is_empty(), "every grant carries a fresh nonce");
+        assert_eq!(g.authority.candidate.as_deref(), Some(candidate.as_str()));
+        assert!(authorize(&g, &Effect::Commit, &candidate, now_unix()).is_ok());
+        assert_eq!(
+            authorize(&g, &Effect::Commit, &bind_candidate(&[b"other"]), now_unix())
+                .unwrap_err()
+                .reason,
+            "candidate-mismatch"
+        );
+    }
+
+    #[test]
+    fn a_missing_grant_is_denied_as_missing_not_passed_over() {
+        assert_eq!(
+            authorize_opt(None, &Effect::Commit, &bind_candidate(&[b"tree"]), now_unix())
+                .unwrap_err()
+                .reason,
+            "missing-grant"
+        );
+        let g = grant();
+        let hash = g.candidate_hash.clone();
+        assert!(authorize_opt(Some(&g), &Effect::Push, &hash, 999_999).is_ok());
     }
 
     #[test]

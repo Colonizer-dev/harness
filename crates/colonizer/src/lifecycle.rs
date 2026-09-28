@@ -91,6 +91,18 @@ async fn running_or_wait(execution: &dyn ExecutionBackend) -> HashSet<String> {
     }
 }
 
+/// The fence's real check (issue #98): authorize the Recover effect against the grant the
+/// restart necessarily destroyed. Grants are never persisted, so this denies every time it runs —
+/// `missing-grant` is the recorded reason the colony stays fenced — and a future where a grant
+/// did survive would have to make this function lie first.
+fn restart_fence(id: &str) -> crate::authority::Deny {
+    let Err(deny) = crate::authority::authorize_opt(None, &crate::authority::Effect::Recover, id, crate::authority::now_unix())
+    else {
+        unreachable!("no grant survives a restart, so Recover is always denied");
+    };
+    deny
+}
+
 /// Reconnects to microVMs that kept running while the harness was down.
 pub async fn recover(app: &Shared) {
     // The list before the wait for `msb`: a resume or the queue can claim a colony while the
@@ -155,9 +167,19 @@ pub async fn recover(app: &Shared) {
             }
             //
             // Fencing (issue #98): the colony is left `Failed`, and anything preserved here resumes
-            // only under fresh authorization — `authority::requires_reauth_after_restart` is true by
-            // construction, so no grant survives the restart and resume re-authenticates from scratch.
-            debug_assert!(crate::authority::requires_reauth_after_restart());
+            // only under fresh authorization. Restarts always require re-auth
+            // (`requires_reauth_after_restart`) and grants live in memory only, so the Recover
+            // effect authorizes against no grant: the real check below — the old debug_assert,
+            // made true — always denies, and the denial is minuted as the fence.
+            if crate::authority::requires_reauth_after_restart() {
+                let deny = restart_fence(&fresh.id);
+                app.session_log(
+                    &fresh.id,
+                    "warn",
+                    format!("fenced after the restart: no Recover grant survived it ({})", deny.reason),
+                )
+                .await;
+            }
             teardown_vm(app, &fresh).await;
             let mut attention = None;
             app.update_session(&fresh.id, |x| {
@@ -829,11 +851,42 @@ pub(crate) fn effective_since(client_epoch: Option<u64>, current_epoch: u64, sin
     }
 }
 
-pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+/// A fresh Resume grant (issue #98): the approval to boot a colony's kept worktree again. Held in
+/// memory only, so a restart — after which `recover` fences everything — un-approves it, and a
+/// TTL lapse does the same. Bound to the session id and branch, so it names exactly the colony it
+/// may bring back. Reviewer and builder need not be independent (`needs_independent_review` is
+/// false for `Resume`; resume re-authenticates rather than re-reviews), but both name a real
+/// party: whoever asked, and the harness that boots.
+pub(crate) fn mint_resume_grant(s: &Session, reviewer: &str) -> crate::authority::Grant {
+    crate::authority::Grant::mint(
+        &s.id,
+        &s.branch,
+        vec![crate::authority::Effect::Resume],
+        resume_candidate(s),
+        reviewer,
+        "harness",
+        crate::authority::GRANT_TTL_SECS,
+    )
+}
+
+/// What a Resume grant binds: the session id plus its branch. `boot` recomputes this from the
+/// fresh record before it acts, so a grant minted for one colony cannot bring another back.
+pub(crate) fn resume_candidate(s: &Session) -> String {
+    crate::authority::bind_candidate(&[s.id.as_bytes(), s.branch.as_bytes()])
+}
+
+pub async fn resume(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    via: Option<axum::Extension<crate::auth::Via>>,
+) -> ApiResult<Session> {
     let s = app
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    // Issue #98: who the resume approval names as reviewer — the cockpit or token that asked, or
+    // "operator" for the harness's own calls into this handler (the queue's kept-VM recovery).
+    let reviewer = crate::activity::via_name(via.map(|ext| ext.0)).unwrap_or_else(|| "operator".to_string());
     // A suspended colony resumes too (issue #562): the operator may not want to wait for an answer
     // to bring it back. Its claim below clears the suspension; any held answer is delivered by the
     // boot, exactly as the queue's restore delivers one. The escape is for a colony actually
@@ -993,7 +1046,10 @@ pub async fn resume(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
         }
         app.session_log(&id, "info", "resuming: booting a fresh microVM on the kept worktree".into())
             .await;
-        tokio::spawn(boot(app.clone(), id, true));
+        // Issue #98: the operator's press is the resume approval — a fresh grant, held in memory
+        // only and checked where the boot runs (`boot` below denies a resume it was not handed).
+        let grant = mint_resume_grant(&s, &reviewer);
+        tokio::spawn(boot(app.clone(), id, true, Some(grant)));
     } else {
         if park.as_ref().is_some_and(|p| p.vm_kept) {
             // A parked colony waiting in the queue must not keep a microVM running the queue's
@@ -1469,6 +1525,88 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    // ----- the Resume/Recover grants (issue #98) -----
+
+    fn resumable() -> Session {
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.id = "abc".into();
+        s.branch = "colonizer/issue-7-ab12cd34".into();
+        s
+    }
+
+    /// Resume re-authenticates rather than re-reviews (`needs_independent_review` is false for
+    /// `Resume`), so these tests cover what the effect does require: a grant at all, unexpired,
+    /// bound to exactly this colony.
+    #[test]
+    fn a_resume_grant_authorizes_its_own_colony_even_when_reviewer_equals_builder() {
+        let s = resumable();
+        // Reviewer == builder is fine here: the queue mints "harness" on both sides.
+        let grant = mint_resume_grant(&s, "harness");
+        assert!(
+            crate::authority::authorize_opt(
+                Some(&grant),
+                &crate::authority::Effect::Resume,
+                &resume_candidate(&s),
+                crate::authority::now_unix()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_resume_grant_for_one_colony_cannot_boot_another() {
+        let s = resumable();
+        let grant = mint_resume_grant(&s, "cockpit");
+        let other = crate::authority::bind_candidate(&[b"another-colony", b"another-branch"]);
+        assert_eq!(
+            crate::authority::authorize_opt(
+                Some(&grant),
+                &crate::authority::Effect::Resume,
+                &other,
+                crate::authority::now_unix()
+            )
+            .unwrap_err()
+            .reason,
+            "candidate-mismatch"
+        );
+    }
+
+    #[test]
+    fn resume_fails_closed_on_a_missing_or_expired_grant() {
+        let s = resumable();
+        let candidate = resume_candidate(&s);
+        assert_eq!(
+            crate::authority::authorize_opt(
+                None,
+                &crate::authority::Effect::Resume,
+                &candidate,
+                crate::authority::now_unix()
+            )
+            .unwrap_err()
+            .reason,
+            "missing-grant"
+        );
+        let expired = mint_resume_grant(&s, "cockpit");
+        let mut expired = expired;
+        expired.authority.expires_unix = 0;
+        assert_eq!(
+            crate::authority::authorize_opt(
+                Some(&expired),
+                &crate::authority::Effect::Resume,
+                &candidate,
+                crate::authority::now_unix()
+            )
+            .unwrap_err()
+            .reason,
+            "expired"
+        );
+    }
+
+    #[test]
+    fn the_restart_fence_denies_recover_against_the_grant_that_did_not_survive() {
+        assert_eq!(restart_fence("abc").reason, "missing-grant");
+    }
+
     #[test]
     fn only_colonies_with_nothing_running_can_be_deleted() {
         use SessionStatus::*;
@@ -1734,7 +1872,7 @@ mod tests {
             .unwrap();
         std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
         let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
-        let err = resume(State(app.clone()), Path("abc".to_string())).await.unwrap_err();
+        let err = resume(State(app.clone()), Path("abc".to_string()), None).await.unwrap_err();
         let body = err.1.to_string();
         assert!(body.contains("the colony was not resumed"), "{body}");
         assert!(body.contains("aside yourself and try again"), "{body}");
@@ -1831,7 +1969,7 @@ mod tests {
         // No free slot, so the resume queues instead of spawning a boot whose git and `msb` work
         // would flip the colony's status under the assertions below.
         fill_the_parallel_limit(&app).await;
-        let _ = resume(State(app.clone()), Path("abc".to_string())).await.unwrap();
+        let _ = resume(State(app.clone()), Path("abc".to_string()), None).await.unwrap();
         assert!(app.session_dir("abc").join("events-1.jsonl").exists(), "the rotation landed");
         assert_eq!(
             run_epoch_for_dir(&app.session_dir("abc")),
@@ -1856,7 +1994,7 @@ mod tests {
         let rt = app.runtime("abc").await;
         // Stand in for an in-flight append: the lock another task would hold.
         let append = rt.file_lock.lock().await;
-        let resumed = tokio::spawn(resume(State(app.clone()), Path("abc".to_string())));
+        let resumed = tokio::spawn(resume(State(app.clone()), Path("abc".to_string()), None));
         // Purely cooperative, so there is no timing bet: each yield lets the resume advance to the
         // lock it cannot take. With the lock held it can neither have finished nor have renamed.
         for _ in 0..64 {
@@ -1990,7 +2128,7 @@ mod tests {
             &app,
             "abc",
             "resume",
-            resume(State(app.clone()), Path("abc".to_string())),
+            resume(State(app.clone()), Path("abc".to_string()), None),
             |s| s.status == SessionStatus::Queued,
         )
         .await;
@@ -2146,7 +2284,7 @@ mod tests {
         let mut tasks = Vec::new();
         for _ in 0..2 {
             let app = app.clone();
-            tasks.push(tokio::spawn(resume(State(app), Path("abc".to_string()))));
+            tasks.push(tokio::spawn(resume(State(app), Path("abc".to_string()), None)));
         }
         for _ in 0..64 {
             tokio::task::yield_now().await;
@@ -2894,7 +3032,7 @@ exit 0
             std::io::Error::from(std::io::ErrorKind::StorageFull)
         });
 
-        let error = resume(State(app.clone()), Path("abc".into())).await.unwrap_err();
+        let error = resume(State(app.clone()), Path("abc".into()), None).await.unwrap_err();
         assert_eq!(
             error.status(),
             StatusCode::INTERNAL_SERVER_ERROR,

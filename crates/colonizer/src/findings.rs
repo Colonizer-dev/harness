@@ -238,13 +238,33 @@ pub async fn list_all(State(app): State<Shared>) -> Json<Vec<FindingRecord>> {
     Json(out)
 }
 
-/// Files `finding` on the colony's repository unless an open issue already has its title.
-pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -> Result<Filed> {
+/// The candidate a FileIssue grant binds (issue #98): the title plus the exact rendered body that
+/// will be filed. The mint (events::file_finding) and the check (`file`) both compute it through
+/// here, so the hash the validator approved is the hash of what actually goes out.
+pub(crate) fn candidate_hash(finding: &Finding, s: &Session, co_author: Option<&CoAuthor>) -> String {
+    crate::authority::bind_candidate(&[finding.title.as_bytes(), issue_body(finding, s, co_author).as_bytes()])
+}
+
+/// Files `finding` on the colony's repository unless an open issue already has its title. `grant`
+/// is the FileIssue approval minted after the independent validation; the exact bytes about to be
+/// filed are authorized against it before any `gh` call, the duplicate search included.
+pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path, grant: &crate::authority::Grant) -> Result<Filed> {
     // Issue #84: fails closed here too, not only at the caller, so no path to `gh label create` or
     // `gh issue create` skips the operator's kill-switch.
     if crate::authority::external_writes_blocked() {
         bail!("refusing to file a finding: external writes are blocked (COLONIZER_NO_EXTERNAL_EFFECTS / COLONIZER_NO_WRITE)");
     }
+    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
+    let body = issue_body(finding, s, co_author.as_ref());
+    // Issue #98: fail closed on anything the grant does not cover — a body edited since the
+    // validation, an expired approval, a reviewer inside the colony.
+    crate::authority::authorize(
+        grant,
+        &crate::authority::Effect::FileIssue,
+        &candidate_hash(finding, s, co_author.as_ref()),
+        crate::authority::now_unix(),
+    )
+    .map_err(|deny| anyhow::anyhow!("refusing to file a finding: not authorized ({})", deny.reason))?;
     let repo = s.repo.as_str();
     let terms = search_terms(&finding.title);
     if !terms.is_empty() {
@@ -269,8 +289,7 @@ pub async fn file(app: &App, s: &Session, finding: &Finding, body_path: &Path) -
         }
     }
 
-    let co_author = crate::config::FileConfig::load(&app.cfg.config_dir).publish.co_author;
-    std::fs::write(body_path, issue_body(finding, s, co_author.as_ref()))?;
+    std::fs::write(body_path, body)?;
     // Best effort: the label may exist already, or the token may not be allowed to create labels.
     let _ = exec(&mut app.gh([
         "label",
@@ -460,7 +479,16 @@ mod tests {
             evidence: "Checked".into(),
         };
         let _blocked = crate::authority::test_block_external_writes();
-        let err = file(&app, &s, &finding, &root.join("body.md")).await.unwrap_err();
+        let grant = crate::authority::Grant::mint(
+            &s.id,
+            &finding.title,
+            vec![crate::authority::Effect::FileIssue],
+            crate::authority::bind_candidate(&[b"body"]),
+            "finding-validator",
+            &s.id,
+            crate::authority::GRANT_TTL_SECS,
+        );
+        let err = file(&app, &s, &finding, &root.join("body.md"), &grant).await.unwrap_err();
         assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -495,5 +523,98 @@ mod tests {
         let plain = issue_body(&finding, &s, Some(&custom));
         assert!(!plain.contains("credited to"), "{plain}");
         assert_eq!(plain.matches("<sub>").count(), 1, "{plain}");
+    }
+
+    // ----- the FileIssue grant (issue #98) -----
+
+    /// A colony-shaped session for the grant tests, with the id the real flow always has (an
+    /// empty builder or colony would read as a missing binding, which is a different denial).
+    fn grant_session() -> crate::sessions::Session {
+        let mut s = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        s.id = "finding-colony".into();
+        s
+    }
+
+    #[test]
+    fn a_file_issue_grant_covers_its_exact_body_and_nothing_else() {
+        let s = grant_session();
+        let finding = parse(&event(
+            "Career pages are promised but unsupported",
+            "llms.txt says…",
+            "Read model.rs",
+        ))
+        .unwrap();
+        let want = candidate_hash(&finding, &s, None);
+        let grant = crate::authority::Grant::mint(
+            &s.id,
+            &finding.title,
+            vec![crate::authority::Effect::FileIssue],
+            want.clone(),
+            "finding-validator",
+            &s.id,
+            crate::authority::GRANT_TTL_SECS,
+        );
+        assert!(
+            crate::authority::authorize(
+                &grant,
+                &crate::authority::Effect::FileIssue,
+                &want,
+                crate::authority::now_unix()
+            )
+            .is_ok()
+        );
+        // A body edited after the validation is another candidate, however close the words.
+        let edited = parse(&event(
+            "Career pages are promised but unsupported",
+            "llms.txt says… now",
+            "Read model.rs",
+        ))
+        .unwrap();
+        let other = candidate_hash(&edited, &s, None);
+        assert_eq!(
+            crate::authority::authorize(
+                &grant,
+                &crate::authority::Effect::FileIssue,
+                &other,
+                crate::authority::now_unix()
+            )
+            .unwrap_err()
+            .reason,
+            "candidate-mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_refuses_a_grant_that_does_not_cover_the_body_before_any_gh_call() {
+        let root = std::env::temp_dir().join(format!("colonizer-findings-grant-{}", std::process::id()));
+        let app = crate::tests::test_app(&root);
+        let s = grant_session();
+        let finding = parse(&event(
+            "Career pages are promised but unsupported",
+            "llms.txt says…",
+            "Read model.rs",
+        ))
+        .unwrap();
+        // Bound to bytes that were never rendered: the refusal names the reason, and nothing ran
+        // before it — a gh failure would read "failed to start `gh`", and the body file would exist.
+        let candidate = crate::authority::bind_candidate(&[b"a body the validator never saw"]);
+        let grant = crate::authority::Grant::mint(
+            &s.id,
+            &finding.title,
+            vec![crate::authority::Effect::FileIssue],
+            candidate,
+            "finding-validator",
+            "someone-else",
+            crate::authority::GRANT_TTL_SECS,
+        );
+        let err = file(&app, &s, &finding, &root.join("finding-body.md"), &grant)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("not authorized (candidate-mismatch)"), "{err:#}");
+        assert!(
+            !root.join("finding-body.md").exists(),
+            "nothing is written before the grant covers it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

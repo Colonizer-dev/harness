@@ -737,7 +737,7 @@ pub async fn create(
             app.session_log(&id, "info", format!("queued: {limits}{ahead}")).await;
         }
     } else {
-        tokio::spawn(boot(app.clone(), id, false));
+        tokio::spawn(boot(app.clone(), id, false, None));
     }
     // Adoption by use: a colony started here is the operator's answer to "do you want this org?", so
     // the org counts as seen and no prompt later asks about one they are already working in. The
@@ -1311,7 +1311,7 @@ mod tests {
         // the colony — it is claimed and handed to a fresh boot like any other. The boot itself
         // never runs here: the spawned task is dropped with the one-thread test runtime before it
         // is polled, so nothing reaches for GitHub or a microVM.
-        let resumed = resume(State(app.clone()), Path("kept".into()))
+        let resumed = resume(State(app.clone()), Path("kept".into()), None)
             .await
             .unwrap_or_else(|e| panic!("resume refused a colony of a switched-off org: {:#}", e.1))
             .0;

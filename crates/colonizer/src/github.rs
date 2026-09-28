@@ -1314,6 +1314,10 @@ trait PublishOps {
     fn description(&self) -> (String, String);
     /// The commit's trailer paragraph: the issue reference plus Colonizer's co-author line.
     fn trailer(&self) -> String;
+    /// The tree the commit is about to bake in — what `stage_all` + `commit` produce from the
+    /// worktree right now — so the publish grant's candidate can be recomputed at the commit
+    /// (issue #98). Read-only on the branch; the index it reads is the one `commit` commits.
+    async fn candidate_tree(&self) -> Result<String>;
     /// Stages everything in the worktree; true when anything is staged.
     async fn stage_all(&self) -> Result<bool>;
     /// Commits what is staged, with the title and trailer.
@@ -1347,12 +1351,48 @@ trait PublishOps {
 /// never a no-op: it is exactly what a retry after a failed push looks like.
 #[cfg(test)]
 async fn run_publish<O: PublishOps>(ops: &O) -> Result<Published> {
-    run_publish_with(ops, None).await
+    run_publish_with(ops, None, Some(&grant_for(ops).await)).await
+}
+
+/// A valid grant for `ops`' own candidate, minted the way a real approval mints one: over the
+/// tree `candidate_tree` reports and the body `description` read, with an independent reviewer.
+/// The deny tests below mint their own off-candidate grants instead.
+#[cfg(test)]
+async fn grant_for<O: PublishOps>(ops: &O) -> crate::authority::Grant {
+    let (_, body) = ops.description();
+    let tree = ops.candidate_tree().await.expect("candidate tree");
+    let candidate = crate::authority::bind_candidate(&[tree.as_bytes(), body.as_bytes()]);
+    crate::authority::Grant::mint(
+        "acme",
+        "issue-7",
+        vec![
+            crate::authority::Effect::Commit,
+            crate::authority::Effect::Push,
+            crate::authority::Effect::OpenPr,
+        ],
+        candidate,
+        "reviewer",
+        "builder",
+        crate::authority::GRANT_TTL_SECS,
+    )
+}
+
+/// [`run_publish`] with the screening gate — the grant minted as a real approval would.
+#[cfg(test)]
+async fn run_screened<O: PublishOps>(ops: &O, screen: Option<&ScreenGate>) -> Result<Published> {
+    run_publish_with(ops, screen, Some(&grant_for(ops).await)).await
 }
 
 /// [`run_publish`] with the screening gate wired in — `publish` builds the gate off the screen
-/// module's settings; the tests below run without one.
-async fn run_publish_with<O: PublishOps>(ops: &O, screen: Option<&ScreenGate>) -> Result<Published> {
+/// module's settings; the tests below run without one. `grant` is the publish approval minted at
+/// the press or verdict that started this run; every external effect below checks itself against
+/// it (issue #98) and refuses, with the denial reason, when it does not cover what is about to
+/// happen.
+async fn run_publish_with<O: PublishOps>(
+    ops: &O,
+    screen: Option<&ScreenGate>,
+    grant: Option<&crate::authority::Grant>,
+) -> Result<Published> {
     // Issue #84: refused before anything is staged, so a blocked publish leaves the worktree untouched.
     refuse_if_writes_blocked("publish")?;
     let (title, body) = ops.description();
@@ -1360,6 +1400,12 @@ async fn run_publish_with<O: PublishOps>(ops: &O, screen: Option<&ScreenGate>) -
 
     let staged = ops.stage_all().await?;
     if staged {
+        // Issue #98: the commit recomputes its candidate from the tree actually being committed
+        // plus the body `description` read, so a worktree that moved between the approval and
+        // this moment is caught here rather than committed under someone else's approval.
+        let tree = ops.candidate_tree().await?;
+        let want = crate::authority::bind_candidate(&[tree.as_bytes(), body.as_bytes()]);
+        refuse_unauthorized(grant, &crate::authority::Effect::Commit, &want, "commit")?;
         ops.commit(&title, &trailer).await?;
         ops.checkpoint(PublishStage::Committed).await;
     }
@@ -1384,6 +1430,13 @@ async fn run_publish_with<O: PublishOps>(ops: &O, screen: Option<&ScreenGate>) -
     };
 
     let local = ops.local_head().await?;
+    // Issue #98: the push and the PR check against the approved candidate rather than a recomputed
+    // one. The tree the approval bound was recomputed at the commit above; a restack may since have
+    // rewritten the branch legitimately, and what pins the push to reality is `verify_tree_binding`
+    // just below (pushed == local head). What these two checks add is that *this* grant — present,
+    // unexpired, independently reviewed, covering the effect — authorizes what is about to leave.
+    let approved = grant.map(|g| g.candidate_hash.clone()).unwrap_or_default();
+    refuse_unauthorized(grant, &crate::authority::Effect::Push, &approved, "push")?;
     if ops.remote_head().await?.as_deref() == Some(local.as_str()) {
         ops.note("the branch is already on origin; skipping the push".to_string())
             .await;
@@ -1399,10 +1452,23 @@ async fn run_publish_with<O: PublishOps>(ops: &O, screen: Option<&ScreenGate>) -
             .await;
         return Ok(Published::PullRequest(url));
     }
+    refuse_unauthorized(grant, &crate::authority::Effect::OpenPr, &approved, "open a pull request")?;
     let url = ops.create_pr(&title, &body).await?;
     ops.checkpoint(PublishStage::PrOpened).await;
     ops.note(format!("opened pull request {url}")).await;
     Ok(Published::PullRequest(url))
+}
+
+/// The per-effect grant check (issue #98): fails closed on a missing grant and surfaces the Deny
+/// reason the way every other publish failure is surfaced.
+fn refuse_unauthorized(
+    grant: Option<&crate::authority::Grant>,
+    effect: &crate::authority::Effect,
+    candidate: &str,
+    what: &str,
+) -> Result<()> {
+    crate::authority::authorize_opt(grant, effect, candidate, crate::authority::now_unix())
+        .map_err(|deny| anyhow!("refusing to {what}: not authorized ({})", deny.reason))
 }
 
 /// Fails closed while the operator's kill-switch is on (issue #84). Checked by the runner and again by
@@ -1587,22 +1653,32 @@ impl PublishOps for GitPublishOps<'_> {
                 .warn(format!("path policy: left {rel} out of the commit ({why})"))
                 .await;
         }
-        Ok(!exec_status(self.wt_git().args(["diff", "--cached", "--quiet"])).await?)
-    }
-
-    async fn commit(&self, title: &str, trailer: &str) -> Result<()> {
-        refuse_if_writes_blocked("commit")?;
-        // Issue #455: file tools rewrite files without their mode, so `stage_all`'s `git add -A`
-        // stages `100755` → `100644` drops the colony never asked for; restore them before the
-        // commit bakes them in. The trait is untouched, so the `FakeRepo` suite below is unaffected.
+        // Issue #455: file tools rewrite files without their mode, so the `git add -A` above
+        // stages `100755` → `100644` drops the colony never asked for; restore them here, before
+        // anything reads the tree the commit will bake in (`candidate_tree`) and before the commit
+        // itself. Runs inside staging rather than `commit` so the grant's commit-time candidate
+        // (issue #98) is computed over exactly what the commit will contain.
         let task_text = format!("{}\n{}", self.s.issue_title, self.s.instructions);
-        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
         let base = self.base.lock().expect("publish base poisoned").clone();
+        let mut git = crate::exec_bits::WorktreeGit::new(self.app, &self.admin, &self.wt);
         for path in crate::exec_bits::restore_dropped_exec_bits(&self.wt, &base, &task_text, &mut git).await? {
             self.log
                 .info(format!("restored executable bit on {path} (colony commit had dropped it)"))
                 .await;
         }
+        Ok(!exec_status(self.wt_git().args(["diff", "--cached", "--quiet"])).await?)
+    }
+
+    async fn candidate_tree(&self) -> Result<String> {
+        // The index is exactly what `commit` will commit (staging, hold-back and the exec-bit
+        // restore all ran in `stage_all`), so `write-tree` names the commit's tree without
+        // creating one. Writes tree objects only.
+        let tree = exec(self.wt_git().args(["write-tree"])).await?;
+        Ok(tree.trim().to_string())
+    }
+
+    async fn commit(&self, title: &str, trailer: &str) -> Result<()> {
+        refuse_if_writes_blocked("commit")?;
         let v = viewer(self.app).await?;
         let login = v["login"].as_str().unwrap_or("colonizer");
         let name = v["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(login);
@@ -1916,8 +1992,15 @@ fn parse_ls_remote(out: &str, branch: &str) -> Option<String> {
 /// Commits the worktree on the host, pushes the branch and opens the pull request. Resumably: whatever a
 /// previous attempt already got done (commit, push, pull request) is detected against git and the remote
 /// and skipped, so retrying after a failure never duplicates work. The microVM must already be gone:
-/// everything it left behind is treated as untrusted data.
-pub async fn publish(app: &Shared, s: &Session, log: &SessionLogger) -> Result<Published> {
+/// everything it left behind is treated as untrusted data. `grant` is the publish approval minted
+/// where this run was approved — the operator's Create PR press or autopilot's confirmed verdict —
+/// and every external effect below checks itself against it (issue #98).
+pub async fn publish(
+    app: &Shared,
+    s: &Session,
+    log: &SessionLogger,
+    grant: Option<&crate::authority::Grant>,
+) -> Result<Published> {
     // Issue #84: refused before `restore_gitfile`/`strip_nested_git` touch the worktree, so a blocked
     // publish leaves it exactly as the VM left it. `run_publish` checks again for any other `PublishOps`.
     refuse_if_writes_blocked("publish")?;
@@ -1942,7 +2025,72 @@ pub async fn publish(app: &Shared, s: &Session, log: &SessionLogger) -> Result<P
         session_dir: app.session_dir(&s.id),
     };
     let screen = ScreenGate::of(app.clone(), s).await;
-    run_publish_with(&ops, screen.as_ref()).await
+    run_publish_with(&ops, screen.as_ref(), grant).await
+}
+
+/// The tree a publish approval binds (issue #98): what `stage_all` + `commit` would produce from
+/// the worktree right now, computed on a temporary index outside the worktree (the technique of
+/// verify's snapshot) so the agent's index, branch and refs are untouched — the nested-git strip
+/// `publish` runs too, then `read-tree HEAD`, `add -A`, the path-policy hold-back, the
+/// dropped-exec-bit restore, and `write-tree`. The candidate minted here and the one the commit
+/// recomputes ([`GitPublishOps::candidate_tree`]) therefore answer the same question about the same
+/// worktree, so work the agent changes between the approval and the commit is caught by the grant
+/// check instead of committed anyway.
+pub(crate) async fn approval_candidate_tree(app: &App, s: &Session) -> Result<String> {
+    let admin = PathBuf::from(s.git_admin_dir.as_deref().context("session has no worktree yet")?);
+    let wt = PathBuf::from(&s.worktree);
+    // The same sanitization `publish` runs before it stages: with a nested repository still
+    // carrying its `.git`, `add -A` below would bake a gitlink into the approval's tree while the
+    // commit — made after the strip — bakes the files, refusing a publish whose worktree never
+    // moved. Stripping here too keeps the approval over the tree the commit will see.
+    let removed = strip_nested_git(&wt)?;
+    if !removed.is_empty() {
+        let names = removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+        app.session_log(&s.id, "info", format!("removed nested git metadata {names}"))
+            .await;
+    }
+    let dir = app.session_dir(&s.id);
+    let index = dir.join(format!("approve-index-{}", crate::util::short_id()));
+    let at_index = || {
+        let mut c = app.git(&admin);
+        c.arg("--work-tree").arg(&wt).env("GIT_INDEX_FILE", &index);
+        c
+    };
+    let result = async {
+        exec(at_index().args(["read-tree", "HEAD"])).await?;
+        exec(at_index().args(["add", "-A"])).await?;
+        let rec = crate::path_policy::Recorded::read(&dir.join("vm"));
+        crate::path_policy::hold_back_staged(&at_index, &wt, &rec, Duration::from_secs(30)).await?;
+        let mut git = ApprovalGit { at_index };
+        let base = s.base.clone().unwrap_or_default();
+        let task_text = format!("{}\n{}", s.issue_title, s.instructions);
+        crate::exec_bits::restore_dropped_exec_bits(&wt, &base, &task_text, &mut git).await?;
+        let tree = exec(at_index().args(["write-tree"])).await?;
+        Ok(tree.trim().to_string())
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&index).await;
+    result
+}
+
+/// [`crate::exec_bits::GitRun`] over the approval's temporary index: the same hardened host git,
+/// with `--work-tree` and `GIT_INDEX_FILE` pinned by the factory, so the exec-bit restore reads
+/// and fixes the temporary index and never the agent's own.
+struct ApprovalGit<F> {
+    at_index: F,
+}
+
+impl<F: Fn() -> Command + Send> crate::exec_bits::GitRun for ApprovalGit<F> {
+    fn run_git<'a>(
+        &'a mut self,
+        args: Vec<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut cmd = (self.at_index)();
+            cmd.args(&args);
+            exec(&mut cmd).await
+        })
+    }
 }
 
 fn read_gitdir(wt: &FsPath) -> Result<PathBuf> {
@@ -2030,7 +2178,7 @@ pub(crate) fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<Stri
 /// [`read_regular_file`] opens and reads through one handle, so the VM — which can write `out`
 /// while the colony is live, including while a retry publishes — has no check-then-read window.
 /// Every failure reads as "no content" here, matching a file that was never written.
-fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
+pub(crate) fn read_pr_description(out: &FsPath, s: &Session) -> (String, String) {
     let content = read_regular_file(&out.join("pr.md"), 256_000).ok();
     let default_title = match s.issue {
         Some(number) => format!("Fix #{number}: {}", s.issue_title),
@@ -3362,6 +3510,8 @@ mod tests {
     /// A remote head that shares no history with `LOCAL`: pushing over it is a non-fast-forward.
     const DIVERGED: &str = "f1e2d3c4b5a6f7e8d9c0b1a2f3e4d5c6b7a8f9e0";
     const PR_URL: &str = "https://github.com/acme/repo/pull/7";
+    /// The tree `candidate_tree` reports for the fake repo: what a minted grant must bind.
+    const FAKE_TREE: &str = "7ee1a4c0f2b6d8a3c5e9f0b1d2a4c6e8f0a2b4d6";
 
     #[derive(Default)]
     struct State {
@@ -3504,6 +3654,11 @@ mod tests {
 
         fn trailer(&self) -> String {
             "Refs #85".into()
+        }
+
+        async fn candidate_tree(&self) -> Result<String> {
+            self.state.borrow_mut().calls.push("candidate_tree");
+            Ok(FAKE_TREE.into())
         }
 
         async fn stage_all(&self) -> Result<bool> {
@@ -3649,6 +3804,94 @@ mod tests {
             vec![PublishStage::Committed, PublishStage::Pushed, PublishStage::PrOpened]
         );
         assert!(repo.noted("opened pull request"));
+    }
+
+    /// The deny matrix (issue #98): each test mints a real-shaped grant, bends one field, and
+    /// checks the publish refuses at the right step with the denial reason surfaced.
+    #[cfg(test)]
+    async fn bent_grant<O: PublishOps>(ops: &O, bend: impl FnOnce(&mut crate::authority::Grant)) -> crate::authority::Grant {
+        let mut grant = grant_for(ops).await;
+        bend(&mut grant);
+        grant
+    }
+
+    #[tokio::test]
+    async fn a_publish_without_a_grant_is_refused_before_the_commit() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let Err(err) = run_publish_with(&repo, None, None).await else {
+            panic!("an unauthorized publish must fail");
+        };
+        assert!(format!("{err:#}").contains("missing-grant"), "{err:#}");
+        assert_eq!(repo.count("commit"), 0, "nothing may commit without a grant");
+        assert_eq!(repo.count("push"), 0);
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_grant_bound_to_a_different_tree_is_refused_at_the_commit() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let grant = bent_grant(&repo, |g| {
+            g.candidate_hash = crate::authority::bind_candidate(&[b"a-tree-the-reviewer-never-saw"]);
+            g.authority.candidate = Some(g.candidate_hash.clone());
+        })
+        .await;
+        let Err(err) = run_publish_with(&repo, None, Some(&grant)).await else {
+            panic!("a publish whose worktree moved after the approval must fail");
+        };
+        assert!(format!("{err:#}").contains("candidate-mismatch"), "{err:#}");
+        assert_eq!(repo.count("commit"), 0, "the moved worktree must not commit");
+        assert_eq!(repo.count("push"), 0, "nothing after a refused commit may run");
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_grant_is_refused_at_the_commit() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let grant = bent_grant(&repo, |g| g.authority.expires_unix = 0).await;
+        let Err(err) = run_publish_with(&repo, None, Some(&grant)).await else {
+            panic!("an expired grant must fail the publish");
+        };
+        assert!(format!("{err:#}").contains("expired"), "{err:#}");
+        assert_eq!(repo.count("commit"), 0);
+        assert_eq!(repo.count("push"), 0);
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_who_is_also_the_builder_cannot_authorize_the_publish() {
+        let repo = FakeRepo::new(true, false, None, None);
+        let grant = bent_grant(&repo, |g| g.reviewer = g.builder.clone()).await;
+        let Err(err) = run_publish_with(&repo, None, Some(&grant)).await else {
+            panic!("a self-reviewed publish must fail");
+        };
+        assert!(format!("{err:#}").contains("reviewer-not-independent"), "{err:#}");
+        assert_eq!(repo.count("commit"), 0);
+        assert_eq!(repo.count("push"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_grant_stops_the_push_when_there_is_nothing_to_commit() {
+        // Nothing staged and the branch already ahead: the commit gate never runs, so this walks
+        // to the push gate and refuses there.
+        let repo = FakeRepo::new(false, true, None, None);
+        let grant = bent_grant(&repo, |g| g.authority.expires_unix = 0).await;
+        let Err(err) = run_publish_with(&repo, None, Some(&grant)).await else {
+            panic!("an expired grant must fail the publish");
+        };
+        assert!(format!("{err:#}").contains("not authorized (expired)"), "{err:#}");
+        assert_eq!(repo.count("push"), 0, "nothing may push without a grant");
+        assert_eq!(repo.count("create_pr"), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_grant_stops_the_pull_request_after_the_push_is_skipped() {
+        // Already on origin: the push is skipped, and the pull request gate refuses on its own.
+        let repo = FakeRepo::new(false, true, Some(LOCAL), None);
+        let grant = bent_grant(&repo, |g| g.authority.expires_unix = 0).await;
+        let Err(err) = run_publish_with(&repo, None, Some(&grant)).await else {
+            panic!("an expired grant must fail the publish");
+        };
+        assert!(format!("{err:#}").contains("not authorized (expired)"), "{err:#}");
+        assert_eq!(repo.count("create_pr"), 0, "no pull request may open without a grant");
     }
 
     /// The regression from issue #85: an earlier attempt committed but failed to push, so a retry finds
@@ -3888,7 +4131,7 @@ mod tests {
         s.git_admin_dir = Some(root.join("admin").display().to_string());
 
         let _blocked = crate::authority::test_block_external_writes();
-        let Err(err) = publish(&app, &s, &app.logger(&s.id)).await else {
+        let Err(err) = publish(&app, &s, &app.logger(&s.id), None).await else {
             panic!("a blocked publish must fail");
         };
         assert!(format!("{err:#}").contains("external writes are blocked"), "{err:#}");
@@ -3898,6 +4141,122 @@ mod tests {
             "the .git file must not be rewritten"
         );
         assert!(wt.join("sub/.git").is_dir(), "nested git metadata must not be stripped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The approval's candidate is the tree the commit commits, on a real colony-shaped repo: the
+    /// temp-index computation at the press and the real staging (`stage_all` + `candidate_tree`)
+    /// agree whatever the agent left in its index — a staged-then-re-edited file, a staged file
+    /// deleted again, ignored files, a dropped exec bit a script wins back — and even with an
+    /// untracked embedded repository, which `publish` strips before it commits (issue #98).
+    #[tokio::test]
+    async fn the_approval_candidate_tree_is_what_the_commit_commits() {
+        async fn git_in(dir: &FsPath, args: &[&str]) {
+            let mut c = tokio::process::Command::new("git");
+            c.args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            let out = c.output().await.expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let root = std::env::temp_dir().join(format!("colonizer-github-approve-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        // A colony-shaped repo: the seed is origin, the admin dir is the worktree's git dir.
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_in(&seed, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        std::fs::write(seed.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::write(seed.join(".gitignore"), "ignored.txt\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(&seed, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await;
+        let admin = root.join("admin");
+        let wt = root.join("wt");
+        git_in(
+            &root,
+            &[
+                "clone",
+                "-q",
+                "--separate-git-dir",
+                admin.to_str().unwrap(),
+                seed.to_str().unwrap(),
+                wt.to_str().unwrap(),
+            ],
+        )
+        .await;
+        git_in(&wt, &["checkout", "-qb", "colonizer/issue-7-ab12cd34"]).await;
+
+        // The agent's work, all before the click: a file it staged and then edited again, a new
+        // file, a deleted file, an ignored file, and a dropped exec bit on a script.
+        std::fs::write(wt.join("README.md"), "hello world v2\n").unwrap();
+        git_in(&wt, &["add", "README.md"]).await;
+        std::fs::write(wt.join("README.md"), "hello world v3\n").unwrap();
+        std::fs::write(wt.join("new.rs"), "new content\n").unwrap();
+        std::fs::remove_file(wt.join(".gitignore")).unwrap();
+        std::fs::write(wt.join("ignored.txt"), "secret\n").unwrap();
+        std::fs::write(wt.join("gone.txt"), "delete me\n").unwrap();
+        git_in(&wt, &["add", "gone.txt"]).await;
+        std::fs::remove_file(wt.join("gone.txt")).unwrap();
+        std::fs::write(wt.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(wt.join("run.sh"), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.id = "approve".into();
+        s.branch = "colonizer/issue-7-ab12cd34".into();
+        s.base = Some("main".into());
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(admin.display().to_string());
+        std::fs::create_dir_all(app.session_dir(&s.id)).unwrap();
+
+        // What `publish` does before it stages, then the real staging and its tree.
+        let commit_tree = async |app: &Shared, s: &Session| {
+            restore_gitfile(&wt, &admin).unwrap();
+            strip_nested_git(&wt).unwrap();
+            let log = app.logger(&s.id);
+            let ops = GitPublishOps {
+                app,
+                s,
+                log: &log,
+                admin: admin.clone(),
+                wt: wt.clone(),
+                bare: app.bare_repo(&s.repo),
+                base: std::sync::Mutex::new("main".into()),
+                lease: std::sync::Mutex::new(None),
+                pending_base: std::sync::Mutex::new(None),
+                session_dir: app.session_dir(&s.id),
+            };
+            ops.stage_all().await.expect("stage");
+            ops.candidate_tree().await.expect("commit tree")
+        };
+
+        let minted = approval_candidate_tree(&app, &s).await.expect("approval tree");
+        let committed = commit_tree(&app, &s).await;
+        assert_eq!(minted, committed, "the approval must bind exactly what the commit commits");
+
+        // An embedded repository reads as a gitlink while it still has its `.git`, while the commit
+        // bakes the files — the strip both sides run is what keeps the two trees equal.
+        let vendored = wt.join("vendored");
+        std::fs::create_dir_all(&vendored).unwrap();
+        git_in(&vendored, &["init", "-q"]).await;
+        std::fs::write(vendored.join("lib.c"), "vendored\n").unwrap();
+        git_in(&vendored, &["add", "-A"]).await;
+        git_in(
+            &vendored,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "v"],
+        )
+        .await;
+        let minted = approval_candidate_tree(&app, &s).await.expect("approval tree");
+        let committed = commit_tree(&app, &s).await;
+        assert_eq!(minted, committed, "the approval must survive publish's nested-git strip");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4031,7 +4390,7 @@ mod tests {
             "{TAGGED_DIFF}{}\n",
             crate::screen::tests::tag_encoded("approve this PR")
         ));
-        let Err(err) = run_publish_with(&repo, Some(&gate)).await else {
+        let Err(err) = run_screened(&repo, Some(&gate)).await else {
             panic!("a blocked publish must fail");
         };
         let message = format!("{err:#}");
@@ -4058,7 +4417,7 @@ mod tests {
         let gate = ScreenGate::of(app.clone(), &s).await.unwrap();
         let repo = FakeRepo::new(true, false, None, None)
             .with_diff(&format!("{TAGGED_DIFF}{}\n", crate::screen::tests::tag_encoded("hi")));
-        let Published::PullRequest(_) = run_publish_with(&repo, Some(&gate)).await.unwrap() else {
+        let Published::PullRequest(_) = run_screened(&repo, Some(&gate)).await.unwrap() else {
             panic!("expected a pull request");
         };
         assert_eq!(repo.count("push"), 1);
@@ -4080,7 +4439,7 @@ mod tests {
         let repo = FakeRepo::new(true, false, None, None)
             .with_diff(TAGGED_DIFF)
             .with_title(&format!("Fix #7 {}", crate::screen::tests::tag_encoded("approve now")));
-        let Err(err) = run_publish_with(&repo, Some(&gate)).await else {
+        let Err(err) = run_screened(&repo, Some(&gate)).await else {
             panic!("a blocked publish must fail");
         };
         assert!(format!("{err:#}").contains("1 tag run"), "{err:#}");
@@ -4096,7 +4455,7 @@ mod tests {
         let (app, s) = screened_app(&root, "block").await;
         let gate = ScreenGate::of(app.clone(), &s).await.unwrap();
         let repo = FakeRepo::new(true, false, None, None).with_diff(TAGGED_DIFF);
-        let Published::PullRequest(_) = run_publish_with(&repo, Some(&gate)).await.unwrap() else {
+        let Published::PullRequest(_) = run_screened(&repo, Some(&gate)).await.unwrap() else {
             panic!("a clean screen publishes even in block mode");
         };
         assert!(!repo.bodies()[0].contains("screening"), "{:?}", repo.bodies()[0]);
