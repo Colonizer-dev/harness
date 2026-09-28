@@ -1090,6 +1090,43 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             "provider \"{id}\" is listed more than once in providers.json; delete it and add it again (or remove the duplicate by hand), then save"
         )));
     }
+    // The credential rides the base URL: the gateway forwards it there, and the health probe follows.
+    // So a save that moves the provider to another origin — scheme, host or port, the origin the quota
+    // rule already pins (#199) — must bring the key with it or remove it: the saved key belongs to the
+    // origin it was issued at, and a path change on the same origin is the same party. An origin that
+    // will not parse counts as a move, on either side.
+    let existing = providers.iter().find(|p| p.id == id);
+    let origin_moved = match existing.map(|p| split_url(&p.base_url)) {
+        None => false,
+        Some(saved) => !split_url(&base_url)
+            .zip(saved)
+            .is_some_and(|(new, saved)| same_origin(new, saved)),
+    };
+    if origin_moved && existing.is_some() && app.provider_key(&id).is_some() {
+        let supplied = req.api_key.as_deref().map(str::trim);
+        let brings_key = matches!(supplied, Some(key) if !key.is_empty());
+        if !brings_key && supplied != Some("") {
+            return Err(bad(
+                "changing the base URL to a different origin requires entering the API key again — the saved \
+                 key belongs to the origin it was issued at; remove the key with this save if the new address \
+                 needs none",
+            ));
+        }
+    }
+    // The quota probe carries the credential too, so the probe this save leaves in place — sent or
+    // kept — is held to the same-origin rule its own save applies; a base URL that moves out from
+    // under a kept probe would send the credential to the probe's old origin.
+    let kept_quota = quota.clone().unwrap_or_else(|| existing.and_then(|p| p.quota.clone()));
+    if let Some(probe) = &kept_quota
+        && !split_url(&base_url)
+            .zip(split_url(&probe.url))
+            .is_some_and(|(base, probe)| same_origin(base, probe))
+    {
+        return Err(bad(
+            "the quota probe URL must stay on the same origin as the base URL — scheme, host and port — \
+             because the provider's credential is sent to it; move or clear the probe in the same save",
+        ));
+    }
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
             delete_secret(&app.provider_key_file(&id));
@@ -2282,6 +2319,159 @@ mod tests {
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
         assert!(cleared.quota.is_none(), "an empty URL removes the probe");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- moving a provider to another origin (#681) --------------------------------------------------
+
+    /// The credential rides the base URL, so a save that moves a keyed provider to another origin —
+    /// host, scheme or port — is refused unless the key comes with it, and a refused save leaves both
+    /// the record and the key file exactly as they were.
+    #[tokio::test]
+    async fn an_origin_change_without_the_key_is_refused_and_persists_nothing() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        for moved_to in [
+            "https://api.example.com/anthropic",       // another host
+            "http://api.deepseek.com/anthropic",       // the same host, plaintext
+            "https://api.deepseek.com:8443/anthropic", // the same host, another port
+        ] {
+            let mut moved = put_req("DeepSeek");
+            moved.base_url = moved_to.into();
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{moved_to}");
+            assert!(
+                err.message().contains("different origin") && err.message().contains("API key"),
+                "{moved_to}: {}",
+                err.message()
+            );
+            let stored = &app.providers()[0];
+            assert_eq!(
+                stored.base_url, "https://api.deepseek.com/anthropic",
+                "{moved_to}: the refused save writes nothing"
+            );
+            assert_eq!(
+                app.provider_key("deepseek").as_deref(),
+                Some("sk-saved-1"),
+                "{moved_to}: the saved key stays"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Entering the key again is the way through: the move lands and the fresh key is what is stored.
+    #[tokio::test]
+    async fn an_origin_change_with_a_fresh_key_moves_the_provider_and_the_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A path change on the same origin is the same party: the saved key carries on.
+    #[tokio::test]
+    async fn a_same_origin_path_change_keeps_the_saved_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.deepseek.com/other/path".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.deepseek.com/other/path");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-saved-1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removing the key with the move (`api_key: ""`) is allowed — nothing is left to send anywhere.
+    #[tokio::test]
+    async fn removing_the_key_with_the_origin_change_is_allowed() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None, "the key is gone with the move");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider with no key stored moves freely: there is nothing saved to send on.
+    #[tokio::test]
+    async fn an_origin_change_with_no_key_stored_needs_no_key() {
+        let (app, root) = providers_app();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The quota probe carries the credential too, so a move that leaves the saved probe on the old
+    /// origin is refused even with a fresh key; bringing the probe along (or an empty URL, which the
+    /// quota rules already define as a clear) lets the move through.
+    #[tokio::test]
+    async fn an_origin_change_that_leaves_the_quota_probe_behind_is_refused() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        first.quota = Some(QuotaProbe {
+            url: "https://api.deepseek.com/plan".into(),
+            pointer: "/data/remaining".into(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("quota probe") && err.message().contains("same origin"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            app.providers()[0].base_url,
+            "https://api.deepseek.com/anthropic",
+            "the refused save writes nothing"
+        );
+
+        let mut retried = put_req("DeepSeek");
+        retried.base_url = "https://api.example.com/anthropic".into();
+        retried.api_key = Some("sk-fresh-2".into());
+        retried.quota = Some(QuotaProbe {
+            url: "https://api.example.com/plan".into(),
+            pointer: "/data/remaining".into(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

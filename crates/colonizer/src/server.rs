@@ -582,6 +582,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_colony_gateway_token_is_not_an_api_token() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // The token boot issues the colony for its gateway routes (gateway.rs checks it against the
+        // session dir) is not a credential for the cockpit API: presented as a Bearer there it is
+        // just an unauthenticated request, on a loopback Host with no Origin.
+        let token = crate::util::random_token();
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), token.as_bytes()).unwrap();
+        let res = auth_router(&app)
+            .oneshot(guarded(
+                Method::POST,
+                "/api/sessions",
+                vec![(header::AUTHORIZATION, format!("Bearer {token}"))],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(body_text(res).await.contains("colonizer open"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn cookie_posts_keep_the_same_origin_origin_requirement() {
         let root = temp_root();
         let app = test_app(&root);
