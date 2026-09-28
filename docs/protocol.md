@@ -3078,6 +3078,9 @@ A loop's colony emits two runner events (§2), acted on only for colonies whose 
 
 `loop_next` sets a self-paced loop's `next_run_at` to now + `delay_minutes` (clamped to 15–1440); a
 fixed loop only notes it. `loop_stop` disables the loop and records `ended_reason: "stopped by the
-colony: <reason>"`. The runner offers `mcp__colonizer_loop__loop_stop` when the mothership sets `COLONIZER_LOOP=true`, and
-`mcp__colonizer_loop__loop_next` only when it also sets `COLONIZER_LOOP_SELF_PACED=true`; subagents are
-refused. A self-paced loop whose colony never calls `loop_next` runs again a day later.
+colony: <reason>"`. Which runner offers the tools is the module's `loop_tools` manifest flag
+([loops.md](loops.md)): Claude Code serves them as `mcp__colonizer_loop__loop_stop` when the
+mothership sets `COLONIZER_LOOP=true`, and `mcp__colonizer_loop__loop_next` only when it also sets
+`COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build and OpenCode runners
+gate the same two tools on the same env under their own names. A self-paced loop whose colony never
+calls `loop_next` runs again a day later.

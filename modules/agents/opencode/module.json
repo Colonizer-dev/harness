@@ -8,6 +8,7 @@
   "kind": "agent",
   "name": "OpenCode",
   "protocol": "colonizer-runner/1",
+  "loop_tools": true,
   "requires": {
     "binaries": [
       "opencode"
