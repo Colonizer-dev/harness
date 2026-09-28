@@ -189,11 +189,15 @@ pub struct Park {
 /// A user answer that arrived while the colony was suspended and is still undelivered.
 /// `question_id` is the question it answered; `prompt` is the user message the resumed runner
 /// receives, formatted at answer time while the question text is still known — a manual resume
-/// rotates the event log, so boot time would be too late to quote the question.
+/// rotates the event log, so boot time would be too late to quote the question. `answered_at` is
+/// when the answer arrived, what the restore pass lines answered colonies up by; records saved
+/// before answers kept one carry no time, and the restore pass falls back to the suspension's own.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PendingAnswer {
     pub question_id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<DateTime<Utc>>,
 }
 
 /// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
@@ -612,6 +616,7 @@ mod tests {
         s.pending_answer = Some(PendingAnswer {
             question_id: "q1".into(),
             prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
         });
         let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         assert_eq!(again.suspended, s.suspended);
@@ -622,6 +627,20 @@ mod tests {
         assert_eq!(wire["suspended"]["reason"], json!("waiting_for_answer"));
         assert_eq!(wire["suspended"]["path"], json!("session_resume"));
         assert_eq!(wire["pending_answer"]["question_id"], json!("q1"));
+        assert!(
+            wire["pending_answer"]["answered_at"].is_string(),
+            "the answer time rides the wire as RFC3339"
+        );
+    }
+
+    /// And a held answer saved before answers carried a time (issue #667) still loads: the restore
+    /// pass falls back to the suspension's own time for those.
+    #[test]
+    fn a_held_answer_saved_before_it_kept_a_time_still_deserialises() {
+        let saved = r#"{"question_id":"q1","prompt":"Q: Ship it?\nA: yes"}"#;
+        let answer: PendingAnswer = serde_json::from_str(saved).unwrap();
+        assert_eq!(answer.question_id, "q1");
+        assert_eq!(answer.answered_at, None, "no time on the record, none read back");
     }
 
     /// The park record (issue #213) survives the trip to the wire and back — this is the shape

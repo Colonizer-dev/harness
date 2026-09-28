@@ -2982,6 +2982,7 @@ exit 0
                 x.pending_answer = Some(PendingAnswer {
                     question_id: "q1".into(),
                     prompt: "Q: Ship it?\nA: yes".into(),
+                    answered_at: Some(Utc::now()),
                 });
             })
             .await
@@ -3022,6 +3023,7 @@ exit 0
             x.pending_answer = Some(PendingAnswer {
                 question_id: "q1".into(),
                 prompt: "Q: Ship it?\nA: yes".into(),
+                answered_at: Some(Utc::now()),
             });
         })
         .await
