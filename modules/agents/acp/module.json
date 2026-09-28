@@ -62,6 +62,13 @@
         "description": "Model id meant for session/set_model after session/new. Not applied yet: the runner does not read this setting, so the agent runs on its own default model. Switching the model on a running colony works when the agent advertises model selection at session/new; otherwise it is a logged warning.",
         "default": "",
         "env": "COLONIZER_MODEL"
+      },
+      "exec_policy": {
+        "type": "string",
+        "title": "Exec policy",
+        "description": "JSON exec policy this install layers over the built-in one: {\"rules\": [{\"id\", \"decision\": \"deny\"|\"ask\"|\"allow\", \"reason\", \"command\"|\"script\"|\"touches\"|\"writes_outside\"}]} (see modules/agents/acp/README.md). A matched rule answers session/request_permission for the command tool calls it names: allow approves the call without asking you, deny refuses it, ask becomes a question to you. Layers can only narrow: the built-in deny rules always hold, an org policy (COLONIZER_EXEC_POLICY_ORG) narrows further, and a repository's own .colonizer/exec-policy.json narrows further still. Empty uses the built-in policy alone.",
+        "default": "",
+        "env": "COLONIZER_EXEC_POLICY"
       }
     }
   }

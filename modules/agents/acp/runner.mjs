@@ -13,6 +13,8 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
 export const CREDENTIAL_MISSING = 'ACP_CREDENTIAL_MISSING';
@@ -31,6 +33,15 @@ function agentArgv(env) {
 /** A command line into argv: split on whitespace, keeping quoted spans whole. */
 export function splitCommand(line) {
   return [...String(line ?? '').matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]);
+}
+
+/** The command an `execute` tool call runs, for the exec policy: `rawInput.command` (a string, or
+ * an argv array joined with spaces), else the title the agent showed. */
+export function commandText(call) {
+  const raw = call?.rawInput?.command;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  if (Array.isArray(raw) && raw.length) return raw.map(String).join(' ');
+  return String(call?.title ?? '');
 }
 
 // The ACP tool kinds that only look at the world; §2's risk vocabulary only rounds up.
@@ -82,6 +93,13 @@ export function clampOptions(options) {
     .map((option) => ({ optionId: option.optionId, name: String(option.name ?? option.optionId), kind: String(option.kind ?? 'other') }));
   while (list.length < 2) list.push({ optionId: '__cancel__', name: 'Cancel', kind: 'reject_once', synthetic: true });
   return list;
+}
+
+/** The option a policy decision answers with: the exact `allow_once`/`reject_once` kind, then any
+ * of the prefix — the synthetic Cancel padding never answers on the policy's behalf. */
+function optionByKind(options, prefix) {
+  const real = options.filter((option) => !option.synthetic);
+  return real.find((option) => option.kind === `${prefix}_once`) ?? real.find((option) => option.kind.startsWith(prefix));
 }
 
 /** The workspace-confined absolute path for `target`, or null when it escapes: symlinks resolve
@@ -253,6 +271,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   }
 
   const workspace = realpathSync(cwd);
+  // The layered exec policy (issue #471), loaded once at start: the repo layer's file is read
+  // before the agent can run anything. Warnings ride stderr; agentd turns those into `log` events.
+  const execPolicy = loadExecPolicy(env, { cwd: workspace });
+  for (const warning of execPolicy.warnings) process.stderr.write(`${warning}\n`);
   let sessionId = null, currentModel = null, modelSupported = false;
   let turn = null; // { messageId, text, thoughts } while a session/prompt is in flight
   let dead = false;
@@ -304,12 +326,28 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   /** `session/request_permission` → a question card; the `answer` command (or an interrupt) picks
    * the outcome. Free text cannot select an ACP option, and neither can the padded Cancel, so both
-   * answer cancelled. */
+   * answer cancelled. Before the card, an `execute` call meets the exec policy: a deny answers the
+   * reject option, an allow the allow one, and only an ask (or a call with neither option) reaches
+   * the card, with the rule named on it. */
   const onPermission = async (params, reply) => {
     const call = plainObject(params.toolCall);
     const options = clampOptions(params.options);
+    // Only asks reach the card: commands the agent runs without asking are never fenced, so the
+    // policy is guidance here, like in Claude Code — the colony VM is the boundary.
+    const command = call.kind === 'execute' ? commandText(call) : null;
+    const hit = command ? evaluateExecPolicy(execPolicy, command, { cwd: workspace }) : null;
+    if (hit) {
+      process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
+      if (hit.decision === 'deny') {
+        const reject = optionByKind(options, 'reject');
+        return reply(reject ? { outcome: { outcome: 'selected', optionId: reject.optionId } } : { outcome: { outcome: 'cancelled' } });
+      }
+      const allow = optionByKind(options, 'allow');
+      if (hit.decision === 'allow' && allow) return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+    }
+    const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
+    const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
-    const text = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     emit({
       type: 'question', question_id: questionId, message_id: turn?.messageId ?? null, risk: riskForKind(call.kind),
       questions: [{ question: text, header: 'Permission', multi_select: false, options: options.map((o) => ({ label: o.name, description: o.kind })) }],
