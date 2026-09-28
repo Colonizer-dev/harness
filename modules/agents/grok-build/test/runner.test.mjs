@@ -4,7 +4,7 @@
 // required fields of docs/agent-events.schema.json.
 
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, startTurn, turnArgs } from '../runner.mjs';
+import { parseVersion, resolveModel, startTurn, turnArgs, untrustableWorkspace } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -23,7 +23,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const pair = (args, flag) => (args.includes(flag) ? args.slice(args.indexOf(flag), args.indexOf(flag) + 2) : null);
 
 /** The runner as a child process, with its protocol output collected into `events`. */
-function startRunner(env = {}) {
+function startRunner(env = {}, spawnOpts = {}) {
   // A scratch dir plus a `grok` on it that is the fake, so COLONIZER_GROK_BIN needs no PATH games.
   const binDir = mkdtempSync(join(tmpdir(), 'grok-test-bin-'));
   const bin = join(binDir, 'grok');
@@ -33,6 +33,7 @@ function startRunner(env = {}) {
   const child = spawn(process.execPath, [join(moduleDir, 'runner.mjs')], {
     env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, XAI_API_KEY: 'xai-test-key', COLONIZER_GROK_BIN: bin, GROK_FAKE_RECORD: record, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
+    ...spawnOpts,
   });
   const events = [];
   const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -95,6 +96,19 @@ const count = (type, n) => (events) => {
   return matches.length >= n ? matches[n - 1] : undefined;
 };
 
+/** A workspace carrying every project-scope grok surface the folder-trust gate covers: a `.grok/`
+ * with an MCP server, a plugin path, a hook and a skill, plus a `.mcp.json` beside them. */
+function projectScopeWorkspace(dir) {
+  mkdirSync(join(dir, '.grok', 'hooks'), { recursive: true });
+  mkdirSync(join(dir, '.grok', 'skills', 'evil-skill'), { recursive: true });
+  mkdirSync(join(dir, '.grok', 'plugins', 'evil-plugin', '.grok-plugin'), { recursive: true });
+  writeFileSync(join(dir, '.grok', 'config.toml'), '[mcp_servers.evil]\ncommand = "/bin/echo"\nargs = ["evil-grok-project-mcp"]\n\n[plugins]\npaths = [".grok/plugins/evil-plugin"]\n');
+  writeFileSync(join(dir, '.grok', 'hooks', 'hooks.json'), `${JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: '/bin/echo evil-project-hook' }] }] } })}\n`);
+  writeFileSync(join(dir, '.grok', 'skills', 'evil-skill', 'SKILL.md'), '---\nname: evil-skill\ndescription: project-scope skill\n---\nEvil.\n');
+  writeFileSync(join(dir, '.grok', 'plugins', 'evil-plugin', '.grok-plugin', 'plugin.json'), `${JSON.stringify({ name: 'evil-plugin', version: '0.0.1' })}\n`);
+  writeFileSync(join(dir, '.mcp.json'), `${JSON.stringify({ mcpServers: { 'evil-json': { command: '/bin/echo', args: ['evil-json-mcp'] } } })}\n`);
+}
+
 test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('grok 1.0.34 (built today)'), '1.0.34');
   assert.equal(parseVersion('1.2.3'), '1.2.3');
@@ -107,6 +121,18 @@ test('resolveModel accepts xai-grok and bare ids, and refuses other providers by
   assert.deepEqual(resolveModel('  grok-4.6 '), { model: 'grok-4.6' });
   assert.deepEqual(resolveModel(''), {});
   assert.match(resolveModel('deepseek/deepseek-flash').error, /^GROK_MODEL_PROVIDER:/);
+});
+
+test('untrustableWorkspace refuses only a workspace that is the home directory or the filesystem root', () => {
+  const home = mkdtempSync(join(tmpdir(), 'grok-test-untrust-'));
+  assert.equal(untrustableWorkspace(home, home), home, 'a workspace that is $HOME is auto-trusted upstream');
+  assert.equal(untrustableWorkspace('/', home), '/', 'the filesystem root can never be gated');
+  assert.equal(untrustableWorkspace(home, mkdtempSync(join(tmpdir(), 'grok-test-other-'))), null, 'an ordinary workspace gates fine');
+  // A checkout merely inside $HOME keys on the checkout itself upstream (workspace_key falls back
+  // to the cwd when the git root is over-broad), so it still gates.
+  const nested = join(home, 'nested');
+  mkdirSync(nested, { recursive: true });
+  assert.equal(untrustableWorkspace(nested, home), null, 'a checkout inside $HOME keys on itself and gates');
 });
 
 test('turnArgs carries every nesting flag, the model, and the resume id', () => {
@@ -175,6 +201,26 @@ test('a turn streams mapped events and the child carries the nesting flags', asy
   runner.send({ type: 'shutdown' });
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
   assert.equal(await runner.waitExit(), 0);
+});
+
+test('project-scope config stays off: the gate is forced past an inherited GROK_FOLDER_TRUST=0, headless, with no --trust and no trust store', async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), 'grok-test-ws-'));
+  projectScopeWorkspace(workspace);
+  const runner = startRunner({ GROK_FOLDER_TRUST: '0' }, { cwd: workspace });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'do the thing' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  const [invocation] = runner.turns();
+  assert.equal(invocation.env.GROK_FOLDER_TRUST, '1', 'the gate is forced on; the host value must never pass through');
+  assert.ok(!invocation.argv.includes('--trust'), 'the runner never grants folder trust itself');
+  assert.equal(invocation.trustedFolders, false, 'the fresh GROK_HOME starts with an empty trust store');
+  assert.equal(invocation.tty.stdin, false, 'stdin is a pipe: headless resolves untrusted, never a trust prompt');
+  assert.equal(invocation.tty.stderr, false, 'stderr is a pipe too');
+  assert.ok(invocation.env.GROK_HOME && !invocation.env.GROK_HOME.startsWith(workspace), 'the fresh GROK_HOME is not inside the workspace');
+
+  await stop(runner);
 });
 
 test('the second turn resumes the first turn’s grok session, with cumulative cost and usage', async (t) => {
@@ -341,6 +387,25 @@ test('a grok that is not the pinned version is a named drift error', async (t) =
   await stop(runner);
 });
 
+test('a workspace folder trust cannot gate (the home directory) is a named error before any spawn', async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), 'grok-test-home-'));
+  projectScopeWorkspace(workspace);
+  const runner = startRunner({ HOME: workspace }, { cwd: workspace });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  const problem = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the workspace error');
+  assert.match(problem.message, /^GROK_WORKSPACE_UNTRUSTABLE:/);
+  assert.match(problem.message, /dedicated worktree/);
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error' && e.detail === 'GROK_WORKSPACE_UNTRUSTABLE'), 'the error status');
+
+  runner.send({ type: 'user_message', id: 'initial', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^GROK_WORKSPACE_UNTRUSTABLE:/);
+  assert.equal(runner.records().length, 0, 'not even grok --version may run in an untrustable workspace');
+  await stop(runner);
+});
+
 test('unknown streaming event types are warned about, not fatal', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'grok-test-script-'));
   const scriptPath = join(dir, 'events.ndjson');
@@ -429,6 +494,88 @@ test('finding_file and the memory tools are only offered when the mothership swi
   runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
   assert.deepEqual(runner.turns()[0].mcp.tools, ['wait'], 'no findings switch and no memory dir leave only wait');
+
+  await stop(runner);
+});
+
+// The live contract test behind COLONIZER_GROK_LIVE_BIN drives the real runner against the real
+// pinned grok binary (a wrapper intercepts the turn and runs `grok inspect --json` in the
+// workspace instead, which needs no xAI key), so it asserts what the forced gate actually makes
+// grok resolve — not just what env the runner hands over. Run it with:
+//   COLONIZER_GROK_LIVE_BIN=/path/to/grok npm test
+const liveBin = String(process.env.COLONIZER_GROK_LIVE_BIN ?? '').trim();
+
+test('live grok: the forced gate leaves the real binary with an untrusted workspace and none of the project config', { skip: liveBin ? false : 'set COLONIZER_GROK_LIVE_BIN to the pinned grok binary (install.sh 1.0.34) to run the live contract test' }, async (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), 'grok-live-ws-'));
+  projectScopeWorkspace(workspace);
+  // Folder trust keys the workspace on the git root; the parent env's GIT_DIR/GIT_WORK_TREE/
+  // GIT_INDEX_FILE (a colonizer worktree sets them) would redirect the init into read-only rock.
+  const gitEnv = { ...process.env };
+  delete gitEnv.GIT_DIR;
+  delete gitEnv.GIT_WORK_TREE;
+  delete gitEnv.GIT_INDEX_FILE;
+  execFileSync('git', ['init', '-q'], { cwd: workspace, env: gitEnv });
+  const binDir = mkdtempSync(join(tmpdir(), 'grok-live-bin-'));
+  const inspectJson = join(binDir, 'inspect.json');
+  const facts = join(binDir, 'facts.txt');
+  const wrapper = join(binDir, 'grok');
+  // Preflight's `--version` passes through to the real binary; a turn becomes `inspect --json`
+  // in the cwd the runner gave the child, followed by a bare end event so the turn completes.
+  writeFileSync(
+    wrapper,
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "--prompt-file" ]; then',
+      '  {',
+      '    printf \'argv=%s\\n\' "$*";',
+      '    printf \'GROK_FOLDER_TRUST=%s\\n\' "${GROK_FOLDER_TRUST-unset}";',
+      '    printf \'GROK_HOME=%s\\n\' "${GROK_HOME-unset}";',
+      '    if [ -e "$GROK_HOME/trusted_folders.toml" ]; then printf \'trust_store=present\\n\'; else printf \'trust_store=absent\\n\'; fi',
+      '    if [ -t 0 ]; then printf \'stdin=tty\\n\'; else printf \'stdin=pipe\\n\'; fi',
+      '    if [ -t 2 ]; then printf \'stderr=tty\\n\'; else printf \'stderr=pipe\\n\'; fi',
+      '  } > "$GROK_LIVE_FACTS"',
+      `  "${liveBin}" inspect --json > "$GROK_LIVE_INSPECT" 2>/dev/null`,
+      '  printf \'%s\\n\' \'{"type":"end","sessionId":"live-inspect","stopReason":"end_turn","total_cost_usd":0}\'',
+      '  exit 0',
+      'fi',
+      `exec "${liveBin}" "$@"`,
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const runner = startRunner(
+    {
+      COLONIZER_GROK_BIN: wrapper,
+      GROK_LIVE_INSPECT: inspectJson,
+      GROK_LIVE_FACTS: facts,
+      HOME: mkdtempSync(join(tmpdir(), 'grok-live-home-')), // a home that is not the workspace
+    },
+    { cwd: workspace },
+  );
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'inspect the workspace' });
+  await runner.waitUntil(count('turn_end', 1), 'the inspect turn to finish');
+
+  const factLines = Object.fromEntries(readFileSync(facts, 'utf8').trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+  assert.equal(factLines.GROK_FOLDER_TRUST, '1', 'the child runs with the gate forced on');
+  assert.equal(factLines.trust_store, 'absent', 'the fresh GROK_HOME carries no recorded grant');
+  assert.equal(factLines.stdin, 'pipe', 'headless: stdin is not a TTY');
+  assert.equal(factLines.stderr, 'pipe', 'headless: stderr is not a TTY');
+  assert.ok(!factLines.argv.includes('--trust'), 'the runner never passes --trust');
+
+  const report = JSON.parse(readFileSync(inspectJson, 'utf8'));
+  assert.equal(report.projectTrusted, false, 'grok itself resolves the workspace untrusted');
+  const inWorkspace = (path) => typeof path === 'string' && path.startsWith(workspace);
+  assert.deepEqual(report.hooks.filter((h) => inWorkspace(h.source?.path)), [], 'no project hooks load');
+  assert.ok(!report.skills.some((s) => inWorkspace(s.source?.path) || s.name === 'evil-skill'), 'no project skills load');
+  assert.ok(report.plugins.filter((p) => inWorkspace(p.path)).every((p) => p.enabled === false), 'project plugins stay disabled');
+  // `inspect` lists project MCP servers even when untrusted — it is a discovery report, and 1.0.34
+  // exposes no per-server trust verdict for them. The gate that matters is at spawn: grok drops
+  // project-scoped servers for an untrusted workspace before any process starts (upstream
+  // session/managed_mcp.rs → folder_trust::filter_untrusted_project_mcp_with), keyed on the same
+  // projectTrusted verdict asserted above.
+  assert.ok(Array.isArray(report.mcpServers), 'the discovery report came back parseable');
 
   await stop(runner);
 });

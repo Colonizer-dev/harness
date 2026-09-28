@@ -53,6 +53,7 @@ Before any grok process is spawned (a colony must fail loudly, not hang on a pro
 answer), each named problem emits a `log` error plus `status error` with the name as `detail`:
 
 - `GROK_CREDENTIAL_MISSING` — `XAI_API_KEY` unset/empty. Fix below.
+- `GROK_WORKSPACE_UNTRUSTABLE` — the workspace is the home directory or the filesystem root, which grok's folder trust auto-trusts instead of gating (an unrecordable trust root); run the colony from a dedicated worktree.
 - `GROK_BINARY_MISSING` — no grok at `COLONIZER_GROK_BIN`/PATH; the log carries the pinned install command.
 - `GROK_VERSION_DRIFT` — `grok --version` (parsed leniently for X.Y.Z) is not the pinned version.
 - `GROK_MODEL_PROVIDER` — a model setting naming another provider than `xai-grok/<model>`.
@@ -87,7 +88,7 @@ The microVM is the boundary. Inside it:
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |
 | Host config / OAuth token / hooks / plugins / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: these live under it (14-headless-mode.md "File Locations") |
 | Colonizer MCP tools | **on** | the runner-written `$GROK_HOME/config.toml` registers `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
-| Hooks / plugins / MCP / skills (project scope) | **not yet enforced** | no verified global off-switch; a colonized repo's `.grok/` could still contribute them (26-config-reference.md limits project config to MCP servers, plugins and permission) |
+| Hooks / plugins / MCP / skills (project scope) | **enforced off** | the folder-trust gate forced on with `GROK_FOLDER_TRUST=1` (env beats a `[folder_trust] enabled` kill-switch in any config), and the fresh `GROK_HOME` has an empty trust store: a headless run (no TTY, no `--trust`) resolves the workspace untrusted, and grok then skips project `.grok/` MCP servers, plugins, hooks and skills, plus project LSP and instructions (AGENTS.md) — the repo must be re-briefed through the prompt. Release-stamped binaries only: a self-built, unstamped grok never gates (the pinned install.sh build is stamped). Verified live by the contract test behind `COLONIZER_GROK_LIVE_BIN` ("Tests") |
 
 Subagents and plan mode are left at grok's defaults; `--no-subagents`/`--no-plan` exist if a later
 slice wants them off.
@@ -95,11 +96,24 @@ slice wants them off.
 ## Tests
 
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
-`runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv and env
-it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the model against the registered
-colonizer MCP server, so findings, memory and wait are tested end to end. The happy path's events are
-checked against the required fields of `docs/agent-events.schema.json`. CI covers only these stubbed
-contract tests.
+`runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv, env,
+TTY state and trust store it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the
+model against the registered colonizer MCP server, so findings, memory and wait are tested end to
+end. The happy path's events are checked against the required fields of
+`docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
+
+One contract test is live: with `COLONIZER_GROK_LIVE_BIN` pointing at the pinned binary it drives
+the real runner (a wrapper turns the turn into `grok inspect --json` in the workspace, which needs
+no key) and asserts grok itself reports `projectTrusted: false` with none of a planted `.grok/`
+loadable:
+
+```
+COLONIZER_GROK_LIVE_BIN=/path/to/grok npm test
+```
+
+Without the variable the test skips. `inspect` lists project MCP servers even when untrusted — it
+is a discovery report; the gate that removes them sits at spawn (`filter_untrusted_project_mcp_with`),
+keyed on the same verdict the test asserts.
 
 ## What remains
 
