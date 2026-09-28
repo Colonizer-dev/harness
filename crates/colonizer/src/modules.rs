@@ -1551,6 +1551,7 @@ mod tests {
             requires,
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 
