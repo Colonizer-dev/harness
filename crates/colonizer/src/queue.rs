@@ -1751,6 +1751,7 @@ mod tests {
             schema: json!({}),
             egress: None,
             resume_dir: resume_dir.map(String::from),
+            loop_tools: false,
         }
     }
 

@@ -1,10 +1,12 @@
 // Direct tests for mcp.mjs, the colonizer MCP stdio server: the tool list's gating, memory_search
-// against a mounted notes dir, and wait's refusals, match and timeout-with-tail. The end-to-end path
-// (bridge forwarding, the runner's -c registration) is covered in runner.test.mjs.
+// against a mounted notes dir, the loop tools' bridge forwarding and clamp, and wait's refusals,
+// match and timeout-with-tail. The end-to-end path (bridge forwarding, the runner's -c
+// registration) is covered in runner.test.mjs.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -35,6 +37,27 @@ function startServer(env) {
 const resultText = (reply) => reply.result?.content?.[0]?.text ?? `rpc error: ${reply.error?.message ?? 'none'}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** A stand-in for the runner's bridge: records every forwarded call as {path, body} and answers
+ * `answer` (default {ok:true}, the runner's reply to a well-formed loop call). */
+async function startBridge(answer = { ok: true }) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push({ path: req.url, body: JSON.parse(body || '{}') });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(answer));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    seen,
+    url: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
+  };
+}
+
 test('the tool list follows the switches, and memory_search reads the mounted notes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-mcp-mem-'));
   mkdirSync(join(dir, 'repo', 'notes'), { recursive: true });
@@ -53,6 +76,63 @@ test('the tool list follows the switches, and memory_search reads the mounted no
     assert.equal(unknown.error.code, -32602);
   } finally {
     srv.stop();
+  }
+});
+
+test('the loop tools follow the loop switches: loop_stop for a loop colony, loop_next only when it is self-paced', async () => {
+  const paced = startServer({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
+  try {
+    assert.deepEqual((await paced.call('tools/list', {})).result.tools.map((t) => t.name), ['loop_next', 'loop_stop', 'wait']);
+  } finally {
+    paced.stop();
+  }
+  const fixed = startServer({ COLONIZER_LOOP: 'true' });
+  try {
+    assert.deepEqual((await fixed.call('tools/list', {})).result.tools.map((t) => t.name), ['loop_stop', 'wait'], 'a fixed-schedule loop gets no loop_next');
+  } finally {
+    fixed.stop();
+  }
+  // The no-env case is the first test's list above: not a loop colony, no loop tools.
+});
+
+test('loop_next forwards to the bridge with a clamped delay, and loop_stop carries its reason', async () => {
+  const bridge = await startBridge();
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: 't', COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
+  try {
+    const soon = await srv.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 3, reason: 'work is pending' } });
+    assert.equal(resultText(soon), 'Next run scheduled in 15 minutes.');
+    const later = await srv.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 90, reason: 'quiet spell' } });
+    assert.equal(resultText(later), 'Next run scheduled in 90 minutes.');
+    const far = await srv.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 100000, reason: 'nothing happening' } });
+    assert.equal(resultText(far), 'Next run scheduled in 1440 minutes.');
+    assert.deepEqual(bridge.seen.map((c) => c.path), ['/loop_next', '/loop_next', '/loop_next']);
+    assert.deepEqual(bridge.seen.map((c) => c.body.delay_minutes), [15, 90, 1440], 'the delay is clamped to 15 min – 24 h');
+    assert.deepEqual(bridge.seen[1].body.reason, 'quiet spell');
+    const stopped = await srv.call('tools/call', { name: 'loop_stop', arguments: { reason: 'the goal is met' } });
+    assert.equal(resultText(stopped), 'The loop is stopped; this is its last run.');
+    assert.deepEqual(bridge.seen.at(-1), { path: '/loop_stop', body: { reason: 'the goal is met' } });
+  } finally {
+    srv.stop();
+    await bridge.close();
+  }
+});
+
+test('the loop tools refuse malformed input as text, and surface a bridge error as a tool error', async () => {
+  const bridge = await startBridge({ error: 'loop_next needs a reason: what the next run should find or do' });
+  const srv = startServer({ COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' });
+  const call = (name, arguments_) => srv.call('tools/call', { name, arguments: arguments_ });
+  try {
+    assert.match(resultText(await call('loop_next', {})), /delay_minutes must be a number of minutes from now/);
+    assert.match(resultText(await call('loop_next', { delay_minutes: 0 })), /delay_minutes must be a number/);
+    assert.match(resultText(await call('loop_next', { delay_minutes: 30 })), /reason is required/);
+    assert.match(resultText(await call('loop_stop', {})), /reason is required/);
+    assert.equal(bridge.seen.length, 0, 'a refusal never reaches the bridge');
+    const bridged = await call('loop_next', { delay_minutes: 30, reason: 'r' });
+    assert.equal(bridged.result.isError, true);
+    assert.equal(resultText(bridged), 'loop_next needs a reason: what the next run should find or do');
+  } finally {
+    srv.stop();
+    await bridge.close();
   }
 });
 

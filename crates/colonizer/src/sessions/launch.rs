@@ -1356,6 +1356,7 @@ mod tests {
             schema: json!({}),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.
