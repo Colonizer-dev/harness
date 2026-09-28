@@ -281,6 +281,7 @@ test('every session/update type maps (or is ignored) without breaking the turn',
             { sessionUpdate: 'user_message_chunk', content: { type: 'text', text: 'echo back?' } },
             { sessionUpdate: 'available_commands_update', commands: [{ name: 'help', description: '' }] },
             { sessionUpdate: 'current_mode_update', currentModeId: 'code' },
+            { sessionUpdate: 'session_info_update', sessionId: 'renamed', modes: {} },
             { sessionUpdate: 'from_the_future' },
           ],
         },
@@ -302,6 +303,7 @@ test('every session/update type maps (or is ignored) without breaking the turn',
     { type: 'tool_result', tool_call_id: 'call_2', output: 'boom', is_error: true },
   ], 'an in_progress update emits no tool_result; a failed one is an error');
   assert.ok(runner.events.some((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('from_the_future')), 'an unknown update type is named');
+  assert.ok(!runner.events.some((e) => e.type === 'log' && e.message.includes('session_info_update')), 'session_info_update is known and ignored quietly');
   const turnEnd = first('turn_end')(runner.events);
   assert.equal(turnEnd.is_error, false);
   assert.equal(turnEnd.result, 'Hello');
@@ -688,4 +690,65 @@ test('a preset agent runs through its pinned command line and names a missing cr
   const problem3 = await empty.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the empty-command error');
   assert.match(problem3.message, /the custom command is empty/);
   await stop(empty);
+});
+
+test('the grok preset: its command line and child env, the missing credential, a refused credential, the opaque turn error', async (t) => {
+  // A `grok` shim on PATH that records its argv and environment, so the preset's command and the
+  // child env are checked end-to-end.
+  const binDir = mkdtempSync(join(tmpdir(), 'acp-test-grok-'));
+  const argvRecord = join(binDir, 'argv.txt');
+  const envRecord = join(binDir, 'env.txt');
+  const shim = `#!/bin/sh\nprintf '%s\\n' "$@" >> ${JSON.stringify(argvRecord)}\nenv > ${JSON.stringify(envRecord)}\nexec ${process.execPath} ${JSON.stringify(fakeAcp)} "$@"\n`;
+  writeFileSync(join(binDir, 'grok'), shim, { mode: 0o755 });
+  const grokEnv = { COLONIZER_ACP_AGENT: 'grok', XAI_API_KEY: 'test-key', PATH: `${binDir}:/usr/bin:/bin` };
+
+  const grok = startRunner({ env: grokEnv, script: { turns: { '*': { updates: [{ sessionUpdate: 'session_info_update', sessionId: 'renamed' }] } } } });
+  t.after(() => grok.child.kill('SIGKILL'));
+  grok.send({ type: 'user_message', id: 'initial', text: 'hi' });
+  await grok.waitUntil(count('turn_end', 1), 'the turn to finish on the grok preset');
+  assert.equal(readFileSync(argvRecord, 'utf8').trim(), 'agent\nstdio', 'the grok preset runs `grok agent stdio`');
+  const child = Object.fromEntries(
+    readFileSync(envRecord, 'utf8').trim().split('\n').map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]),
+  );
+  assert.match(child.GROK_HOME, /colonizer-acp-grok/, 'a fresh GROK_HOME, not the host home');
+  assert.equal(child.GROK_FOLDER_TRUST, '1');
+  assert.equal(child.GROK_MEMORY, '0');
+  assert.equal(child.GROK_TELEMETRY_ENABLED, '0');
+  assert.equal(child.GROK_DISABLE_AUTOUPDATER, '1');
+  assert.equal(child.BROWSER, '/bin/false', 'nothing opens a browser');
+  assert.equal(child.XAI_API_KEY, 'test-key', 'the credential passes through');
+  assert.ok(!grok.events.some((e) => e.type === 'log' && e.message.includes('session_info_update')), 'grok\'s session_info_update is ignored quietly');
+  await stop(grok);
+
+  const noKey = startRunner({ env: { COLONIZER_ACP_AGENT: 'grok', COLONIZER_ACP_COMMAND: '', XAI_API_KEY: '' } });
+  t.after(() => noKey.child.kill('SIGKILL'));
+  const problem = await noKey.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the credential error');
+  assert.match(problem.message, /ACP_CREDENTIAL_MISSING/);
+  assert.match(problem.message, /XAI_API_KEY/);
+  await stop(noKey);
+
+  // grok's ACP answers a missing/refused credential at session/new with `Authentication required`.
+  const refused = startRunner({
+    env: grokEnv,
+    script: { sessionNew: { error: { code: -32000, message: 'Authentication required' } } },
+  });
+  t.after(() => refused.child.kill('SIGKILL'));
+  const auth = await refused.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the auth error');
+  assert.match(auth.message, /ACP_AUTH_FAILED/);
+  assert.match(auth.message, /the agent refused the credential: check XAI_API_KEY/);
+  await refused.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'error' && e.detail === 'ACP_AUTH_FAILED'), 'the error status');
+  assert.equal(await refused.waitExit(), 1, 'a refused credential is a nonzero exit');
+
+  // A turn with a key the API rejects comes back as a bare "Internal error"; the runner names the
+  // credential as the likeliest fix.
+  const badKey = startRunner({
+    env: grokEnv,
+    script: { turns: { '*': { error: { code: -32603, message: 'Internal error' } } } },
+  });
+  t.after(() => badKey.child.kill('SIGKILL'));
+  badKey.send({ type: 'user_message', id: 'initial', text: 'hi' });
+  const failed = await badKey.waitUntil(first('turn_end'), 'the failed turn');
+  assert.equal(failed.is_error, true);
+  assert.match(failed.result, /^the turn failed: Internal error — grok reports a rejected XAI_API_KEY this way; check the key first$/);
+  await stop(badKey);
 });
