@@ -12,7 +12,8 @@ still applies behind it.
 **Status.** This is the pinned v1 wire contract for issue #531. It was written before the code.
 Both halves now exist on `main`: the relay (`services/relay`, #532/#534, PR #555), the mothership
 tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558), the cockpit
-switch, link and badge (#535, PR #575), and the security review
+switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, described in
+[Pairing and the owner](#pairing-and-the-owner)), and the security review
 ([remote-access-review.md](remote-access-review.md), #536). The relay is not deployed, and the
 feature does not work end to end yet: the two halves do not follow this contract in several
 places, listed in [Where the code differs today](#where-the-code-differs-today). The client as
@@ -270,7 +271,8 @@ Both answer with the same body:
 | `url` | `"https://<host>"` once registered, otherwise `null`. |
 | `error` | A human-readable string while `state` is `"error"`, otherwise `null`. |
 
-The relay's pairing flow and the cockpit badge belong to #534/#535 and are not defined here.
+The relay's pairing flow is in [Pairing and the owner](#pairing-and-the-owner) below; the cockpit
+badge belongs to #535.
 
 As built (#558), the API differs from this sketch. `GET` and `PUT /api/remote` answer
 `{"enabled", "host", "connected", "since", "replaced"}` — the bare host rather than a URL, a
@@ -278,6 +280,42 @@ As built (#558), the API differs from this sketch. `GET` and `PUT /api/remote` a
 `POST /api/remote/reset`, replaces the key and the link. A failed registration is a `502` on the
 `PUT` and the switch stays off. [protocol.md §6.10](protocol.md#610-remote-access-tunnel) has the
 details (`crates/colonizer/src/remote.rs:150-165`, `:1137-1143`).
+
+## Pairing and the owner
+
+The relay forwards a browser only when its GitHub sign-in is the install's bound owner (#534). The
+first sign-in on an unowned `<install_id>.my.colonizer.dev` gets a six-digit code instead: random,
+valid for 10 minutes, and single-use. The code does nothing by itself. It binds only when the
+**local** cockpit confirms it, so the machine decides who owns its link, not whoever signed in first.
+
+The mothership reaches the relay's pairing state through signed calls on the apex
+(`services/relay/src/worker.js`, `signed`). Each carries `x-colonizer-ts` (Unix seconds, within
+±300 s of the relay's clock) and `x-colonizer-sig`: standard padded base64 of an Ed25519 signature,
+by the install's registered key, over the UTF-8 string `METHOD\npath\nts\nbody` (`path` is the
+URL path the relay receives; `body` is the exact request body, empty for none).
+
+| Relay endpoint | Mothership route | Answer |
+| :--- | :--- | :--- |
+| `GET /api/installs/<id>/pairing` | `GET /api/remote/pairing` | `{"owner": {"github_login"} \| null, "pending": [{"code", "github_login", "expires_at"}]}`; `expires_at` in Unix seconds. |
+| `POST /api/installs/<id>/pairing/confirm {"code"}` | `POST /api/remote/pairing/confirm {"code"}` | `200 {"owner": {"github_login"}}`. `400` not six digits, `404` unknown, expired or already used, `409` an owner is already bound. A confirm deletes every pending code of the install. |
+| `POST /api/installs/<id>/pairing/reject {"code"}` | `POST /api/remote/pairing/reject {"code"}` | `200 {"github_login"}`: that one code is gone. `400`, `404` as for confirm. Added with #599. |
+| `DELETE /api/installs/<id>/owner` | `DELETE /api/remote/owner` | `204`: the owner and every pending code are gone. The owner's relay sessions fail their next request, because each one re-checks the current owner. |
+
+The mothership routes are owner-only: a scoped `col_…` API token gets `403` on all four
+(`api_tokens::classify`). Confirm, reject and unbind are also **local-only**. A request that
+arrived through the tunnel carries the `Tunnelled` request extension, which only the tunnel client
+can set, and these handlers answer it `403`. The reason: were confirm reachable through the tunnel,
+anyone whose request got that far could bind themselves. Before any call, the mothership refuses a
+code that is not six digits with `400`, and answers `409` when remote access has never been
+switched on (there is no install to pair). A relay answer outside the table — a `401` for a key the
+relay does not accept, a `404` for an install it does not know — becomes a `502` naming it.
+
+**Reset link** (`POST /api/remote/reset`) unbinds too: after the new key registers, the mothership
+sends the old install a signed `DELETE …/owner` with the old key, best effort, before it replaces the
+key file. The new install starts unowned.
+
+Confirm, reject and unbind are recorded in the activity log as `remote.pair`, `remote.pair_reject`
+and `remote.unpair`, with the GitHub login as the target where the relay names one.
 
 ## Test vector
 
@@ -379,15 +417,6 @@ amendment to the contract; none is decided here.
   relay sent and sets its own tunnel host (`remote.rs:786`, `:1047`).
 - The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:134-136`;
   review finding R4).
-
-**Owner sign-in**
-
-- The relay only forwards a browser whose GitHub account is the install's bound owner, and binding
-  one needs the mothership to confirm a pairing code with a signed request
-  (`POST /api/installs/<id>/pairing/confirm`). The mothership has no code for the signed pairing
-  endpoints yet: `GET /api/remote/pairing` and `POST /api/remote/pairing/confirm`, which the
-  cockpit calls, are not routes (`crates/colonizer/routes.snap`), so the cockpit hides the pairing
-  block and no install can get an owner.
 
 ## What is not colony work
 

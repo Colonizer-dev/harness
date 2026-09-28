@@ -274,5 +274,20 @@ describe("mock remote access (issue #535)", () => {
     // A confirm deletes every pending code, so the used one is gone — a 404, like at the relay.
     await expect(api.confirmRemotePairing(code)).rejects.toMatchObject({ status: 404 });
     expect((await api.remotePairing())?.pending).toEqual([]);
+    const { entries } = await api.activity({ kind: "remote.pair" });
+    expect(entries[0]).toMatchObject({ kind: "remote.pair", target: `@${done.owner.github_login}`, section: "remote" });
+  });
+
+  it("rejecting drops a code, and unbinding clears the owner (#599)", async () => {
+    const api = createMockApi();
+    const code = (await api.remotePairing()).pending[0].code;
+    await expect(api.rejectRemotePairing("abc")).rejects.toMatchObject({ status: 400 });
+    expect(await api.rejectRemotePairing(code)).toEqual({ github_login: "octocat" });
+    await expect(api.rejectRemotePairing(code)).rejects.toMatchObject({ status: 404 });
+    await expect(api.confirmRemotePairing(code)).rejects.toMatchObject({ status: 404 });
+    expect((await api.remotePairing()).pending).toEqual([]);
+    await api.unbindRemoteOwner();
+    expect(await api.remotePairing()).toEqual({ owner: null, pending: [] });
+    expect((await api.activity({ kind: "remote.unpair" })).entries).toHaveLength(1);
   });
 });

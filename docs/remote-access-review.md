@@ -46,11 +46,12 @@ Every finding below is still open on `main`:
 No issue with any of the five R titles is in the public tracker as of 2026-09-27; if they were
 filed privately (as security advisories), this document cannot see them.
 
-One more gap, found on the re-check and not a security finding: the mothership has no code for
-the relay's signed pairing endpoints. The cockpit calls `GET /api/remote/pairing` and
-`POST /api/remote/pairing/confirm` (`web/src/api.ts`), but neither is a mothership route
-(`crates/colonizer/routes.snap`), so no install can bind an owner and the relay forwards no one.
-Remote access therefore cannot be used end to end yet, independent of R1.
+One more gap, found on the re-check and not a security finding: the mothership had no code for
+the relay's signed pairing endpoints. The cockpit called `GET /api/remote/pairing` and
+`POST /api/remote/pairing/confirm` (`web/src/api.ts`), but neither was a mothership route, so no
+install could bind an owner and the relay forwarded no one. #599 closes it: the mothership now
+serves the pairing routes, and confirming a code is refused through the tunnel
+([remote-tunnel.md](remote-tunnel.md#pairing-and-the-owner)).
 [remote-tunnel.md](remote-tunnel.md#where-the-code-differs-today) lists every place the two halves
 depart from the pinned tunnel contract.
 
@@ -166,4 +167,4 @@ Each was confirmed by code reading; L1 also by a proof-of-concept run.
 - The tunnel-client half of this review re-run once #533 merges, since `a518798` was unmerged at
   review time. (#533 merged as #558; the re-check above found every finding unchanged.)
 - The mothership's side of pairing built, so an install can bind an owner at all (see *Status on
-  `main`* above).
+  `main`* above). Done in #599.

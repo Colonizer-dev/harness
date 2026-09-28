@@ -18,6 +18,13 @@
 //     socket with a minimal RFC 6455 codec — masked frames in, unmasked out; text, close with
 //     code/reason, ping/pong — so a close the DO sends (4000 'replaced') reaches the client as a
 //     real close frame.
+//   - A request whose Host is `<install_id>.<RELAY_DOMAIN>` keeps that host, so the real owner sign-in
+//     (/_auth, /_auth/callback) runs. GitHub is stubbed: the callback's `code` names the account,
+//     `<github_id>:<login>`, and the token exchange and /user read answer exactly that. The session
+//     secret and OAuth app are fixed test values. With this, the pairing flow runs end to end: sign in,
+//     read the code off the pairing page, confirm it with the mothership's signed call.
+//   - POST /_local/expire-pairings?install=<install_id> (harness only, never the worker) moves every
+//     pending pairing of that install into the past, so an expiry can be tested without waiting.
 //   - Any other request carrying header `x-local-relay-install: <install_id>` skips GitHub owner
 //     sign-in: it is forwarded to that install's DO as a proxy request (x-relay-kind: proxy, like
 //     test/fakes.mjs proxyRequest), and the DO's Response is written back faithfully — status,
@@ -42,6 +49,9 @@ const dos = new Map();
 const env = {
   RELAY_DOMAIN: DOMAIN,
   DB: fakeD1(),
+  GITHUB_CLIENT_ID: 'local-relay-client',
+  GITHUB_CLIENT_SECRET: 'local-relay-secret',
+  SESSION_SECRET: 'local-relay-session-secret',
   TUNNELS: {
     idFromName: (name) => name,
     get(id) {
@@ -52,6 +62,24 @@ const env = {
       return { fetch: (request) => made.relay.fetch(request) };
     },
   },
+};
+
+// GitHub, stubbed: the OAuth `code` is `<github_id>:<login>`; the token exchange hands it back as the
+// access token and /user reads the account out of it. Nothing else is fetched from here.
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init = {}) => {
+  const url = String(input instanceof Request ? input.url : input);
+  if (url === 'https://github.com/login/oauth/access_token') {
+    const { code } = JSON.parse(init.body ?? '{}');
+    return Response.json({ access_token: code });
+  }
+  if (url === 'https://api.github.com/user') {
+    const token = String(new Headers(init.headers).get('authorization') ?? '').replace(/^Bearer /, '');
+    const at = token.indexOf(':');
+    const id = Number(token.slice(0, at));
+    return at > 0 && Number.isInteger(id) ? Response.json({ id, login: token.slice(at + 1) }) : new Response('bad token', { status: 401 });
+  }
+  return realFetch(input, init);
 };
 
 // The mothership dial currently in flight: the raw socket, and once the DO has made its socket pair,
@@ -216,6 +244,14 @@ function enqueue(job) {
 
 async function serve(req, res) {
   try {
+    const hook = new URL(req.url, 'http://local');
+    if (req.method === 'POST' && hook.pathname === '/_local/expire-pairings') {
+      await env.DB.prepare('UPDATE pairings SET expires_at = ? WHERE install_id = ?')
+        .bind(Math.floor(Date.now() / 1000) - 1, hook.searchParams.get('install') ?? '')
+        .run();
+      res.writeHead(204, { connection: 'close' });
+      return res.end();
+    }
     const install = req.headers['x-local-relay-install'];
     const request = buildRequest(req, install);
     const response =
@@ -242,6 +278,12 @@ function buildRequest(req, install) {
     headers.set('x-relay-install-id', install);
   }
   const body = req.method === 'GET' || req.method === 'HEAD' ? null : Readable.toWeb(req);
+  // An install's own host is kept, so the worker routes it to the owner sign-in; the scheme is https
+  // because that is what the worker builds its callback URL from.
+  const asked = String(req.headers.host ?? '').toLowerCase();
+  if (install === undefined && asked.endsWith(`.${DOMAIN}`)) {
+    return new Request(`https://${asked}${req.url}`, { method: req.method, headers, body, ...(body ? { duplex: 'half' } : {}) });
+  }
   return new Request(`http://${DOMAIN}${req.url}`, { method: req.method, headers, body, ...(body ? { duplex: 'half' } : {}) });
 }
 

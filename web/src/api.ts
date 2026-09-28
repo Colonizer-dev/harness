@@ -240,10 +240,14 @@ export interface Api {
   setRemote(enabled: boolean): Promise<RemoteStatus>;
   /** POST /api/remote/reset: a fresh key and host; the old link stops working. */
   resetRemote(): Promise<RemoteStatus>;
-  /** GET /api/remote/pairing: the relay's owner binding and pending codes. null when this mothership has no pairing endpoint yet, and the pane hides the block. */
-  remotePairing(): Promise<RemotePairing | null>;
-  /** POST /api/remote/pairing/confirm: binds that code's GitHub account as the owner. 400 bad code, 404 unknown/expired, 409 owner already bound. */
+  /** GET /api/remote/pairing: the relay's owner binding and pending codes, fetched with the install's signed call (issue #599). 409 while remote access has never been on (no link), 502 when the relay is unreachable or no longer knows this install. */
+  remotePairing(): Promise<RemotePairing>;
+  /** POST /api/remote/pairing/confirm: binds that code's GitHub account as the owner. 400 bad code, 404 unknown/expired/used, 409 owner already bound; 403 through the remote link — confirming is local-only. */
   confirmRemotePairing(code: string): Promise<{ owner: { github_login: string } }>;
+  /** POST /api/remote/pairing/reject: drops one pending code, so that sign-in never becomes the owner. 404 when it is not pending; local-only like confirm. */
+  rejectRemotePairing(code: string): Promise<{ github_login: string }>;
+  /** DELETE /api/remote/owner: unbinds the owner and clears pending codes; the owner's relay sessions stop working. Local-only. */
+  unbindRemoteOwner(): Promise<void>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
@@ -578,14 +582,10 @@ export const httpApi: Api = {
   remote: () => request("/api/remote"),
   setRemote: (enabled) => put("/api/remote", { enabled }),
   resetRemote: () => post("/api/remote/reset"),
-  remotePairing: () =>
-    request<RemotePairing>("/api/remote/pairing").catch((e) => {
-      // A mothership whose pairing proxy has not landed yet (#534) answers 404; the pane then
-      // simply hides the pairing block. Any other failure is the caller's to say.
-      if (e instanceof ApiError && e.status === 404) return null;
-      throw e;
-    }),
+  remotePairing: () => request("/api/remote/pairing"),
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
+  rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),
+  unbindRemoteOwner: () => del("/api/remote/owner"),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

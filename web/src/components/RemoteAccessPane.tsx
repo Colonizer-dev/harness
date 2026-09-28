@@ -1,6 +1,7 @@
 // Settings → Remote access (issue #535): the switch behind the relay tunnel of remote.rs
 // (docs/protocol.md §6.10), the link and its QR code, the live link status, the pairing codes
-// waiting to be confirmed, and the reset that retires a leaked link. The switch state itself is
+// waiting to be confirmed or rejected and the bound owner to unbind (#599, all local-only at the
+// mothership), and the reset that retires a leaked link. The switch state itself is
 // owned by App — the top bar's badge reads the same view — so every answer is folded back up
 // through `onChanged`.
 import { useEffect, useRef, useState, type ReactElement } from "react";
@@ -82,10 +83,13 @@ export function RemoteAccessPane({
   const [saving, setSaving] = useState(false);
   const [showQr, setShowQr] = useState(false);
   const [askReset, setAskReset] = useState(false);
-  // undefined has no meaning here: null is "this mothership has no pairing endpoint yet" (#534),
-  // which hides the block, exactly like "not fetched yet" does.
+  // null is "not fetched yet", which hides the block; a fetch that fails before any view arrived
+  // shows its reason instead (the relay is unreachable, or no longer knows this install).
   const [pairing, setPairing] = useState<RemotePairing | null>(initialPairing ?? null);
-  const [confirming, setConfirming] = useState<string | null>(null);
+  const [pairingError, setPairingError] = useState<string | null>(null);
+  // The pairing action in flight: "confirm:<code>", "reject:<code>" or "unbind"; one at a time.
+  const [busy, setBusy] = useState<string | null>(null);
+  const [askUnbind, setAskUnbind] = useState(false);
   // Whether this pane is still mounted: a late confirm answer must not reach a closed one.
   const alive = useRef(true);
   useEffect(() => {
@@ -109,15 +113,19 @@ export function RemoteAccessPane({
 
   // The pairing view only means something while the switch is on, and is keyed on the polled
   // view itself, not just the flag: a code made on the phone while this pane sits open must
-  // appear on App's next 30 s refresh. A resolved null (no endpoint yet, #534) hides the block;
-  // a thrown failure keeps whatever is on screen — a poll must not blank it or toast.
+  // appear on App's next 30 s refresh. A failure keeps whatever is on screen — a poll must not
+  // blank it or toast — and only says why while there is nothing to show.
   useEffect(() => {
     if (!remote?.enabled) return;
     let cancelled = false;
     api
       .remotePairing()
-      .then((view) => !cancelled && setPairing(view))
-      .catch(() => {});
+      .then((view) => {
+        if (cancelled) return;
+        setPairing(view);
+        setPairingError(null);
+      })
+      .catch((e) => !cancelled && setPairingError(errorMessage(e)));
     return () => {
       cancelled = true;
     };
@@ -163,19 +171,19 @@ export function RemoteAccessPane({
     }
   };
 
-  const confirmCode = async (code: string) => {
-    setConfirming(code);
+  // One pairing decision, then the relay's fresh view — refetched either way: a confirm binds the
+  // owner and clears every pending code, a reject or unbind drops rows, and a 404/409 means the
+  // view here is stale. A failed refetch keeps the view, and a late answer never reaches a closed
+  // pane.
+  const decide = async (key: string, action: () => Promise<string>) => {
+    setBusy(key);
     try {
-      const done = await api.confirmRemotePairing(code);
-      toast(`Paired with @${done.owner.github_login}`);
+      toast(await action());
     } catch (e) {
       toast(errorMessage(e), "error"); // a bad code (400), a gone one (404), an owner already bound (409)
     } finally {
-      if (alive.current) setConfirming(null);
+      if (alive.current) setBusy(null);
     }
-    // Refetched either way: a confirm binds the owner and clears every pending code at the relay,
-    // and a 409 means the view here is stale. A failed refetch keeps the view, and a late answer
-    // never reaches a closed pane.
     try {
       const view = await api.remotePairing();
       if (alive.current) setPairing(view);
@@ -183,6 +191,19 @@ export function RemoteAccessPane({
       /* keep what is on screen */
     }
   };
+
+  const confirmCode = (code: string) =>
+    decide(`confirm:${code}`, async () => `Paired with @${(await api.confirmRemotePairing(code)).owner.github_login}`);
+
+  const rejectCode = (code: string) =>
+    decide(`reject:${code}`, async () => `Turned down the sign-in from @${(await api.rejectRemotePairing(code)).github_login}`);
+
+  const unbind = () =>
+    decide("unbind", async () => {
+      await api.unbindRemoteOwner();
+      if (alive.current) setAskUnbind(false);
+      return "Unbound — the next sign-in to the link asks for a new code";
+    });
 
   const link = remote ? remoteLink(remote) : null;
 
@@ -255,13 +276,40 @@ export function RemoteAccessPane({
                 </p>
               </div>
 
+              {!pairing && pairingError && (
+                <div>
+                  <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
+                  <p className="text-[12.5px] text-warn">Couldn’t read the pairing from the relay: {pairingError}</p>
+                </div>
+              )}
+
               {pairing && (
                 <div>
                   <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
                   {pairing.owner ? (
-                    <p className="text-[12.5px] text-muted">
-                      Paired with @{pairing.owner.github_login} — only that GitHub account can sign in to the link.
-                    </p>
+                    <div className="space-y-2">
+                      <p className="text-[12.5px] text-muted">
+                        Paired with @{pairing.owner.github_login} — only that GitHub account can sign in to the link.
+                      </p>
+                      {askUnbind ? (
+                        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">
+                          <p className="min-w-0 flex-1 text-[12.5px] text-muted">
+                            Unbind @{pairing.owner.github_login}? Their sign-in stops working at once.
+                          </p>
+                          <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void unbind()}>
+                            {busy === "unbind" && <Spinner className="size-3" />}
+                            Unbind
+                          </Button>
+                          <Button size="sm" disabled={busy !== null} onClick={() => setAskUnbind(false)}>
+                            Cancel
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button size="sm" disabled={busy !== null} onClick={() => setAskUnbind(true)}>
+                          Unbind
+                        </Button>
+                      )}
+                    </div>
                   ) : pairing.pending.length === 0 ? (
                     <p className="text-[12.5px] text-muted">
                       No pending requests. The first sign-in to the link shows a code that appears here to confirm.
@@ -269,7 +317,8 @@ export function RemoteAccessPane({
                   ) : (
                     <>
                       <p className="mb-1.5 text-[12.5px] text-muted">
-                        A sign-in to the link is waiting. Confirm only if your phone shows the same code.
+                        A sign-in to the link is waiting. Confirm only if your phone shows the same code; reject it if you
+                        did not just sign in.
                       </p>
                       <div className="overflow-hidden rounded-xl border border-border">
                         {pairing.pending.map((request) => (
@@ -282,8 +331,12 @@ export function RemoteAccessPane({
                                 @{request.github_login} · {expiryText(request.expires_at)}
                               </div>
                             </div>
-                            <Button size="sm" variant="primary" disabled={confirming !== null} onClick={() => void confirmCode(request.code)}>
-                              {confirming === request.code && <Spinner className="size-3" />}
+                            <Button size="sm" disabled={busy !== null} onClick={() => void rejectCode(request.code)}>
+                              {busy === `reject:${request.code}` && <Spinner className="size-3" />}
+                              Reject
+                            </Button>
+                            <Button size="sm" variant="primary" disabled={busy !== null} onClick={() => void confirmCode(request.code)}>
+                              {busy === `confirm:${request.code}` && <Spinner className="size-3" />}
                               Confirm
                             </Button>
                           </div>
@@ -311,7 +364,9 @@ export function RemoteAccessPane({
                     <Button size="sm" variant="danger" disabled={saving} onClick={() => setAskReset(true)}>
                       Reset link
                     </Button>
-                    <span className="text-[12.5px] text-muted">A fresh identity and link; the old link stops working. The way out of a leaked one.</span>
+                    <span className="text-[12.5px] text-muted">
+                      A fresh identity and link; the old link stops working and its owner is unbound. The way out of a leaked one.
+                    </span>
                   </div>
                 )}
               </div>

@@ -61,9 +61,9 @@ pairing and owner endpoints are signed with the key the install registered: head
 `METHOD\npathname\nts\nrawBody`, with `rawBody` empty when there is no body). Bad or missing → 401;
 a request body over 1 KiB → 413.
 
-The mothership does not call the signed endpoints yet: it has no pairing code, and the cockpit's
-Settings → Remote access hides the pairing block when the mothership has no pairing route. Until
-that lands, no install can bind an owner, so the relay forwards no one.
+The mothership calls these from `crates/colonizer/src/remote.rs` (#599): the cockpit's Settings →
+Remote access shows the pending codes with Confirm and Reject, and the bound owner with Unbind.
+Confirming is local-only at the mothership — never through the tunnel.
 
 - `POST /api/installs` `{"public_key": …}` → `201 {"install_id", "host"}` — 20 random base32 chars, 100
   bits; the key must be 32 bytes. Every call makes a new install, even for a key already registered.
@@ -78,6 +78,8 @@ that lands, no install can bind an owner, so the relay forwards no one.
 - `POST /api/installs/<id>/pairing/confirm` `{"code": …}` → `200 {"owner": …}` — binds that pairing's
   GitHub account, deletes every pairing of the install (single-use). Unknown/expired/used → 404; an
   owner already bound → 409.
+- `POST /api/installs/<id>/pairing/reject` `{"code": …}` → `200 {"github_login"}` — deletes just that
+  pairing, so the sign-in behind it never becomes the owner. Malformed → 400; unknown/expired → 404.
 - `DELETE /api/installs/<id>/owner` → `204` — the "reset link": unbinds the owner and clears pending
   pairings. Existing sessions die on their next request, because each one re-checks the cookie against
   the current owner.

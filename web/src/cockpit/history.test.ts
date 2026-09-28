@@ -137,6 +137,9 @@ describe("filters and words", () => {
     expect(sentence({ kind: "remote.enable", actor: "you", target: "remote access" })).toBe("You switched remote access on");
     expect(sentence({ kind: "remote.disable", actor: "you", target: "remote access" })).toBe("You switched remote access off");
     expect(sentence({ kind: "remote.reset", actor: "you", target: "remote access" })).toBe("You reset the remote access link");
+    expect(sentence({ kind: "remote.pair", actor: "you", target: "@octocat" })).toBe("You paired @octocat with the remote access link");
+    expect(sentence({ kind: "remote.pair_reject", actor: "you", target: "@mallory" })).toBe("You turned down a remote access sign-in from @mallory");
+    expect(sentence({ kind: "remote.unpair", actor: "you", target: "remote access" })).toBe("You unbound the remote access link's owner");
     const [item] = buildTimeline([entry({ kind: "remote.reset", target: "remote access", section: "remote", colony: null, repo: null, issue: null })], [], true);
     expect(item).toMatchObject({ tone: "action", section: "remote", text: "You reset the remote access link" });
     expect(targetOf(item, new Set())).toEqual({ kind: "section", section: "remote" });
