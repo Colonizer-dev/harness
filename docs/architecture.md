@@ -77,7 +77,8 @@ Two settings layers sit next to the modules:
   `<provider>/<model>`. The Claude Code runner starts a router inside
   the colony that sends those requests to the mothership's provider gateway
   (`host.microsandbox.internal:41750`). The gateway reaches loopback, LAN and tailnet providers, adds the
-  key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
+  key, queues requests per provider (`max_concurrent`) and per colony (at most 16 waiting), applies long
+  timeouts, and marks the colony busy
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`, `known-orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
@@ -93,8 +94,10 @@ Every authenticated gateway request appends one line to the colony's `gateway.js
 method and path, the requested and upstream model (each admitted only through the model-id
 validator), status, failure code, whether the answer licensed the Claude fallback, queue and total
 duration, request and response bytes, and token counts. The failure codes: `unknown_provider` (no
-such provider), `not_routed` (not this colony's), `restricted` (untrusted provider for a restricted
-task), `missing_key`, `budget`, `bad_request` (path or body the wire cannot serve), `queue_full`,
+such provider), `not_routed` (not this colony's provider or model), `restricted` (untrusted provider
+for a restricted task), `missing_key`, `budget`, `colony_inactive` (the colony or its token went
+away while the request waited for a slot), `bad_request` (path, method or body the wire cannot
+serve), `queue_full`,
 `unreachable`, `timeout`, `upstream_error` (a 4xx/5xx that is not quota), `quota_exhausted`,
 `body_read_failed` (the response broke after its headers). The record is a fixed struct and nothing
 else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
