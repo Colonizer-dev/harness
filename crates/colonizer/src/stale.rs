@@ -42,7 +42,7 @@ pub async fn behind(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let _guard = lock.lock().await;
     // Best effort: without a fresh fetch the count may lag, and a failed fetch leaves the
     // last-known answer rather than failing the poll.
-    let _ = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
+    let _ = exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
     let behind_by = count_behind(&app, &bare, &s.branch, &base).await;
     Ok(Json(json!({"behind_by": behind_by, "base": base, "branch": s.branch})))
 }
@@ -95,7 +95,7 @@ pub async fn catch_up(State(app): State<Shared>, Path(id): Path<String>) -> ApiR
     let _guard = lock.lock().await;
     // Merging a stale base would mislead — the colony would look caught up while still behind — so
     // a failed fetch refuses the merge instead of merging blind.
-    if let Err(e) = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+    if let Err(e) = exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
         let message = format!("could not fetch origin; merging a stale base would mislead ({e:#})");
         return Err(client_error(StatusCode::BAD_GATEWAY, &message));
     }

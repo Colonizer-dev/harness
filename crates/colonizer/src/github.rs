@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
+    ffi::OsString,
     os::unix::fs::OpenOptionsExt,
     path::{Path as FsPath, PathBuf},
     sync::Mutex,
@@ -118,26 +119,36 @@ impl App {
         c
     }
 
-    /// Host-side git, hardened so nothing inside a repository can make it execute code.
+    /// Host-side git over repository and worktree content: a clean config, a scrubbed environment
+    /// ([`git_hardened`]) and no publishing credential. The default for every command that can run
+    /// code on colony content — staging, committing, diffing, checking out.
     pub fn git_plain(&self) -> Command {
-        let mut c = Command::new("git");
-        c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
-            .args(HOST_GIT_NO_EXEC)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GH_PROMPT_DISABLED", "1")
-            // A colony sandbox exports these for its own worktree; host-side git never inherits
-            // them (callers that set them after construction still override).
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
+        git_clean()
+    }
+
+    pub fn git(&self, git_dir: &FsPath) -> Command {
+        let mut c = self.git_plain();
+        c.arg("--git-dir").arg(git_dir);
+        c
+    }
+
+    /// [`App::git_plain`] plus exactly what talking to GitHub needs: the gh credential helper and
+    /// the token. Only `fetch`, `push`, `ls-remote` and `clone` may run this way — they move or
+    /// list objects without checking any out, so no content filter could run, and nothing that
+    /// reads worktree content may ever carry a credential.
+    pub fn git_remote(&self) -> Command {
+        let mut c = git_clean();
+        c.args(["-c", "credential.helper=!gh auth git-credential"]);
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
         c
     }
 
-    pub fn git(&self, git_dir: &FsPath) -> Command {
-        let mut c = self.git_plain();
+    /// [`App::git_remote`] pinned to a repository — the bare clone's `fetch`, `push` and
+    /// `ls-remote`.
+    pub fn git_authed(&self, git_dir: &FsPath) -> Command {
+        let mut c = self.git_remote();
         c.arg("--git-dir").arg(git_dir);
         c
     }
@@ -160,6 +171,81 @@ pub(crate) const HOST_GIT_NO_EXEC: [&str; 8] = [
     "-c",
     "maintenance.auto=false",
 ];
+
+/// The host identity for the writes host git makes without one of its own — a rebase sets the
+/// committer on the commits it moves, and with the clean config below there is no global default
+/// to fall back on. Each moved commit keeps its original author; only the committer line names
+/// the host. The same identity `verify.rs` bakes into its snapshot commits.
+pub(crate) const HOST_GIT_IDENTITY: [&str; 4] = [
+    "-c",
+    "user.name=colonizer",
+    "-c",
+    "user.email=colonizer@users.noreply.github.com",
+];
+
+/// The environment keys host git keeps from the process that launched it; everything else is
+/// dropped. What is dropped: tokens (`GH_TOKEN` and friends), so no command over colony content
+/// can inherit a publishing credential, and every `GIT_*` variable, so nothing outside this file —
+/// a leftover sandbox export, a `GIT_CONFIG_COUNT` definition — can point git's config, objects or
+/// index somewhere else. What stays is what git and its subprocesses need to behave: locale,
+/// timezone, temp dir, `HOME` and `PATH`, the proxy and custom-CA settings a network operation
+/// needs to reach github.com, and the gh config paths the credential helper
+/// ([`App::git_remote`]) reads its stored login from.
+const GIT_ENV_KEEP: &[&str] = &[
+    "PATH",
+    "HOME",
+    "GH_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_COLLATE",
+    "LC_MESSAGES",
+    "TZ",
+    "TMPDIR",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+];
+
+/// Builds the host git command over `base` — the mothership's environment in production, a
+/// hand-built one in tests. This is the one place that decision lives. The config is clean: the
+/// global and system configs are pinned out with `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_NOSYSTEM` and
+/// credential helpers are reset, so no filter driver is defined for a colony-controlled
+/// `.gitattributes` to select and no helper can answer a prompt. The environment is the
+/// [`GIT_ENV_KEEP`] allowlist, hooks, fsmonitor and gc are off ([`HOST_GIT_NO_EXEC`]), and git
+/// never prompts. Anything a caller sets after construction still wins.
+fn git_hardened(base: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
+    let mut c = Command::new("git");
+    c.env_clear();
+    for (key, value) in base {
+        if GIT_ENV_KEEP
+            .iter()
+            .any(|kept| key.to_string_lossy().eq_ignore_ascii_case(kept))
+        {
+            c.env(key, value);
+        }
+    }
+    c.args(["-c", "credential.helper="])
+        .args(HOST_GIT_NO_EXEC)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GH_PROMPT_DISABLED", "1");
+    c
+}
+
+/// [`git_hardened`] over the mothership's own environment: the credential-free default.
+pub(crate) fn git_clean() -> Command {
+    git_hardened(std::env::vars_os())
+}
 
 /// One cached `gh api user` answer: which credential it was read with, when, and what it said.
 /// `Err` keeps the rendered failure. The credential itself is never stored, only its fingerprint,
@@ -540,7 +626,7 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
         if let Some(parent) = bare.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        exec(app.git_plain().args(["clone", "--bare", "--quiet"]).arg(&url).arg(bare)).await?;
+        exec(app.git_remote().args(["clone", "--bare", "--quiet"]).arg(&url).arg(bare)).await?;
         exec(
             app.git(bare)
                 .args(["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]),
@@ -548,7 +634,7 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
         .await?;
     }
     log.info("fetching origin").await;
-    exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
     Ok(())
 }
 
@@ -1198,7 +1284,7 @@ pub(crate) async fn rebase_retargeted_child(app: &App, child_id: &str, old_base:
     let bare = app.bare_repo(&child.repo);
     let lock = app.repo_lock(&child.repo).await;
     let _guard = lock.lock().await;
-    if let Err(e) = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+    if let Err(e) = exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
         app.session_log(
             child_id,
             "warn",
@@ -1209,7 +1295,7 @@ pub(crate) async fn rebase_retargeted_child(app: &App, child_id: &str, old_base:
     }
     // The remote head before the rebase: the push below leases against exactly this sha.
     let pattern = format!("refs/heads/{}", child.branch);
-    let expected = exec(app.git(&bare).args(["ls-remote", "--heads", "origin", &pattern]))
+    let expected = exec(app.git_authed(&bare).args(["ls-remote", "--heads", "origin", &pattern]))
         .await
         .ok()
         .and_then(|out| parse_ls_remote(&out, &child.branch));
@@ -1248,9 +1334,14 @@ pub(crate) async fn rebase_retargeted_child(app: &App, child_id: &str, old_base:
     let push = match expected {
         Some(sha) => {
             let lease = format!("--force-with-lease=refs/heads/{0}:{sha}", child.branch);
-            exec(app.git(&bare).args(["push", "--quiet", "origin", &lease]).arg(&refspec)).await
+            exec(
+                app.git_authed(&bare)
+                    .args(["push", "--quiet", "origin", &lease])
+                    .arg(&refspec),
+            )
+            .await
         }
-        None => exec(app.git(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await,
+        None => exec(app.git_authed(&bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await,
     };
     if let Err(e) = push {
         app.session_log(
@@ -1758,7 +1849,12 @@ impl PublishOps for GitPublishOps<'_> {
         // The fully-qualified ref is the pattern, because a bare branch name tail-matches and would
         // list sibling refs like `archive/<branch>` too.
         let pattern = format!("refs/heads/{}", self.s.branch);
-        let out = exec(self.app.git(&self.bare).args(["ls-remote", "--heads", "origin", &pattern])).await?;
+        let out = exec(
+            self.app
+                .git_authed(&self.bare)
+                .args(["ls-remote", "--heads", "origin", &pattern]),
+        )
+        .await?;
         Ok(parse_ls_remote(&out, self.s.branch.as_str()))
     }
 
@@ -1777,13 +1873,19 @@ impl PublishOps for GitPublishOps<'_> {
             let lease = format!("--force-with-lease=refs/heads/{0}:{expected}", self.s.branch);
             exec(
                 self.app
-                    .git(&self.bare)
+                    .git_authed(&self.bare)
                     .args(["push", "--quiet", "origin", &lease])
                     .arg(&refspec),
             )
             .await?;
         } else {
-            exec(self.app.git(&self.bare).args(["push", "--quiet", "origin"]).arg(&refspec)).await?;
+            exec(
+                self.app
+                    .git_authed(&self.bare)
+                    .args(["push", "--quiet", "origin"])
+                    .arg(&refspec),
+            )
+            .await?;
         }
         // Only now — with the rebased history actually on the remote — does the recorded base
         // follow it; see the doc comment on `restack` for why persisting it any sooner is unsafe.
@@ -1826,7 +1928,12 @@ impl PublishOps for GitPublishOps<'_> {
         refuse_if_writes_blocked("open a pull request")?;
         // Best effort: a fresh origin makes the behind count below current, and a fetch failure
         // leaves the pull request without its staleness note rather than failing the publish.
-        let _ = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
+        let _ = exec(
+            self.app
+                .git_authed(&self.bare)
+                .args(["fetch", "--quiet", "--prune", "origin"]),
+        )
+        .await;
         let base = self.base.lock().expect("publish base poisoned").clone();
         let behind = count_behind(self.app, &self.bare, &self.s.branch, &base).await;
         let body_path = self.session_dir.join("pr-body.md");
@@ -1925,7 +2032,13 @@ impl PublishOps for GitPublishOps<'_> {
         let _guard = lock.lock().await;
         // Rebasing onto a stale destination would mislead, so a failed fetch fails the publish
         // instead of rebasing blind; the retry fetches again.
-        if let Err(e) = exec(self.app.git(&self.bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+        if let Err(e) = exec(
+            self.app
+                .git_authed(&self.bare)
+                .args(["fetch", "--quiet", "--prune", "origin"]),
+        )
+        .await
+        {
             bail!("could not fetch origin before restacking onto {dest}: {e:#}");
         }
         // The remote head before the rebase: the push leases against exactly this sha.
@@ -4349,6 +4462,214 @@ mod tests {
         ] {
             assert!(flat.contains(needed), "{flat} must still carry {needed}");
         }
+    }
+
+    /// The default host git carries no token and reads no config, and what the [`GIT_ENV_KEEP`]
+    /// allowlist drops stays dropped; the network variant is the same command plus the token.
+    /// Read back from the built commands, no git run.
+    #[test]
+    fn host_git_runs_credential_free_and_only_the_network_variant_carries_the_token() {
+        let env_of = |c: &Command| -> HashMap<String, String> {
+            c.as_std()
+                .get_envs()
+                .filter_map(|(k, v)| v.map(|v| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())))
+                .collect()
+        };
+        let base = [
+            (OsString::from("PATH"), OsString::from("/bin")),
+            (OsString::from("HOME"), OsString::from("/home/host")),
+            (OsString::from("GH_TOKEN"), OsString::from("mothership-token")),
+            (OsString::from("GITHUB_TOKEN"), OsString::from("other-token")),
+            (OsString::from("GIT_CONFIG_COUNT"), OsString::from("1")),
+            (OsString::from("GIT_DIR"), OsString::from("/somewhere/else")),
+        ];
+        let clean = env_of(&git_hardened(base));
+        assert_eq!(clean.get("GIT_CONFIG_GLOBAL").map(String::as_str), Some("/dev/null"));
+        assert_eq!(clean.get("GIT_CONFIG_NOSYSTEM").map(String::as_str), Some("1"));
+        for dropped in ["GH_TOKEN", "GITHUB_TOKEN", "GIT_CONFIG_COUNT", "GIT_DIR"] {
+            assert!(!clean.contains_key(dropped), "the clean default must not carry {dropped}");
+        }
+        assert_eq!(
+            clean.get("PATH").map(String::as_str),
+            Some("/bin"),
+            "what the allowlist keeps rides along"
+        );
+
+        let root = std::env::temp_dir().join(format!("colonizer-git-env-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        crate::util::write_secret(&app.github_token_file(), "saved-token").expect("token saved");
+        let authed = env_of(&app.git_remote());
+        assert_eq!(authed.get("GH_TOKEN").map(String::as_str), Some("saved-token"));
+        assert_eq!(
+            authed.get("GIT_CONFIG_GLOBAL").map(String::as_str),
+            Some("/dev/null"),
+            "the credential never buys back the host config"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The production constructor runs against the real process environment, so this is the check
+    /// that the scrub stays: whatever the process that launched the tests carries, the child's
+    /// environment must be the [`GIT_ENV_KEEP`] allowlist and nothing else. The child dumps its own
+    /// environment through a shell alias, which is also why the keys git itself injects into a
+    /// `!alias` subprocess (`GIT_EXEC_PATH` and friends) are expected here.
+    #[tokio::test]
+    async fn the_production_host_git_child_env_is_the_allowlist_and_nothing_else() {
+        let scratch = std::env::temp_dir().join(format!("colonizer-git-env-dump-{}", short_id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        std::fs::create_dir_all(&scratch).unwrap();
+        let ok = std::process::Command::new("git")
+            .current_dir(&scratch)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["init", "-q"])
+            .status()
+            .expect("git runs")
+            .success();
+        assert!(ok, "fixture git init failed");
+
+        let mut c = git_clean();
+        c.current_dir(&scratch)
+            .args(["-c", "alias.envdump=!env", "envdump"])
+            .stdout(std::process::Stdio::piped());
+        let out = c.output().await.expect("git runs");
+        assert!(
+            out.status.success(),
+            "envdump failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let keys: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| line.split('=').next().map(String::from))
+            .collect();
+        assert!(
+            keys.iter().any(|k| k == "PATH"),
+            "PATH rides along; an empty dump means the scrub broke"
+        );
+        // Expected beyond the allowlist: what [`git_hardened`] sets itself, and what git injects
+        // into a `!alias` subprocess on its own. Nothing else may appear.
+        let builder_set = [
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_TERMINAL_PROMPT",
+            "GH_PROMPT_DISABLED",
+        ];
+        let git_added = ["GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_EXEC_PATH", "GIT_PREFIX"];
+        for key in &keys {
+            assert!(!key.starts_with("CARGO_"), "inherited {key} reached host git");
+            assert!(
+                !key.eq_ignore_ascii_case("GH_TOKEN") && !key.eq_ignore_ascii_case("GITHUB_TOKEN"),
+                "{key} reached host git"
+            );
+            assert!(
+                GIT_ENV_KEEP.contains(&key.as_str()) || builder_set.contains(&key.as_str()) || git_added.contains(&key.as_str()),
+                "unexpected key {key} in the host git environment"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    /// Host git over colony content never runs a content filter a worktree's `.gitattributes`
+    /// selects, and never hands one a credential — however loudly the surrounding config names
+    /// one. A scratch HOME's global config and a `GIT_CONFIG_COUNT` definition both point every
+    /// filter at a sentinel that writes a marker (carrying `$GH_TOKEN`) on each run, in a repo
+    /// whose `.gitattributes` maps every file to it. A plain git run with the same environment does
+    /// run it — the positive control — while staging, committing, status and a checkout through the
+    /// hardened command leave no marker behind.
+    #[tokio::test]
+    async fn a_colony_named_content_filter_never_runs_and_never_sees_a_token() {
+        let root = std::env::temp_dir().join(format!("colonizer-git-filter-{}", short_id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let marker = root.join("sentinel-ran");
+        let script = root.join("sentinel.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$1 $GH_TOKEN\" >> '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let clean = format!("{} clean", script.display());
+        std::fs::write(
+            home.join(".gitconfig"),
+            format!(
+                "[filter \"sentinel\"]\n\tclean = {clean}\n\tsmudge = {} smudge\n\trequired = true\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        // The environment every run below shares: a token, the sentinel global config, and the
+        // same filter defined again the env way — both routes in, both must come out dead.
+        let base: Vec<(&str, String)> = vec![
+            ("PATH", std::env::var("PATH").unwrap_or_default()),
+            ("HOME", home.display().to_string()),
+            ("GH_TOKEN", "token-for-the-filter".into()),
+            ("GIT_CONFIG_GLOBAL", home.join(".gitconfig").display().to_string()),
+            ("GIT_CONFIG_COUNT", "1".into()),
+            ("GIT_CONFIG_KEY_0", "filter.sentinel.clean".into()),
+            ("GIT_CONFIG_VALUE_0", clean.clone()),
+        ];
+        let env_of = |c: &mut std::process::Command| {
+            for (k, v) in &base {
+                c.env(k, v);
+            }
+        };
+        let repo = |name: &str| {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(".gitattributes"), "* filter=sentinel\n").unwrap();
+            std::fs::write(dir.join("file.txt"), "content\n").unwrap();
+            dir
+        };
+        async fn hardened(dir: &FsPath, args: &[&str], base: &[(&str, String)]) {
+            let mut c = git_hardened(base.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))));
+            c.current_dir(dir).args(args).stdout(std::process::Stdio::null());
+            let ok = c.status().await.expect("git runs").success();
+            assert!(ok, "hardened git {args:?} failed");
+        }
+
+        // The positive control: a plain git with this environment does run the filter, and the
+        // filter does see the token — the hazard the hardened command must close.
+        let control = repo("control");
+        let plain = |args: &[&str]| {
+            let mut c = std::process::Command::new("git");
+            c.current_dir(&control).args(args);
+            env_of(&mut c);
+            assert!(c.status().expect("git runs").success(), "control git {args:?} failed");
+        };
+        plain(&["init", "-q", "-b", "main"]);
+        plain(&["add", "-A"]);
+        plain(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "work"]);
+        assert!(marker.exists(), "the control must show the filter runs at all");
+        let ran = std::fs::read_to_string(&marker).unwrap();
+        assert!(
+            ran.contains("clean token-for-the-filter"),
+            "the control filter saw the token: {ran}"
+        );
+
+        // The code under test: the same repo shape, the same environment, the hardened command.
+        std::fs::remove_file(&marker).unwrap();
+        let colony = repo("colony");
+        hardened(&colony, &["init", "-q", "-b", "main"], &base).await;
+        hardened(&colony, &["add", "-A"], &base).await;
+        hardened(
+            &colony,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "work"],
+            &base,
+        )
+        .await;
+        hardened(&colony, &["status", "--porcelain"], &base).await;
+        std::fs::remove_file(colony.join("file.txt")).unwrap();
+        hardened(&colony, &["checkout", "--", "file.txt"], &base).await;
+        hardened(&colony, &["rev-parse", "--verify", "HEAD"], &base).await;
+        assert!(
+            !marker.exists(),
+            "host git ran a content filter the worktree named, with the environment's token in reach"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ----- the screening gate (issue #320) -----

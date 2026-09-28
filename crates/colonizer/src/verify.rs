@@ -473,13 +473,8 @@ async fn snapshot_work(app: &App, s: &Session, admin: &Path, cwd: &Path) -> Resu
         crate::path_policy::hold_back_staged(at_index, Path::new(&s.worktree), &rec, GIT_LIMIT).await?;
         let tree = exec_within(GIT_LIMIT, &mut git(&["write-tree"])).await?;
         let mut c = disowned(app.git(admin), cwd);
-        c.args([
-            "-c",
-            "user.name=colonizer",
-            "-c",
-            "user.email=colonizer@users.noreply.github.com",
-        ])
-        .args(["commit-tree", tree.trim(), "-p", "HEAD", "-m", "verification snapshot"]);
+        c.args(crate::github::HOST_GIT_IDENTITY)
+            .args(["commit-tree", tree.trim(), "-p", "HEAD", "-m", "verification snapshot"]);
         Ok(exec_within(GIT_LIMIT, &mut c).await?.trim().to_string())
     }
     .await;

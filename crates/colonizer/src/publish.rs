@@ -337,10 +337,33 @@ pub(crate) enum RebaseOutcome {
     Failed,
 }
 
-/// Runs `git` in a worktree with a deadline: trimmed stdout, or the reason it failed.
+/// Runs `git` in a worktree with a deadline: trimmed stdout, or the reason it failed. The clean
+/// default — [`crate::github::git_clean`], so no publishing credential and no config a repository
+/// could hang code on; only `fetch` and `push`, which talk to GitHub without reading worktree
+/// content, go through [`git_in_authed`].
 async fn git_in(worktree: &std::path::Path, args: &[&str], secs: u64) -> anyhow::Result<String> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(worktree).args(crate::github::HOST_GIT_NO_EXEC).args(args);
+    git_in_with(crate::github::git_clean(), worktree, args, secs).await
+}
+
+/// [`git_in`] for the two GitHub network operations: the same hardening plus the credentials, with
+/// the colony's git dir pinned so the process never sits in the worktree at all — defense in depth
+/// on top of the clean config, since these run with the credential a repository must never reach.
+async fn git_in_authed(app: &App, git_dir: &std::path::Path, args: &[&str], secs: u64) -> anyhow::Result<String> {
+    let mut cmd = app.git_authed(git_dir);
+    cmd.args(args);
+    Ok(crate::util::exec_within(Duration::from_secs(secs), &mut cmd)
+        .await?
+        .trim()
+        .to_string())
+}
+
+async fn git_in_with(
+    mut cmd: tokio::process::Command,
+    worktree: &std::path::Path,
+    args: &[&str],
+    secs: u64,
+) -> anyhow::Result<String> {
+    cmd.current_dir(worktree).args(args);
     Ok(crate::util::exec_within(Duration::from_secs(secs), &mut cmd)
         .await?
         .trim()
@@ -367,10 +390,10 @@ pub(crate) async fn attempt_auto_rebase(
     let Some(s) = app.session(session_id).await else {
         return RebaseOutcome::Gone;
     };
-    if matches!(s.status, SessionStatus::Merged | SessionStatus::Closed)
-        || s.git_admin_dir.is_none()
-        || !std::path::Path::new(&s.worktree).is_dir()
-    {
+    let Some(git_dir) = s.git_admin_dir.as_deref() else {
+        return RebaseOutcome::Gone;
+    };
+    if matches!(s.status, SessionStatus::Merged | SessionStatus::Closed) || !std::path::Path::new(&s.worktree).is_dir() {
         // Nothing to rebase onto what is gone or finished; the flags say a person should look, and
         // that nothing is left running that will ever clear them itself.
         app.update_session(session_id, |x| {
@@ -414,7 +437,7 @@ pub(crate) async fn attempt_auto_rebase(
     // A plain `fetch` and `rev-parse` only update the local remote-tracking ref and read it — never
     // touching the colony's checked-out branch — so both paths below may learn the current base sha
     // this way regardless of liveness.
-    if let Err(e) = git_in(&worktree, &["fetch", "origin"], 30).await {
+    if let Err(e) = git_in_authed(app, std::path::Path::new(git_dir), &["fetch", "origin"], 30).await {
         app.session_log(
             session_id,
             "warn",
@@ -473,7 +496,11 @@ pub(crate) async fn attempt_auto_rebase(
         .await;
     }
     let old_head = git_in(&worktree, &["rev-parse", "HEAD"], 10).await.unwrap_or_default();
-    if git_in(&worktree, &["rebase", &origin_base], 90).await.is_err() {
+    // The rebase sets a committer on the commits it moves; with the clean config there is no global
+    // default, so the host identity rides on the command line. Authors are untouched.
+    let mut rebase: Vec<&str> = crate::github::HOST_GIT_IDENTITY.to_vec();
+    rebase.extend(["rebase", &origin_base]);
+    if git_in(&worktree, &rebase, 90).await.is_err() {
         // Read the conflicted files before the abort clears them, then say so — nothing is left
         // running to wake here, since a live colony already returned above.
         let conflicted = crate::rebase::unmerged_files(&worktree).await;
@@ -512,7 +539,7 @@ pub(crate) async fn attempt_auto_rebase(
     } else {
         format!("--force-with-lease={}:{}", s.branch, old_head)
     };
-    match git_in(&worktree, &["push", &lease, "origin", &s.branch], 60).await {
+    match git_in_authed(app, std::path::Path::new(git_dir), &["push", &lease, "origin", &s.branch], 60).await {
         Ok(_) => {
             app.session_log(session_id, "info", format!("auto-rebased onto {main_sha} and pushed"))
                 .await;
@@ -1372,7 +1399,9 @@ mod tests {
 
         let (app, app_root) = crate::sessions::tests::app_with_colony("live", SessionStatus::Running).await;
         app.update_session("live", |x| {
-            x.git_admin_dir = Some("git".into());
+            // The real git dir: the authed fetch pins it (`--git-dir`) so it never runs from the
+            // worktree as its working directory.
+            x.git_admin_dir = Some(worktree.join(".git").display().to_string());
             x.worktree = worktree.display().to_string();
             x.base = Some("main".into());
             x.branch = "colonizer/live-branch".into();
