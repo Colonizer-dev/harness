@@ -68,7 +68,9 @@ test('a subagent is not constrained: it is the one doing the work', () => {
 
 test('delegation is enforced unless it is explicitly loosened', () => {
   const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude' };
-  const gated = (env) => Boolean(buildOptions({ ...base, ...env }).options.hooks?.PreToolUse?.[0]?.hooks?.[0]);
+  // The delegation gate is the one PreToolUse hook without a tool matcher (the exec policy's Bash
+  // gate and rtk's rewriter both carry one), so its presence is what "enforce" means here.
+  const gated = (env) => Boolean(buildOptions({ ...base, ...env }).options.hooks?.PreToolUse?.some((entry) => !entry.matcher));
   assert.ok(gated({}), 'unset means enforce');
   assert.ok(gated({ COLONIZER_DELEGATE: 'enforce' }));
   assert.ok(gated({ COLONIZER_DELEGATE: 'nonsense' }), 'a typo must not quietly switch the gate off');

@@ -331,13 +331,16 @@ test('buildOptions registers the hooks behind the gates, and nothing without a t
   const root = makeRepo();
   try {
     const bare = buildOptions({ COLONIZER_DELEGATE: 'off' }).options;
-    assert.equal(bare.hooks.PreToolUse, undefined);
+    // Only the exec policy's Bash hook (#471), which every colony gets; no instruction hooks.
+    assert.deepEqual(bare.hooks.PreToolUse.map((e) => e.matcher), ['Bash']);
     assert.equal(bare.hooks.UserPromptSubmit, undefined);
     assert.equal(bare.hooks.SessionStart, undefined);
 
     const instructions = new ConditionalInstructions({ workspace: root });
     const { options } = buildOptions({ COLONIZER_DELEGATE: 'enforce' }, { instructions });
-    assert.equal(options.hooks.PreToolUse.length, 2, 'the delegation gate stays first');
+    // Delegation gate first, then the exec policy's Bash hook (#471), then the instructions hook last.
+    assert.equal(options.hooks.PreToolUse.length, 3, 'the delegation gate stays first');
+    assert.equal(options.hooks.PreToolUse[1].matcher, 'Bash');
     assert.equal(options.hooks.PreToolUse.at(-1).matcher, PATH_TOOLS_MATCHER);
     assert.ok(options.hooks.UserPromptSubmit.length >= 1);
     assert.ok(options.hooks.SessionStart.length >= 1);

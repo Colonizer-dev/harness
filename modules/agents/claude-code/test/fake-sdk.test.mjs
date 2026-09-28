@@ -615,13 +615,14 @@ test('a loaded superpowers plugin puts its bootstrap in the system prompt, since
     assert.ok(append.includes('Check for a skill before any response.\n</EXTREMELY_IMPORTANT>'), 'the skill text, trailing blank lines trimmed');
     assert.ok(append.endsWith(SUPERPOWERS_COLONIZER_NOTE), 'the note about the two skills that are not staged');
     assert.equal(append.split('<EXTREMELY_IMPORTANT>').length, 2, 'once, however many plugins load');
-    // Loading it is still just a plugin entry; nothing registers a hook for it. (Only the
-    // denial layer's PostToolUseFailure hook is always present.)
+    // Loading it is still just a plugin entry; nothing registers a hook for it. (The always
+    // present hooks are the denial layer's PostToolUseFailure and the exec policy's Bash gate,
+    // issue #471.)
     assert.deepEqual(options.plugins, [
       { type: 'local', path: ecc },
       { type: 'local', path: superpowers },
     ]);
-    assert.equal(options.hooks.PreToolUse, undefined);
+    assert.deepEqual(options.hooks.PreToolUse.map((entry) => entry.matcher), ['Bash']);
 
     assert.equal(superpowersBootstrap('x').split('\n')[0], '<EXTREMELY_IMPORTANT>');
   } finally {
@@ -717,10 +718,11 @@ test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other ou
     assert.equal(await rtkRewrite('git status', join(root, 'missing-rtk')), null, 'rtk not installed');
     assert.equal(await rtkRewrite('slow', rtk), null, 'a slow rtk never holds a command back');
 
-    assert.equal(buildOptions({}).options.hooks.PreToolUse, undefined, 'off by default');
+    assert.deepEqual(buildOptions({}).options.hooks.PreToolUse.map((entry) => entry.matcher), ['Bash'], 'rtk off by default (only the exec policy gates Bash)');
     const { options } = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, PATH: '/usr/bin' });
     assert.equal(options.env.PATH, `${root}:/usr/bin`, 'rewritten commands call rtk, so it is on the PATH');
-    const [entry] = options.hooks.PreToolUse;
+    // rtk's hook sits after the exec policy's (both match Bash, but only rtk rewrites the input).
+    const entry = options.hooks.PreToolUse.at(-1);
     assert.equal(entry.matcher, 'Bash');
     const hook = entry.hooks[0];
     const rewritten = await hook({ tool_name: 'Bash', tool_input: { command: 'cargo test', description: 'Run tests' } });
@@ -731,9 +733,9 @@ test('rtk rewrites Bash commands through `rtk rewrite` and leaves every other ou
     assert.equal(rewritten.hookSpecificOutput.permissionDecision, undefined, 'never a permission decision');
     assert.deepEqual(await hook({ tool_name: 'Bash', tool_input: { command: 'echo hi' } }), { continue: true });
 
-    // Alongside the delegation gate, both hooks are registered and the gate keeps its deny.
+    // Alongside the delegation gate, all three hooks are registered and the gate keeps its deny.
     const both = buildOptions({ COLONIZER_RTK: 'true', COLONIZER_RTK_BIN: rtk, COLONIZER_DELEGATE: 'enforce' }).options;
-    assert.equal(both.hooks.PreToolUse.length, 2);
+    assert.equal(both.hooks.PreToolUse.length, 3);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

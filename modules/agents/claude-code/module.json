@@ -260,6 +260,13 @@
         "description": "Comma-separated Claude Code tool names this colony never gets, such as Write, WebSearch, Task. The tool is removed from the agent's context and cannot be called, whatever endpoint serves the model; a provider can also strip tools per connection. Empty disables nothing.",
         "default": "",
         "env": "COLONIZER_DISABLED_TOOLS"
+      },
+      "exec_policy": {
+        "type": "string",
+        "title": "Exec policy",
+        "description": "JSON exec policy this install layers over the built-in one: {\"rules\": [{\"id\", \"decision\": \"deny\"|\"ask\"|\"allow\", \"reason\", \"command\"|\"script\"|\"touches\"|\"writes_outside\"}]} (see modules/agents/claude-code/README.md). An ask becomes a question to you. Layers can only narrow: the built-in deny rules always hold, an org policy (COLONIZER_EXEC_POLICY_ORG) narrows further, and a repository's own .colonizer/exec-policy.json narrows further still. Empty uses the built-in policy alone.",
+        "default": "",
+        "env": "COLONIZER_EXEC_POLICY"
       }
     }
   }

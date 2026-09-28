@@ -26,6 +26,8 @@ lines on stdout, diagnostics on stderr.
 | `COLONIZER_SUBAGENT_EFFORT` | orchestrator effort | Effort for the `general-purpose` and `Explore` subagents, redefined with it (`subagents.mjs`); the first-party read-only `repo-explorer` is added either way; plugin agents keep the orchestrator's |
 | `COLONIZER_ENFORCE_CHOICES` | on | Re-ask a plain-text question as a choice card once |
 | `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
+| `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy above |
+| `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON; narrows the install layer, is narrowed by the repo file |
 
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
 the VM).
@@ -70,6 +72,37 @@ With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an i
 (`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
 emits a `memory_proposal` event for review on the mothership (with review off, a repo note is stored
 straight away; org and global notes always wait for review). Nothing is written inside the colony.
+
+## Exec policy
+
+Every Bash command meets the layered rules in `execpolicy.mjs` (issue #471), before it runs — and
+for `bash x.sh` / `python x.py` / `node x.js`-style commands, the contents of the script it runs are
+read (capped at 256 KiB) and meet them too. A rule matches when all of its predicates hold; the
+first match in a layer wins, and across layers the strictest decision wins (`deny > ask > allow`),
+so a layer can only ever narrow. A `deny` refuses the call with the rule named; an `ask` becomes a
+colony question (Allow / Deny) that the operator — or the autonomy judge, within its risk ceiling —
+answers. Every decision leaves one `exec policy: <decision> rule=… layer=… command=…` line in the
+harness log.
+
+```json
+{ "rules": [ { "id": "no-deploys", "decision": "deny", "reason": "deploys go through CI",
+               "script": ["\\bkubectl\\s", "\\bterraform\\s"] },
+             { "id": "ask-before-eject", "decision": "ask", "writes_outside": true } ] }
+```
+
+Predicates: `command` (regex over the command), `touches` (path globs matched against the path-like
+tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
+`/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
+contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style
+target that is an absolute path outside the repository — `/tmp` and the `/dev` sinks don't count).
+Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env*` and the files the
+path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
+not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
+stays the egress policy's business; ask `writes-outside-repo`), **install** (the agent module's
+`exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (`COLONIZER_EXEC_POLICY_ORG`) and
+**repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
+rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. Note
+this is guidance in front of the model, like the delegation gate — not a boundary; the microVM is.
 
 ## Waiting
 
