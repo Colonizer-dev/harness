@@ -437,8 +437,10 @@ sends the colony's conversation to TypeSafe (`api.typesafe.ai`) at each compacti
 `JEV_API_KEY`. Read [protocol.md, Token savings](protocol.md#token-savings) before you turn it on.
 
 **Limits.** A pass that was computed but not applied is not measured. A reread only counts when
-the tool and its input are exactly the same. The report that grades colonies against each other
-is not built yet. This is separate from the Jev routing second opinion (`jev_shadow_mode`,
+the tool and its input are exactly the same. The bench-wide report that grades colonies against
+each other is `bench.mjs jev`
+([bench.md, Grading Jev compaction](bench.md#grading-jev-compaction)). This is separate from the
+Jev routing second opinion (`jev_shadow_mode`,
 [protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is also shadow-only.
 
 ## Rate limits on notifications and the judge

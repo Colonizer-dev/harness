@@ -9,6 +9,7 @@
 //   node scripts/bench.mjs run --repo owner/bench-repo --label after --only add-helper,readme-typo --heldout ~/bench-heldout
 //   node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
 //   node scripts/bench.mjs compare bench-before.json bench-after.json
+//   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
 //
 // `run` needs a mothership on COLONIZER_URL (default http://127.0.0.1:7878) with GitHub and an agent
@@ -20,7 +21,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { analyze, loadColonies, TOKEN_CATEGORIES, totalCost } from './colony-report.mjs';
+import { analyze, loadColonies, readJsonLines, TOKEN_CATEGORIES, totalCost } from './colony-report.mjs';
 import { auditSession } from './trajectory-monitor.mjs';
 import { DEFAULT_MAX_GAP, addCompanion, companionsFor, familyGaps, familyOf, formatGaps, gapVerdict, loadSet, lockSet, newSet, outsideRepo, recordDecisions, saveSet } from './bench/heldout.mjs';
 
@@ -413,6 +414,99 @@ export function formatComparison(before, after) {
   ].join('\n');
 }
 
+// -------------------------------------------------------------------------------------------------- jev
+
+// Stage 2 of the Jev visibility ladder: the bench-wide report grading colonies' Jev compaction against
+// each other (#637). The grading mirrors precision_recall in crates/colonizer/src/jev_ladder.rs, keeping
+// what the server's reader keeps: predicted positive is a `decision` row whose keep_result is present and
+// at or above the threshold (an unscored chunk predicts nothing), actually positive is any `reread` row
+// naming that decision's tool_call_id, and a zero denominator is null — undefined, never a zero score.
+// Rows are partitioned by session first, so a reread only ever grades decisions from its own session.
+function jevMetrics(rows, threshold) {
+  const counts = { tp: 0, fp: 0, fn: 0, tn: 0 };
+  const decisions = rows.filter((r) => r?.kind === 'decision');
+  for (const d of decisions) {
+    const reread = rows.some((r) => r?.kind === 'reread' && r.matched_tool_call_id === d.tool_call_id);
+    const predicted = d.keep_result != null && d.keep_result >= threshold;
+    if (predicted && reread) counts.tp += 1;
+    else if (predicted) counts.fp += 1;
+    else if (reread) counts.fn += 1;
+    else counts.tn += 1;
+  }
+  return {
+    ...counts,
+    decisions: decisions.length,
+    rereads: rows.filter((r) => r?.kind === 'reread').length,
+    precision: counts.tp + counts.fp > 0 ? counts.tp / (counts.tp + counts.fp) : null,
+    recall: counts.tp + counts.fn > 0 ? counts.tp / (counts.tp + counts.fn) : null,
+  };
+}
+
+// A run total pools its groups' counts and recomputes the rates from the pooled counts — the same
+// numbers precision_recall would give over that run's rows, because sessions partition the ledger.
+function pool(groups) {
+  const t = { tp: 0, fp: 0, fn: 0, tn: 0, decisions: 0, rereads: 0 };
+  for (const g of groups) for (const k of Object.keys(t)) t[k] += g[k];
+  return { ...t, precision: t.tp + t.fp > 0 ? t.tp / (t.tp + t.fp) : null, recall: t.tp + t.fn > 0 ? t.tp / (t.tp + t.fn) : null };
+}
+
+const NO_RUN = '(no run)';
+
+/** The ledger graded per (run, colony) with a per-run and an overall total. A colony is a session; its
+ *  run is the first of `runs` (parsed `bench-<label>.json` files) whose results name its session_id,
+ *  which also carries that result's task, agent and model for display. A session no given run names —
+ *  chat colonies, run files left off the command line — grades under `(no run)`. */
+export function jevReport(rows, runs, threshold) {
+  const runsOf = new Map();
+  for (const run of runs) {
+    for (const r of run.results ?? []) {
+      if (r?.session_id && !runsOf.has(r.session_id)) {
+        runsOf.set(r.session_id, { run: run.label ?? NO_RUN, task: r.id ?? null, agent: r.agent ?? null, model: r.model ?? null });
+      }
+    }
+  }
+  const groups = new Map();
+  for (const row of rows) {
+    if (row?.kind !== 'decision' && row?.kind !== 'reread') continue;
+    const meta = runsOf.get(row.session) ?? { run: NO_RUN, task: null, agent: null, model: null };
+    const key = `${meta.run}\u0000${row.session}`;
+    if (!groups.has(key)) groups.set(key, { ...meta, colony: row.session, rows: [] });
+    groups.get(key).rows.push(row);
+  }
+  const order = [...new Set([...runs.map((r) => r.label ?? NO_RUN), NO_RUN])];
+  const runsOut = order
+    .filter((label) => [...groups.values()].some((g) => g.run === label))
+    .map((label) => {
+      const colonies = [...groups.values()]
+        .filter((g) => g.run === label)
+        .map(({ rows: groupRows, run: _label, ...colony }) => ({ ...colony, ...jevMetrics(groupRows, threshold) }));
+      return { run: label, colonies, total: pool(colonies) };
+    });
+  return { threshold, runs: runsOut, total: pool(runsOut.flatMap((r) => r.colonies)) };
+}
+
+/** The human table, in the style of formatComparison: precision and recall to two places, `–` where the
+ *  denominator is zero, and the counts beside them so a small sample is visible. */
+export function formatJevReport(report) {
+  const score = (v) => (v == null ? '–' : v.toFixed(2));
+  const harness = (c) => `${c.agent ?? '–'} · ${c.model ?? '–'}`;
+  const head = ['Run', 'Colony', 'Task', 'Harness · model', 'Decisions', 'Rereads', 'TP', 'FP', 'FN', 'TN', 'Precision', 'Recall'];
+  const line = (cells) => `| ${cells.join(' | ')} |`;
+  const colonyRow = (run, c) => [run, c.colony, c.task ?? '–', harness(c), c.decisions, c.rereads, c.tp, c.fp, c.fn, c.tn, score(c.precision), score(c.recall)];
+  const totalRow = (run, label, t) => [run, label, '', '', t.decisions, t.rereads, t.tp, t.fp, t.fn, t.tn, score(t.precision), score(t.recall)];
+  const rows = report.runs.flatMap((r) => [...r.colonies.map((c) => colonyRow(r.run, c)), totalRow(r.run, 'total', r.total)]);
+  rows.push(totalRow('overall', '', report.total));
+  return [
+    `# Jev compaction, graded at threshold ${report.threshold}`,
+    '',
+    line(head),
+    line(head.map(() => '---')),
+    ...rows.map(line),
+    '',
+    'Precision over no positive predictions and recall over no actual positives read as –: undefined, not a bad score. One colony in one run is a small sample; read the counts beside the rates.',
+  ].join('\n');
+}
+
 // ------------------------------------------------------------------------------------------------ clean
 
 function clean(repo) {
@@ -427,7 +521,9 @@ function clean(repo) {
 // ---------------------------------------------------------------------------------------------- command
 
 export function parseArgs(argv) {
-  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
+  // `threshold`'s default mirrors PREDICTED_THRESHOLD in crates/colonizer/src/jev_ladder.rs: the score
+  // the plugin itself kept at, so `jev` grades the decisions compaction actually made.
+  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, threshold: 0.5, json: false, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // Refuse a missing value here: a flag left dangling would otherwise be read as undefined
@@ -444,6 +540,11 @@ export function parseArgs(argv) {
       if (!Number.isFinite(seconds) || seconds <= 0) throw new Error('--timeout needs a positive number of seconds');
       args.timeoutMs = seconds * 1000;
     } else if (a === '--data') args.data = value();
+    else if (a === '--threshold') {
+      const threshold = Number(value());
+      if (!Number.isFinite(threshold)) throw new Error('--threshold needs a number');
+      args.threshold = threshold;
+    } else if (a === '--json') args.json = true;
     else if (a === '--heldout') args.heldout = value();
     else if (a === '--max-gap') args.maxGap = Number(value());
     else if (a === '--family') args.family = value();
@@ -453,6 +554,10 @@ export function parseArgs(argv) {
   }
   return args;
 }
+
+// The mothership's data dir the readers look at: the colony report, the trajectory monitor and `jev`'s
+// ledger all read it.
+const dataDirOf = (args) => args.data || process.env.COLONIZER_DATA_DIR || join(process.env.HOME ?? '', '.local/share/colonizer');
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -472,6 +577,12 @@ async function main() {
     console.log(formatComparison(a, b));
     return;
   }
+  if (args.command === 'jev') {
+    const rows = readJsonLines(join(dataDirOf(args), 'jev_ladder.jsonl'));
+    const report = jevReport(rows, args.files.map((f) => JSON.parse(readFileSync(f, 'utf8'))), args.threshold);
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatJevReport(report));
+    return;
+  }
   if (args.command === 'heldout') {
     if (args.files[0] !== 'add' || !args.heldout || !args.family || !args.check) throw new Error('use heldout add --heldout <dir> --family <family> --check <file>');
     outsideRepo(args.heldout); // before the lock, which would create the directory it guards
@@ -486,7 +597,7 @@ async function main() {
     }
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare or clean');
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);
@@ -505,7 +616,7 @@ async function main() {
   for (const task of tasks) {
     console.log(`${task.id}: colony on ${args.repo}#${issues[task.id]}`);
     const { session, answers, timed_out } = await runTask(task, args.repo, issues[task.id], args);
-    const dataDir = args.data || process.env.COLONIZER_DATA_DIR || join(process.env.HOME ?? '', '.local/share/colonizer');
+    const dataDir = dataDirOf(args);
     const colony = loadColonies(dataDir).find((c) => c.session.id === session.id);
     const scoring = { visible_ms: null, heldout_ms: null };
     let branchScore = null;

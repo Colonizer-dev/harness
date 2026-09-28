@@ -31,7 +31,7 @@ impl App {
     /// Every Jev visibility-ladder measurement row (#475), one JSON line each: the compaction pass's
     /// per-chunk decisions and the rereads that grade them. Kept in the data dir rather than a
     /// session's directory, like the routing ledger: the measurement has to outlive cleanup and stay
-    /// queryable across sessions and colonies, for stage 2's bench-wide precision/recall report.
+    /// queryable across sessions and colonies, for the bench-wide report (`scripts/bench.mjs jev`).
     pub(crate) fn jev_ladder_file(&self) -> PathBuf {
         self.cfg.data_dir.join("jev_ladder.jsonl")
     }
