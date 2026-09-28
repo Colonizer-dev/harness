@@ -208,6 +208,9 @@ credential.
   none) and the day it was made — `--json` adds the exact timestamps, last used among them.
 - **`token revoke ID`** takes effect at once; presentations of it stop authenticating.
 
+The cockpit does the same from Settings → API tokens ([cockpit.md](cockpit.md)): it lists, creates
+and revokes tokens, and shows a new token's plaintext once, like `token create` does.
+
 The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 
 | Scope | What it may call |
@@ -251,4 +254,3 @@ map loop (whose runs launch outside any token's caps) is the owner's alone.
 
 - Following a pull request's checks: `colonizer pr` prints the checks state once, when the
   mothership knows it, but nothing waits on it.
-- Token management in the Settings UI — the CLI (owner token) and the API are the only ways.
