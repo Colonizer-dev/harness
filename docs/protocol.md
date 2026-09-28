@@ -2134,7 +2134,8 @@ route gets one extra allow rule for that port on top of its egress policy
 **Runner.**
 
 - Adds a route's `headers` to every request routed through it.
-- For routes referenced by `COLONIZER_MODEL`, `COLONIZER_SUBAGENT_MODEL` or `COLONIZER_BACKGROUND_MODEL`
+- For routes referenced by `COLONIZER_MODEL`, `COLONIZER_SUBAGENT_MODEL`, `COLONIZER_BACKGROUND_MODEL`
+  or, where the agent module has one, `COLONIZER_SMALL_MODEL`
   (the "used" routes), sets in Claude Code's environment:
   - when the largest `timeout_secs` is above 300: `CLAUDE_STREAM_IDLE_TIMEOUT_MS` = min(t·1000, 1800000),
     `API_TIMEOUT_MS` = t·1000 + 60000, `API_FORCE_IDLE_TIMEOUT` = `0`,
@@ -2146,9 +2147,18 @@ route gets one extra allow rule for that port on top of its egress policy
   `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require.
   Without `fallback_model`, return the gateway's response unchanged.
 
-**Gateway endpoint** `ANY /providers/{id}/{path}`:
+**Gateway endpoint** `POST /providers/{id}/v1/messages`, plus `POST
+/providers/{id}/v1/messages/count_tokens` on the `wire: anthropic` (the route is registered for any
+method and path so that a refusal is audited like real traffic; the handler answers `405` to a wrong
+method and `404` to any other path, and forwards a query string only if it stays within the path's
+character set plus `=` and `&`):
 
 - Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- What a token admits is recorded at boot, before the token is written: the providers and the
+  `<provider>/<model>` pairs the colony's model settings name. A colony with no recorded set reaches
+  nothing, and `403` `permission_error` is answered, before anything is sent upstream, when the
+  provider is not in the record or the body's `model` — matched on the requested name, before any
+  `model_map` renaming — is not.
 - A colony past its spend budget is refused `403` `permission_error` before it waits for a slot, with no
   `x-colonizer-fallback`: there is nothing to fall back to. The same check stops the colony on the host,
   worktree kept, so raising the budget and resuming continues it.
@@ -2157,14 +2167,19 @@ route gets one extra allow rule for that port on top of its egress policy
   forwards the client's `authorization` or `x-api-key`.
 - `max_concurrent`: waits up to `queue_timeout_secs` for a slot, then answers `503`
   `{"type":"error","error":{"type":"overloaded_error","message":"…"}}` with `x-colonizer-fallback: queue_timeout`.
+  A colony has at most 16 requests waiting for slots at once; past that a further request is refused
+  `429` `overloaded_error` on arrival instead of joining the queue (agents fan out through parallel
+  subagents, so bursts are routine, but a wait without bound is not).
+- A request that waited re-checks once it holds its slot and is refused `403` `permission_error`
+  without being sent — releasing what it held — if its token no longer matches that live colony or
+  the budget no longer admits it.
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
-  provider; `403` `permission_error` when the provider is not routed to this colony; `403`
-  `sensitivity_error` when the task's sensitivity class exceeds the provider's mark — `vetted` work
-  needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted` implies
-  `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md); `502`
-  `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend plus
-  in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body the
-  wire cannot carry.
+  provider; `403` `sensitivity_error` when the task's sensitivity class exceeds the provider's mark —
+  `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted`
+  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md);
+  `502` `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend
+  plus in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body
+  the wire cannot carry.
 - Connection or send failure: `502` `api_error` with `x-colonizer-fallback: unreachable`. No response headers within
   `timeout_secs`: `504` with `x-colonizer-fallback: timeout`. A response body silent for `timeout_secs`
   is ended.
