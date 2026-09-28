@@ -5,7 +5,7 @@ has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7
 colonies. The subcommands are everything else: a few run against this machine (`version`,
 `update`, `open`, `login-item`, `telemetry`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
-`resume`, `pr`, `map`, `token`, `mcp`). Settings still come from the environment, never flags — every
+`resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -120,11 +120,42 @@ colonizer token revoke tok_x
 `colonizer mcp` starts the MCP server instead of driving one; it is documented in
 [mcp.md](mcp.md).
 
+## Loops
+
+Loops are saved prompts that launch a colony on a schedule; what they do is
+[loops.md](loops.md). The ids are what `loop list` and the cockpit show:
+
+```sh
+colonizer loop list                                              # every loop this token may see, with its next run
+colonizer loop create acme/app --name "Triage" --prompt "Triage new issues" daily@09:00
+colonizer loop create acme/app --name "Maps" --kind map 14d@03:00   # refresh the map; no prompt needed
+colonizer loop run loop_x1                                       # start the next run now (exit 5 while one is live)
+colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
+colonizer loop start loop_x1                                     # enable a paused or ended loop again
+colonizer loop delete loop_x1                                    # delete it; its past colonies stay
+```
+
+`loop create` takes the repository as `owner/repo` (`owner/*` for a map loop: every repository
+of the org), the cadence as its last argument — `30m`/`2h` (every N minutes), `1d`–`7d` (whole
+days, still an interval), `14d@03:00` (every N days at a time of day), `daily@09:00`,
+`weekly@mon@09:00`, `monthly@15@09:00` or `self` (self-paced: each run names its own next) —
+and `--name`, with the prompt from `--prompt` or `--prompt-file PATH` (`-` reads stdin). The
+clock times are your local time, stored in UTC exactly as the cockpit's form stores them. The
+other flags mirror `launch`: `--model`, `--subagent-model`, `--autopilot`/`--no-autopilot`;
+`--max-runs N` ends the loop after N runs and `--disabled` creates it paused. Cadence ranges
+(15 minutes to a week, days 1–365) are the mothership's to refuse, with its message.
+
+`loop stop` and `loop start` are the cockpit's switch: the loop's own settings are sent back
+with `enabled` flipped, so pausing keeps everything and re-enabling books the next run from the
+cadence. `loop list` shows the cadence in words with its times in your local time, the state
+(`enabled`, `paused`, `ended`) and when it runs next; an empty list prints a note to stderr, and
+`--json` prints the raw records everywhere.
+
 ## `--json`
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
 what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop`, `resume` and
-the `token` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
+the `token` and `loop` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
 stored map document — or, with `--find`, the search result — and `answer` echoes the answer body
@@ -141,7 +172,7 @@ Exit codes are part of the interface, so a script can tell a typo from a refusal
 | 1 | Error: the mothership is unreachable, answered with an error no code below names, or the command failed locally |
 | 2 | Usage: the arguments name no command this build knows, or a flag's value is refused (a `--host` URL, an unknown `--scope`) |
 | 3 | Unauthorized or forbidden: the token is missing or unknown (401), or not allowed (403 — a scope or an org/repo limit refusing) |
-| 4 | Not found: no such colony or token (404) |
+| 4 | Not found: no such colony, loop or token (404) |
 | 5 | Conflict (409, e.g. `stop` mid-publish); for `ask` and `answer`, a colony that is not asking anything |
 | 6 | A launch cap was refused (429): a scoped token's concurrency limit or daily budget |
 
@@ -221,6 +252,5 @@ map loop (whose runs launch outside any token's caps) is the owner's alone.
 
 ## Not yet
 
-- A `loop` subcommand — loops live in the cockpit ([loops.md](loops.md)).
 - Following a pull request's checks: `colonizer pr` prints the checks state once, when the
   mothership knows it, but nothing waits on it.
