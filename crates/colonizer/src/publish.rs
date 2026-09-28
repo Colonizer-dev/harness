@@ -706,9 +706,27 @@ pub async fn watch_pull_requests(app: Shared) {
                                 let parent = s.clone();
                                 async move { retarget_stacked_children(&app, &parent).await }
                             });
+                            // Issue #673: the colonies this merge covers are marked at the edge
+                            // itself — no remote read first, or a queue tick in between could
+                            // start a colony this merge covers. The follow-ups (closing a covered
+                            // pull request, telling a live colony to rebase) go to the background.
+                            let marked = crate::supersede::mark_superseded(&app, &s.id).await;
+                            tokio::spawn({
+                                let app = app.clone();
+                                async move { crate::supersede::side_effects(&app, marked).await }
+                            });
                             // The merged file list is final; re-read it, as later pushes may have
-                            // moved it since the PR opened.
-                            tokio::spawn(record_changed_paths(app.clone(), s.id.clone(), url.clone()));
+                            // moved it since the PR opened — then mark once more, because a file
+                            // overlap only shows itself in the final list.
+                            tokio::spawn({
+                                let app = app.clone();
+                                let id = s.id.clone();
+                                let url = url.clone();
+                                async move {
+                                    record_changed_paths(app.clone(), id.clone(), url).await;
+                                    crate::supersede::after_files(&app, &id).await;
+                                }
+                            });
                         }
                     }
                     // While the pull request is still open, a move into behind/conflicted — or back

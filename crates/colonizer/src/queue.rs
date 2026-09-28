@@ -140,6 +140,12 @@ enum Gate {
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
+    // Issue #673: a colony a merge superseded stays put — held, not retired — until the operator
+    // keeps it. Ahead of the resume fast-path below, which would otherwise admit a resumed-queued
+    // colony the marker must hold; looked past this tick like any other wait.
+    if crate::supersede::blocks_start(s) {
+        return Gate::Hold;
+    }
     // A colony with a kept worktree came from Resume, and resuming reuses the base it recorded at
     // its first boot: `boot_inner` never consults its parent again, because the branch already
     // exists on top of that base. The parent rule below is for fresh boots only — applied to a
@@ -624,6 +630,8 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .await
             .iter()
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
+            // Issue #673: a merge covered this colony's work — the answer can wait until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
             .map(|s| (s.suspended.as_ref().map(|x| x.at).unwrap_or(s.updated_at), s.id.clone()))
             .collect()
     };
@@ -760,6 +768,9 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         for s in sessions
             .iter()
             .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked) && recovered(s))
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            .filter(|s| !crate::supersede::blocks_start(s))
         {
             // A kept-VM park takes the resume route; everything else is a plain requeue.
             if s.parked.as_ref().is_some_and(|p| p.vm_kept) {

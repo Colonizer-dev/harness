@@ -21,7 +21,7 @@ import {
   IconSettings,
   IconX,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, meshBroken, occupiesSlot, orgOf, sameOrg, seconds, store, stored, timeAgo } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, Switch, cx, inputClass, meshBroken, occupiesSlot, orgOf, sameOrg, seconds, store, stored, supersededTitle, timeAgo } from "./ui";
 
 /** Which pane the sidebar shows. Owned by App so Settings's Setup pane can open the launcher. */
 export type SidebarTab = "sessions" | "new";
@@ -637,6 +637,7 @@ function SessionList({
                 {sessionSpend != null && <span>· {formatCost(sessionSpend)}</span>}
                 {session.parent && <span>· stacked</span>}
                 {session.cleaned_up && <span>· cleaned up</span>}
+                {session.superseded && <Badge tone="warn" title={`Superseded: ${supersededTitle(session.superseded)}`}>superseded</Badge>}
                 <AttentionBadge attention={session.attention} />
               </div>
             </button>

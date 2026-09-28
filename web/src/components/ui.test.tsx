@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Session } from "../types";
-import { StatusBadge, occupiesSlot, parkedLabel, statusLabel } from "./ui";
+import { StatusBadge, occupiesSlot, parkedLabel, statusLabel, supersededTitle } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -99,5 +99,25 @@ describe("StatusBadge", () => {
     const out = badge({ status: "waiting_for_answer" });
     expect(out).toContain("Needs your answer");
     expect(out).toContain("pulse-soft");
+  });
+});
+
+// The supersession tooltip (issue #673) is shared by the colony view's badge and banner and the
+// sidebar's compact badge, so the words live in one place.
+describe("supersededTitle", () => {
+  const superseded = (reason: string, title = "Fix the login"): NonNullable<Session["superseded"]> => ({
+    by: "merged",
+    pr_url: "https://github.com/acme/repo/pull/9",
+    title,
+    reason: reason as "files",
+    at: "2026-09-28T10:00:00Z",
+    kept: false,
+  });
+
+  it("names the overlap reason and the colony whose merge covered the work, spelling unknown reasons out", () => {
+    expect(supersededTitle(superseded("issue"))).toBe('same issue — covered by "Fix the login"');
+    expect(supersededTitle(superseded("supply_chain", "Bump lodash"))).toBe('same supply-chain target — covered by "Bump lodash"');
+    expect(supersededTitle(superseded("files"))).toBe('overlapping files — covered by "Fix the login"');
+    expect(supersededTitle(superseded("something_new"))).toBe('something new — covered by "Fix the login"');
   });
 });

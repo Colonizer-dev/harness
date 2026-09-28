@@ -264,6 +264,8 @@ export interface Api {
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<StopReply>;
+  /** POST /api/sessions/{id}/keep (issue #673): release a superseded colony to start again. 409 when it is not superseded. */
+  keepSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
   /** GET /api/storage: disk usage plus the reclaimable / unpushed / orphan breakdown (issue #223). */
   storageSummary(): Promise<StorageSummary>;
@@ -607,6 +609,7 @@ export const httpApi: Api = {
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
+  keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   storageSummary: () => request("/api/storage"),
   setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),

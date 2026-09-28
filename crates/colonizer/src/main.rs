@@ -94,6 +94,7 @@ mod status;
 mod store;
 mod stream;
 mod summaries;
+mod supersede;
 mod telemetry;
 mod timing;
 mod update;

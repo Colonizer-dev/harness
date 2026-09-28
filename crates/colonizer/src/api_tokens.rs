@@ -424,7 +424,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "answer" | "stop" | "resume" | "keep"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },

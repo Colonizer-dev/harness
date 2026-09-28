@@ -114,6 +114,20 @@ export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
   return when ? `${reason} · resumes ${when}` : reason;
 }
 
+/** The overlap reasons a merge supersedes a colony by (issue #673), in human words. */
+const SUPERSEDE_REASONS: Record<NonNullable<Session["superseded"]>["reason"], string> = {
+  supply_chain: "same supply-chain target",
+  issue: "same issue",
+  files: "overlapping files",
+};
+
+/** What a supersession says in its badge tooltip: "same issue — covered by "Fix the login""
+ *  (issue #673). An unknown reason shows with its underscores spelled out. */
+export function supersededTitle(superseded: NonNullable<Session["superseded"]>): string {
+  const reason = SUPERSEDE_REASONS[superseded.reason] ?? superseded.reason.replace(/_/g, " ");
+  return `${reason} — covered by "${superseded.title}"`;
+}
+
 /** The label a colony's status reads as, suspension-aware (issue #562): a `waiting_for_answer`
  *  colony whose microVM is stopped is suspended rather than working, and one whose answer is
  *  stored and a boot is underway (queued or starting) says so. A colony still suspended while its

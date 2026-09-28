@@ -411,6 +411,16 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The supply-chain target this colony was launched against (issue #673): a package and the
+    /// advisory it was launched to fix. A live colony for one target refuses a second, like an
+    /// issue hold. `None` for everything not launched against one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
+    /// Set when a same-repo colony's pull request merged over this colony's work (issue #673): what
+    /// covered it, why, and whether the operator kept it running anyway. While it stands unkept the
+    /// queue and the resume route leave the colony where it is. `None` for a colony no merge covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<crate::supersede::Supersession>,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -509,6 +519,8 @@ impl Default for Session {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            supply_chain: None,
+            superseded: None,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,
