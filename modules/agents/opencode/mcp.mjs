@@ -4,11 +4,18 @@
 // runner's loopback bridge (COLONIZER_BRIDGE_URL). Newline-delimited JSON-RPC 2.0; no dependencies.
 // Asks can wait on a human for minutes, so while one is in flight the server sends periodic
 // progress notifications on the call's progressToken to hold the request open.
+// Loop colonies (docs/protocol.md, Loops) also get colonizer_loop_stop, plus colonizer_loop_next
+// when the loop is self-paced — offered only when the mothership set COLONIZER_LOOP.
 
 import { createInterface } from 'node:readline';
 
 const BRIDGE = process.env.COLONIZER_BRIDGE_URL ?? '';
 const TOKEN = process.env.COLONIZER_BRIDGE_TOKEN ?? '';
+const LOOP = process.env.COLONIZER_LOOP === 'true';
+const SELF_PACED = process.env.COLONIZER_LOOP_SELF_PACED === 'true';
+// The delay bounds the bridge clamps to; here they only word the description.
+const NEXT_MIN_MINUTES = 15;
+const NEXT_MAX_MINUTES = 24 * 60;
 
 const TOOLS = [
   {
@@ -26,9 +33,26 @@ const TOOLS = [
     description: 'Propose a durable, reusable learning for shared memory (scope repo, org or global). Nothing is written directly; the proposal goes to review.',
     inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['repo', 'org', 'global'] }, title: { type: 'string' }, content: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['scope', 'title', 'content'] },
   },
-];
+  LOOP && SELF_PACED && {
+    name: 'loop_next',
+    description: `Schedule this loop's next run: minutes from now (${NEXT_MIN_MINUTES} to ${NEXT_MAX_MINUTES}) and why.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        delay_minutes: { type: 'integer', description: `Minutes from now; clamped to ${NEXT_MIN_MINUTES}–${NEXT_MAX_MINUTES}` },
+        reason: { type: 'string', description: 'Why then: what the next run should find or do' },
+      },
+      required: ['delay_minutes', 'reason'],
+    },
+  },
+  LOOP && {
+    name: 'loop_stop',
+    description: "End this loop: it will not run again until the operator re-enables it. Use when the loop's goal is met.",
+    inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'Why the loop should stop' } }, required: ['reason'] },
+  },
+].filter(Boolean);
 
-const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory' };
+const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory', loop_next: '/loop_next', loop_stop: '/loop_stop' };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 
 async function forward(path, args, progressToken) {
@@ -54,10 +78,10 @@ async function forward(path, args, progressToken) {
 }
 
 async function onCall(name, args, progressToken) {
-  const path = PATHS[name];
-  if (!path) throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
+  // A tool the env gated off (loop_next/loop_stop without COLONIZER_LOOP) is unknown, not forwarded.
+  if (!TOOLS.some((tool) => tool.name === name)) throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
   try {
-    const data = await forward(path, args, progressToken);
+    const data = await forward(PATHS[name], args, progressToken);
     if (data?.cancelled) return { content: [{ type: 'text', text: 'The question was cancelled before the user answered.' }], isError: true };
     if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
     return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] };

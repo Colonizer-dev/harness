@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Minimal MCP stdio server for a Colonizer agent module, dependency-free: newline-delimited
 // JSON-RPC 2.0 (protocolVersion 2024-11-05). `wait` and `memory_search` read the local filesystem
-// here; `finding_file` and `memory_propose` leave the colony as protocol events, so they are
-// forwarded to the runner's loopback bridge (COLONIZER_BRIDGE_URL). finding_file is offered only
-// when the mothership set COLONIZER_FINDINGS=true, the memory tools only when COLONIZER_MEMORY_DIR
-// is mounted; `wait` is always offered.
+// here; `finding_file`, `memory_propose`, `loop_next` and `loop_stop` leave the colony as protocol
+// events, so they are forwarded to the runner's loopback bridge (COLONIZER_BRIDGE_URL).
+// finding_file is offered only when the mothership set COLONIZER_FINDINGS=true, the memory tools
+// only when COLONIZER_MEMORY_DIR is mounted, and the loop tools only for a loop colony
+// (COLONIZER_LOOP=true — loop_next additionally when the loop is self-paced); `wait` is always
+// offered.
 
 import { realpathSync } from 'node:fs';
 import { open, readdir, readFile, stat } from 'node:fs/promises';
@@ -16,6 +18,12 @@ const BRIDGE = process.env.COLONIZER_BRIDGE_URL ?? '';
 const TOKEN = process.env.COLONIZER_BRIDGE_TOKEN ?? '';
 const MEMORY_DIR = process.env.COLONIZER_MEMORY_DIR ?? '';
 const FINDINGS = process.env.COLONIZER_FINDINGS === 'true';
+const LOOP = process.env.COLONIZER_LOOP === 'true';
+const SELF_PACED = process.env.COLONIZER_LOOP_SELF_PACED === 'true';
+// A self-paced loop's pacing bounds, the mothership's own (docs/loops.md): loop_next clamps into
+// them here, so the number in its answer is the schedule the mothership records.
+const NEXT_MIN_MINUTES = 15;
+const NEXT_MAX_MINUTES = 24 * 60;
 
 const TOOLS = [
   FINDINGS && {
@@ -49,6 +57,23 @@ const TOOLS = [
       },
       required: ['scope', 'title', 'content'],
     },
+  },
+  LOOP && SELF_PACED && {
+    name: 'loop_next',
+    description: `Schedule this loop's next run: minutes from now (${NEXT_MIN_MINUTES} to ${NEXT_MAX_MINUTES}) and why.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        delay_minutes: { type: 'integer', description: `Minutes from now; clamped to ${NEXT_MIN_MINUTES}–${NEXT_MAX_MINUTES}` },
+        reason: { type: 'string', description: 'Why then: what the next run should find or do' },
+      },
+      required: ['delay_minutes', 'reason'],
+    },
+  },
+  LOOP && {
+    name: 'loop_stop',
+    description: "End this loop: it will not run again until the operator re-enables it. Use when the loop's goal is met.",
+    inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'Why the loop should stop' } }, required: ['reason'] },
   },
   {
     name: 'wait',
@@ -137,6 +162,31 @@ const formatResults = (results) =>
   results.length
     ? results.map((r) => `[${r.scope}] ${r.title} (/colonizer/memory/${r.file})\n${r.snippet}`).join('\n\n')
     : 'No shared memory matches that query.';
+
+// --- loops (docs/loops.md) ---------------------------------------------------------------------
+
+// A loop colony ends its loop with loop_stop, and a self-paced one names its next run with
+// loop_next. Both cross the bridge and leave the colony as protocol events; the mothership owns
+// the schedule and clamps the delay on its side too, but clamping here (NEXT_MIN_MINUTES,
+// NEXT_MAX_MINUTES above) keeps the answer the agent reads equal to the schedule it recorded.
+
+const refusal = (what, why) => text(`Could not ${what}: ${why}`);
+
+async function loopNext({ delay_minutes, reason }) {
+  if (!Number.isFinite(delay_minutes) || delay_minutes < 1) return refusal('schedule the next run', 'delay_minutes must be a number of minutes from now.');
+  if (!String(reason ?? '').trim()) return refusal('schedule the next run', 'reason is required — what the next run should find or do.');
+  const minutes = Math.min(NEXT_MAX_MINUTES, Math.max(NEXT_MIN_MINUTES, Math.round(delay_minutes)));
+  const data = await forward('/loop_next', { delay_minutes: minutes, reason: String(reason) });
+  if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
+  return text(`Next run scheduled in ${minutes} minutes.`);
+}
+
+async function loopStop({ reason }) {
+  if (!String(reason ?? '').trim()) return refusal('stop the loop', 'reason is required — why it should not run again.');
+  const data = await forward('/loop_stop', { reason: String(reason) });
+  if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
+  return text('The loop is stopped; this is its last run.');
+}
 
 // --- wait (issue #181) -------------------------------------------------------------------------
 
@@ -331,6 +381,8 @@ async function onCall(name, args) {
   try {
     if (name === 'wait') return await waitTool(args ?? {});
     if (name === 'memory_search') return text(formatResults(await searchMemory(args?.query)));
+    if (name === 'loop_next') return loopNext(args ?? {});
+    if (name === 'loop_stop') return loopStop(args ?? {});
     const data = await forward(name === 'finding_file' ? '/finding' : '/memory', args);
     if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
     return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] };
