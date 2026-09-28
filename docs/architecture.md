@@ -305,20 +305,27 @@ in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
-microsandbox 0.6.18 cannot snapshot a running VM's memory: `msb snapshot create` is disk-only and wants a stopped
-sandbox, and `--resumable` answers `unsupported: resumable snapshots require VM pause/resume restore support`, so
-`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. microsandbox
-0.7.x can (`msb snapshot create --full`, `msb restore`, `msb pause/resume`); measured on a nested-KVM host, a full
-checkpoint of a running 512 MiB VM took 0.46 s (the VM pauses during capture) and 304 MB on disk, an incremental
-re-checkpoint +24 MB at 0.22 s, and a restore to usable 0.3 s. Adopting it wants a vendor pin bump, and
-`MSB_HOME` is version-locked — an older msb against a newer home fails every command — so it is follow-up work.
+microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
+checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
+`--guest-flush required` — but its restore cannot bring a colony back, measured on the pinned binaries. A
+sandbox that has ever carried a `--secret` fails its restore outright (`restore virtio device virtio_fs1 …
+No such file or directory`), whether or not the source sandbox still runs — and every colony carries one: its
+credential. `msb snapshot restore` accepts no `--secret` or `-e` that could restate the credential and
+environment on the restored sandbox, re-creates no volume bindings (the worktree and transcript mounts have to
+be passed again with `-v`), and has no per-direction network default — its `--net-default` is one value for
+both directions, so the deny-egress/allow-ingress fence every colony boots with cannot be restated. So
+`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. The
+function is the seam; what unblocks the switch is an upstream fix to the restore of secret-carrying sandboxes,
+plus a restore-time way to restate secrets, environment and the egress fence.
 Resuming a transcript whose `AskUserQuestion` tool_use was left unresolved is valid, too — verified with the
 SDK's bundled Claude Code CLI 2.1.270, which inserts the missing `tool_result` itself (`is_error`,
 "[Request interrupted by user for tool use]"), so the held answer arrives as the next user message.
 
 Disk-wise nothing new is kept: there is no snapshot file in this path. What a suspension keeps is the worktree
 and the transcript directory under the colony's session dir, which already count against the per-colony
-host-disk checks and are deleted with the colony.
+host-disk checks and are deleted with the colony. The same would hold for a snapshot artifact: the natural home
+is `<session dir>/snapshots/`, so it would be counted and cleaned up with the colony, with `msb snapshot remove`
+run before the directory goes away.
 
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
@@ -551,8 +558,8 @@ The microVM is the boundary; this is the layer inside it, for the case the wall 
 is root in the guest, and root can still reach kernel interfaces, another process's memory and the
 human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
 
-Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6.18 per
-`vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+Guest kernel baseline, measured 2026-09-25 on the stack as pinned then (microsandbox 0.6.18 per
+`vendor/vendor.lock`; the pin is 0.7.3 since issue #639, same libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
 `capability,selinux` — so Landlock pinning waits for a libkrunfw with `CONFIG_SECURITY_LANDLOCK=y`

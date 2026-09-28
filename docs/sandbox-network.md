@@ -1,14 +1,16 @@
 # Sandbox network policy
 
 This page states what a colony's network policy allows and denies. It covers microsandbox (`msb`)
-0.6.18 as the harness drives it at commit `4147180`. Every upstream claim cites the v0.6.18 tag,
-commit [`fa3e439`][tag]. [#303](https://github.com/Colonizer-dev/harness/issues/303) and
+0.7.3 as the harness drives it (the pin since
+[#639](https://github.com/Colonizer-dev/harness/issues/639)). The source claims below were read at the
+v0.6.18 tag, commit [`fa3e439`][tag]; the behaviour they describe was re-verified against the
+pinned v0.7.3 binaries. [#303](https://github.com/Colonizer-dev/harness/issues/303) and
 [#304](https://github.com/Colonizer-dev/harness/issues/304) build on it.
 
-- **Provenance.** `vendor/vendor.lock:5-7` pins prebuilt v0.6.18 release tarballs by sha256, not
+- **Provenance.** `vendor/vendor.lock:5-7` pins prebuilt v0.7.3 release tarballs by sha256, not
   source. Nobody has verified that those binaries were built from `fa3e439`.
 - **Which `msb` runs.** `COLONIZER_MSB` wins, then the vendored binary, then a host install, then
-  `msb` on `PATH` (`crates/colonizer/src/config.rs:55-61`). This page describes 0.6.18 only.
+  `msb` on `PATH` (`crates/colonizer/src/config.rs:55-61`). This page describes the 0.7.3 pin.
 - **Verified or inferred.** Claims read from source are stated plainly. Claims reasoned from source
   but not tested on a running colony are marked **(inferred)**.
 
@@ -231,7 +233,8 @@ Rules cannot change while a colony runs.
   Resume, which re-resolves global and org settings. No live allow/block/reset API is offered.
 
 Composable profiles arrived in v0.6.7 ([`2026-07-24.mdx:9-18`][changelog]). The upstream changelog
-has no entry for 0.6.17 or 0.6.18; its latest lists v0.6.16 ([`2026-08-28.mdx:8`][changelog-last]).
+has no entry for any 0.7.x release; its latest lists v0.6.18
+([`2026-09-11.mdx:9`][changelog-last]).
 
 ## Colony secrets and the fence
 
@@ -509,7 +512,7 @@ Still open, all **(inferred)** and untested:
 [rebind-default]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/network/lib/config/types.rs#L255-L263
 [modify]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/packages/microsandbox-types/rust/lib/modify.rs#L26-L79
 [changelog]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/docs/changelog/2026-07-24.mdx?plain=1#L9-L18
-[changelog-last]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/docs/changelog/2026-08-28.mdx?plain=1#L8
+[changelog-last]: https://github.com/superradcompany/microsandbox/blob/f9f40e1a341922c0f66da36f10914d2aad0ca8be/docs/changelog/2026-09-11.mdx?plain=1#L9
 [cli-secret]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L2369-L2380
 [secret-tls]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/sdk/rust/lib/sandbox/builder.rs#L870-L887
 [tls-defaults]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/packages/microsandbox-types/rust/lib/domain.rs#L2464-L2479
