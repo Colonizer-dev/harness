@@ -1,8 +1,10 @@
 # Outposts: contributed compute
 
-First slice of [#141](https://github.com/Colonizer-dev/harness/issues/141). It draws
-the control/execution seam and ships the local side of it. Remote outposts — other
-machines joining the mesh and hosting colonies — are PLANNED, not present.
+First slice of [#141](https://github.com/Colonizer-dev/harness/issues/141) (closed with
+this slice). It draws the control/execution seam and ships the local side of it. Remote
+outposts — other machines joining the mesh and hosting colonies — are PLANNED, not
+present. The open design gate for them, and for a hosted Colonizer, is
+[#298](https://github.com/Colonizer-dev/harness/issues/298).
 
 Terms follow [vision.md](vision.md): the **Mothership** is the Colonizer app on your
 machine, a **Colony** is one session (a microVM plus worktree plus agent), and the
@@ -25,9 +27,10 @@ The seam between them is the `ExecutionBackend` trait
 (`crates/colonizer/src/execution.rs`). Its methods mirror the sandbox module's
 `boot`, `remove`, `running`, and `pull` signatures with `msb` folded into the backend
 (plus node_id/capabilities added for placement), so the local backend
-delegates with zero adaptation. Nothing calls through the trait yet; wiring the
-launch path over to it is a later slice, deliberately, so this one changes no
-behavior.
+delegates with zero adaptation. Nothing calls through the trait yet: colony boot
+(`crates/colonizer/src/boot.rs`) still pulls the image and boots the microVM through
+the sandbox module directly. Wiring the launch path over to the trait is a later
+slice, deliberately, so this one changes no behavior.
 
 ## Trust
 
@@ -71,6 +74,26 @@ labels exist in the trait today; the scheduler does not.
   sandbox module. No behavior change.
 - **Remote outpost: PLANNED.** No protocol, no enrollment, no scheduler. The trait
   is the seam it will plug into.
+
+## Related pieces that do exist
+
+Two things built since this slice point the same way. Neither runs a colony on
+another machine.
+
+- **The fleet view** ([#231](https://github.com/Colonizer-dev/harness/issues/231)).
+  A mothership can list other motherships beside itself: set `COLONIZER_FLEET_PEERS`
+  to their base URLs, comma separated, and `GET /api/hosts` polls each one's
+  `/api/status` on request (3-second timeout) and returns one row per host — slots in
+  use against the parallel limit, queue depth, free disk, version, and whether it
+  answered. The Overview shows these rows in a Fleet panel once there is more than one
+  host. It is read-only: each host still runs only its own colonies. This host only
+  dials out; for a peer to answer, its operator sets that peer's `COLONIZER_BIND` to a
+  private interface, never `0.0.0.0` ([protocol.md](protocol.md#get-apihosts)).
+- **The session store** ([#325](https://github.com/Colonizer-dev/harness/issues/325)).
+  Colony records sit behind a `SessionStore` interface so a different backend can
+  hold them later. A mothership uses the local files today; an in-memory object store
+  exists only to prove the interface works off the local disk
+  ([session-store.md](session-store.md)).
 
 ## Non-goals for this slice
 

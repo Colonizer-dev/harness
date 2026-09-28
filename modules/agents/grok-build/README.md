@@ -2,9 +2,10 @@
 
 Drives xAI's [Grok Build](https://github.com/xai-org/grok-build) CLI (`grok`) as a Colonizer agent
 module on the `colonizer-runner/1` protocol. **Status: PLANNED / experimental — the first slice of
-[#333](https://github.com/Colonizer-dev/harness/issues/333).** It is pickable in Settings (module
-discovery lists every `modules/agents/*/module.json`), but nothing mothership-side knows about it
-yet; see "What remains".
+[#333](https://github.com/Colonizer-dev/harness/issues/333).** It is pickable in Settings and per
+org (module discovery lists every `modules/agents/*/module.json`), but nothing mothership-side knows
+about it yet, nothing stages the `grok` binary into the colony image, and it has not run in a real
+colony; see "What remains".
 
 The runner is `runner.mjs`: one headless `grok` process per turn (`--prompt-file`,
 `--output-format streaming-json`), the first turn's `end` event yields the grok `sessionId`, and
@@ -41,6 +42,7 @@ answer), each named problem emits a `log` error plus `status error` with the nam
 - `GROK_CREDENTIAL_MISSING` — `XAI_API_KEY` unset/empty. Fix below.
 - `GROK_BINARY_MISSING` — no grok at `COLONIZER_GROK_BIN`/PATH; the log carries the pinned install command.
 - `GROK_VERSION_DRIFT` — `grok --version` (parsed leniently for X.Y.Z) is not the pinned version.
+- `GROK_MODEL_PROVIDER` — a model setting naming another provider than `xai-grok/<model>`.
 
 ## Credential story
 
@@ -52,11 +54,11 @@ never runs `grok login`, and additionally starts every grok child with `BROWSER=
 also means no cached OAuth token (02-authentication.md: the API key authenticates when no session
 token is active).
 
-Honest scope: the mothership-side push of the xAI key into boot secrets (`sessions.rs`, alongside
-the Claude/TypeSafe keys) and gateway routing are **follow-ups, not in this slice**. Today the key
-reaches a colony only if you add `XAI_API_KEY` for host `api.x.ai` as a colony secret in Settings →
-Secrets (`crates/colonizer/src/colony_secrets.rs`; `XAI_API_KEY` is not on that file's reserved
-list), and grok then talks to `api.x.ai` directly.
+Honest scope: the mothership-side push of the xAI key into boot secrets (`crates/colonizer/src/boot.rs`,
+alongside the Claude/TypeSafe keys) and gateway routing are **follow-ups, not in this slice**. Today
+the key reaches a colony only if you add `XAI_API_KEY` for host `api.x.ai` as a colony secret in the
+cockpit's Secrets view (`crates/colonizer/src/colony_secrets.rs`; `XAI_API_KEY` is not on that file's
+reserved list), and grok then talks to `api.x.ai` directly.
 
 ## Nesting decisions
 
@@ -85,7 +87,7 @@ it received, and checks the happy path's events against the required fields of
 
 ## What remains
 
-- Mothership-side xAI key push into boot secrets (`sessions.rs`) and provider-gateway routing for
+- Mothership-side xAI key push into boot secrets (`boot.rs`) and provider-gateway routing for
   `xai-grok` models; today only a user-added `XAI_API_KEY` colony secret works.
 - Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`, so a
   colony does not depend on grok being preinstalled in the image.
@@ -93,5 +95,5 @@ it received, and checks the happy path's events against the required fields of
   runner has to.
 - Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - The colonizer MCP tools (findings, memory, wait) that the Claude module serves.
-- A compat-table row wherever the docs list agent modules, and a manual end-to-end run on a real
-  colony with a real key.
+- A manual end-to-end run on a real colony with a real key. (The module already has its row in the
+  README's module table and in [docs/providers.md](../../../docs/providers.md).)

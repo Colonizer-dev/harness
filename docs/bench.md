@@ -5,7 +5,10 @@ improvement or a regression, and reading one colony's chat won't tell you which.
 of tasks that change has to survive, scored the same way every time.
 
 It pairs with `scripts/colony-report.mjs`, which says what happened *inside* the colonies (cost, tools,
-questions, silences). The bench says whether the work was actually right.
+questions, silences). The bench says whether the work was actually right. For spend alone,
+`node scripts/colony-report.mjs --costs` reads the spend journal (`spend.jsonl`) and ranks colonies by
+cost, the agent's own estimate beside what the gateway metered, with a harness × model table; the
+window is the journal's last 30 days unless `--since`/`--days` move it (#549).
 
 The colony report also says where a colony's tokens went. Each turn bills its whole spend to one of six
 categories — `read`, `search`, `command_output`, `edit`, `reasoning`, `replay` — by the tools it called:
@@ -47,6 +50,7 @@ on a correct fix, would score every colony the same whatever it did.
 
 A task passes when all of this holds:
 
+- the colony finished within `--timeout`;
 - a pull request was opened;
 - the hidden check passes on its branch;
 - the repository's own tests still pass;
@@ -61,14 +65,17 @@ node scripts/bench.mjs run  --repo owner/bench --label before
 # change one thing: a prompt, a module setting, a model
 node scripts/bench.mjs run  --repo owner/bench --label after
 node scripts/bench.mjs compare bench-before.json bench-after.json
-node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull requests
+node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull requests and delete their branches
 ```
 
 `run` talks to a mothership on `COLONIZER_URL` (default `http://127.0.0.1:7878`), launches one colony per
 task, and answers the questions it asks by itself: it picks the option matching the task's `answer.prefer`,
-else the first one, and records what it chose. `--only` runs a subset, `--timeout` bounds a colony in
-seconds, and `--heldout <dir>` scores the held-out suite below (`--max-gap`, default 0.25, sets its
-threshold).
+else the first one, and records what it chose. It authenticates with `COLONIZER_API_TOKEN`, else the
+`api-token` file in `COLONIZER_CONFIG_DIR` (default `~/.config/colonizer`). `--only a,b` runs a subset,
+`--timeout` bounds a colony in seconds (default 1200), `--data <dir>` names the mothership's data
+directory the colony report and trajectory monitor read (default `COLONIZER_DATA_DIR`, else
+`~/.local/share/colonizer`), and `--heldout <dir>` scores the held-out suite below (`--max-gap`,
+default 0.25, sets its threshold). Results go to `bench-<label>.json`.
 
 This costs real model tokens and opens real pull requests on the scratch repository. It opens them nowhere
 else.
@@ -76,8 +83,8 @@ else.
 ## Reading a comparison
 
 ```
-| Task | Harness · model | Result | Cost | Worked | Questions | Why it failed |
-| ambiguous-rounding | claude-code · opus → claude-code · opus | pass → FAIL | 0.31 → 0.28 (-0.03) | 94s → 71s | 1 → 0 | asked 0 questions, expected 1 |
+| Task | Harness · model | Result | Clean | Cost | Worked | Questions | Why it failed |
+| ambiguous-rounding | claude-code · opus → claude-code · opus | pass → FAIL | clean → – | 0.31 → 0.28 (-0.03) | 94s → 71s | 1 → 0 | asked 0 questions, expected 1 |
 ```
 
 One run of one task is one sample. A cost difference of a few cents is noise; a task that flips from pass to
@@ -113,7 +120,9 @@ node scripts/bench.mjs run --repo owner/bench --label after --heldout ~/bench-he
 ```
 
 `heldout add` copies the check into the set, bumps its version and records the addition in `heldout.json`'s
-history (a missing manifest starts at version 1). `run --heldout` resolves one active companion per family
+history (a missing manifest starts at version 1). A family has one active companion at a time: adding a
+second is refused until the first retires. A task's family is its `family` field in `tasks.json`, else
+its id. `run --heldout` resolves one active companion per family
 **before any colony launches** — a family without one fails the run before it spends — then scores every
 task that opened a pull request against its family's companion on a fresh clone of its own, never the
 visible check's checkout. The scorer's git carries the same `-c` guards the mothership puts on every
@@ -213,7 +222,7 @@ node scripts/swebench.mjs run lite.json --owner my-org --task-budget 2 --total-b
 node scripts/swebench.mjs score swebench-lite-before.json --dataset princeton-nlp/SWE-bench_Lite
 ```
 
-`fetch` also takes a local `.json`/`.jsonl` file, `--ids`, and `--split`/`--config`; the gold and test
+`fetch` also takes a local `.json`/`.jsonl` file, `--ids`, `--offset`, and `--split`/`--config`; the gold and test
 patches stay in the instances file for scoring-side checks only — a colony never sees them. `run` needs
 the bench's mothership and `gh` logged in to an account allowed to create **private** repositories: each
 instance becomes `<owner>/swebench-<instance-id>`, a single-commit reconstruction of upstream at
@@ -241,8 +250,8 @@ on are unknown, not failures, and sit in neither rate.
 | `single_commit_snapshot` | yes |
 | `concealed_eval_artifacts` | yes — tests and gold patch never reach the scratch repo; scoring is the official harness |
 | `no_network_answer_sources` | **no** — colonies have internet; nothing is fenced yet |
-| `gold_sanity_gate` | **no** — issue #330 |
-| `trajectory_monitor` | **no** — not implemented |
+| `gold_sanity_gate` | **no** — #330 added the gate for the bench's own tasks (the reference solutions above), but `swebench.mjs` does not apply one |
+| `trajectory_monitor` | **no** — the [trajectory monitor](trajectory-monitor.md) scores the bench's own runs, but `swebench.mjs` does not run it |
 
 Until all five hold, every run is labeled **uncalibrated** — a signal to steer by, not a number to
 publish, and not comparable to published SWE-bench results.

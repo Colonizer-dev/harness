@@ -85,16 +85,16 @@ needs a target. Paths that exist are left untouched on the host. A symlink at
 a listed path is resolved while nothing is running: a link that stays inside
 the checkout is bound at its target (an in-repo `.env -> config/prod.env`
 still masks the real content); one that leaves the checkout, dangles, or
-sits under a non-directory is skipped and named on the boot log rather than
+sits under a symlink or a plain file is skipped and named on the boot log rather than
 half-enforced. The placeholder list is written before the first placeholder
 is created, so a crash cannot leave an empty file no publish knows to remove.
 The resolved policy is written to the session's `vm/path-policy` (one `kind
 path` line per enforcement action: `mask-file`, `mask-dir`, `protect`; a
 directory entry keeps its trailing `/`), and the placeholder list to
 `vm/path-policy.placeholders`. Both ride the colony's read-only `/colonizer`
-mount. The boot logs one info line (N masked, M protected, placeholders
-created, plus any skipped paths) and a warn line naming every `unmask_paths`
-opt-out.
+mount. The boot logs one info line — *path policy: masking N path(s), protecting
+M; K placeholder(s) in the worktree*, plus any skipped paths — and a warn line
+naming every `unmask_paths` opt-out.
 
 **Guest, before the agent.** The boot script reads `/colonizer/path-policy`
 before it `exec`s the agent daemon: a `mask-file` entry is covered by a bind
@@ -159,7 +159,10 @@ is held back as above.
   boot.
 - **Per-org overrides.** The three settings are global (the sandbox module);
   an org cannot carry its own lists yet.
-- **In-guest enforcement against a root agent unmounting.** The colony runs as
-  root inside its VM, so a deliberately hostile agent could `umount` a mask or
-  a read-only bind. Hardening that (a mount namespace the agent cannot reach,
-  or re-checks from the host) is a follow-up issue.
+- **The human's terminal can still unmount.** The colony runs as root inside
+  its VM. Since in-guest hardening (#547), the agent and everything it spawns
+  run without `CAP_SYS_ADMIN` and under a seccomp filter that answers `mount`,
+  `umount2` and the namespace calls with `EPERM`, so the agent cannot undo a
+  mask or a read-only bind. The daemon and the cockpit's terminal shell are not
+  filtered, so a person typing in that terminal can. See
+  [In-guest hardening](architecture.md#in-guest-hardening).

@@ -38,6 +38,10 @@ SIGTERM (SIGKILL after 2 s), `status exited`, exit 0. An agent that dies on its 
 `ACP_AGENT_FAILED` log plus `status error`, the turn in flight ends as an error, and the runner
 exits 1.
 
+Before the first turn, the runner checks its setup and names what is wrong: `ACP_AGENT_UNKNOWN`
+(an `agent` that is not a preset, or `custom` with an empty command) or `ACP_CREDENTIAL_MISSING`
+(the Gemini preset without `GEMINI_API_KEY`). Every turn then ends as an error carrying that name.
+
 ## Questions
 
 `session/request_permission` becomes a `question`: the ACP options (clamped to 2–4 — a synthetic
@@ -67,14 +71,17 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 | :--- | :--- | :--- |
 | `agent` | `COLONIZER_ACP_AGENT` | `gemini` (the verified preset: `gemini --experimental-acp`) or `custom` |
 | `command` | `COLONIZER_ACP_COMMAND` | With `custom`: the full command line including arguments, quotes respected |
-| `model` | `COLONIZER_MODEL` | Model id for `session/set_model` (only if the agent advertises models) |
+| `model` | `COLONIZER_MODEL` | Meant to pick the model with `session/set_model` at boot, but **not applied yet**: the runner never reads `COLONIZER_MODEL`, so the agent runs on its own default. Switching the model from the cockpit (a `set_model` command) does work, when the agent advertises models |
 
 ## Verified and planned agents
 
-- **Gemini CLI (`gemini --experimental-acp`) — verified.** Pinned in `module.json` (`requires.pins`
+- **Gemini CLI (`gemini --experimental-acp`) — handshake verified.** The real CLI 0.61.0 completed
+  `initialize` and `session/new` and sent a prompt to the API; a full colony run with a real key,
+  tool calls and a pull request has not been done. Pinned in `module.json` (`requires.pins`
   carries the npm version and its sha512 integrity; install with
   `npm install -g @google/gemini-cli@<pinned>`). The colony authenticates with a `GEMINI_API_KEY`
-  secret for `generativelanguage.googleapis.com` (declared in `secrets`/`egress`); the runner
+  secret for `generativelanguage.googleapis.com` (declared in `secrets`/`egress`; add the value in
+  the cockpit's Secrets view, as a colony secret for that host); the runner
   refuses to boot the preset without it (`ACP_CREDENTIAL_MISSING`) — the colony never runs the
   CLI's interactive OAuth login. Manual end-to-end: install the pinned CLI, export
   `GEMINI_API_KEY=…`, run `node runner.mjs`, and send
@@ -101,4 +108,6 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-acp-agent.mjs`, a scriptable fake ACP agent, driven by
 the custom-command setting. Every `session/update` type, the permission flow, the fs and terminal
-surface, and the failure paths are covered; CI runs the same via bare `node --test`.
+surface, and the failure paths are covered. CI runs `npm test` in this directory (the "Test the ACP
+runner" step). These stubbed tests are all CI exercises: the end-to-end colony job runs only the
+claude-code module.

@@ -104,19 +104,21 @@ same way `sessions.json` is.
 Overview → the Workspaces table → a workspace row's **Red team** button (the hooded
 figure) opens a three-step wizard scoped to that workspace:
 
-1. **Who and where.** A short "what is a red team" note, the hunter, and the
-   workspace's repositories (one run per repository; one that already has an active
-   run is skipped). Today the **colony swarm** runs; **Strix** and **Shannon** are shown
-   with their logos as coming soon — Strix installs and probes (see
-   [security-hunters.md](security-hunters.md)) but a run does not drive its scans yet,
-   and Shannon is a manifest-only stub. The API refuses `strix` / `shannon` with a 400
-   that says so.
+1. **Hunter.** A short "what is a red team" note, **Who hunts**, and the workspace's
+   repositories (one run per repository; one that already has an active run is
+   skipped). Only the **colony swarm** can run. **Strix** and **Shannon** appear as
+   disabled cards marked "Coming soon" (Strix reads "Installed · runs coming soon" once
+   its binary is installed). They are not built as red-team hunters: Strix can be
+   installed and probed (see [security-hunters.md](security-hunters.md)), but no run
+   drives its scans, and Shannon is a manifest with no install or run behind it.
+   `POST /api/redteam/runs` with `"hunter": "strix"` or `"shannon"` returns 400:
+   *Strix cannot run as a red-team hunter in this build yet*.
 2. **Models.** A provider and model for the hunters and for their subagents, and the
    number of hunters per repository (1–8). They reach each hunter as
    `model_override` / `subagent_model_override` on `POST /api/sessions`.
 3. **Review.** A cost warning with an estimate from past runs (or average colony
    spend), "let hunters fix what they find" off unless ticked (a raid never merges
-   unless autofix is on), and **Once**, **Weekly** or **Monthly** in local time, saved as
+   unless autofix is on), and **Once, now**, **Weekly** or **Monthly** in local time, saved as
    UTC. A one-off run starts armed and launches as soon as no colony is live.
 
 Schedules persist in `<config_dir>/redteam-schedules.json`; a once-a-minute loop

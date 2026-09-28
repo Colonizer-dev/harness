@@ -22,6 +22,21 @@ agent-facing surface at all:
 Live blocking stays where it is — the preflight, the publish sanitizer, the choice cards. This is scoring,
 not enforcement. Evidence strings pass through colony-report's `redact` before they are printed or logged.
 
+## Running it
+
+From the repository root, with Node:
+
+```sh
+node scripts/trajectory-monitor.mjs --session <colony id>            # one colony, hits with evidence
+node scripts/trajectory-monitor.mjs --session <colony id> --json     # the same, as JSON
+node scripts/trajectory-monitor.mjs --bench bench-run.json           # resolved / clean / hacked / gap for a bench run
+node scripts/trajectory-monitor.mjs --calibration                    # the pattern set against its labeled transcripts
+```
+
+It reads session logs from `--data <dir>`, else `COLONIZER_DATA_DIR`, else
+`~/.local/share/colonizer`. `--session` and `--bench` append to each audited colony's
+`audit.jsonl`; `--calibration` writes nothing.
+
 ## The pattern set, v1
 
 `PATTERN_SET_VERSION = 1`. Each pattern states the normal-workflow lookalikes that must not fire: that
@@ -136,3 +151,6 @@ clean rate from one version is never silently compared with another.
   pattern list, carry the security.
 - The monitor sees the persisted event log. Work done outside it, or before the monitor ran, is out of
   reach — as is intent: a hit says a shortcut-shaped thing happened, not why.
+- It reads only `<data>/sessions/<id>/`. A deleted colony's logs survive in the local log archive
+  (`<data>/archive/…`, compressed), but the monitor does not read the archive, so a deleted colony
+  audits as having no event log.

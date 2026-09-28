@@ -9,14 +9,22 @@ only, so both of its streams are read through a splitter that leaves U+2028/U+20
 - Every `user_message` becomes a prompt; a message arriving mid-run joins it (`streamingBehavior:
   followUp`) instead of being refused.
 - Text streams as `assistant_text_delta` and settles as `assistant_text`; tool calls, tool results
-  (capped at 20 000 characters) and `turn_end` (cost, duration, per-model token counts) follow the
-  protocol. One colonizer turn spans a Pi turn and every message queued into it (follow-ups): it
+  (capped at 20 000 characters) and `turn_end` (duration, per-model token counts, and a cost that is
+  normally 0: the gateway prices routed spend, and the runner's `models.json` gives Pi no prices)
+  follow the protocol. One colonizer turn spans a Pi turn and every message queued into it (follow-ups): it
   ends at `agent_settled`, with the last assistant text as its `result`.
 
 ## Selection
 
-One agent module per install: `agent.provider` in `~/.config/colonizer/modules.json` (`"pi"`), set in
-the cockpit's agent picker (`PUT /api/modules/agent`).
+Pick Pi as the mothership's agent module in the cockpit's agent picker (`PUT /api/modules/agent`,
+saved as `agent.provider` `"pi"` in `~/.config/colonizer/modules.json`), or for one org only under
+Org settings → Agent module; an org without a pick uses the mothership's choice.
+
+## Status
+
+The runner has driven the real Pi binary (0.87.1, pinned in `package.json`) through a tool turn and
+a text turn, but only against a stand-in gateway outside a microVM; no colony launched from the
+cockpit has run on it yet. CI runs the fake-Pi tests (`npm test` in this directory).
 
 ## Configuration
 
