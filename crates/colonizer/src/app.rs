@@ -798,6 +798,7 @@ pub(crate) mod tests {
             gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: Vec::new(),
             fleet_peers: Vec::new(),
+            bench_pool: None,
         };
         settings(&mut cfg);
         let boot = Boot {

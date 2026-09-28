@@ -289,6 +289,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/share/mise/installs/claude/latest/claude`, `~/.local/bin/claude`, `~/.claude/local/claude` | The native Claude Code binary to mount into colonies |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | The provider gateway; colonies reach it through `host.microsandbox.internal`. Must be an IP and port: a hostname such as `localhost:41750` refuses startup |
 | `COLONIZER_FLEET_PEERS` | – | Base URLs of other motherships, comma separated, polled for the fleet view (`GET /api/hosts`). Nothing is exposed by setting it |
+| `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
 | `COLONIZER_NO_EXTERNAL_EFFECTS`, `COLONIZER_NO_WRITE` | – | A kill switch: set either to anything but `0`, `false`, `off` or `no`, and every write that leaves the harness (commits, pushes, pull requests, merges, comments, filed issues) refuses to run |

@@ -228,7 +228,16 @@ method, stack, status and age plus the gate's aggregate pass rate and cost per a
 
 Flaky mutants are real bugs that are unfit to score, so they are kept apart: never drawn from, never
 sharing an id with the held-out pool, and carrying briefs that name the injected class of bug and where it
-lives — ready for the red-team hunters.
+lives — ready for the red-team hunters, who now get them. A mothership pointed at the pool with
+`COLONIZER_BENCH_POOL=<dir>` reads `raid.json` at each red-team launch and deals the entries recorded against
+the raided repository out round-robin (entry i to hunter i, then every swarm-size-th entry after it, at most
+20 per brief), so no lead is ever handed to two hunters; a raid set longer than the swarm can carry at the
+cap waits for a later run. The hunter's brief gains a paragraph quoting each entry's brief with its
+`file:line`, injected class and commit, and saying to chase these first even where they fall outside the
+focus assignment. Entries whose `source.repo` names another repository are skipped (the match is ASCII
+case-insensitive), and a missing or malformed `raid.json` only logs — the swarm launches with ordinary
+briefs. The `source.repo` label is `owner/name` from the repository's `origin` remote; a checkout with no
+remote is labelled by its path, and no run's repo slug will match it.
 
 ### Measured so far
 
@@ -238,9 +247,8 @@ bench fixture admitted 3 of 3 candidates, `services/telemetry` 54 of 107 (53 sur
 
 ### Not yet
 
-An LM-rewrite method and PR-mirroring; stacks beyond Node (Rust, Go); wiring the raid set into the
-red-team hunters' briefs (`crates/colonizer/src/redteam.rs`); and the human review of the first 20 accepted
-tasks plus the colony trial that opens the pool to scoring.
+An LM-rewrite method and PR-mirroring; stacks beyond Node (Rust, Go); and the human review of the first 20
+accepted tasks plus the colony trial that opens the pool to scoring.
 
 ## External suites (SWE-bench)
 
