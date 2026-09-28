@@ -176,6 +176,16 @@ pub struct Provider {
     /// default for a field nobody has set yet.
     #[serde(default)]
     pub trusted: bool,
+    /// One step below `trusted`, and implied by it (sensitivity.rs, issue #626): a provider marked
+    /// vetted may carry `vetted`-class work — research notes, internal plans — but not restricted
+    /// secrets. Defaults to `false`, the same safe default as `trusted`.
+    #[serde(default)]
+    pub vetted: bool,
+    /// The organisation that actually runs the model behind this endpoint (`"anthropic"`, …), as the
+    /// operator recorded it. It gates nothing on its own: an org can pin restricted work to a list of
+    /// vendors, and a provider with no vendor recorded never matches such a list (sensitivity.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
     /// What this connection serves (#295): canonical model id (the part after `<id>/`) → the wire name
     /// the endpoint knows it by, sent verbatim. An empty wire name sends the canonical as is. When
     /// non-empty the map is authoritative — the connection serves exactly the canonicals it lists,
@@ -910,6 +920,12 @@ pub struct PutProvider {
     /// build that predates the field must not quietly un-vet a restricted-capable provider.
     #[serde(default)]
     trusted: Option<bool>,
+    /// Omitted keeps the saved vetting mark, like trusted (sensitivity.rs, issue #626).
+    #[serde(default)]
+    vetted: Option<bool>,
+    /// Omitted keeps the saved vendor, like trusted; an empty string clears it.
+    #[serde(default)]
+    vendor: Option<String>,
 }
 
 fn default_auth() -> String {
@@ -1132,6 +1148,18 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         trusted: req
             .trusted
             .unwrap_or_else(|| providers.iter().find(|p| p.id == id).map(|p| p.trusted).unwrap_or(false)),
+        vetted: req
+            .vetted
+            .unwrap_or_else(|| providers.iter().find(|p| p.id == id).map(|p| p.vetted).unwrap_or(false)),
+        // Trimmed on the way in, so the vendor a vendor list is matched against is the one the
+        // operator meant; an empty string clears it, like an empty key.
+        vendor: match req.vendor {
+            Some(vendor) => {
+                let vendor = vendor.trim();
+                (!vendor.is_empty()).then(|| vendor.to_string())
+            }
+            None => providers.iter().find(|p| p.id == id).and_then(|p| p.vendor.clone()),
+        },
     };
     match providers.iter_mut().find(|p| p.id == id) {
         Some(existing) => *existing = provider.clone(),
@@ -1222,6 +1250,8 @@ mod tests {
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,
+            vetted: false,
+            vendor: None,
         }
     }
 
@@ -1866,7 +1896,44 @@ mod tests {
             quota: None,
             normalize_cache_ttl: None,
             trusted: None,
+            vetted: None,
+            vendor: None,
         }
+    }
+
+    /// The marks ride the same omitted-keeps-saved rule as pricing and trusted (issue #626): a save
+    /// from a client that predates them must not strip a provider's vetting or vendor, and a blank
+    /// vendor string is an explicit clear.
+    #[tokio::test]
+    async fn a_put_that_omits_the_marks_keeps_them_and_a_blank_vendor_clears() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.vetted = Some(true);
+        first.vendor = Some("  Anthropic ".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert!(stored.vetted);
+        assert_eq!(stored.vendor.as_deref(), Some("Anthropic"), "the vendor is saved trimmed");
+
+        let second = put_req("DeepSeek renamed");
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(second)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert_eq!(stored.name, "DeepSeek renamed");
+        assert!(stored.vetted, "an omitted vetted keeps the saved mark");
+        assert_eq!(
+            stored.vendor.as_deref(),
+            Some("Anthropic"),
+            "an omitted vendor keeps the saved one"
+        );
+
+        let mut third = put_req("DeepSeek renamed");
+        third.vetted = Some(false);
+        third.vendor = Some("   ".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(third)).await.unwrap();
+        let stored = &app.providers()[0];
+        assert!(!stored.vetted);
+        assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn damaged_providers(app: &crate::Shared, bytes: &[u8]) -> PathBuf {

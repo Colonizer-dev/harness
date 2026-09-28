@@ -1224,35 +1224,50 @@ async fn proxy(
             None,
         );
     }
-    // A task whose issue named restricted paths — secrets, .env, infra config — may only reach a
-    // provider an operator has explicitly marked trusted (sensitivity.rs, issue #472): cheap is not
-    // the same as private, and "configured" is not "vetted". Checked independently of
-    // allowed_providers above, which is about which providers this colony's *models* route to, not
-    // which ones its *task* may trust with sensitive content. The policy itself lives in
-    // `eligible`; the gateway only reads the class back off the session record.
-    if session
+    // A task whose issue named sensitive paths may only reach a provider whose mark meets the
+    // class's minimum — vetted work needs a vetted provider, restricted work a trusted one, the
+    // looser classes any provider unless this org's sensitivity overrides move the bar, and
+    // restricted work can be pinned to vendors outright (sensitivity.rs, issue #472). Checked
+    // independently of allowed_providers above, which is about which providers this colony's
+    // *models* route to, not which ones its *task* may trust with sensitive content. The policy
+    // itself lives in `eligible`; the gateway only reads the class back off the session record.
+    if let Some(sensitivity) = session
         .sensitivity
         .as_deref()
         .and_then(crate::sensitivity::Sensitivity::parse)
-        .is_some_and(|sensitivity| !crate::sensitivity::eligible(sensitivity, provider.trusted))
     {
-        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Restricted);
-        app.session_log(
-            &colony,
-            "warn",
-            format!(
-                "colonizer gateway: refused provider \"{id}\" — this colony's task touches restricted paths and \"{id}\" is not marked trusted"
-            ),
-        )
-        .await;
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "sensitivity_error",
-            format!(
-                "colonizer gateway: provider \"{id}\" is not eligible for colony {colony}'s restricted-sensitivity task; mark it trusted in providers.json to allow it"
-            ),
-            None,
-        );
+        let overrides = app.org_settings(&session.org).sensitivity;
+        let overrides = overrides.as_ref();
+        let mark = crate::sensitivity::ProviderMark::of(provider.trusted, provider.vetted);
+        if !crate::sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides) {
+            // The mark can be the blocker, or — when the org pins vendors — the vendor can be even
+            // though the mark already meets the bar; name the one that actually refused it.
+            let required = crate::sensitivity::required_mark(sensitivity, overrides);
+            let fix = if mark < required {
+                format!("mark it {} in providers.json to allow it", required.as_str())
+            } else {
+                "its vendor is not on this org's restricted-vendor list".to_string()
+            };
+            audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Restricted);
+            app.session_log(
+                &colony,
+                "warn",
+                format!(
+                    "colonizer gateway: refused provider \"{id}\" — this colony's task touches {} paths and \"{id}\" does not meet the bar ({fix})",
+                    sensitivity.as_str()
+                ),
+            )
+            .await;
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "sensitivity_error",
+                format!(
+                    "colonizer gateway: provider \"{id}\" is not eligible for colony {colony}'s {}-sensitivity task; {fix}",
+                    sensitivity.as_str()
+                ),
+                None,
+            );
+        }
     }
     // A keyed provider with no saved key would otherwise be sent the request with no credential at all,
     // and answer with a bare 401 that says nothing about why. Refused here instead, before any upstream
@@ -2596,6 +2611,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// An org vendor pin is wired through end to end (issue #626): the gate reads the overrides of
+    /// the colony's org, so a trusted provider is refused while its recorded vendor is off the org's
+    /// list, and recording that vendor on the provider lets the same request through.
+    #[tokio::test]
+    async fn an_org_vendor_pin_gates_on_the_providers_recorded_vendor() {
+        let router = Router::new().route("/v1/messages", axum::routing::post(|| async { axum::Json(json!({})) }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-vendor-pin-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.sensitivity = Some("restricted".into());
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // The org pins restricted work to one vendor; the trusted provider below records none, then
+        // the pinned one. `app.providers()` reads the file per request, so the rewrite lands.
+        std::fs::write(
+            root.join("config/orgs.json"),
+            r#"{"acme":{"sensitivity":{"restricted_vendors":["anthropic"]}}}"#,
+        )
+        .unwrap();
+        let write_provider = |vendor: Option<&str>| {
+            std::fs::write(
+                root.join("config/providers.json"),
+                serde_json::to_string(&[json!({
+                    "id": "deepseek",
+                    "name": "DeepSeek",
+                    "base_url": format!("http://{addr}"),
+                    "auth": "none",
+                    "trusted": true,
+                    "vendor": vendor,
+                })])
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        async fn call(app: crate::Shared, token: &str) -> Response {
+            let mut headers = HeaderMap::new();
+            headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
+            proxy(
+                State(app),
+                Path(("deepseek".into(), "v1/messages".into())),
+                Method::POST,
+                "/providers/deepseek/v1/messages".parse().unwrap(),
+                headers,
+                Bytes::from_static(b"{}"),
+            )
+            .await
+        }
+
+        write_provider(None);
+        let response = call(app.clone(), &token).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "trusted alone does not pass a vendor pin"
+        );
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "sensitivity_error");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("vendor"), "names the pin that refused it: {message}");
+        assert_eq!(app.gateway.usage_counters("deepseek").snapshot().requests, 0);
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "restricted");
+
+        write_provider(Some("anthropic"));
+        let response = call(app.clone(), &token).await;
+        assert_eq!(response.status(), StatusCode::OK, "the recorded vendor matches the org's pin");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            1,
+            "past the gate, so the request dispatched"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The estimate reads the request's own `max_tokens` (OpenAI's `max_completion_tokens` too) and
     /// falls back to the documented constant when the body names neither, is not JSON, or the provider
     /// carries no pricing at all — which estimates, like it records, at nothing (issue #409).
@@ -3204,6 +3303,8 @@ mod tests {
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,
+            vetted: false,
+            vendor: None,
         }
     }
 

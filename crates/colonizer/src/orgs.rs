@@ -6,6 +6,7 @@ use crate::{
     config_unreadable,
     modules::schema_for,
     notify::NotifySettings,
+    sensitivity::SensitivityOverrides,
     spend,
     util::parse_disk_size,
     watchdog::WatchdogSettings,
@@ -136,6 +137,11 @@ pub struct OrgSettings {
     pub watchdog: Option<WatchdogOverrides>,
     #[serde(default)]
     pub notify: Option<NotifyOverrides>,
+    /// The minimum provider mark each sensitivity class demands for this org's colonies (issue
+    /// #626), and the vendors restricted work may run on. `None` inherits the built-in defaults
+    /// (sensitivity.rs).
+    #[serde(default)]
+    pub sensitivity: Option<SensitivityOverrides>,
 }
 
 pub fn valid_org(org: &str) -> bool {
@@ -713,6 +719,13 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
             }
         }
     }
+    // The org may move the sensitivity bar either way (issue #626), but only within what the mark
+    // vocabulary and the restricted floor allow; the helper names the problem when it isn't.
+    if let Some(sensitivity) = &settings.sensitivity
+        && let Err(problem) = crate::sensitivity::validate_overrides(sensitivity)
+    {
+        return Err(problem);
+    }
     if let Some(watchdog) = &settings.watchdog {
         if watchdog.stall_minutes.is_some_and(|n| !(1..=1440).contains(&n)) {
             return Err("stall minutes must be between 1 and 1440".into());
@@ -868,6 +881,29 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("notify") {
         incoming.notify = saved.notify.clone();
+    }
+    if !named("sensitivity") {
+        incoming.sensitivity = saved.sensitivity.clone();
+    } else if let (Some(saved_sensitivity), Some(sensitivity)) = (saved.sensitivity.as_ref(), incoming.sensitivity.as_mut()) {
+        // And inside it, a sub-field the client's build predates keeps its saved value.
+        if unnamed_sub("sensitivity", "open") {
+            sensitivity.open = saved_sensitivity.open.clone();
+        }
+        if unnamed_sub("sensitivity", "standard") {
+            sensitivity.standard = saved_sensitivity.standard.clone();
+        }
+        if unnamed_sub("sensitivity", "custom") {
+            sensitivity.custom = saved_sensitivity.custom.clone();
+        }
+        if unnamed_sub("sensitivity", "vetted") {
+            sensitivity.vetted = saved_sensitivity.vetted.clone();
+        }
+        if unnamed_sub("sensitivity", "restricted") {
+            sensitivity.restricted = saved_sensitivity.restricted.clone();
+        }
+        if unnamed_sub("sensitivity", "restricted_vendors") {
+            sensitivity.restricted_vendors = saved_sensitivity.restricted_vendors.clone();
+        }
     }
 }
 
@@ -1496,6 +1532,52 @@ mod tests {
             "an agent module id is one plain name"
         );
         assert!(validate(&module("../etc")).is_err(), "an agent module id is never a path");
+        let sensitivity = |overrides: SensitivityOverrides| OrgSettings {
+            sensitivity: Some(overrides),
+            ..Default::default()
+        };
+        assert!(
+            validate(&sensitivity(SensitivityOverrides {
+                standard: Some("vetted".into()),
+                restricted: Some("vetted".into()),
+                restricted_vendors: Some(vec!["anthropic".into()]),
+                ..Default::default()
+            }))
+            .is_ok(),
+            "moving the bar either way is the override's point"
+        );
+        assert!(
+            validate(&sensitivity(SensitivityOverrides {
+                restricted: Some("best".into()),
+                ..Default::default()
+            }))
+            .is_err(),
+            "a mark must be one of any, vetted, trusted"
+        );
+        assert!(
+            validate(&sensitivity(SensitivityOverrides {
+                restricted: Some("any".into()),
+                ..Default::default()
+            }))
+            .is_err(),
+            "restricted can be loosened to vetted but never below it"
+        );
+        assert!(
+            validate(&sensitivity(SensitivityOverrides {
+                restricted_vendors: Some(Vec::new()),
+                ..Default::default()
+            }))
+            .is_err(),
+            "a vendor list must name at least one vendor"
+        );
+        assert!(
+            validate(&sensitivity(SensitivityOverrides {
+                restricted_vendors: Some(vec!["anthropic".into(), " ".into()]),
+                ..Default::default()
+            }))
+            .is_err(),
+            "a blank vendor could never match"
+        );
     }
 
     #[test]
@@ -1567,6 +1649,11 @@ mod tests {
             }),
             notify: Some(NotifyOverrides {
                 on_failed: Some(false),
+                ..Default::default()
+            }),
+            sensitivity: Some(SensitivityOverrides {
+                restricted: Some("trusted".into()),
+                restricted_vendors: Some(vec!["anthropic".into()]),
                 ..Default::default()
             }),
             ..Default::default()
@@ -1645,6 +1732,27 @@ mod tests {
             incoming.notify,
             saved.notify.clone(),
             "so does a whole module a web build from before it has never heard of"
+        );
+        assert_eq!(
+            incoming.sensitivity,
+            saved.sensitivity.clone(),
+            "and the sensitivity overrides a web build from before issue #626"
+        );
+
+        // Inside the sensitivity object the merge reaches one level deeper, like egress: a build
+        // that knows the object but names only some classes keeps the rest of the saved ones.
+        let partial = json!({"sensitivity": {"standard": "vetted", "restricted": null}});
+        let mut partial_incoming: OrgSettings = serde_json::from_value(partial.clone()).unwrap();
+        keep_unnamed_fields(&mut partial_incoming, &saved, Some(&partial));
+        assert_eq!(
+            partial_incoming.sensitivity,
+            Some(SensitivityOverrides {
+                standard: Some("vetted".into()),
+                restricted: None,
+                restricted_vendors: Some(vec!["anthropic".into()]),
+                ..Default::default()
+            }),
+            "the named class wins (null inherits), the unnamed ones keep their saved values"
         );
 
         // A save with no settings object at all — an empty PUT — changes nothing.

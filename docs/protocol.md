@@ -1530,7 +1530,7 @@ The decision is recorded three ways:
   `jev` is the shadow opinion when one was asked for (§6.1c), `cost` is the gate's estimate — the
   three token counts, both dollar figures, whether routing was worth it and whether the gate fired —
   or `null` when the gate had nothing to say, and `sensitivity` is the strictest class the paths the
-  task names classified to (`open`/`standard`/`custom`/`restricted`);
+  task names classified to (`open`/`standard`/`custom`/`vetted`/`restricted`);
 - one JSON line per boot appended to `routing.jsonl` in the mothership's data directory, tagged
   `"kind": "decision"` — the recorded set a future replacement for the heuristic could be evaluated
   against. When a colony that went through routing reaches a terminal state, a second line,
@@ -1778,8 +1778,9 @@ The PUT is a merge, not a replace. A field of `settings` the body does not name 
 field it names always wins, `null` included: an explicit `null` is how a client inherits the global
 module setting. The merge reaches one level deeper for nested fields: an `agent` object without
 `skillsets` or `module` keeps the saved skillset overrides and module pick, an `egress` object keeps
-whichever of `mode`, `allow` and `block` it leaves out, and a `watchdog` object without
-`waiting_minutes` keeps its saved value (the web form never sends `waiting_minutes`, and a save
+whichever of `mode`, `allow` and `block` it leaves out, a `sensitivity` object keeps whichever class
+it leaves out, and a `watchdog` object without `waiting_minutes` keeps its saved value (the web form
+never sends `waiting_minutes`, and a save
 from a client that predates a field must not quietly clear it). So a body naming only `max_parallel`
 changes just that, where a plain replace would have cleared everything it left out.
 
@@ -1821,6 +1822,13 @@ allow list or add blocks but never remove a global block ([sandbox-network.md](s
 `memory` and `watchdog` switch those modules per org, and `notify` overrides the notify module's
 switches and webhook (§6.3, Notify) for the org's colonies.
 
+`sensitivity` moves the provider-mark bar per class (§6.5, `trusted`): each of `open`, `standard`,
+`custom`, `vetted` and `restricted` names one of `any`, `vetted` or `trusted`, `null` inheriting the
+built-in default. An org can tighten a loose class or loosen `restricted` — but never below `vetted`,
+and the API refuses `restricted: "any"`. `restricted_vendors`, when set, pins restricted work to
+providers whose recorded `vendor` is on the list (case-insensitive); a provider with no vendor
+recorded never matches, and the list must name at least one vendor or be cleared to inherit.
+
 ```json
 {"settings": {
   "enabled": true,
@@ -1833,7 +1841,9 @@ switches and webhook (§6.3, Notify) for the org's colonies.
   "stack": "rust",
   "egress": {"mode": null, "allow": ["registry.npmjs.org"], "block": null},
   "memory": {"enabled": true},
-  "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3}
+  "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3},
+  "sensitivity": {"open": null, "standard": "vetted", "custom": null, "vetted": null,
+                  "restricted": "vetted", "restricted_vendors": ["anthropic"]}
 }}
 ```
 
@@ -2135,7 +2145,9 @@ route gets one extra allow rule for that port on top of its egress policy
   `{"type":"error","error":{"type":"overloaded_error","message":"…"}}` with `x-colonizer-fallback: queue_timeout`.
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
   provider; `403` `permission_error` when the provider is not routed to this colony; `403`
-  `sensitivity_error` when the task touches restricted paths and the provider is not `trusted`; `502`
+  `sensitivity_error` when the task's sensitivity class exceeds the provider's mark — `vetted` work
+  needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted` implies
+  `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md); `502`
   `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend plus
   in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body the
   wire cannot carry.

@@ -880,6 +880,8 @@ mod tests {
             quota: None,
             normalize_cache_ttl: false,
             trusted: false,
+            vetted: false,
+            vendor: None,
         }
     }
 

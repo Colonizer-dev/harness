@@ -3,7 +3,7 @@
 //! pure and defaults-driven, mirroring routing.rs's tier decision — a repo can extend the built-in
 //! defaults with `.colonizer/sensitivity.toml`, but the defaults hold when it does not.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 /// How sensitive the paths a task touches are, loosest first — so that classifying several paths at
@@ -13,6 +13,7 @@ pub enum Sensitivity {
     Open,
     Standard,
     Custom,
+    Vetted,
     Restricted,
 }
 
@@ -22,6 +23,7 @@ impl Sensitivity {
             Sensitivity::Open => "open",
             Sensitivity::Standard => "standard",
             Sensitivity::Custom => "custom",
+            Sensitivity::Vetted => "vetted",
             Sensitivity::Restricted => "restricted",
         }
     }
@@ -34,8 +36,51 @@ impl Sensitivity {
             "open" => Some(Sensitivity::Open),
             "standard" => Some(Sensitivity::Standard),
             "custom" => Some(Sensitivity::Custom),
+            "vetted" => Some(Sensitivity::Vetted),
             "restricted" => Some(Sensitivity::Restricted),
             _ => None,
+        }
+    }
+}
+
+/// How far an operator has vouched for a provider, loosest first: any configured connection, one
+/// marked `vetted`, or one marked `trusted` — trusted implies vetted, the way the stronger promise
+/// carries the weaker one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProviderMark {
+    Any,
+    Vetted,
+    Trusted,
+}
+
+impl ProviderMark {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderMark::Any => "any",
+            ProviderMark::Vetted => "vetted",
+            ProviderMark::Trusted => "trusted",
+        }
+    }
+
+    /// Read a mark off a setting, where it travels as a bare word: case-insensitive, tolerant of
+    /// stray whitespace, and `None` for anything that is not a mark.
+    pub fn parse(s: &str) -> Option<ProviderMark> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "any" => Some(ProviderMark::Any),
+            "vetted" => Some(ProviderMark::Vetted),
+            "trusted" => Some(ProviderMark::Trusted),
+            _ => None,
+        }
+    }
+
+    /// The mark of a provider record: `trusted` is the stronger promise and implies `vetted`.
+    pub fn of(trusted: bool, vetted: bool) -> ProviderMark {
+        if trusted {
+            ProviderMark::Trusted
+        } else if vetted {
+            ProviderMark::Vetted
+        } else {
+            ProviderMark::Any
         }
     }
 }
@@ -47,6 +92,7 @@ pub struct SensitivityConfig {
     pub restricted: Vec<String>,
     pub open: Vec<String>,
     pub custom: Vec<String>,
+    pub vetted: Vec<String>,
 }
 
 impl SensitivityConfig {
@@ -114,11 +160,14 @@ fn in_class(path: &str, configured: &[String], defaults: &[&str]) -> bool {
 }
 
 /// The class of one path: restricted is checked first so an override in another list can never
-/// loosen a secret, then custom (config only — nothing is custom until a repo says so), then open,
-/// and everything unlisted is standard.
+/// loosen a secret, then the vetted and custom tiers (config only — nothing is in either until a
+/// repo says so), then open, and everything unlisted is standard.
 pub fn classify_path(path: &str, config: &SensitivityConfig) -> Sensitivity {
     if in_class(path, &config.restricted, DEFAULT_RESTRICTED) {
         return Sensitivity::Restricted;
+    }
+    if matches_any(path, &config.vetted) {
+        return Sensitivity::Vetted;
     }
     if matches_any(path, &config.custom) {
         return Sensitivity::Custom;
@@ -140,13 +189,113 @@ pub fn classify_paths<'a>(paths: impl IntoIterator<Item = &'a str>, config: &Sen
         .unwrap_or(Sensitivity::Standard)
 }
 
-/// Whether a provider may carry a task of this sensitivity. Only `Restricted` gates today, and it
-/// gates on the operator's mark alone: `providers.json` carries no vendor-identity field to check
-/// a first-party frontier against yet, so "trusted" is exactly what an operator has said it is.
-/// `Open`, `Standard` and `Custom` place no extra restriction in this first slice; a "vetted" tier
-/// and org-level overrides are follow-up work (issue #472).
-pub fn eligible(sensitivity: Sensitivity, provider_trusted: bool) -> bool {
-    sensitivity != Sensitivity::Restricted || provider_trusted
+/// An org's per-class minimum provider mark (issue #626), layered over the built-in defaults: each
+/// class field names one of `any`, `vetted` or `trusted`, and `None` inherits that class's default.
+/// `restricted_vendors` pins restricted work to providers whose recorded vendor is on the list;
+/// `None` leaves the mark alone to decide.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SensitivityOverrides {
+    pub open: Option<String>,
+    pub standard: Option<String>,
+    pub custom: Option<String>,
+    pub vetted: Option<String>,
+    pub restricted: Option<String>,
+    pub restricted_vendors: Option<Vec<String>>,
+}
+
+impl SensitivityOverrides {
+    /// The mark this org names for one class, `None` when it leaves the class at its default.
+    fn minimum(&self, sensitivity: Sensitivity) -> Option<&str> {
+        match sensitivity {
+            Sensitivity::Open => self.open.as_deref(),
+            Sensitivity::Standard => self.standard.as_deref(),
+            Sensitivity::Custom => self.custom.as_deref(),
+            Sensitivity::Vetted => self.vetted.as_deref(),
+            Sensitivity::Restricted => self.restricted.as_deref(),
+        }
+    }
+}
+
+/// What an org may save in its sensitivity overrides (orgs.rs `validate` calls this): every mark it
+/// names must be one of the three words, `restricted` can be loosened to vetted but never to `any`,
+/// and a vendor list, when set, must actually name vendors — a blank entry could never match a
+/// vendor, so saving one would write a rule that silently refuses everything. A blank mark inherits,
+/// like a blank stack or egress mode.
+pub fn validate_overrides(overrides: &SensitivityOverrides) -> Result<(), String> {
+    for (class, mark) in [
+        ("open", &overrides.open),
+        ("standard", &overrides.standard),
+        ("custom", &overrides.custom),
+        ("vetted", &overrides.vetted),
+        ("restricted", &overrides.restricted),
+    ] {
+        let Some(word) = mark.as_deref().filter(|word| !word.trim().is_empty()) else {
+            continue;
+        };
+        let Some(parsed) = ProviderMark::parse(word) else {
+            return Err(format!("sensitivity {class} must be one of any, vetted, trusted"));
+        };
+        if class == "restricted" && parsed == ProviderMark::Any {
+            return Err("sensitivity restricted can be loosened to vetted, but never to any".into());
+        }
+    }
+    if let Some(vendors) = &overrides.restricted_vendors
+        && (vendors.is_empty() || vendors.iter().any(|vendor| vendor.trim().is_empty()))
+    {
+        return Err("sensitivity restricted_vendors must name at least one vendor, or be cleared to inherit".into());
+    }
+    Ok(())
+}
+
+/// The minimum mark one class demands: any provider for the classes that say nothing about trust, a
+/// vetted provider for the vetted tier, a trusted one for restricted. The org's override moves the
+/// bar either way — except for restricted, which an override may loosen to vetted but never below,
+/// however the org spells it.
+pub fn required_mark(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>) -> ProviderMark {
+    let default = match sensitivity {
+        Sensitivity::Open | Sensitivity::Standard | Sensitivity::Custom => ProviderMark::Any,
+        Sensitivity::Vetted => ProviderMark::Vetted,
+        Sensitivity::Restricted => ProviderMark::Trusted,
+    };
+    let Some(word) = overrides.and_then(|overrides| overrides.minimum(sensitivity)) else {
+        return default;
+    };
+    let Some(mark) = ProviderMark::parse(word) else {
+        return default; // validation refuses an unparsable mark; if one is saved anyway, the default holds
+    };
+    if sensitivity == Sensitivity::Restricted {
+        mark.max(ProviderMark::Vetted)
+    } else {
+        mark
+    }
+}
+
+/// Whether a provider may carry a task of this sensitivity: its mark must meet the class's minimum
+/// (the built-in defaults, moved by the org's overrides — see [`required_mark`]), and restricted
+/// work further requires the provider's recorded vendor to be on the org's list when it pins one.
+/// Vendors are matched case-insensitively after trimming, and a provider with no vendor recorded
+/// fails the pin — "runs somewhere, unrecorded" is not on any list.
+pub fn eligible(
+    sensitivity: Sensitivity,
+    mark: ProviderMark,
+    vendor: Option<&str>,
+    overrides: Option<&SensitivityOverrides>,
+) -> bool {
+    if mark < required_mark(sensitivity, overrides) {
+        return false;
+    }
+    if sensitivity == Sensitivity::Restricted
+        && let Some(vendors) = overrides.and_then(|overrides| overrides.restricted_vendors.as_ref())
+    {
+        let Some(vendor) = vendor else {
+            return false;
+        };
+        if !vendors.iter().any(|named| named.trim().eq_ignore_ascii_case(vendor.trim())) {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -194,15 +343,114 @@ mod tests {
     }
 
     #[test]
-    fn only_a_restricted_task_gates_on_trust_and_every_other_class_is_eligible_either_way() {
-        assert_eq!(Sensitivity::parse(" restricted "), Some(Sensitivity::Restricted));
-        assert_eq!(Sensitivity::parse("restricted"), Some(Sensitivity::Restricted));
+    fn vetted_ranks_between_custom_and_restricted_and_parses_like_the_rest() {
+        assert!(Sensitivity::Custom < Sensitivity::Vetted);
+        assert!(Sensitivity::Vetted < Sensitivity::Restricted);
+        assert_eq!(Sensitivity::parse(" Vetted "), Some(Sensitivity::Vetted));
+        assert_eq!(Sensitivity::Vetted.as_str(), "vetted");
         assert_eq!(Sensitivity::parse("nope"), None);
-        assert!(!eligible(Sensitivity::Restricted, false));
-        assert!(eligible(Sensitivity::Restricted, true));
-        assert!(eligible(Sensitivity::Open, false));
-        assert!(eligible(Sensitivity::Standard, false));
-        assert!(eligible(Sensitivity::Custom, false));
+    }
+
+    #[test]
+    fn a_repo_config_can_classify_paths_vetted_and_restricted_still_wins() {
+        let mut config = SensitivityConfig::default();
+        config.vetted.push("research/".into());
+        config.restricted.push("research/secrets.md".into());
+        assert_eq!(classify_path("research/plans.md", &config), Sensitivity::Vetted);
+        assert_eq!(classify_path("research/secrets.md", &config), Sensitivity::Restricted);
+        assert_eq!(classify_path("src/main.rs", &config), Sensitivity::Standard);
+    }
+
+    #[test]
+    fn each_tier_demands_its_mark_and_an_org_override_moves_the_bar() {
+        use ProviderMark::{Any, Trusted, Vetted};
+        use Sensitivity::{Custom, Open, Restricted, Standard};
+        type Case = (
+            &'static str,
+            Sensitivity,
+            ProviderMark,
+            Option<&'static str>,
+            Option<SensitivityOverrides>,
+            bool,
+        );
+        let tighten = SensitivityOverrides {
+            standard: Some("vetted".into()),
+            ..Default::default()
+        };
+        let loosen = SensitivityOverrides {
+            restricted: Some("vetted".into()),
+            ..Default::default()
+        };
+        let clamp_any = SensitivityOverrides {
+            restricted: Some("any".into()),
+            ..Default::default()
+        };
+        let pin = SensitivityOverrides {
+            restricted_vendors: Some(vec!["Anthropic".into()]),
+            ..Default::default()
+        };
+        let cases: &[Case] = &[
+            // Defaults: the loose classes run on anything, vetted needs a vetted provider, restricted
+            // a trusted one — and trusted clears every bar.
+            ("defaults", Open, Any, None, None, true),
+            ("defaults", Standard, Any, None, None, true),
+            ("defaults", Custom, Any, None, None, true),
+            ("defaults", Sensitivity::Vetted, Any, None, None, false),
+            ("defaults", Sensitivity::Vetted, Vetted, None, None, true),
+            ("defaults", Restricted, Vetted, None, None, false),
+            ("defaults", Restricted, Trusted, None, None, true),
+            // An org can tighten a loose class ...
+            ("tightened", Standard, Any, None, Some(tighten.clone()), false),
+            ("tightened", Standard, Vetted, None, Some(tighten.clone()), true),
+            // ... loosen restricted to vetted but never below it, however the org spells it ...
+            ("loosened", Restricted, Vetted, None, Some(loosen.clone()), true),
+            ("loosened", Restricted, Any, None, Some(loosen), false),
+            ("clamped", Restricted, Any, None, Some(clamp_any), false),
+            // ... and pin restricted work to the vendors it names.
+            ("vendors", Restricted, Trusted, Some("anthropic"), Some(pin.clone()), true),
+            ("vendors", Restricted, Trusted, Some("DeepSeek"), Some(pin.clone()), false),
+            ("vendors", Restricted, Trusted, None, Some(pin.clone()), false),
+            ("vendors", Standard, Any, Some("deepseek"), Some(pin), true),
+        ];
+        for (group, sensitivity, mark, vendor, overrides, want) in cases {
+            assert_eq!(
+                eligible(*sensitivity, *mark, *vendor, overrides.as_ref()),
+                *want,
+                "{group}: {sensitivity:?} on a {mark:?} provider, vendor {vendor:?}, overrides {overrides:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn org_sensitivity_overrides_are_validated() {
+        let ok = |overrides: SensitivityOverrides| validate_overrides(&overrides).is_ok();
+        assert!(ok(SensitivityOverrides {
+            standard: Some("vetted".into()),
+            restricted: Some(" Trusted ".into()),
+            restricted_vendors: Some(vec!["anthropic".into()]),
+            ..Default::default()
+        }));
+        assert!(ok(SensitivityOverrides {
+            // Blank inherits, like a blank stack; so does a mark the org leaves unset.
+            standard: Some("  ".into()),
+            ..Default::default()
+        }));
+        assert!(!ok(SensitivityOverrides {
+            standard: Some("best".into()),
+            ..Default::default()
+        }));
+        assert!(!ok(SensitivityOverrides {
+            restricted: Some("any".into()),
+            ..Default::default()
+        }));
+        assert!(!ok(SensitivityOverrides {
+            restricted_vendors: Some(Vec::new()),
+            ..Default::default()
+        }));
+        assert!(!ok(SensitivityOverrides {
+            restricted_vendors: Some(vec!["anthropic".into(), "  ".into()]),
+            ..Default::default()
+        }));
     }
 
     #[test]
@@ -212,6 +460,7 @@ mod tests {
         assert_eq!(config.restricted, Vec::<String>::new());
         assert_eq!(config.open, Vec::<String>::new());
         assert_eq!(config.custom, Vec::<String>::new());
+        assert_eq!(config.vetted, Vec::<String>::new());
         let _ = std::fs::remove_dir_all(missing);
 
         let corrupt = temp_dir("corrupt");

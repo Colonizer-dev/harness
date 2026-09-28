@@ -127,7 +127,7 @@ host state, hand-edited, or `unknown` for anything not recognised.
 | :--- | :--- |
 | `modules.json` | Which modules are selected, and their settings |
 | `providers.json` | The providers and their model maps — no keys; keys live in `provider-keys/` and stay home |
-| `orgs.json` | Workspace overrides: budgets, quotas, stacks, egress, memory, watchdog, notifications |
+| `orgs.json` | Workspace overrides: budgets, quotas, stacks, egress, memory, watchdog, notifications, sensitivity provider marks |
 | Skill packs | By name and version — the pin, never their files |
 
 Everything else stays home. The rest of the config directory — every credential, the live-map and
