@@ -52,9 +52,10 @@ orchestrator may call:
   The value is clamped to 15 minutes – 24 hours and shown in the loop's note.
 - `loop_stop(reason)` — ends the loop ("stopped by the colony: …"). Re-enable it on the Loops page.
 
-Only the Claude Code agent module has these two tools today. A loop whose colonies run on another
-agent module still runs on its schedule, but its colonies cannot stop it, and a self-paced one runs
-every 24 hours.
+The Claude Code, Codex, Grok Build and OpenCode agent modules serve these two tools. A loop whose
+colonies run on a module without them — Pi, Hermes and ACP today — still runs on its schedule, but
+its brief never mentions the tools, the loop form warns when you pick self-paced, and a self-paced
+one simply runs again every 24 hours: its colonies can neither pace the loop nor stop it.
 
 A loop also ends by itself after its **max runs**, when its next run would fall past its **end
 date**, or — at its next slot — when its API token has been revoked.

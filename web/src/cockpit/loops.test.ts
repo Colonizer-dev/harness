@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { describeLoopCadence, intervalWords, nameFromPrompt, parseInterval, parseLoopCommand, relative, toLocalChoice, toUtcLoopCadence } from "./loops";
+import type { ModuleInfo, OrgInfo } from "../types";
+import { describeLoopCadence, effectiveAgentModule, intervalWords, nameFromPrompt, parseInterval, parseLoopCommand, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence } from "./loops";
 
 describe("loops", () => {
   it("parses intervals the way people type them", () => {
@@ -77,5 +78,35 @@ describe("loops", () => {
     expect(relative(new Date(now + 3 * 3600_000).toISOString(), now)).toBe("in 3h");
     expect(relative(new Date(now - 20 * 60_000).toISOString(), now)).toBe("20m ago");
     expect(relative(null, now)).toBe("—");
+  });
+
+  it("warns about a self-paced loop only when the org's agent module serves neither loop tool", () => {
+    // What GET /api/modules says: agent rows carry loop_tools (issue #643), other kinds do not.
+    const agent = (loopTools?: boolean, provider = "claude-code"): ModuleInfo => ({
+      kind: "agent",
+      provider,
+      enabled: true,
+      settings: {},
+      schema: null,
+      providers: [
+        { id: "claude-code", name: "Claude Code", loop_tools: true },
+        { id: "pi", name: "Pi", ...(loopTools === undefined ? {} : { loop_tools: loopTools }) },
+      ],
+    });
+    const orgWith = (org: string, module: string | null): OrgInfo =>
+      ({ org, settings: { agent: { module } } }) as OrgInfo;
+    const orgs = [orgWith("acme", null), orgWith("globex", "pi")];
+    const modules = [agent()];
+    // The mothership's own pick (claude-code) serves the tools: no warning.
+    expect(selfPacedWarning("acme", orgs, modules)).toBeNull();
+    // An org pick without them warns, naming the module; the org match is case-insensitive.
+    expect(selfPacedWarning("GLOBEX", orgs, modules)).toMatch(/agent module \(Pi\)/);
+    // The resolution mirrors the server: the org's pick, else the mothership's provider.
+    expect(effectiveAgentModule("globex", orgs, modules)?.id).toBe("pi");
+    expect(effectiveAgentModule("acme", orgs, modules)?.id).toBe("claude-code");
+    expect(effectiveAgentModule("acme", [orgWith("acme", " ")], modules)?.id).toBe("claude-code");
+    // A row without the flag reads as lacking the tools; no agent kind at all says nothing.
+    expect(selfPacedWarning("globex", orgs, [agent(false)])).toMatch(/can't pace its own loop/);
+    expect(selfPacedWarning("globex", orgs, [])).toBeNull();
   });
 });

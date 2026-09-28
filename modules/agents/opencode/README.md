@@ -14,6 +14,9 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
   only through `colonizer_ask_user` (own MCP server, `mcp.mjs`), surfaced as `question` events;
   the matching `answer` command resolves them. Long asks survive: the MCP `timeout` is set to
   an hour and progress notes hold the call open.
+- Loops: in a loop colony (docs/protocol.md, Loops) the MCP server also offers `colonizer_loop_stop`,
+  and on a self-paced loop `colonizer_loop_next` too; both leave the colony as `loop_stop`/`loop_next`
+  events (`delay_minutes` clamped to 15–1440), and the mothership owns the schedule.
 - Text arrives per part as `assistant_text` (`reasoning` as `thinking`); tool completions become
   `tool_call`/`tool_result` (capped at 20 000 characters); `turn_end` carries cumulative
   `model_usage` per `<provider>/<model>`.
@@ -27,6 +30,7 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 | `COLONIZER_DISABLED_TOOLS` | none | OpenCode tool ids every call of is denied (`permission` deny on top of the allow-all), e.g. `bash`, `webfetch`; `edit` covers write, edit and apply_patch as one, and MCP tools are not covered |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.5) |
 | `COLONIZER_FINDINGS` | off | `true` emits `finding` events for `colonizer_finding_file` calls |
+| `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED` | set by the mothership | A loop colony's tools: `colonizer_loop_stop`, plus `colonizer_loop_next` when the loop is self-paced |
 | `COLONIZER_MEMORY_DIR` | unset | Shared memory the model may read (`{repo,org,global}/notes/*.md`) |
 | `COLONIZER_OPENCODE_BIN` | none | Use this binary instead of downloading the pinned one |
 
