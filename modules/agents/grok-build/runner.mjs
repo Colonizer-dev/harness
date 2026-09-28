@@ -6,9 +6,11 @@
 // module.json; every flag and event field is cited from the upstream user guide in the README.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -91,6 +93,64 @@ export function resolveModel(spec) {
     return { error: `${MODEL_PROVIDER}: "${value}" names another provider; this module runs xai-grok/<model> only` };
   }
   return { model: slash > 0 ? value.slice(slash + 1) : value };
+}
+
+/** Loopback bridge to mcp.mjs: finding_file and memory_propose arrive here and leave the colony as
+ * protocol events (docs/protocol.md §6.6, §6.2), the way the opencode module's bridge does. */
+export async function createBridge({ emit, findings = false, token = randomBytes(16).toString('hex') }) {
+  const server = createServer((req, res) => {
+    const reply = (status, payload) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); } };
+    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1 << 20) req.destroy(); });
+    req.on('end', () => {
+      let msg = null;
+      try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
+      if (req.url === '/finding') {
+        const missing = ['title', 'body', 'evidence'].filter((k) => typeof msg[k] !== 'string' || !msg[k].trim());
+        if (missing.length) reply(200, { error: `finding_file needs ${missing.join(', ')}` });
+        else {
+          if (findings) emit({ type: 'finding', title: msg.title, body: msg.body, evidence: msg.evidence });
+          reply(200, { filed: findings });
+        }
+      } else if (req.url === '/memory') {
+        const scope = msg.scope ?? 'repo';
+        if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
+        else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
+        else {
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          reply(200, { ok: true });
+        }
+      } else reply(404, {});
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return {
+    url: `http://127.0.0.1:${server.address().port}`, token,
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
+  };
+}
+
+/** The `$GROK_HOME/config.toml` body that registers the colonizer MCP server (mcp.mjs) with grok: the
+ * upstream table is `mcp_servers.<id>` with `command`, `args` and `env` (26-config-reference.md), and
+ * `--always-approve` auto-approves its tool calls. The values ride as JSON, which is valid TOML for
+ * the strings, the array and the inline table; a `tool_timeout_sec` override is unneeded (the 6000 s
+ * default covers a wait's 1800 s cap). Findings and memory ride through so mcp.mjs can gate its tool
+ * list the way the mothership gated the runner env. */
+export function configToml({ url, token, env }) {
+  const envEntries = Object.entries({
+    COLONIZER_BRIDGE_URL: url,
+    COLONIZER_BRIDGE_TOKEN: token,
+    COLONIZER_FINDINGS: env.COLONIZER_FINDINGS, // undefined drops out of the inline table
+    COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR,
+  }).filter(([, value]) => value !== undefined);
+  const json = JSON.stringify;
+  return [
+    '[mcp_servers.colonizer]',
+    `command = ${json(process.execPath)}`,
+    `args = ${json([join(here, 'mcp.mjs')])}`,
+    `env = { ${envEntries.map(([key, value]) => `${key} = ${json(value)}`).join(', ')} }`,
+  ].join('\n');
 }
 
 /** One headless grok turn (14-headless-mode.md), with the nesting decisions from the README applied. */
@@ -326,6 +386,11 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const totals = { cost: undefined, models: {} };
   let n = 0;
 
+  // One bridge for the runner's life; the colonizer MCP server grok spawns points at it through the
+  // config.toml the runner wrote into its fresh GROK_HOME (the address is fixed, so one write).
+  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true' });
+  await writeFile(join(home, 'config.toml'), configToml({ url: bridge.url, token: bridge.token, env }), 'utf8');
+
   const pump = async () => {
     if (pumping) return;
     pumping = true;
@@ -411,6 +476,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
+  await bridge.close();
   emit({ type: 'status', state: 'exited' });
 }
 

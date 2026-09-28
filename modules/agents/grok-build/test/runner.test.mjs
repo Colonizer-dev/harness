@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -374,5 +374,61 @@ test('a child that exits without an end event fails the turn with the exit code 
   assert.match(turnEnd.result, /exit code 1/);
   assert.match(turnEnd.result, /boom: auth rejected/);
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'idle after the failed turn');
+  await stop(runner);
+});
+
+test('the colonizer MCP tools work end to end: findings, memory and wait', async (t) => {
+  const memory = mkdtempSync(join(tmpdir(), 'grok-test-mem-'));
+  mkdirSync(join(memory, 'repo', 'notes'), { recursive: true });
+  writeFileSync(join(memory, 'repo', 'notes', 'waiting.md'), '# Wait rooms\nThe waitrooms convention: call wait instead of polling.\n');
+  const calls = [
+    { name: 'finding_file', arguments: { title: 'Stale doc', body: 'The README lies about X.', evidence: 'read README.md twice' } },
+    { name: 'memory_propose', arguments: { scope: 'repo', title: 'Run npm ci', content: 'The lockfile drifts without it.', tags: ['node'] } },
+    { name: 'memory_search', arguments: { query: 'waitrooms' } },
+    { name: 'wait', arguments: { reason: 'settling', seconds: 0 } },
+  ];
+  const runner = startRunner({
+    COLONIZER_MODEL: 'xai-grok/grok-4.5',
+    COLONIZER_FINDINGS: 'true',
+    COLONIZER_MEMORY_DIR: memory,
+    GROK_FAKE_MCP_CALLS: JSON.stringify(calls),
+  });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'use the colonizer tools' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  // finding_file and memory_propose crossed the bridge and left the colony as protocol events.
+  assert.deepEqual(first('finding')(runner.events), { type: 'finding', title: 'Stale doc', body: 'The README lies about X.', evidence: 'read README.md twice' });
+  assert.deepEqual(first('memory_proposal')(runner.events), { type: 'memory_proposal', origin: 'orchestrator', scope: 'repo', title: 'Run npm ci', content: 'The lockfile drifts without it.', tags: ['node'] });
+  assertSchema(runner.events);
+
+  const { mcp } = runner.turns()[0];
+  assert.deepEqual(mcp.tools, ['finding_file', 'memory_search', 'memory_propose', 'wait']);
+  assert.deepEqual(mcp.calls[0], { name: 'finding_file', isError: false, text: '{"filed":true}', error: null });
+  assert.deepEqual(mcp.calls[1], { name: 'memory_propose', isError: false, text: '{"ok":true}', error: null });
+  assert.equal(mcp.calls[2].isError, false);
+  assert.match(mcp.calls[2].text, /\[repo\] Wait rooms \(/);
+  assert.match(mcp.calls[2].text, /waitrooms convention/);
+  assert.match(mcp.calls[3].text, /^Waited .* \(settling\)\.$/);
+
+  const mcpCalls = runner.events.filter((e) => e.type === 'tool_call' && String(e.name).startsWith('colonizer__'));
+  assert.equal(mcpCalls.length, calls.length, 'the grok stream carries the calls under their colonizer__ names');
+  assert.deepEqual(
+    mcpCalls.map((e) => e.name),
+    calls.map((c) => `colonizer__${c.name}`),
+  );
+
+  await stop(runner);
+});
+
+test('finding_file and the memory tools are only offered when the mothership switched them on', async (t) => {
+  const runner = startRunner({ GROK_FAKE_MCP_CALLS: '[]' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['wait'], 'no findings switch and no memory dir leave only wait');
+
   await stop(runner);
 });

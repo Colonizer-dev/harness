@@ -12,9 +12,15 @@
 //   GROK_FAKE_STDERR        text to write to stderr before exiting
 //   GROK_FAKE_SLEEP_MS      sleep before emitting, so a turn can be interrupted
 //   GROK_FAKE_SLEEP_FIRST   when set, only the first invocation sleeps (later turns recover)
+//   GROK_FAKE_MCP_CALLS     JSON array of {name, arguments}: play the model and drive the colonizer
+//                           MCP server the runner registered in $GROK_HOME/config.toml (initialize,
+//                           tools/list, one tools/call per entry); the tool names and each call's
+//                           outcome are recorded under `mcp`
 
+import { spawn } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 
 const argv = process.argv.slice(2);
 const recordPath = process.env.GROK_FAKE_RECORD;
@@ -25,7 +31,7 @@ if (recordPath) {
 }
 
 // The env slice the tests assert on: the nesting decisions the runner must apply to every child.
-const record = () => {
+const record = (extra = {}) => {
   if (!recordPath) return;
   const promptFile = argv.includes('--prompt-file') ? argv[argv.indexOf('--prompt-file') + 1] : null;
   appendFileSync(
@@ -41,6 +47,7 @@ const record = () => {
         GROK_DISABLE_AUTOUPDATER: process.env.GROK_DISABLE_AUTOUPDATER ?? null,
         XAI_API_KEY: process.env.XAI_API_KEY ? 'set' : 'unset',
       },
+      ...extra,
     })}\n`,
   );
 };
@@ -56,7 +63,68 @@ if (argv[0] === 'login') {
   process.exit(3);
 }
 
-record();
+/** The colonizer MCP server entry of the config.toml the runner wrote into GROK_HOME, parsed for just
+ * the subset this runner writes (its values are JSON, which is valid TOML for strings and arrays). */
+function mcpConfig(home) {
+  let text = '';
+  try {
+    text = readFileSync(join(home ?? '', 'config.toml'), 'utf8');
+  } catch {
+    return {};
+  }
+  const cfg = {};
+  let inTable = false;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('[')) inTable = line.trim() === '[mcp_servers.colonizer]';
+    else if (inTable && line.includes('=')) {
+      const at = line.indexOf('=');
+      const key = line.slice(0, at).trim();
+      const raw = line.slice(at + 1).trim();
+      try {
+        cfg[key] = JSON.parse(raw);
+      } catch {
+        // The one value JSON.parse cannot read is the inline table: pull its `KEY = "json"` pairs.
+        cfg[key] = Object.fromEntries([...raw.matchAll(/([A-Za-z0-9_-]+) = ("(?:[^"\\]|\\.)*")/g)].map(([_, k, v]) => [k, JSON.parse(v)]));
+      }
+    }
+  }
+  return cfg;
+}
+
+/** Play the model against the registered MCP server: initialize, tools/list, one tools/call per
+ * scripted entry. Resolves with the tool names and each call's outcome, for the record. */
+async function callMcp(cfg, calls) {
+  const child = spawn(cfg.command, cfg.args ?? [], { env: { ...process.env, ...cfg.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+  const pending = new Map();
+  let next = 0;
+  createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (line) => {
+    const msg = JSON.parse(line);
+    const waiter = pending.get(msg.id);
+    if (waiter) {
+      pending.delete(msg.id);
+      waiter(msg);
+    }
+  });
+  const rpc = (method, params) =>
+    new Promise((resolve) => {
+      const id = next++;
+      pending.set(id, resolve);
+      child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    });
+  await rpc('initialize', {});
+  const out = { tools: (await rpc('tools/list', {})).result?.tools?.map((t) => t.name) ?? [], calls: [] };
+  for (const { name, arguments: input } of calls) {
+    const reply = await rpc('tools/call', { name, arguments: input });
+    out.calls.push({ name, isError: reply.result?.isError === true, text: reply.result?.content?.[0]?.text ?? null, error: reply.error?.message ?? null });
+  }
+  child.kill('SIGKILL');
+  return out;
+}
+
+const scriptedCalls = process.env.GROK_FAKE_MCP_CALLS ? JSON.parse(process.env.GROK_FAKE_MCP_CALLS) : [];
+const cfg = mcpConfig(process.env.GROK_HOME);
+const mcp = process.env.GROK_FAKE_MCP_CALLS && cfg.command ? await callMcp(cfg, scriptedCalls) : undefined;
+record(mcp ? { mcp } : {});
 
 const defaultEvents = () => [
   { type: 'thought', data: 'weighing the options' },
@@ -86,7 +154,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 if (process.env.GROK_FAKE_SLEEP_MS && (!process.env.GROK_FAKE_SLEEP_FIRST || invocation === 0)) {
   await sleep(Number(process.env.GROK_FAKE_SLEEP_MS));
 }
-for (const event of events.length ? events : defaultEvents()) {
+// The scripted MCP calls appear as grok tool_call/tool_call_update events (Grok names the tools
+// `colonizer__<tool>` to the model), before the model's own events.
+const mcpEvents = (mcp ?? { calls: [] }).calls.flatMap((call, i) => [
+  { type: 'tool_call', toolCallId: `call_mcp_${i + 1}`, title: 'MCP', kind: 'mcp', status: 'in_progress', toolName: `colonizer__${call.name}`, rawInput: scriptedCalls[i]?.arguments ?? {} },
+  { type: 'tool_call_update', toolCallId: `call_mcp_${i + 1}`, status: call.isError ? 'failed' : 'completed', rawOutput: call.text ?? call.error ?? '' },
+]);
+for (const event of [...mcpEvents, ...(events.length ? events : defaultEvents())]) {
   if (process.env.GROK_FAKE_NO_END === '1' && event.type === 'end') continue;
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }

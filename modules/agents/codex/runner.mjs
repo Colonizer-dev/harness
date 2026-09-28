@@ -6,8 +6,10 @@
 // codex thread. The pin lives in module.json; every flag and event field is cited in the README.
 
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -96,10 +98,66 @@ export function resolveModel(spec) {
   return { model: slash > 0 ? value.slice(slash + 1) : value };
 }
 
+/** Loopback bridge to mcp.mjs: finding_file and memory_propose arrive here and leave the colony as
+ * protocol events (docs/protocol.md §6.6, §6.2), the way the opencode module's bridge does. */
+export async function createBridge({ emit, findings = false, token = randomBytes(16).toString('hex') }) {
+  const server = createServer((req, res) => {
+    const reply = (status, payload) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); } };
+    if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1 << 20) req.destroy(); });
+    req.on('end', () => {
+      let msg = null;
+      try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
+      if (req.url === '/finding') {
+        const missing = ['title', 'body', 'evidence'].filter((k) => typeof msg[k] !== 'string' || !msg[k].trim());
+        if (missing.length) reply(200, { error: `finding_file needs ${missing.join(', ')}` });
+        else {
+          if (findings) emit({ type: 'finding', title: msg.title, body: msg.body, evidence: msg.evidence });
+          reply(200, { filed: findings });
+        }
+      } else if (req.url === '/memory') {
+        const scope = msg.scope ?? 'repo';
+        if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
+        else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
+        else {
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          reply(200, { ok: true });
+        }
+      } else reply(404, {});
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  return {
+    url: `http://127.0.0.1:${server.address().port}`, token,
+    close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
+  };
+}
+
+/** The `-c` overrides that register the colonizer MCP server (mcp.mjs) with codex: the upstream
+ * config keys are `mcp_servers.<id>.command`, `.args` and `.env`, and `tool_timeout_sec` (default
+ * 60) must cover a wait's 1800 s hard cap. The values ride as JSON, which is valid TOML for the
+ * strings, the array and the inline table. Findings and memory ride through so mcp.mjs can gate
+ * its tool list the way the mothership gated the runner env. */
+export function mcpArgs({ url, token, env }) {
+  const server = {
+    command: process.execPath,
+    args: [join(here, 'mcp.mjs')],
+    env: {
+      COLONIZER_BRIDGE_URL: url,
+      COLONIZER_BRIDGE_TOKEN: token,
+      COLONIZER_FINDINGS: env.COLONIZER_FINDINGS, // undefined drops out of the JSON, and the table
+      COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR,
+    },
+    tool_timeout_sec: 3600,
+  };
+  return Object.entries(server).flatMap(([key, value]) => ['-c', `mcp_servers.colonizer.${key}=${JSON.stringify(value)}`]);
+}
+
 /** One headless codex turn (`codex exec --json`): the prompt rides stdin (`-`), exec-level options
  * come before the `resume` subcommand (which takes no `-c`), and the nesting decisions from the
- * README applied. */
-export function turnArgs({ model, threadId }) {
+ * README applied. `mcp` carries the colonizer server's `-c` overrides (mcpArgs). */
+export function turnArgs({ model, threadId, mcp = [] }) {
   const args = [
     '--json', // events as JSONL on stdout (developers.openai.com/codex/noninteractive)
     '--skip-git-repo-check', // the runner may sit anywhere; the colony VM is the boundary
@@ -107,6 +165,7 @@ export function turnArgs({ model, threadId }) {
     '-c', 'check_for_update_on_startup=false', // no update checks inside a colony (upstream config reference)
     '-c', 'history.persistence="none"', // no prompt history file; the session rollout stays (resume needs it)
     '-c', 'otel.metrics_exporter="none"', // product analytics off (upstream config reference)
+    ...mcp,
   ];
   if (model) args.push('-m', model);
   if (threadId) args.push('resume', threadId); // resume: a colony is one continuous codex thread
@@ -168,7 +227,7 @@ export function mergeUsage(totals, model, usage) {
 /** Runs one turn as a codex child, emitting the mapped protocol events as they arrive; resolves with
  * the turn's codex thread id once the child exits. `interrupt()` SIGINTs the child (codex saves the
  * session rollout continuously) and escalates to SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals }) {
+export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals, mcp = [] }) {
   let child = null;
   let interrupted = false;
   // The thread id to carry into the next turn: whatever `thread.started` named last, else the one
@@ -182,7 +241,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
     let completed = null;
     let failed = null;
     let failure = null;
-    child = spawnFn(codexBin(env), turnArgs({ model, threadId }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawnFn(codexBin(env), turnArgs({ model, threadId, mcp }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
     // The prompt rides stdin (`-` as the prompt argument): an issue brief can be far larger than
     // an argv slot, and a child that exits early must not turn a broken pipe into a crash.
     child.stdin.on('error', () => {});
@@ -320,6 +379,10 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   const totals = { models: {} };
   let n = 0;
 
+  // One bridge for the runner's life; the colonizer MCP server codex spawns each turn points at it.
+  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true' });
+  const mcp = mcpArgs({ url: bridge.url, token: bridge.token, env });
+
   const pump = async () => {
     if (pumping) return;
     pumping = true;
@@ -339,7 +402,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals });
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, mcp });
         try {
           const result = await turn.done;
           threadId = result.threadId ?? threadId;
@@ -400,6 +463,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
+  await bridge.close();
   emit({ type: 'status', state: 'exited' });
 }
 
