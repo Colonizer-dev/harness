@@ -20,6 +20,10 @@
       }
     }
   },
+  "session_resume": {
+    "dir": "/root/.codex",
+    "description": "Codex keeps every session rollout under CODEX_HOME and can resume any thread given its id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact."
+  },
   "secrets": [
     {
       "env": [

@@ -159,8 +159,9 @@ Two Sandbox settings control this. Both are mothership-wide, with no per-org ove
 
 **Limits.**
 
-- Only an agent that can resume its own session is suspended. Today that is Claude Code. Any
-  other agent keeps its microVM, and the colony log says so once.
+- Only an agent that can resume its own session is suspended. Today that is Claude Code, Codex and
+  ACP agents that advertise session loading. Any other agent keeps its microVM, and the colony log
+  says so once.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
   such as a dev server, are gone after the resume.
 - Stopping a suspended colony clears the suspension and any saved answer.

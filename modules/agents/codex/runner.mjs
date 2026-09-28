@@ -7,8 +7,7 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +20,12 @@ export const MISSING_CREDENTIAL = 'CODEX_CREDENTIAL_MISSING';
 export const MISSING_BINARY = 'CODEX_BINARY_MISSING';
 export const VERSION_DRIFT = 'CODEX_VERSION_DRIFT';
 export const MODEL_PROVIDER = 'CODEX_MODEL_PROVIDER';
+
+/** The CODEX_HOME the codex children run with: a fixed path, declared as this module's
+ * session_resume dir in module.json, so the session rollouts `resume` needs are persisted outside
+ * the VM (README, "Session resume"). Persisting it leaks nothing: auth rides the environment and
+ * prompt history is off. COLONIZER_CODEX_HOME moves it in tests. */
+export const CODEX_HOME = '/root/.codex';
 
 /** The pin, read from module.json so the manifest and this preflight cannot drift apart. */
 export function readPin() {
@@ -114,10 +119,11 @@ export function turnArgs({ model, threadId }) {
   return args;
 }
 
-/** The child's environment. A fresh CODEX_HOME is the one nesting lever the docs verify: codex's
- * config.toml, auth.json and session rollouts all live under it (README "Nesting"). The API key
- * itself rides the inherited environment: `codex exec` reads CODEX_API_KEY from it — and only that
- * name, so an OPENAI_API_KEY credential the preflight accepted is handed down under the real name. */
+/** The child's environment. CODEX_HOME is the persisted colony path, the one nesting lever the
+ * docs verify: codex's config.toml, auth.json and session rollouts all live under it (README
+ * "Nesting"). The API key itself rides the inherited environment: `codex exec` reads CODEX_API_KEY
+ * from it — and only that name, so an OPENAI_API_KEY credential the preflight accepted is handed
+ * down under the real name. */
 export function childEnv(env, home) {
   const mapped = { ...env };
   if (!String(mapped.CODEX_API_KEY ?? '').trim() && String(mapped.OPENAI_API_KEY ?? '').trim()) {
@@ -166,14 +172,17 @@ export function mergeUsage(totals, model, usage) {
 }
 
 /** Runs one turn as a codex child, emitting the mapped protocol events as they arrive; resolves with
- * the turn's codex thread id once the child exits. `interrupt()` SIGINTs the child (codex saves the
- * session rollout continuously) and escalates to SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals }) {
+ * the turn's codex thread id once the child exits. `announceSession` gets the thread id the moment
+ * `thread.started` names one, so the colony's record carries it before the turn ends (§2).
+ * `interrupt()` SIGINTs the child (codex saves the session rollout continuously) and escalates to
+ * SIGKILL after a grace period. */
+export function startTurn({ prompt, model, threadId, messageId, env, home, emit, announceSession = () => {}, spawnFn = spawn, totals }) {
   let child = null;
   let interrupted = false;
-  // The thread id to carry into the next turn: whatever `thread.started` named last, else the one
-  // this turn resumed.
-  let latestThread = threadId ?? null;
+  // The thread id the child actually named: whatever `thread.started` carried last. Null when it
+  // named none, so a resumed turn that never got going is recognisable (and the colony keeps the
+  // id it had, the caller's `?? threadId`).
+  let latestThread = null;
   const done = (async () => {
     const startedAt = Date.now();
     const text = [];
@@ -202,7 +211,10 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
       }
       switch (event.type) {
         case 'thread.started':
-          if (typeof event.thread_id === 'string' && event.thread_id) latestThread = event.thread_id;
+          if (typeof event.thread_id === 'string' && event.thread_id) {
+            latestThread = event.thread_id;
+            announceSession(event.thread_id); // the id a suspended colony is restored with (§2)
+          }
           break;
         case 'item.started':
           if (TOOL_ITEMS.has(event.item?.type)) emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.item.id ?? ''), name: event.item.type, input: toolInput(event.item) });
@@ -261,7 +273,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
       duration_ms: Date.now() - startedAt,
       ...(hasModels ? { model_usage: totals.models } : {}),
     });
-    return { threadId: latestThread, failure };
+    return { threadId: latestThread, failure, interrupted };
   })();
 
   return {
@@ -305,7 +317,8 @@ class AsyncQueue {
 export async function run({ commands, emit, env, spawnFn = spawn }) {
   emit({ type: 'status', state: 'idle' });
   const problem = await preflight({ env, spawnFn });
-  const home = mkdtempSync(join(tmpdir(), 'colonizer-codex-'));
+  const home = String(env.COLONIZER_CODEX_HOME ?? '').trim() || CODEX_HOME;
+  mkdirSync(home, { recursive: true });
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
     emit({ type: 'status', state: 'error', detail: problem.code });
@@ -313,7 +326,19 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
 
   let modelSpec = String(env.COLONIZER_MODEL ?? '');
   let currentModel = null; // what the UI last heard through model_changed
-  let threadId = null;
+  // A colony restored while it waited on its user (§2's COLONIZER_RESUME_SESSION) boots with the
+  // session id it last reported: its first turn resumes that codex thread. `resumed` lets exactly
+  // that turn fall back to a fresh thread when the rollout is missing from the persisted home.
+  let threadId = String(env.COLONIZER_RESUME_SESSION ?? '').trim() || null;
+  const resumed = Boolean(threadId);
+  let agentSession = null; // the session id last announced in an agent_session
+  // Announced the moment codex names a thread, not at turn end: a colony that goes idle waiting on
+  // its user must already carry the id the harness would resume it with (§2, issue #562).
+  const announceSession = (id) => {
+    if (!id || id === agentSession) return;
+    agentSession = id;
+    emit({ type: 'agent_session', session_id: id });
+  };
   let turn = null;
   let pumping = false;
   const pending = [];
@@ -339,9 +364,29 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals });
+        // The seeded first attempt holds its turn_end back: if its rollout is missing it is retried
+        // silently on a fresh thread, so the harness sees a single turn for the message.
+        const seeded = resumed && n === 1;
+        let heldEnd = null;
+        const emitFor = (event) => {
+          if (seeded && event.type === 'turn_end') heldEnd = event;
+          else emit(event);
+        };
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit: emitFor, announceSession, spawnFn, totals });
         try {
-          const result = await turn.done;
+          let result = await turn.done;
+          if (seeded && result.failure && !result.threadId && !result.interrupted) {
+            // The resumed thread's rollout is not in the persisted home (the child never names a
+            // thread): the same prompt retries on a fresh thread, so a restored colony is not lost
+            // to a mount that changed under it. An interrupted attempt is excluded: a prompt the
+            // user stopped must not start over on the fresh thread.
+            heldEnd = null; // the failed attempt never happened, as far as the harness sees
+            emit({ type: 'log', level: 'warn', message: `codex has no rollout for thread ${threadId} in the persisted CODEX_HOME; starting a fresh thread: ${clip(result.failure ?? 'unknown failure', 300)}` });
+            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, home, emit, announceSession, spawnFn, totals });
+            result = await turn.done;
+          } else if (heldEnd) {
+            emit(heldEnd);
+          }
           threadId = result.threadId ?? threadId;
         } catch (err) {
           // A turn that throws must still end as an error turn, or the colony's turn never terminates.

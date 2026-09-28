@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { CODEX_HOME, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -29,9 +29,10 @@ function startRunner(env = {}) {
   const bin = join(binDir, 'codex');
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(fakeCodex)} "$@"\n`, { mode: 0o755 });
   const scratch = mkdtempSync(join(tmpdir(), 'codex-test-'));
+  const home = join(scratch, 'codex-home'); // COLONIZER_CODEX_HOME keeps the tests off /root/.codex
   const record = join(scratch, 'record.jsonl');
   const child = spawn(process.execPath, [join(moduleDir, 'runner.mjs')], {
-    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, CODEX_API_KEY: 'codex-test-key', COLONIZER_CODEX_BIN: bin, CODEX_FAKE_RECORD: record, ...env },
+    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, COLONIZER_CODEX_HOME: home, CODEX_API_KEY: 'codex-test-key', COLONIZER_CODEX_BIN: bin, CODEX_FAKE_RECORD: record, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const events = [];
@@ -69,7 +70,7 @@ function startRunner(env = {}) {
   const records = () => (existsSync(record) ? readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   // Only the turn invocations carry --json; the records also hold the preflight's `--version` call.
   const turns = () => records().filter((r) => r.argv.includes('--json'));
-  return { child, events, send, waitUntil, waitExit, records, turns };
+  return { child, events, send, waitUntil, waitExit, records, turns, home };
 }
 
 const stop = (runner) => (runner.send({ type: 'shutdown' }), runner.waitExit());
@@ -91,6 +92,11 @@ const count = (type, n) => (events) => {
   const matches = events.filter((e) => e.type === type);
   return matches.length >= n ? matches[n - 1] : undefined;
 };
+
+test('module.json persists CODEX_HOME itself as the session_resume dir', () => {
+  const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
+  assert.equal(manifest.session_resume.dir, CODEX_HOME, 'the mounted dir and the runner’s CODEX_HOME must not drift');
+});
 
 test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('codex-cli 0.156.1'), '0.156.1');
@@ -164,7 +170,7 @@ test('a turn streams mapped events and the child carries the nesting env', async
   assert.equal(invocation.argv[invocation.argv.length - 1], '-', 'the prompt is the stdin sentinel');
   assert.equal(invocation.env.BROWSER, '/bin/false');
   assert.equal(invocation.env.CODEX_API_KEY, 'set');
-  assert.ok(invocation.env.CODEX_HOME && invocation.env.CODEX_HOME !== process.env.CODEX_HOME, 'a fresh CODEX_HOME is assigned');
+  assert.equal(invocation.env.CODEX_HOME, runner.home, 'CODEX_HOME is the injected, persisted colony path');
 
   runner.send({ type: 'shutdown' });
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
@@ -196,6 +202,63 @@ test('the second turn resumes the first turn’s thread, with cumulative token t
   assert.ok(!turns[0].argv.includes('resume'), 'the first turn starts a fresh thread');
   assert.deepEqual(turns[1].argv.slice(turns[1].argv.indexOf('resume'), -1), ['resume', 'thread-fake-1'], 'the second turn resumes thread.started’s id');
   assert.deepEqual(second.model_usage, { 'gpt-5.2': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } }, 'model_usage is cumulative for the colony');
+  assert.equal(runner.events.filter((e) => e.type === 'agent_session').length, 1, 'the resumed turn does not re-announce the id');
+
+  await stop(runner);
+});
+
+test('a restarted runner resumes the thread it announced, off the persisted CODEX_HOME', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-resume-'));
+  const firstRun = startRunner({ COLONIZER_CODEX_HOME: home });
+  t.after(() => firstRun.child.kill('SIGKILL'));
+
+  firstRun.send({ type: 'user_message', id: 'u-1', text: 'begin' });
+  await firstRun.waitUntil(count('turn_end', 1), 'the first process’s turn to finish');
+  assert.deepEqual(first('agent_session')(firstRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the thread id is announced');
+  const firstOrder = firstRun.events.map((e) => e.type);
+  assert.ok(firstOrder.indexOf('agent_session') < firstOrder.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+
+  // The VM is gone; the harness boots a fresh one with COLONIZER_RESUME_SESSION set (§2, issue #562)
+  // and the colony's persisted home mounted back in at the same path.
+  const secondRun = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-fake-1' });
+  t.after(() => secondRun.child.kill('SIGKILL'));
+
+  secondRun.send({ type: 'user_message', id: 'u-2', text: 'continue' });
+  await secondRun.waitUntil(count('turn_end', 1), 'the resumed turn to finish');
+
+  const turns = secondRun.turns();
+  assert.equal(turns.length, 1, 'the conversation continues without a fallback');
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-fake-1', '-'], 'the first turn of the new process resumes the announced thread');
+  assert.deepEqual(turns[0].prompt, 'continue');
+  assert.deepEqual(first('agent_session')(secondRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'a new process announces the id once, like claude-code');
+  const order = secondRun.events.map((e) => e.type);
+  assert.ok(order.indexOf('agent_session') < order.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+  assertSchema([...firstRun.events, ...secondRun.events]);
+
+  await stop(firstRun);
+  await stop(secondRun);
+});
+
+test('a resumed thread whose rollout is gone falls back to a fresh thread once', async (t) => {
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end').length, 1, 'the failed attempt emits no turn_end of its own');
+  assert.ok(
+    runner.events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no rollout for thread thread-gone')),
+    'the failed resume is logged as a warning',
+  );
+  assert.equal(turnEnd.is_error, false, 'the colony is not failed by the missing rollout');
+  assert.equal(turnEnd.result, 'Hello, colony');
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-gone', '-'], 'the seeded thread is attempted first');
+  assert.ok(!turns[1].argv.includes('resume'), 'the retry starts a fresh thread');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the fresh thread is what gets announced');
+  assertSchema(runner.events);
 
   await stop(runner);
 });

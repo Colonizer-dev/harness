@@ -9,8 +9,12 @@ into the colony image yet, and no end-to-end colony run has happened.**
 The runner is `runner.mjs`: one long-lived ACP agent process per colony. At boot it negotiates
 `initialize` (protocolVersion 1, clientCapabilities `fs.readTextFile`/`fs.writeTextFile` and
 `terminal`) and opens one `session/new` in the workspace; every `user_message` becomes one
-`session/prompt` turn, queued when one is already running. There is no `session/load`: the runner
-cannot resume a session, so it never emits `agent_session` (§2 rules).
+`session/prompt` turn, queued when one is already running. When the agent advertises
+`agentCapabilities.loadSession` at `initialize`, the runner announces its session id as
+`agent_session`, and a resume boot (`COLONIZER_RESUME_SESSION`: the harness continuing a colony
+that waited on its user) reloads that session with `session/load` instead — the `session/update`s
+the agent replays of the old conversation are history the harness already logged, never new
+events. A load that fails, or an agent without `loadSession`, falls back to a fresh `session/new`.
 
 ## Mapping
 
@@ -97,7 +101,10 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 ## Limits
 
 - No `plan` event type in colonizer-runner/1: plans render as a `thinking` checklist.
-- No resume: a stopped colony starts a fresh ACP session (no `agent_session`, no `session/load`).
+- Resume rides the module's `session_resume` dir: the harness persists `/root/.gemini` outside the
+  VM, so the gemini preset keeps its conversation across a suspended colony's stop and
+  continuation (`session/load`). A custom agent resumes only if it keeps its sessions there too;
+  otherwise the resumed boot starts a fresh session.
 - The autopilot/exec policy from [#471](https://github.com/Colonizer-dev/harness/issues/471) is not
   wired in: tool calls arrive with the colony's own egress and path policy as the only fence, and
   every permission question surfaces to the user.

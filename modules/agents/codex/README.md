@@ -66,13 +66,26 @@ The microVM is the boundary. Inside it:
 | Update check | **off** | `-c check_for_update_on_startup=false` |
 | Prompt history | **off** | `-c history.persistence="none"`; the session rollout persists (resume needs it) |
 | Telemetry (statsig metrics) | **off** | `-c otel.metrics_exporter="none"` |
-| Host config / OAuth token / MCP | **off in practice** | a fresh, empty `CODEX_HOME` (`mkdtemp`): all of these live under it; `BROWSER=/bin/false` as belt-and-braces |
+| Host config / OAuth token / MCP | **off in practice** | `CODEX_HOME` is a bare `/root/.codex` the runner creates: no `config.toml`, no `auth.json` (auth is env-only), no MCP config; `BROWSER=/bin/false` as belt-and-braces |
 
 The model setting (`COLONIZER_MODEL`) is passed as `-m <model>` when set, as `openai/<model>` or a
 bare model id; **empty (the default) passes no `-m`, so Codex runs on the CLI's own default model**
 — that is the module's documented default. `subagent_model` and `background_model` are accepted
 for parity with the other modules but unused: headless `codex exec` has no subagent or
 background-worker split.
+
+## Session resume
+
+`module.json` declares `/root/.codex` — the whole `CODEX_HOME` — as the module's `session_resume`
+directory: the harness persists it outside the microVM and mounts it back on every boot, so the
+session rollouts `codex exec resume` reads survive a stopped VM. The home holds nothing sensitive —
+auth rides the `CODEX_API_KEY` environment variable, prompt history is off — so persisting it leaks
+no credentials. The runner announces the thread id as `agent_session` (once per id, the same rule
+`model_changed` follows), so a colony that is waiting on its user can be suspended
+([#562](https://github.com/Colonizer-dev/harness/issues/562)) and booted again with
+`COLONIZER_RESUME_SESSION` set: its first turn then runs `exec [options] resume <thread_id> -` and
+the conversation continues in the same codex thread. If that thread's rollout is gone (the mount
+changed under the colony), that first turn falls back to a fresh thread once instead of failing.
 
 ## Tests
 
@@ -87,6 +100,4 @@ stdin prompt and env it received, and checks the happy path's events against the
   "What remains" for the same gap); until then the preflight fails a codex colony at boot.
 - Mothership-side push of the OpenAI key into boot secrets (`crates/colonizer/src/boot.rs`), the
   same follow-up grok-build has; today only a user-added `CODEX_API_KEY` colony secret works.
-- Questions (`answer` is ignored), the colonizer MCP tools (memory, findings, wait), and resuming a
-  codex thread across a runner restart: the thread id lives in the runner's memory and its session
-  rollout in the runner's fresh `CODEX_HOME`, both gone when the colony's VM is.
+- Questions (`answer` is ignored) and the colonizer MCP tools (memory, findings, wait).
