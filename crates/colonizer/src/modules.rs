@@ -807,16 +807,18 @@ fn validate_settings(
             };
             return Err(format!("`{key}` is not a {provider} setting; known settings: {known}"));
         };
-        let ok = match spec["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_i64() || value.is_u64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            Some("array") => value.is_array() && value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
-            _ => true,
-        };
-        if !ok {
-            return Err(format!("setting `{key}` has the wrong type"));
+        // A type or range refusal names what the schema asks for (#642), so the fix needs no schema
+        // reading: the expected type, or the bounds the value must sit inside, one-sided or both.
+        let expected = |want: &str| format!("setting `{key}` must be {want}");
+        match spec["type"].as_str() {
+            Some("string") if !value.is_string() => return Err(expected("a string")),
+            Some("integer") if !value.is_i64() && !value.is_u64() => return Err(expected("an integer")),
+            Some("number") if !value.is_number() => return Err(expected("a number")),
+            Some("boolean") if !value.is_boolean() => return Err(expected("a boolean")),
+            Some("array") if !value.is_array() || !value.as_array().is_some_and(|items| items.iter().all(Value::is_string)) => {
+                return Err(expected("an array of strings"));
+            }
+            _ => {}
         }
         if let Some(options) = spec["enum"].as_array()
             && !options.contains(value)
@@ -831,7 +833,13 @@ fn validate_settings(
         if let Some(n) = value.as_f64()
             && (spec["minimum"].as_f64().is_some_and(|min| n < min) || spec["maximum"].as_f64().is_some_and(|max| n > max))
         {
-            return Err(format!("setting `{key}` is out of range"));
+            let bounds = match (spec["minimum"].as_f64(), spec["maximum"].as_f64()) {
+                (Some(min), Some(max)) => format!("between {min} and {max}"),
+                (Some(min), None) => format!("at least {min}"),
+                (None, Some(max)) => format!("at most {max}"),
+                (None, None) => unreachable!("a range refusal fired, so the schema declared a bound"),
+            };
+            return Err(format!("setting `{key}` must be {bounds}"));
         }
         if let Some(s) = value.as_str()
             && (s.len() > 500 || s.contains('\n'))
@@ -1114,12 +1122,14 @@ mod tests {
 
         input.remove("unknwon").unwrap();
         input.insert("cpus".into(), json!(0));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be between 1 and 64", "{err}");
         input.insert("cpus".into(), json!("eight"));
         // Being stored buys a key nothing once the schema declares it: `cpus` is checked like any
         // other, and only keys no schema has pass through untouched.
         stored.insert("cpus".into(), json!(4));
-        assert!(validate_settings("sandbox", &schema, &input, &stored).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &stored).unwrap_err();
+        assert_eq!(err, "setting `cpus` must be an integer", "{err}");
     }
 
     #[test]
@@ -1149,7 +1159,8 @@ mod tests {
         );
         let mut input = Map::new();
         input.insert("budget_usd".into(), json!(-1));
-        assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+        let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+        assert_eq!(err, "setting `budget_usd` must be at least 0", "{err}");
         input.remove("budget_usd");
         input.insert("budget_tokens".into(), json!(-1));
         assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
@@ -1240,10 +1251,12 @@ mod tests {
         assert_eq!(out.get("mask_paths"), input.get("mask_paths"));
         assert_eq!(out.get("protect_paths"), input.get("protect_paths"));
 
-        // A non-array, or an array of non-strings, is the wrong type for the setting.
+        // A non-array, or an array of non-strings, is the wrong type for the setting, and the
+        // refusal says the type the schema asks for.
         for bad in [json!("secrets/credentials.json"), json!(["ok", 4])] {
             input.insert("mask_paths".into(), bad);
-            assert!(validate_settings("sandbox", &schema, &input, &Map::new()).is_err());
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(err, "setting `mask_paths` must be an array of strings", "{err}");
         }
         // And the entries themselves are checked with the boot's own gate: absolute paths,
         // traversal, the worktree root and — for the masked list only — the git dir.
@@ -1318,9 +1331,10 @@ mod tests {
         let mut input = Map::new();
         for bad in [json!(0), json!(1441)] {
             input.insert("hold_timeout_minutes".into(), bad);
-            assert!(
-                validate_settings("sandbox", &schema, &input, &Map::new()).is_err(),
-                "the timeout is 1 to 1440 minutes"
+            let err = validate_settings("sandbox", &schema, &input, &Map::new()).unwrap_err();
+            assert_eq!(
+                err, "setting `hold_timeout_minutes` must be between 1 and 1440",
+                "the refusal names the bounds: {err}"
             );
         }
         for ok in [1, 30, 1440] {
