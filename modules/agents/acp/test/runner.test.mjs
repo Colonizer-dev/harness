@@ -125,12 +125,16 @@ test('the pure helpers: command split, risk, content text, option clamp, command
     assert.equal(commandText(call), command, `${JSON.stringify(call.rawInput ?? call.title)} command text`);
   }
 
-  const root = mkdtempSync(join(tmpdir(), 'acp-root-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'acp-root-')));
   assert.equal(confine(root, 'a/b.txt'), join(root, 'a/b.txt'));
   assert.equal(confine(root, `${root}/a/../c.txt`), join(root, 'c.txt'));
   assert.equal(confine(root, '../outside'), null, '../ escapes');
   assert.equal(confine(root, '/etc/hostname'), null, 'an absolute path outside escapes');
-  symlinkSync('/etc/hostname', join(root, 'escape'));
+  // An outside target that exists on every OS (macOS has no /etc/hostname): a dangling link would
+  // resolve through its parent instead, which is a different case.
+  const outside = join(mkdtempSync(join(tmpdir(), 'acp-outside-')), 'target.txt');
+  writeFileSync(outside, 'x');
+  symlinkSync(outside, join(root, 'escape'));
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
 });
 
