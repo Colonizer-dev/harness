@@ -79,6 +79,7 @@ mod rebase;
 mod reclaim;
 mod redteam;
 mod remote;
+mod repo_identity;
 mod repo_meta;
 mod restack;
 mod routing;

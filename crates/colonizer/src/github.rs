@@ -120,16 +120,9 @@ impl App {
 
     /// Host-side git, hardened so nothing inside a repository can make it execute code.
     pub fn git_plain(&self) -> Command {
-        let mut c = Command::new("git");
+        let mut c = Command::from(host_git_offline());
         c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
-            .args(HOST_GIT_NO_EXEC)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GH_PROMPT_DISABLED", "1")
-            // A colony sandbox exports these for its own worktree; host-side git never inherits
-            // them (callers that set them after construction still override).
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
+            .env("GH_PROMPT_DISABLED", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -145,6 +138,21 @@ impl App {
     pub fn bare_repo(&self, repo: &str) -> PathBuf {
         self.cfg.data_dir.join("repos").join(format!("{repo}.git"))
     }
+}
+
+/// The hardening every host-side git carries, as a blocking command with no credentials: the
+/// [`HOST_GIT_NO_EXEC`] overrides, no terminal prompt, and none of a colony sandbox's `GIT_DIR` /
+/// `GIT_WORK_TREE` / `GIT_INDEX_FILE` (callers that set them after construction still override).
+/// [`App::git_plain`] builds on it; code that holds no [`App`] and only reads a local repository
+/// (the fleet repo fingerprint, `repo_identity.rs`) uses it directly.
+pub(crate) fn host_git_offline() -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.args(HOST_GIT_NO_EXEC)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    c
 }
 
 /// `-c` overrides that stop host-side git from executing anything a repository (or a colony that
