@@ -101,6 +101,48 @@ pub(crate) fn redact_jsonl(bytes: &[u8]) -> Cow<'_, [u8]> {
 
 // ── JSON ──
 
+/// The `[REDACTED:<kind>]` marks in already-redacted text, counted per kind in first-seen order.
+/// How the publish, review and finding paths tell that redaction changed what they are about to
+/// send, so the operator hears that a colony exposed a secret instead of it vanishing silently.
+pub(crate) fn marks(text: &str) -> Vec<(String, usize)> {
+    const OPEN: &str = "[REDACTED:";
+    let mut out: Vec<(String, usize)> = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        rest = &rest[at + OPEN.len()..];
+        let Some(end) = rest.find(']') else { break };
+        let kind = &rest[..end];
+        if !kind.is_empty() && kind.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            match out.iter_mut().find(|(k, _)| k == kind) {
+                Some((_, n)) => *n += 1,
+                None => out.push((kind.to_string(), 1)),
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    out
+}
+
+/// The operator-facing line for a file that redaction changed, e.g. `pr.md contained 1 secret
+/// (github token), redacted before publishing`; `None` when `text` carries no mark.
+pub(crate) fn redaction_note(file: &str, text: &str, before: &str) -> Option<String> {
+    let found = marks(text);
+    let total: usize = found.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        return None;
+    }
+    let kinds = found
+        .iter()
+        .map(|(kind, n)| {
+            let label = kind.replace('_', " ");
+            if *n > 1 { format!("{label} ×{n}") } else { label }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let noun = if total == 1 { "secret" } else { "secrets" };
+    Some(format!("{file} contained {total} {noun} ({kinds}), redacted before {before}"))
+}
+
 fn walk(value: &mut Value, key: Option<&str>) -> bool {
     match value {
         Value::String(s) => {
@@ -910,6 +952,25 @@ fn is_entropy_secret(s: &[u8], start: usize, end: usize) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_redaction_note_names_the_count_and_the_kinds() {
+        let text = "a [REDACTED:github_token] b [REDACTED:aws_access_key] c [REDACTED:github_token]";
+        assert_eq!(
+            redaction_note("pr.md", text, "publishing").as_deref(),
+            Some("pr.md contained 3 secrets (github token ×2, aws access key), redacted before publishing")
+        );
+        assert_eq!(
+            redaction_note(
+                "pr.md",
+                &redact_text("GH=ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5"),
+                "publishing"
+            )
+            .as_deref(),
+            Some("pr.md contained 1 secret (github token), redacted before publishing")
+        );
+        assert_eq!(redaction_note("pr.md", "nothing [REDACTED: here] or [x]", "publishing"), None);
+    }
 
     fn r(s: &str) -> String {
         redact_text(s).into_owned()
