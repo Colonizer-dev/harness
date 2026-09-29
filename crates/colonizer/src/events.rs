@@ -825,7 +825,7 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
-        let recorded = append_line(&record, &entry.to_string()).await;
+        let recorded = append_line(&record, &crate::redact::redact_line(&entry.to_string())).await;
         if let Err(e) = recorded {
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.

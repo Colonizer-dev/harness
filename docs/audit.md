@@ -93,7 +93,12 @@ limits.
   field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
   bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
   second line behind keeping secrets out of the colony, not a replacement
-  (`crates/colonizer/src/redact.rs`).
+  (`crates/colonizer/src/redact.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
+  written, and a fleet export redacts the logs it carries.
+- **Credentials stay in the session directory.** An archive bundle or a fleet export never holds
+  a session's `vm/token`, `gateway-token`, `vm/mesh-authkey` or `vm/session.json`, nor any file
+  there named like a credential (`*token*`, `*authkey*`, `*.key`, `*.pem`, `secrets*`)
+  (`is_credential_file` in `crates/colonizer/src/archive.rs`).
 - **Inside the colony.** Credential files in the worktree are masked and agent config is pinned
   read-only ([path-policy.md](path-policy.md), #545); every colony boots behind an egress policy
   with a deny set no setting can reopen ([sandbox-network.md](sandbox-network.md#egress-policy-303),

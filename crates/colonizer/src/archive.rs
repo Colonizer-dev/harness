@@ -121,6 +121,46 @@ pub(crate) struct IndexRecord {
     pub fingerprint: String,
 }
 
+/// The credential files boot writes into a session directory: agentd's bearer (`vm/token`), the
+/// colony's gateway bearer (`gateway-token`), the mesh auth key (`vm/mesh-authkey`, removed once the
+/// VM joins, but present if the boot died first) and the runner's `vm/session.json`, whose env
+/// carries the gateway bearer again as `COLONIZER_RECALL_TOKEN`. Every one of them is live for a
+/// colony that is still running or can be resumed.
+const CREDENTIAL_FILES: [&str; 4] = ["vm/token", "gateway-token", "vm/mesh-authkey", "vm/session.json"];
+
+/// Whether a session-dir-relative, `/`-separated path is a credential that must never leave the
+/// session directory in an archive bundle, a fleet export or any other bundle: the known files
+/// above, plus anything whose file name looks like one (`*token*`, `*authkey*`, `*.key`, `*.pem`)
+/// and anything in or named `secrets*`/`colony-secrets*`, wherever in the directory it sits.
+pub(crate) fn is_credential_file(rel: &str) -> bool {
+    if CREDENTIAL_FILES.contains(&rel) {
+        return true;
+    }
+    let lower = rel.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    name.contains("token")
+        || name.contains("authkey")
+        || name.ends_with(".key")
+        || name.ends_with(".pem")
+        // A secrets directory takes everything under it.
+        || lower
+            .split('/')
+            .any(|part| part.starts_with("secrets") || part.starts_with("colony-secrets"))
+}
+
+/// A session file's bytes as they may leave the session directory: a log (`*.jsonl`, `*.log`,
+/// rotated `events-N.jsonl` included) goes through the #761 redactor, so one written before
+/// redaction existed is scrubbed on its way out; anything else is kept as it is.
+pub(crate) fn redact_for_bundle(rel: &str, bytes: Vec<u8>) -> Vec<u8> {
+    if !(rel.ends_with(".jsonl") || rel.ends_with(".log")) {
+        return bytes;
+    }
+    match crate::redact::redact_jsonl(&bytes) {
+        std::borrow::Cow::Owned(redacted) => redacted,
+        std::borrow::Cow::Borrowed(_) => bytes,
+    }
+}
+
 /// The session directory read through the session store (#325), so a future remote backend serves
 /// the archive like everything else, plus its fingerprint. `None` when there is no session directory.
 async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(String, u64, Vec<u8>)>, String)>> {
@@ -134,15 +174,16 @@ async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(Stri
     let store = crate::store::LocalDirStore::new(data_dir);
     let (mut files, mut total, mut newest) = (Vec::new(), 0u64, 0u64);
     for name in store.list_files(id).await? {
-        let Some(mut bytes) = store.read_file(id, &name).await? else {
+        // Credentials are never read, so they neither travel nor move the fingerprint (a resumed
+        // colony's fresh tokens are not a change to its logs).
+        if is_credential_file(&name) {
+            continue;
+        }
+        let Some(bytes) = store.read_file(id, &name).await? else {
             continue;
         };
         // #761: a log written before redaction existed is redacted on its way into the bundle.
-        if (name.ends_with(".jsonl") || name.ends_with(".log"))
-            && let std::borrow::Cow::Owned(redacted) = crate::redact::redact_jsonl(&bytes)
-        {
-            bytes = redacted;
-        }
+        let bytes = redact_for_bundle(&name, bytes);
         let mtime = tokio::fs::metadata(dir.join(&name))
             .await
             .ok()
@@ -750,6 +791,141 @@ mod tests {
             assert!(message.contains("finite and not negative"), "{message}");
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every entry of a tar+zstd bundle, as (name, bytes).
+    fn entries_of(bundle: &Path) -> Vec<(String, Vec<u8>)> {
+        use std::io::Read;
+        let mut tar = tar::Archive::new(zstd::Decoder::new(std::fs::File::open(bundle).unwrap()).unwrap());
+        tar.entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let name = e.path().unwrap().to_string_lossy().into_owned();
+                let mut bytes = Vec::new();
+                e.read_to_end(&mut bytes).unwrap();
+                (name, bytes)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn archives_and_fleet_exports_never_carry_a_sessions_credentials() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Stopped).await;
+        let dir = app.session_dir("abc");
+        // What boot leaves in a session directory, each credential with a marker that must never
+        // travel, beside the logs that must.
+        let credentials = [
+            "vm/token",
+            "gateway-token",
+            "vm/mesh-authkey",
+            "vm/session.json",
+            "secrets.env",
+            "out/deploy.key",
+            "transcripts/oauth-token.json",
+        ];
+        for name in credentials {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("MARKER-{name}\n")).unwrap();
+        }
+        let aws = "AKIAIOSFODNN7EXAMPLE";
+        let logs = [
+            ("events.jsonl", "{\"seq\":1}\n".to_string()),
+            ("harness.jsonl", "{\"msg\":\"booted\"}\n".to_string()),
+            ("gateway.jsonl", "{\"path\":\"/v1/messages\"}\n".to_string()),
+            // Written before #761: a rotated log and the findings ledger, secrets and all.
+            ("events-1.jsonl", format!("{{\"text\":\"key {aws}\"}}\n")),
+            ("findings.jsonl", format!("{{\"title\":\"leak {aws}\"}}\n")),
+            ("transcripts/a.jsonl", format!("{{\"said\":\"{aws}\"}}\n")),
+            ("out/pr.md", "the pull request\n".to_string()),
+        ];
+        for (name, text) in &logs {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let no_credentials = |bundle: &str, entries: &[(String, Vec<u8>)]| {
+            for (name, bytes) in entries {
+                let text = String::from_utf8_lossy(bytes);
+                assert!(!text.contains("MARKER-"), "{bundle}: {name} carries a credential");
+                assert!(!text.contains(aws), "{bundle}: {name} carries an unredacted key");
+                for cred in credentials {
+                    assert!(!name.ends_with(cred), "{bundle} holds {name}");
+                }
+            }
+        };
+
+        // The archive: every log and artifact, no credential.
+        let s = app.session("abc").await.unwrap();
+        let rel = archive_session(&app, &s).await.unwrap().unwrap();
+        let archived = entries_of(&root.join("data/archive").join(&rel));
+        let names: Vec<&str> = archived.iter().map(|(n, _)| n.as_str()).collect();
+        for (name, _) in &logs {
+            assert!(names.contains(name), "{name} missing from the archive: {names:?}");
+        }
+        no_credentials("archive", &archived);
+
+        // The fleet export: its log allowlist, plus the archive fallback once the live logs are gone.
+        std::fs::write(root.join("data/sessions.json"), serde_json::to_vec(&vec![s.clone()]).unwrap()).unwrap();
+        let bundle = root.join("export.tar.zst");
+        let origin = crate::fleet_export::Origin {
+            host: "host-a".into(),
+            name: "a".into(),
+        };
+        let cats = crate::fleet_export::Categories::default();
+        crate::fleet_export::export_bundle_for(&root.join("data"), &origin, &cats, &bundle).unwrap();
+        let exported = entries_of(&bundle);
+        let names: Vec<&str> = exported.iter().map(|(n, _)| n.as_str()).collect();
+        for name in [
+            "logs/abc/events.jsonl",
+            "logs/abc/harness.jsonl",
+            "logs/abc/gateway.jsonl",
+            "logs/abc/transcripts/a.jsonl",
+        ] {
+            assert!(names.contains(&name), "{name} missing from the export: {names:?}");
+        }
+        no_credentials("export", &exported);
+
+        for name in ["events.jsonl", "harness.jsonl", "gateway.jsonl"] {
+            std::fs::remove_file(dir.join(name)).unwrap();
+        }
+        crate::fleet_export::export_bundle_for(&root.join("data"), &origin, &cats, &bundle).unwrap();
+        let exported = entries_of(&bundle);
+        let names: Vec<&str> = exported.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"logs/abc/events.jsonl"), "the archive fallback: {names:?}");
+        no_credentials("export from the archive", &exported);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn credential_files_are_named_and_logs_are_not() {
+        for name in [
+            "vm/token",
+            "gateway-token",
+            "vm/mesh-authkey",
+            "vm/session.json",
+            "secrets.json",
+            "colony-secrets/prod",
+            "out/id.key",
+            "out/tls.PEM",
+            "transcripts/access_token.txt",
+        ] {
+            assert!(is_credential_file(name), "{name} is a credential");
+        }
+        for name in [
+            "events.jsonl",
+            "events-2.jsonl",
+            "harness.jsonl",
+            "gateway.jsonl",
+            "findings.jsonl",
+            "egress.json",
+            "out/pr.md",
+            "vm/boot.sh",
+            "transcripts/a.jsonl",
+        ] {
+            assert!(!is_credential_file(name), "{name} is not a credential");
+        }
     }
 
     #[test]
