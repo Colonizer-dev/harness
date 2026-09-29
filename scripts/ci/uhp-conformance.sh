@@ -31,9 +31,11 @@ server_pid=
 trap 'if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi; rm -rf "$work"' EXIT INT TERM
 die() { echo "$1 — last lines of $work/serve.log (dir kept):" >&2; tail -20 "$work/serve.log" >&2; trap - EXIT INT TERM; exit 1; }
 
-# A free port on loopback, so a locally running mothership cannot collide with the run.
+# A free port on loopback, so a locally running mothership cannot collide with the run. The
+# suite appends its /v1/… paths to the base URL, and §7.1 puts that surface under /uhp: the
+# mothership's protocol answers live at /uhp/v1/…, beside the /api/… routes.
 port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
-base_url=http://127.0.0.1:$port
+base_url=http://127.0.0.1:$port/uhp
 mkdir -p "$work/cfg" "$work/data"
 COLONIZER_BIND=127.0.0.1:$port COLONIZER_CONFIG_DIR="$work/cfg" COLONIZER_DATA_DIR="$work/data" \
   COLONIZER_NO_BROWSER=1 COLONIZER_UPDATE_CHECK=0 COLONIZER_TELEMETRY=off DO_NOT_TRACK=1 \

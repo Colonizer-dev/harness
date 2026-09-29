@@ -23,9 +23,15 @@ These held when the audit checked them against the code.
 - **Per-colony gateway tokens.** Each colony gets its own random token, written 0600 on the host and
   compared in constant time at the gateway.
 - **The publish step.** The branch must carry the `colonizer/` prefix and must not be the base
-  branch. There is no force-push. Nothing merges automatically by default: the one exception is
-  the publish module's `automerge` setting (off by default, and it needs `autofix`), which merges
-  a fix colony's pull request once an independent review session passes it.
+  branch. There is no force-push. Nothing merges automatically by default. The exceptions, both
+  off by default, are the publish module's `automerge` setting (which needs `autofix` too), which
+  merges a fix colony's pull request once an independent review session passes it, and the merge
+  train: a background tick that squash-merges an open colony pull request only when mergeability
+  is clean, every check and the base branch's own CI are green, it is not a draft and carries no
+  HOLD / do-not-merge / WIP mark, its commits pass the author and attribution allowlists, and the
+  branch is up to date with the base — never a force-merge, never `--admin`. `merge_train_overrides`
+  turns it on or off per org or repo, and `merge_train_deny_orgs` keeps named orgs out whatever
+  the overrides say.
 - **Untrusted colony output.** The worktree's `.git` is rewritten from the value recorded before the
   VM ran, nested `.git` directories are removed, and `pr.md` must be a regular file within a size
   limit.

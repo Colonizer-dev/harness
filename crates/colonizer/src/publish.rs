@@ -34,9 +34,10 @@ pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
     app.update_session(id, |x| x.publish_stage = Some(stage)).await;
 }
 
-/// Runs one claimed publish: tears the microVM down, then drives `github::publish` with the
-/// approval minted where the publish was started — the Create PR press or autopilot's verdict —
-/// so every external effect inside can check itself against it (issue #98).
+/// Runs one claimed publish: confirms the colony's microVM is gone, then drives `github::publish`
+/// with the approval minted where the publish was started — the Create PR press or autopilot's
+/// verdict — so every external effect inside can check itself against it (issue #98). A removal
+/// that cannot be confirmed fails the publish before anything touches the worktree.
 pub async fn publish_session(app: Shared, id: String, grant: Option<crate::authority::Grant>) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
     let Some(current) = app.session(&id).await else { return };
@@ -61,24 +62,34 @@ pub async fn publish_session(app: Shared, id: String, grant: Option<crate::autho
         return;
     }
     let log = app.logger(&id);
-    // A live status is not the only proof of a sandbox: `stop` marks the colony stopped before the
+    // Every branch below ends at the same gate: the worktree is touched only once the colony's
+    // microVM is confirmed gone — `msb rm` ran and the sandbox no longer appears in `msb ls`. A
+    // live status is not the only proof of a sandbox: `stop` marks the colony stopped before the
     // removal it starts, and that removal swallows its errors, so a `stopped`/`failed` colony can
     // still have a microVM. Wherever an agent link is still wired up for the colony, a publish
-    // removes the sandbox first, exactly as a stop would have; only a colony with no runtime at all
-    // — one that never got far enough to log, or one from before a harness restart — is known to
-    // have nothing to remove.
+    // removes the sandbox first, exactly as a stop would have; and a colony with no runtime at
+    // all — one that never got far enough to log, or one from before a harness restart — is
+    // checked against the sandbox list anyway, because "no runtime" is not proof of "no microVM".
+    // A removal that cannot be confirmed (an `msb` error, a timeout, or the sandbox still listed)
+    // fails the publish before anything touches the worktree; publishing again retries the gate.
     if was_live {
         log.info("publishing: stopping the agent and removing the microVM").await;
-        teardown_vm(&app, &s).await;
     } else if app.runtimes.lock().await.contains_key(&id) {
         log.info("publishing: removing any microVM left behind for this colony").await;
-        teardown_vm(&app, &s).await;
     } else {
-        // A retry from `failed`/`no_changes` with no runtime has no microVM: the worktree and bare
-        // repo on the host are all a publish needs, and claiming to have removed one would be a lie.
-        log.info("publishing the kept worktree (no microVM is running)").await;
+        log.info("publishing: confirming no microVM is left for this colony").await;
     }
-    match github::publish(&app, &s, &log, grant.as_ref()).await {
+    let published = match teardown_vm_confirmed(&app, &s).await {
+        Ok(()) => github::publish(&app, &s, &log, grant.as_ref()).await,
+        // The warn says the underlying cause; the record below carries the fixed message verbatim,
+        // the way PUBLISH_LOST_TO_RESTART is recorded, so the closed vocabulary can bucket it.
+        Err(e) => {
+            log.warn(format!("not publishing: the microVM could not be confirmed removed: {e:#}"))
+                .await;
+            Err(anyhow::anyhow!(PUBLISH_VM_UNCONFIRMED))
+        }
+    };
+    match published {
         Ok(github::Published::NoChanges) => {
             app.update_session(&id, |x| {
                 x.status = SessionStatus::NoChanges;
@@ -1567,6 +1578,12 @@ mod tests {
             base_ref_oid: None,
             created_at: Some(opened),
             ci: github::CiState::Success,
+            is_draft: false,
+            title: String::new(),
+            labels: Vec::new(),
+            head_ref_name: None,
+            head_ref_oid: None,
+            base_ref_name: None,
         };
         assert!(apply_pr_facts(&mut s, &info));
         assert_eq!((s.pr_opened_at, s.ci_state), (Some(opened), Some(github::CiState::Success)));
@@ -1740,6 +1757,169 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Publishing);
         assert!(!s.holds_slot(), "no microVM, no publish slot");
         assert!(s.parked.is_none(), "the publish ends the pause");
+    }
+
+    // -- the confirmed-removal gate, against a stand-in `msb` -------------------------------------
+
+    use crate::tests::test_app;
+    use std::sync::Arc;
+
+    /// Points both `cfg.msb` and the execution backend at a stand-in `msb` running `body` on every
+    /// call — the pattern of the recover tests in lifecycle.rs. Only works before the `Shared` has
+    /// been cloned.
+    fn stand_in_msb(app: &mut Shared, root: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let msb = root.join("msb");
+        std::fs::write(&msb, format!("#!/bin/sh\n{body}")).unwrap();
+        std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let app = Arc::get_mut(app).unwrap();
+        app.cfg.msb = msb.display().to_string();
+        app.execution = Arc::new(crate::execution::LocalBackend::new(msb.display().to_string()));
+    }
+
+    /// A colony a publish would accept: its branch and base pass `check_publish_branch`, its
+    /// worktree holds work, and its git dir is recorded (the publish would rewrite the worktree's
+    /// `.git` file from it, so that file's absence proves the publish never ran).
+    fn publishable(root: &std::path::Path, id: &str, status: SessionStatus) -> Session {
+        let mut s = colony("acme", status);
+        s.id = id.into();
+        s.branch = format!("colonizer/issue-1-{id}");
+        s.base = Some("main".into());
+        let wt = root.join(format!("wt-{id}"));
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(wt.join("work.txt"), "the colony's work").unwrap();
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(wt.join(".git-admin").display().to_string());
+        s.sandbox = format!("sandbox-{id}");
+        s
+    }
+
+    /// A loopback port nothing listens on: bound and released, so a connect to it is refused at
+    /// once — agentd unreachable, without waiting out any timeout.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    /// The colony's harness log as one string.
+    fn harness_log(app: &App, id: &str) -> String {
+        std::fs::read_to_string(app.session_dir(id).join("harness.jsonl")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn a_publish_refuses_while_the_microvm_cannot_be_confirmed_removed() {
+        let root = std::env::temp_dir().join(format!("colonizer-publish-gate-{}", crate::util::short_id()));
+        let mut app = test_app(&root);
+        // `rm` fails and `ls` keeps listing the colony's sandbox: the microVM stays behind.
+        stand_in_msb(
+            &mut app,
+            &root,
+            "if [ \"$1\" = rm ]; then exit 1; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' sandbox-live; fi\nexit 0\n",
+        );
+        let mut s = publishable(&root, "live", SessionStatus::Running);
+        // The colony is live with an agent link: the forced shutdown is tried and fails — agentd
+        // is unreachable — which is said, while the gate stays on the removal's own confirmation.
+        s.local_port = Some(closed_port());
+        app.sessions.write().await.push(s.clone());
+        tokio::fs::create_dir_all(app.session_dir("live").join("vm")).await.unwrap();
+        std::fs::write(app.session_dir("live").join("vm/token"), "t").unwrap();
+
+        publish_session(app.clone(), "live".into(), None).await;
+
+        let after = app.session("live").await.unwrap();
+        assert_eq!(
+            after.status,
+            SessionStatus::Failed,
+            "an unconfirmed removal fails the publish"
+        );
+        assert_eq!(
+            after.error.as_deref(),
+            Some(PUBLISH_VM_UNCONFIRMED),
+            "the fixed message proves the gate stopped it, not the publish"
+        );
+        assert!(!after.holds_slot(), "the failed publish holds no slot");
+        assert_eq!(after.publish_stage, None, "no publish stage was reached");
+        let log = harness_log(&app, "live");
+        assert!(
+            log.contains("not publishing: the microVM could not be confirmed removed"),
+            "{log}"
+        );
+        assert!(log.contains("still listed"), "{log}");
+        assert!(log.contains("agentd shutdown failed"), "the shutdown outcome is said: {log}");
+        assert!(
+            !std::path::Path::new(&s.worktree).join(".git").exists(),
+            "nothing was published: the publish rewrites .git before anything else, so its absence proves the run never got to git"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_no_runtime_publish_still_confirms_the_microvm_is_gone() {
+        let root = std::env::temp_dir().join(format!("colonizer-publish-gate-retry-{}", crate::util::short_id()));
+        let mut app = test_app(&root);
+        // A failed colony retrying its publish: no runtime is wired up, but the sandbox is still
+        // listed and its removal fails, so "no runtime" is correctly not read as "no microVM".
+        stand_in_msb(
+            &mut app,
+            &root,
+            "if [ \"$1\" = rm ]; then exit 1; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' sandbox-retry; fi\nexit 0\n",
+        );
+        let s = publishable(&root, "retry", SessionStatus::Failed);
+        app.sessions.write().await.push(s.clone());
+        tokio::fs::create_dir_all(app.session_dir("retry")).await.unwrap();
+
+        publish_session(app.clone(), "retry".into(), None).await;
+
+        let after = app.session("retry").await.unwrap();
+        assert_eq!(after.status, SessionStatus::Failed, "the retry is refused and fails again");
+        assert_eq!(after.error.as_deref(), Some(PUBLISH_VM_UNCONFIRMED));
+        let log = harness_log(&app, "retry");
+        assert!(
+            log.contains("not publishing: the microVM could not be confirmed removed"),
+            "{log}"
+        );
+        assert!(
+            !std::path::Path::new(&s.worktree).join(".git").exists(),
+            "nothing touched the kept worktree"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_removal_opens_the_gate_and_the_publish_runs() {
+        let root = std::env::temp_dir().join(format!("colonizer-publish-gate-open-{}", crate::util::short_id()));
+        let mut app = test_app(&root);
+        // `ls` answers nothing: the sandbox is gone, so the gate opens. The publish itself then
+        // fails on its own (the recorded git dir is not a repository) — any error but the gate's.
+        stand_in_msb(&mut app, &root, "exit 0\n");
+        let s = publishable(&root, "open", SessionStatus::Failed);
+        app.sessions.write().await.push(s.clone());
+        tokio::fs::create_dir_all(app.session_dir("open")).await.unwrap();
+
+        publish_session(app.clone(), "open".into(), None).await;
+
+        let after = app.session("open").await.unwrap();
+        assert_eq!(after.status, SessionStatus::Failed, "the publish fails on its own");
+        assert_ne!(
+            after.error.as_deref(),
+            Some(PUBLISH_VM_UNCONFIRMED),
+            "the gate opened; this failure is the publish's own: {:?}",
+            after.error
+        );
+        let log = harness_log(&app, "open");
+        assert!(log.contains("publishing failed"), "{log}");
+        assert!(log.contains("confirming no microVM is left for this colony"), "{log}");
+        assert!(
+            !log.contains("could not be confirmed removed"),
+            "the gate said nothing: {log}"
+        );
+        assert!(
+            std::path::Path::new(&s.worktree).join(".git").is_file(),
+            "the publish got far enough to rewrite the worktree's .git"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     // ----- the retarget glue, against a stand-in for GitHub, the record and the log -----
