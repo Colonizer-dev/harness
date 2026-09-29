@@ -36,6 +36,9 @@ pub enum GatewayFailure {
     MissingKey,
     /// The colony passed its spend budget, or this request's estimate would tip it over.
     Budget,
+    /// The colony stopped — or its token stopped matching — while the request waited for a slot,
+    /// so the re-check that runs once the slot is in hand refuses it (issue #681).
+    ColonyInactive,
     /// A path or body the wire cannot serve: an unsupported path or an untranslatable request.
     BadRequest,
     /// No free per-provider request slot within `queue_timeout_secs`.
@@ -60,6 +63,7 @@ impl GatewayFailure {
             Self::Restricted => "restricted",
             Self::MissingKey => "missing_key",
             Self::Budget => "budget",
+            Self::ColonyInactive => "colony_inactive",
             Self::BadRequest => "bad_request",
             Self::QueueFull => "queue_full",
             Self::Unreachable => "unreachable",
