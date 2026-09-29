@@ -301,6 +301,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/share/mise/installs/claude/latest/claude`, `~/.local/bin/claude`, `~/.claude/local/claude` | The native Claude Code binary to mount into colonies |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | The provider gateway; colonies reach it through `host.microsandbox.internal`. Must be an IP and port: a hostname such as `localhost:41750` refuses startup |
 | `COLONIZER_FLEET_PEERS` | – | Base URLs of other motherships, comma separated, polled for the fleet view (`GET /api/hosts`). Nothing is exposed by setting it |
+| `COLONIZER_FLEET_SYNC` | on | Set to `off` (or `0`, `false`, `no`) to stop a fleet member's background history push ([fleet.md](fleet.md#history-push)); `colonizer fleet sync` still drains on demand. Has no effect on a machine that has not joined a fleet |
 | `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |

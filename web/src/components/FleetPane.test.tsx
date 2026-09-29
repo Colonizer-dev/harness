@@ -7,8 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createMockApi } from "../mock";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
-import type { FleetState } from "../types";
-import { FleetPane, InviteReveal, expiresText, joinedDay, runFleet, spacedCode } from "./FleetPane";
+import type { FleetState, FleetSyncPreview } from "../types";
+import { FleetPane, HistorySync, InviteReveal, expiresText, joinedDay, runFleet, spacedCode } from "./FleetPane";
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(node);
 // The pane reads the api itself; static markup runs no effects, so a stub context is enough.
@@ -29,7 +29,7 @@ const memberState: FleetState = {
   invites: [],
   pending: [],
   members: [],
-  membership: { owner_url: "http://studio:7878", member_id: "mem_me", joined_at: iso(-3 * 60 * 24) },
+  membership: { owner_url: "http://studio:7878", member_id: "mem_me", joined_at: iso(-3 * 60 * 24), history_sync: false },
   joining: null,
 };
 const joiningState: FleetState = { ...NONE, joining: { owner_url: "http://studio:7878", confirm_code: "424264", started_at: iso(-1) } };
@@ -131,7 +131,13 @@ describe("fleet on the mock api", () => {
       const fleet = await api.fleet();
       expect(fleet.role).toBe("member");
       expect(fleet.membership?.owner_url).toBe("http://studio:7878");
+      // Joining is not consent: history sync starts off, turns on, and a re-join would start it off again.
+      expect(fleet.membership?.history_sync).toBe(false);
+      expect((await api.fleetSyncPreview()).pending_colonies).toBeGreaterThan(0);
+      expect((await api.setFleetHistorySync(true)).consent).toBe(true);
+      expect((await api.fleet()).membership?.history_sync).toBe(true);
       expect(await runFleet(() => api.leaveFleet())).toBeNull();
+      await expect(api.fleetSyncPreview()).rejects.toThrow();
       expect((await api.fleet()).role).toBe("none");
     } finally {
       vi.useRealTimers();
@@ -143,5 +149,47 @@ describe("fleet on the mock api", () => {
     await api.removeFleetMember((await api.fleet()).members[0].id);
     await expect(api.joinFleet({ owner_url: "http://studio:7878", code: "short" })).rejects.toMatchObject({ status: 404 });
     await expect(createMockApi().joinFleet({ owner_url: "http://studio:7878", code: "a".repeat(16) })).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+describe("HistorySync", () => {
+  const preview: FleetSyncPreview = {
+    owner_url: "http://studio:7878",
+    colonies: 3,
+    payloads: 7,
+    payload_bytes: 2 * 1024 ** 2,
+    omitted_payloads: 0,
+    row_bytes: 4096,
+    total_bytes: 2 * 1024 ** 2,
+    pending_colonies: 3,
+    pending_bytes: 2 * 1024 ** 2,
+    includes: "records and logs",
+    excludes: "running colonies, transcripts, stats, settings, secrets and tokens",
+  };
+  const block = (on: boolean, shown: FleetSyncPreview | null) => wrap(<HistorySync on={on} preview={shown} busy={false} onToggle={() => {}} />);
+
+  it("off: shows what would be sent beside the switch, and says joining sent nothing", () => {
+    const html = block(false, preview);
+    expect(html).toContain(">Off</span>");
+    expect(html).toContain("3 finished colonies and 7 log files");
+    expect(html).toContain("2M in all would go to the owner");
+    expect(html).toContain("Never sent: running colonies");
+    expect(html).toContain("Joining a fleet sends nothing");
+    expect(html).toContain(">Send history to the owner</button>");
+  });
+
+  it("will not turn on before the preview has been read", () => {
+    expect(block(false, null)).toMatch(/<button[^>]*disabled[^>]*>.*Send history to the owner/);
+  });
+
+  it("on: offers to stop", () => {
+    const html = block(true, { ...preview, pending_colonies: 0, pending_bytes: 0 });
+    expect(html).toContain(">On</span>");
+    expect(html).toContain(">Stop sending history</button>");
+    expect(html).not.toContain("Joining a fleet sends nothing");
+  });
+
+  it("the member pane carries the switch", () => {
+    expect(pane(memberState)).toContain("History sync");
   });
 });

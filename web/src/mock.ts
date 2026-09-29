@@ -32,6 +32,8 @@ import type {
   FleetMember,
   FleetMembership,
   FleetPending,
+  FleetSyncPreview,
+  FleetSyncStatus,
   FleetRole,
   FindingRecord,
   HarnessStatus,
@@ -2775,7 +2777,7 @@ export function createMockApi(): Api {
       if (Date.now() - Date.parse(fleetJoining.started_at) > 6000) {
         // The simulated owner has approved: the pairing completes and the fleet token arrives on
         // the joining side, where nothing here reads it.
-        fleetMembership = { owner_url: fleetJoining.owner_url, member_id: `mem_${mockId()}`, joined_at: now() };
+        fleetMembership = { owner_url: fleetJoining.owner_url, member_id: `mem_${mockId()}`, joined_at: now(), history_sync: false };
         fleetJoining = null;
         return { status: "joined" as const };
       }
@@ -2789,6 +2791,40 @@ export function createMockApi(): Api {
       await sleep(250);
       if (!fleetMembership) throw new ApiError("not a member of any fleet", 409);
       fleetMembership = null;
+    },
+    fleetSyncPreview: async (): Promise<FleetSyncPreview> => {
+      await sleep(200);
+      if (!fleetMembership) throw new ApiError("this mothership has not joined a fleet", 409);
+      return {
+        owner_url: fleetMembership.owner_url,
+        colonies: 42,
+        payloads: 118,
+        payload_bytes: 37 * 1024 ** 2,
+        omitted_payloads: 0,
+        row_bytes: 96 * 1024,
+        total_bytes: 37 * 1024 ** 2 + 96 * 1024,
+        pending_colonies: fleetMembership.history_sync ? 0 : 42,
+        pending_bytes: fleetMembership.history_sync ? 0 : 37 * 1024 ** 2 + 96 * 1024,
+        includes: "each finished colony's record and its event, harness and gateway logs",
+        excludes: "running colonies, transcripts, stats, settings, secrets and tokens",
+      };
+    },
+    setFleetHistorySync: async (enabled): Promise<FleetSyncStatus> => {
+      await sleep(200);
+      if (!fleetMembership) throw new ApiError("this mothership has not joined a fleet", 409);
+      fleetMembership = { ...fleetMembership, history_sync: enabled };
+      return {
+        member: true,
+        consent: enabled,
+        enabled,
+        status: enabled ? "synced" : "consent_required",
+        detail: null,
+        acknowledged: enabled ? 42 : 0,
+        retired: [],
+        last_drain_at: enabled ? now() : null,
+        last_synced_at: enabled ? now() : null,
+        next_attempt_at: null,
+      };
     },
     setUsage: async (enabled) => {
       await sleep(250);

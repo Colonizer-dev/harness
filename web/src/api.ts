@@ -45,6 +45,8 @@ import type {
   FleetJoinStatus,
   FleetMember,
   FleetState,
+  FleetSyncPreview,
+  FleetSyncStatus,
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
@@ -284,6 +286,10 @@ export interface Api {
   cancelFleetJoin(): Promise<void>;
   /** POST /api/fleet/leave: ends this mothership's own membership; every local colony and setting stays. */
   leaveFleet(): Promise<void>;
+  /** GET /api/fleet/sync/preview (issue #762): what the history push would send; sends nothing. 409 when not a member. */
+  fleetSyncPreview(): Promise<FleetSyncPreview>;
+  /** POST /api/fleet/sync/consent: turns the history push on or off for this membership. 409 when not a member. */
+  setFleetHistorySync(enabled: boolean): Promise<FleetSyncStatus>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
@@ -637,6 +643,8 @@ export const httpApi: Api = {
   confirmFleetJoin: () => post("/api/fleet/join/confirm"),
   cancelFleetJoin: () => del("/api/fleet/join"),
   leaveFleet: () => post("/api/fleet/leave"),
+  fleetSyncPreview: () => request("/api/fleet/sync/preview"),
+  setFleetHistorySync: (enabled) => post("/api/fleet/sync/consent", { enabled }),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

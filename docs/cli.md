@@ -181,6 +181,26 @@ print as the bundle's manifest. The fleet-join dialog (#686) drives the same for
 over the fleet connection, preview → confirm → transfer, so a machine that joins a fleet is
 backfilled the same way.
 
+### Fleet sync
+
+A machine that has joined a fleet can push its finished colonies' history to the owner
+([fleet.md](fleet.md#history-push)) — once its operator consents; joining alone sends nothing.
+`fleet sync --preview` shows what would be sent, `--enable` prints that preview and consents,
+`--disable` withdraws consent, `fleet sync` asks the running mothership to drain now, and
+`--status` shows where the push stands. None but a plain `fleet sync` or `--enable` sends anything.
+
+```sh
+colonizer fleet sync --preview  # colonies, log files and bytes that would go, and what never does
+colonizer fleet sync --enable   # print the preview, then consent for this membership
+colonizer fleet sync --disable  # stop sending
+colonizer fleet sync            # drain now: rows and payloads sent, pending, retired
+colonizer fleet sync --status   # consent_required, synced, backoff, unauthorized, removed or error
+```
+
+Without consent a plain `fleet sync` fails with the 409 and says how to give it. A manual
+`fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
+`Retry-After`. With the global `--json` both print the mothership's answer.
+
 ## `--json`
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
@@ -251,8 +271,9 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
-for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts` and
-`POST /api/fleet/peer/leave`.
+for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
+`POST /api/fleet/peer/leave`, and the history push's `POST /api/fleet/peer/rows` and
+`PUT /api/fleet/peer/payloads/{sha256}`.
 
 Everything else is the owner's at any scope — token management itself, settings, secrets, and
 publishing. The enforcement is the same for every client of the API, the CLI included.

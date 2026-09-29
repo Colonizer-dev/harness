@@ -119,6 +119,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // A fleet member the owner removed presents a token revoked on purpose: it reads 403
+        // "removed from the fleet", so the member can tell removal from a bad credential.
+        if let Some(token) = auth::bearer_token(req.headers())
+            && app.fleet_members.is_removed_token(&token).await
+        {
+            return crate::client_error(StatusCode::FORBIDDEN, "removed from the fleet").into_response();
+        }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
@@ -220,6 +227,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
         .merge(crate::fleet_members::routes())
+        .merge(crate::fleet_sync::routes())
         .merge(crate::gateway::routes())
         .merge(crate::github::routes())
         .merge(crate::graft::routes())
@@ -280,6 +288,7 @@ pub(crate) fn router(app: &Shared) -> Router {
 async fn start_tasks(app: &Shared, router: &Router) {
     crate::autonomy::start_tasks(app);
     crate::burn_down::start_tasks(app);
+    crate::fleet_sync::start_tasks(app);
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);
     crate::loops::start_tasks(app);

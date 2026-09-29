@@ -514,6 +514,12 @@ then it says to wait and can be pressed again, and **Cancel** abandons the join.
 owner's URL and **Leave fleet** (asked twice). Membership hands the other side a `fleet`-scoped
 token only — never this cockpit's own credential.
 
+A member also sees **History sync**, off at every join: beside the switch, how many finished
+colonies and log files — and how many bytes — turning it on would send to the owner, and what is
+never sent. **Send history to the owner** is the consent the history push waits for
+([fleet.md](fleet.md#history-push)); **Stop sending history** withdraws it. Leaving and re-joining
+turns it off again.
+
 ### Notifications and Web Push
 
 **Settings → Notifications.** These switches are kept in the browser, per browser:

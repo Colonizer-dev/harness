@@ -448,6 +448,44 @@ export interface FleetMembership {
   owner_url: string;
   member_id: string;
   joined_at: string;
+  /** Whether this machine's operator consented to pushing its history to the owner (issue #762). Off at every join. */
+  history_sync: boolean;
+}
+
+/** GET /api/fleet/sync/preview (issue #762): what turning the history push on would send — read from the same collection the push sends. */
+export interface FleetSyncPreview {
+  owner_url: string;
+  /** Finished colonies, one row each. */
+  colonies: number;
+  /** Their log files, and those files' bytes. */
+  payloads: number;
+  payload_bytes: number;
+  /** Logs over the size limit: named on their row, never sent. */
+  omitted_payloads: number;
+  row_bytes: number;
+  total_bytes: number;
+  /** What the owner has not acknowledged yet. */
+  pending_colonies: number;
+  pending_bytes: number;
+  includes: string;
+  excludes: string;
+}
+
+/** GET /api/fleet/sync's `status`: where the history push stands. */
+export type FleetSyncState = "idle" | "synced" | "backoff" | "unauthorized" | "removed" | "error" | "consent_required";
+
+/** GET /api/fleet/sync, and POST /api/fleet/sync/consent's answer. */
+export interface FleetSyncStatus {
+  member: boolean;
+  consent: boolean;
+  enabled: boolean;
+  status: FleetSyncState;
+  detail: string | null;
+  acknowledged: number;
+  retired: { id: string; error: string; attempts: number; at: string }[];
+  last_drain_at: string | null;
+  last_synced_at: string | null;
+  next_attempt_at: string | null;
 }
 
 /** GET /api/fleet `joining`: a join this mothership started and has not finished; both screens show `confirm_code` until the owner decides. */

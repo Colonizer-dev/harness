@@ -42,6 +42,7 @@ mod findings;
 mod fleet;
 mod fleet_export;
 mod fleet_members;
+mod fleet_sync;
 mod gateway;
 mod gateway_audit;
 mod github;
