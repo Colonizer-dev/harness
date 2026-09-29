@@ -174,8 +174,11 @@ scored against, `next_version` appears when recording the run's decisions left t
 rotation.
 
 Scoring makes no model calls, so its only cost is time: each result records
-`scoring: { visible_ms, heldout_ms }` and the run summary sums `scoring_ms` (not yet journaled into the
-mothership's spend.jsonl, #296).
+`scoring: { visible_ms, heldout_ms }` and the run summary sums `scoring_ms`, which `run` journals into
+the mothership's spend.jsonl once it finishes — one `scoring` row under the `bench` org, carrying the
+run's total ([protocol.md, §6.8 Spend](protocol.md#68-spend-per-org-and-per-day)), so the spend
+history shows it beside the colonies' spend. A failed write only warns: a lost row is not a failed
+run.
 
 ## Synthetic tasks
 

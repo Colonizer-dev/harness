@@ -82,7 +82,8 @@ Two settings layers sit next to the modules:
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`, `known-orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
-  per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog, notifications and the sensitivity
+  per-colony budget and host-disk quota, the sandbox stack, the egress fence, the path policy's masked and protected
+  lists, memory, the watchdog, notifications and the sensitivity
   provider marks, plus an on/off
   switch per org. `known-orgs.json` records the orgs seen on the signed-in GitHub account, so an org that appears for
   the first time asks instead of being adopted silently. A colony belongs to its repository

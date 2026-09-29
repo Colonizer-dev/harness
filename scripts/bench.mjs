@@ -16,7 +16,7 @@
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
 // and opens real pull requests on that repository, and on nothing else.
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -344,6 +344,19 @@ export function summarizeRun(results) {
     clean_rate: audited ? clean / n : null,
     gap: audited ? results.filter((r) => r.passed).length / n - clean / n : null,
   };
+}
+
+/** Journals a run's scoring time into the mothership's spend.jsonl (docs/protocol.md §6.8): one
+ *  `scoring` row under the `bench` org, so the spend history shows it beside the colonies' spend.
+ *  Scoring makes no model calls, so the row carries no tokens and no dollar — the time is all it
+ *  spent. A write failure is a lost measurement, not a failed run, so it only warns. */
+export function journalScoring(dataDir, scoringMs, now = new Date()) {
+  const row = { ts: now.toISOString(), day: now.toISOString().slice(0, 10), org: 'bench', kind: 'scoring', scoring_ms: scoringMs };
+  try {
+    appendFileSync(join(dataDir, 'spend.jsonl'), `${JSON.stringify(row)}\n`);
+  } catch (e) {
+    console.error(`bench: could not journal the scoring time to ${join(dataDir, 'spend.jsonl')}: ${e.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------- compare
@@ -675,6 +688,7 @@ async function main() {
     console.log('\nNo held-out suite was scored (pass --heldout <dir> to score one).');
   }
   const s = summarizeRun(results);
+  journalScoring(dataDirOf(args), s.scoring_ms);
   console.log(`\n${s.passed}/${s.tasks} passed · $${s.total_cost_usd.toFixed(2)} (routed $${s.routed_cost_usd.toFixed(2)}) · ${s.questions} questions · written to ${file}`);
   console.log(`Compare with: node scripts/bench.mjs compare bench-<other>.json ${file}`);
 }
