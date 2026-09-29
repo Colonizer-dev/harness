@@ -26,6 +26,13 @@ import type {
   Answers,
   BurnDownStatus,
   FleetHost,
+  CreatedFleetInvite,
+  FleetInvite,
+  FleetJoining,
+  FleetMember,
+  FleetMembership,
+  FleetPending,
+  FleetRole,
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
@@ -1395,6 +1402,20 @@ export function createMockApi(): Api {
     const [owner, name, extra] = repo.split("/");
     return extra === undefined && [owner, name].every((p) => !!p && p.length <= 100 && p !== "." && p !== ".." && /^[._a-zA-Z0-9-]+$/.test(p));
   };
+  // Fleet pairing (issue #686, docs/fleet.md): the mock starts as a fleet owner — one member, one
+  // machine mid-pairing, one open invite — so the owner side of the Fleet pane has all three lists
+  // filled. Removing the last member drops the role to "none", which unlocks the join form; the
+  // simulated owner approves a join six seconds in, so "Codes match" can be watched going from
+  // pending to joined without a second browser. As anywhere, the invite's code is handed out once.
+  let fleetInvites: FleetInvite[] = [{ id: "inv_seed1", expires_at: new Date(Date.now() + 9 * 60_000).toISOString() }];
+  let fleetPending: FleetPending[] = [
+    { id: "pen_seed1", name: "rfc-annex", url: "http://10.0.0.6:7878", confirm_code: "512849", expires_at: new Date(Date.now() + 11 * 60_000).toISOString(), status: "pending" },
+  ];
+  let fleetMembers: FleetMember[] = [{ id: "mem_seed1", name: "studio-2", url: "http://10.0.0.5:7878", joined_at: ago(3 * 1440) }];
+  let fleetMembership: FleetMembership | null = null;
+  let fleetJoining: FleetJoining | null = null;
+  const fleetRole = (): FleetRole => (fleetMembership ? "member" : fleetMembers.length > 0 ? "owner" : "none");
+  const mockInviteCode = () => Array.from({ length: 16 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join(""); // 80 bits
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   // acme/design-system's map has its entry far off the centre (bottom-left), as a real repo's did.
@@ -2694,6 +2715,80 @@ export function createMockApi(): Api {
       const at = apiTokens.findIndex((row) => row.id === id);
       if (at < 0) throw new ApiError("no such token", 404);
       apiTokens.splice(at, 1);
+    },
+    fleet: () =>
+      later(() => ({
+        role: fleetRole(),
+        invites: fleetInvites.map(clone),
+        pending: fleetPending.map(clone),
+        members: fleetMembers.map(clone),
+        membership: fleetMembership ? clone(fleetMembership) : null,
+        joining: fleetJoining ? clone(fleetJoining) : null,
+      })),
+    createFleetInvite: async () => {
+      await sleep(250);
+      if (fleetRole() !== "owner") throw new ApiError("only a fleet owner creates invites", 409);
+      const invite: CreatedFleetInvite = { id: `inv_${mockId()}`, code: mockInviteCode(), expires_at: new Date(Date.now() + 15 * 60_000).toISOString() };
+      fleetInvites.push({ id: invite.id, expires_at: invite.expires_at });
+      return invite;
+    },
+    deleteFleetInvite: async (id) => {
+      await sleep(200);
+      const at = fleetInvites.findIndex((row) => row.id === id);
+      if (at < 0) throw new ApiError("no such invite", 404);
+      fleetInvites.splice(at, 1);
+    },
+    approveFleetPending: async (id) => {
+      await sleep(250);
+      const at = fleetPending.findIndex((row) => row.id === id);
+      if (at < 0) throw new ApiError("no such pending request", 404);
+      const [row] = fleetPending.splice(at, 1);
+      const member: FleetMember = { id: row.id, name: row.name, url: row.url, joined_at: now() };
+      fleetMembers.push(member);
+      return { member: clone(member) };
+    },
+    rejectFleetPending: async (id) => {
+      await sleep(200);
+      const at = fleetPending.findIndex((row) => row.id === id);
+      if (at < 0) throw new ApiError("no such pending request", 404);
+      fleetPending.splice(at, 1);
+    },
+    removeFleetMember: async (id) => {
+      await sleep(250);
+      const at = fleetMembers.findIndex((row) => row.id === id);
+      if (at < 0) throw new ApiError("no such member", 404);
+      fleetMembers.splice(at, 1);
+    },
+    joinFleet: async (body) => {
+      await sleep(300);
+      // The server's rules in its order: already in a fleet is the 409, a bad/used/expired code is
+      // one 404 that names nothing (docs/fleet.md).
+      if (fleetRole() !== "none") throw new ApiError("this mothership is already in a fleet", 409);
+      if (!body?.owner_url?.trim() || !body.code?.trim()) throw new ApiError("owner_url and code are required", 400);
+      if (body.code.trim().length < 16) throw new ApiError("no such invite", 404);
+      fleetJoining = { owner_url: body.owner_url.trim(), confirm_code: String(Math.floor(100_000 + Math.random() * 900_000)), started_at: now() };
+      return { confirm_code: fleetJoining.confirm_code, status: "pending" as const };
+    },
+    confirmFleetJoin: async () => {
+      await sleep(250);
+      if (!fleetJoining) throw new ApiError("not joining any fleet", 404);
+      if (Date.now() - Date.parse(fleetJoining.started_at) > 6000) {
+        // The simulated owner has approved: the pairing completes and the fleet token arrives on
+        // the joining side, where nothing here reads it.
+        fleetMembership = { owner_url: fleetJoining.owner_url, member_id: `mem_${mockId()}`, joined_at: now() };
+        fleetJoining = null;
+        return { status: "joined" as const };
+      }
+      return { status: "pending" as const };
+    },
+    cancelFleetJoin: async () => {
+      await sleep(150);
+      fleetJoining = null;
+    },
+    leaveFleet: async () => {
+      await sleep(250);
+      if (!fleetMembership) throw new ApiError("not a member of any fleet", 409);
+      fleetMembership = null;
     },
     setUsage: async (enabled) => {
       await sleep(250);

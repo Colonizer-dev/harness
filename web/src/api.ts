@@ -40,6 +40,11 @@ import type {
   ScanPending,
   TouchedFiles,
   FleetHost,
+  CreatedFleetInvite,
+  FleetJoinRequest,
+  FleetJoinStatus,
+  FleetMember,
+  FleetState,
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
@@ -259,6 +264,26 @@ export interface Api {
   createToken(body: NewApiToken): Promise<CreatedApiToken>;
   /** DELETE /api/tokens/{id}: revokes at once; 404 when no token carries the id. */
   revokeToken(id: string): Promise<void>;
+  /** GET /api/fleet (issue #686, docs/fleet.md): this mothership's role and everything the Fleet pane renders, in one view. */
+  fleet(): Promise<FleetState>;
+  /** POST /api/fleet/invites: mints a single-use invite; its code is shown once. 409 while this mothership is itself in a fleet. */
+  createFleetInvite(): Promise<CreatedFleetInvite>;
+  /** DELETE /api/fleet/invites/{id}: revokes an open invite before it is redeemed. */
+  deleteFleetInvite(id: string): Promise<void>;
+  /** POST /api/fleet/pending/{id}/approve: admits the joining machine; the answer's member carries a fleet-scoped token on the joining side. */
+  approveFleetPending(id: string): Promise<{ member: FleetMember }>;
+  /** POST /api/fleet/pending/{id}/reject: turns the request down; the joiner's next confirm reads `rejected`. */
+  rejectFleetPending(id: string): Promise<void>;
+  /** DELETE /api/fleet/members/{id}: ends one membership — the member's fleet token is revoked, its local data stays. */
+  removeFleetMember(id: string): Promise<void>;
+  /** POST /api/fleet/join: redeems the owner's invite; both screens then show the answer's `confirm_code`. 409 while already a member, or an owner with members. */
+  joinFleet(body: FleetJoinRequest): Promise<{ confirm_code: string; status: "pending" }>;
+  /** POST /api/fleet/join/confirm: asks whether the owner has decided; `pending` means wait and try again. */
+  confirmFleetJoin(): Promise<{ status: FleetJoinStatus }>;
+  /** DELETE /api/fleet/join: cancels an in-progress join. */
+  cancelFleetJoin(): Promise<void>;
+  /** POST /api/fleet/leave: ends this mothership's own membership; every local colony and setting stays. */
+  leaveFleet(): Promise<void>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
@@ -602,6 +627,16 @@ export const httpApi: Api = {
   tokens: () => request("/api/tokens"),
   createToken: (body) => post("/api/tokens", body),
   revokeToken: (id) => del(`/api/tokens/${enc(id)}`),
+  fleet: () => request("/api/fleet"),
+  createFleetInvite: () => post("/api/fleet/invites"),
+  deleteFleetInvite: (id) => del(`/api/fleet/invites/${enc(id)}`),
+  approveFleetPending: (id) => post(`/api/fleet/pending/${enc(id)}/approve`),
+  rejectFleetPending: (id) => post(`/api/fleet/pending/${enc(id)}/reject`),
+  removeFleetMember: (id) => del(`/api/fleet/members/${enc(id)}`),
+  joinFleet: (body) => post("/api/fleet/join", body),
+  confirmFleetJoin: () => post("/api/fleet/join/confirm"),
+  cancelFleetJoin: () => del("/api/fleet/join"),
+  leaveFleet: () => post("/api/fleet/leave"),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

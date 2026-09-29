@@ -278,7 +278,14 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
-| `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry, polled on request |
+| `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
+| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` — everything the Settings → Fleet pane renders |
+| `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
+| `POST /api/fleet/pending/{id}/approve` · `…/reject` | The owner's decision on a redeemed invite. Approve answers `{member}` and mints the member's `fleet`-scoped token, handed over exactly once; reject leaves the joiner's next confirm reading `rejected` |
+| `DELETE /api/fleet/members/{id}` | End one membership from the owner's side: the member's fleet token is revoked, its local data stays |
+| `POST /api/fleet/join` · `POST /api/fleet/join/confirm` · `DELETE /api/fleet/join` | Redeem an owner's invite (`{owner_url, code, name?, url?}` → `{confirm_code, status: "pending"}`; **409** while already in a fleet, or an owner with members), poll for the owner's decision (`{status: "joined"\|"pending"\|"rejected"\|"expired"}`), cancel |
+| `POST /api/fleet/leave` | A member ends its own membership; the token is revoked and every local colony and setting stays |
+| `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
 | `PUT /api/modules/{kind}` | `{provider, enabled (default true), settings}` → saves config and answers the module as `GET` lists it. **400** for an unknown provider or setting, a value of the wrong type or out of range, or switching off a kind that must stay on (`source`, `sandbox`, `agent`, `publish`) |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module. `GET /api/repos` answers `[{full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}]`. The issue list is up to 200 open issues, filtered by the Source module's labels. Each issue carries `epic`: null, or `{reason, sub_issues}` when it is an epic (sub-issues, an `epic` label, or a title marking one; see *Epics* under `POST /api/sessions`) — sub-issue counts from up to two best-effort GraphQL pages (100 each) of the newest open issues, the label and title always |
@@ -378,6 +385,9 @@ routed together).
   nothing launches after revocation. A token edits and runs only the loops it created — an owner's
   loop reads as **404** — and map loops, whose runs launch outside any token's caps, stay
   owner-only.
+- `fleet` sits outside that ladder and cannot be minted here: fleet pairing
+  ([fleet.md](fleet.md), below) hands it to a member at approval, and it reaches only
+  `GET /api/hosts` and `POST /api/fleet/peer/leave`.
 
 Anything else is **403** naming the token's scope and the route; a colony- or map-scoped route for
 a repository outside the token's org/repo limits is **404**, the same answer an unknown id gets, so
@@ -1139,7 +1149,10 @@ called.
 
 Peers are configured with `COLONIZER_FLEET_PEERS`, a comma-separated list of base URLs (e.g.
 `http://100.127.251.53:7878,http://10.0.0.5:7878`) — the same one-item-per-comma parsing
-`COLONIZER_ALLOWED_HOSTS` uses. No port is opened by this change on any host: this mothership only
+`COLONIZER_ALLOWED_HOSTS` uses. Fleet membership adds its rows the same way, no list to maintain:
+a member also polls its fleet's owner, and an owner also polls the members that gave a URL
+([fleet.md](fleet.md)). This route is also the one a `fleet`-scoped token may call, so a member
+reads the fleet view with the token its pairing minted. No port is opened by this change on any host: this mothership only
 ever dials **out** to the URLs it is given, over whatever private network the operator already runs
 (their own tailnet, mesh, or VPN — never the public internet). `COLONIZER_BIND` stays loopback-only
 by default everywhere, exactly as before; an operator who wants a given host to answer these polls
@@ -1148,6 +1161,35 @@ sets *that host's own* `COLONIZER_BIND` to a private interface IP of their choos
 machine at all. Peer polls carry no token, so a peer answers the reduced `GET /api/status`
 (version, queue depth, microVM counts, numeric host capacity, platform/OS, storage verdict — no
 hostnames, host ids, repos, or account identities); the row keys on the configured URL.
+
+### Fleet pairing (issue #686)
+
+One mothership joins another's fleet like phone pairing: a single-use invite, both screens showing
+the same six-digit confirmation code, a human approving what they see. The full walkthrough, the
+`fleet` trust scope, the mesh ACL and the security notes are in [fleet.md](fleet.md); the state
+lives in `<config_dir>/fleet.json` (0600). The cockpit-facing routes are owner-only (a scoped token
+gets **403**); the `peer` routes are how the other machine drives its side of the pairing, and the
+first two are unauthenticated — the invite code, then the joiner's nonce, are the whole credential.
+The table above names each one; the shapes:
+
+- `POST /api/fleet/peer/redeem` `{code, nonce, name, url?}` answers `{pairing_id, confirm_code}` —
+  or the one **404** an invalid, expired and already-redeemed code all share, indistinguishably. The
+  first redeem consumes the code.
+- `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
+  `{status: "approved", token, member_id}` exactly once (a second poll reads **404**), or the
+  rejection. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
+  `GET /api/hosts` and `POST /api/fleet/peer/leave`, never minted by `POST /api/tokens`, and never
+  the member's local cockpit token.
+- `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
+  revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
+  enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](fleet.md).
+
+Both screens get the same six digits because each side computes them independently: the first 4
+bytes of SHA-256(`"colonizer-fleet-pair\0"` ‖ normalized invite code ‖ `"\0"` ‖ joiner nonce) taken
+as u32, mod 1,000,000. The owner knows the invite code and learns the nonce at the redeem; the
+joiner generated both. The digits are a compare for two people looking at two screens, not an
+authentication — a stolen invite redeemed by someone else is consumed, so the real joiner sees an
+error and the owner sees a request nobody vouches for.
 
 ### `GET /api/version`
 

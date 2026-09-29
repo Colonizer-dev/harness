@@ -136,6 +136,9 @@ pub struct App {
     /// so a peer that goes quiet still shows its last real numbers instead of nulls. This machine's
     /// own entry is never cached here — `crate::fleet::self_summary` always computes it live.
     pub fleet_cache: crate::fleet::FleetCache,
+    /// Fleet membership (fleet_members.rs, issue #686): who joined this mothership, who this
+    /// mothership joined, and the pairings in between — persisted to `<config_dir>/fleet.json`.
+    pub fleet_members: crate::fleet_members::FleetStore,
     pub gateway: crate::gateway::Gateway,
     /// The last `gh api user` answer for the GitHub credential, cached so the status poll does not
     /// hammer GitHub. Keyed on a fingerprint of the token; the token itself is never stored.
@@ -241,6 +244,7 @@ impl App {
             deja: crate::deja::Deja::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),
             fleet_cache: crate::fleet::FleetCache::new(),
+            fleet_members: crate::fleet_members::FleetStore::load(&cfg.config_dir),
             gateway: crate::gateway::Gateway::new(&cfg.data_dir)?,
             github_viewer: Mutex::new(None),
             graft: Mutex::new(Default::default()),

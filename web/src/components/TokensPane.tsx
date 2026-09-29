@@ -10,7 +10,8 @@ import type { ApiTokenMeta, ApiTokenScope, CreatedApiToken, NewApiToken } from "
 import { Pane } from "./SettingsDialog";
 import { Badge, Button, Spinner, cx, inputClass, timeAgo, type Tone } from "./ui";
 
-/** The scopes a new token may take, in the order the registry ranks them, with the one-line hint the picker shows. */
+/** The scopes a new token may take, in the order the registry ranks them, with the one-line hint the picker shows.
+ * `fleet` is absent on purpose: it is minted by fleet pairing, never created by hand (docs/fleet.md). */
 export const TOKEN_SCOPES: readonly { id: ApiTokenScope; hint: string }[] = [
   { id: "read", hint: "Watch the mothership and its colonies — nothing is driven." },
   { id: "operate", hint: "Also drive colonies that exist: answer, stop, resume." },
@@ -102,7 +103,7 @@ export function usedText(token: Pick<ApiTokenMeta, "last_used_at">, now: Date = 
   return token.last_used_at ? timeAgo(token.last_used_at, now) : "never used";
 }
 
-const SCOPE_TONE: Record<ApiTokenScope, Tone> = { read: "neutral", operate: "info", launch: "accent" };
+const SCOPE_TONE: Record<ApiTokenScope, Tone> = { fleet: "neutral", read: "neutral", operate: "info", launch: "accent" };
 
 /** The created day, "12 Sep 2026"; an unparseable stamp passes through, like the other panes. */
 function createdDay(createdAt: string): string {

@@ -448,8 +448,8 @@ what would be removed before you apply it.
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
 - **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, API tokens, Updates ([updates.md](updates.md)), Usage data ([usage-data.md](usage-data.md)),
-  Notifications, Desktop.
+  access, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
+  ([usage-data.md](usage-data.md)), Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
 
@@ -497,6 +497,22 @@ with a Copy button, and nothing can read it back afterwards — copy it before p
 **Revoke** asks for confirmation, then the token stops authenticating at once. The same three verbs are
 `colonizer token create|list|revoke`; what each scope may call is in
 [cli.md](cli.md#scoped-api-tokens).
+
+### Fleet
+
+**Settings → Fleet.** Where motherships join each other ([fleet.md](fleet.md)): this machine is
+either a fleet's owner, a member of another's fleet, or in neither.
+
+As the owner, **Create invite** mints a single-use code, shown once, that lives 15 minutes — hand it
+to the joining machine's operator together with this cockpit's URL. When that machine redeems it, a
+pending request appears showing its own six-digit code: **Approve** only if the joining machine's
+screen shows the same code, else **Reject**. **Remove** (asked twice) ends a membership.
+
+As a machine joining, enter the owner's URL and the invite code, and both screens then show a
+six-digit confirmation code. **Codes match** finishes the join once the owner has approved; until
+then it says to wait and can be pressed again, and **Cancel** abandons the join. A member sees the
+owner's URL and **Leave fleet** (asked twice). Membership hands the other side a `fleet`-scoped
+token only — never this cockpit's own credential.
 
 ### Notifications and Web Push
 

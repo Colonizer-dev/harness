@@ -41,6 +41,7 @@ mod execution;
 mod findings;
 mod fleet;
 mod fleet_export;
+mod fleet_members;
 mod gateway;
 mod gateway_audit;
 mod github;
