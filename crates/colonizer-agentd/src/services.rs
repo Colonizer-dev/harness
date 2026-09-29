@@ -36,6 +36,28 @@ const SVC_USAGE: &str =
          /tmp/colonizer-svc-NAME.log; --env takes bare variable NAMES only — a record never carries a value.
   stop   removes the record; the running process, if any, is left alone.";
 
+/// The guest dir holding agentd (a read-only single-file mount) and, beside it, the `colonizer-svc`
+/// link the boot script makes.
+pub const BIN_DIR: &str = "/opt/colonizer/bin";
+
+/// The warn event for a guest whose boot script could not link `colonizer-svc` into `bin_dir`
+/// (the script runs `set -u`, not `set -e`, so a failed link does not stop the boot). `None` when
+/// the link resolves to the binary, or when `bin_dir` holds no agentd at all — not a colony guest,
+/// e.g. agentd run by hand on a host.
+pub fn svc_link_warning(bin_dir: &Path) -> Option<String> {
+    if !bin_dir.join("colonizer-agentd").is_file() {
+        return None;
+    }
+    let link = bin_dir.join("colonizer-svc");
+    (!link.is_file()).then(|| {
+        format!(
+            "`colonizer-svc` is missing from {}: the boot script could not link it, so the agent cannot \
+             register services for a resume under that name; `colonizer-agentd svc ...` is the same command",
+            bin_dir.display()
+        )
+    })
+}
+
 /// What became of one declared service on a resumed boot.
 struct Restored {
     spec: ServiceSpec,
@@ -414,6 +436,23 @@ mod tests {
 
     fn restored(spec: ServiceSpec, outcome: Outcome) -> Restored {
         Restored { spec, outcome }
+    }
+
+    /// Issue #700: a colony guest whose boot script could not link `colonizer-svc` gets a warn
+    /// event naming the fallback; a working link, or a dir without agentd (not a guest), gets none.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_svc_link_is_a_warning_only_in_a_colony_guest() {
+        let dir = std::env::temp_dir().join(format!("colonizer-agentd-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(svc_link_warning(&dir), None, "no agentd here: not a colony guest");
+        std::fs::write(dir.join("colonizer-agentd"), b"").unwrap();
+        let warning = svc_link_warning(&dir).expect("agentd without its link warns");
+        assert!(warning.contains("colonizer-agentd svc"), "{warning}");
+        std::os::unix::fs::symlink(dir.join("colonizer-agentd"), dir.join("colonizer-svc")).unwrap();
+        assert_eq!(svc_link_warning(&dir), None, "the link resolves to agentd");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn argv<'a>(args: impl IntoIterator<Item = &'a str>) -> Vec<String> {

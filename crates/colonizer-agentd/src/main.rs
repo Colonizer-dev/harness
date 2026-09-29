@@ -217,6 +217,11 @@ async fn run(args: Args) -> Result<(), BoxError> {
         ),
     ));
 
+    // Issue #700: the boot script's `colonizer-svc` link is best-effort; a missing one is a warn
+    // event the host shows, not a silent gap the agent trips over later.
+    if let Some(warning) = services::svc_link_warning(Path::new(services::BIN_DIR)) {
+        store.append(log_event("warn", warning));
+    }
     // Path policy beyond boot (#648): masked and protected paths are bound inside nested
     // checkouts as they appear, before the runner exists to act on them. Best effort — a miss is
     // still reported at publish (watch.rs); it never stops the daemon.

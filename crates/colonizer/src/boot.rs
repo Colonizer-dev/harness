@@ -1474,8 +1474,11 @@ mount --bind /proc/sys /proc/sys 2>/dev/null \
   || echo "colonizer: /proc/sys stays writable" >&2
 mount -o remount,ro /sys 2>/dev/null || echo "colonizer: /sys stays writable" >&2
 # The agent-facing service registry (issue #700) is the agentd binary under its argv0 name. Only
-# the binary's own bind is read-only; the directory is the VM's filesystem, so the symlink sticks.
-ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc
+# the binary's own bind is read-only (msb mounts a single file, not its directory); the directory
+# is the VM's writable overlay root, so the symlink sticks. `set -u` is not `set -e`: a failed link
+# says so here, and agentd logs a warn event when it finds the link missing.
+ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc \
+  || echo "colonizer: could not link colonizer-svc; the agent must run \`colonizer-agentd svc\` instead" >&2
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --seal-token --state-dir /var/lib/colonizer
 "#;
 
@@ -1723,7 +1726,6 @@ mod tests {
         assert!(!agent_needs_node(&[]), "an empty command needs nothing mounted");
     }
 
-    /// The boot script puts the node bin dir first and keeps the claude entry as-is.
     /// Regression (PR #770's colony-e2e): the services mount targets a path inside the read-only
     /// `/colonizer` mount, so its mount point must be created host-side or the microVM fails to boot.
     #[test]
@@ -1740,6 +1742,7 @@ mod tests {
         std::fs::remove_dir_all(&vm_dir).unwrap();
     }
 
+    /// The boot script puts the node bin dir first and keeps the claude entry as-is.
     #[test]
     fn boot_script_puts_node_first() {
         assert!(
@@ -1763,6 +1766,47 @@ mod tests {
             path < link && link < exec,
             "the link sits between the PATH export ({path}) and the exec ({exec})"
         );
+        // `set -u` is not `set -e`: a failed link must say so, not vanish.
+        let fallback = BOOT_SCRIPT[link..exec].find("|| echo \"colonizer: could not link colonizer-svc");
+        assert!(fallback.is_some(), "a failed colonizer-svc link is loud");
+    }
+
+    /// The boot script's own link lines, run by `sh` against a stand-in bin dir: the link lands
+    /// where the PATH export looks, and a dir the guest cannot write (here: absent) makes a loud
+    /// line on stderr while the boot carries on to exec agentd (`set -u`, not `set -e`).
+    #[cfg(unix)]
+    #[test]
+    fn boot_script_links_colonizer_svc_and_says_so_when_it_cannot() {
+        let start = BOOT_SCRIPT.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let end = BOOT_SCRIPT.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let lines = &BOOT_SCRIPT[start..end];
+        let root = std::env::temp_dir().join(format!("colonizer-svc-link-{}", crate::util::short_id()));
+        let run = |bin: &std::path::Path| {
+            let script = format!(
+                "set -u\n{}echo booted",
+                lines.replace("/opt/colonizer/bin", &bin.display().to_string())
+            );
+            std::process::Command::new("sh").arg("-c").arg(script).output().unwrap()
+        };
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("colonizer-agentd"), b"").unwrap();
+        let ok = run(&bin);
+        assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), "booted");
+        assert!(ok.stderr.is_empty(), "{}", String::from_utf8_lossy(&ok.stderr));
+        assert_eq!(
+            std::fs::read_link(bin.join("colonizer-svc")).unwrap(),
+            bin.join("colonizer-agentd")
+        );
+        let failed = run(&root.join("absent"));
+        assert_eq!(
+            String::from_utf8_lossy(&failed.stdout).trim(),
+            "booted",
+            "the boot carries on"
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains("colonizer: could not link colonizer-svc"), "{stderr}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// The path policy is enforced in the guest before the agent starts, and every kind the host
