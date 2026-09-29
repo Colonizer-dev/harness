@@ -625,7 +625,12 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false},
                 "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true},
                 "autofix": {"type": "boolean", "title": "Autofix validated findings", "description": "When a colony files a validated finding, spawn a fix colony for it: a fresh colony whose pull request is reviewed by an independent session before anything merges. Can be switched off per colony at launch.", "default": false},
-                "automerge": {"type": "boolean", "title": "Merge fixes whose review passes", "description": "Merge a fix colony's pull request when its independent review passes; requires autofix, since with no fix colonies there is nothing to merge. Can be switched off per colony at launch.", "default": false}
+                "automerge": {"type": "boolean", "title": "Merge fixes whose review passes", "description": "Merge a fix colony's pull request when its independent review passes; requires autofix, since with no fix colonies there is nothing to merge. Can be switched off per colony at launch.", "default": false},
+                "merge_train": {"type": "string", "title": "Merge train", "enum": ["off", "on"], "description": "Opt in: a background loop squash-merges colonies' open pull requests, one per repository every two minutes, oldest first, and only when the repository's base branch is green, the pull request contains the base branch's tip, its own checks pass, and every commit is authored by an allowed identity and says nothing forbidden. Drafts, WIP/HOLD marks and failing checks are never merged; a pull request behind its base is caught up once per base commit, a conflicted one is left to the auto-rebase, and the branch is kept whenever another colony is stacked on it. The default for every repository; the overrides below switch it per owner or repository.", "default": "off"},
+                "merge_train_overrides": {"type": "string", "title": "Merge train per repository", "format": "merge-train-overrides", "description": "Comma-separated `owner=on|off` or `owner/repo=on|off` entries that switch the train per organization or per repository; a repository entry wins over an organization entry, and either wins over the switch above. Example: `acme=on, acme/widget=off`.", "default": ""},
+                "merge_train_deny_orgs": {"type": "string", "title": "Organizations the train never merges in", "description": "Comma-separated organization or owner names the train never merges in, whatever the switch above or the overrides say.", "default": ""},
+                "merge_train_authors": {"type": "string", "title": "Allowed commit authors", "description": "Comma-separated GitHub logins or email addresses that a pull request's commits may be authored by; a pull request carrying any other author is left open. Empty means the identity this mothership publishes as: the `gh` login and its noreply email, the author of every publish and catch-up commit. Compared case-insensitively.", "default": ""},
+                "merge_train_forbid": {"type": "string", "title": "Refuse commit messages containing", "description": "Comma-separated, case-insensitive substrings; a pull request any of whose commit messages contains one is never merged. For example `Co-Authored-By: Claude`.", "default": ""}
             }}),
         )],
         "memory" => vec![
@@ -953,6 +958,14 @@ fn validate_settings(
         if spec["format"].as_str() == Some("egress-entries")
             && let Some(s) = value.as_str()
             && let Err(problem) = crate::egress::validate_entries(s)
+        {
+            return Err(format!("setting `{key}`: {problem}"));
+        }
+        // The merge train's per-repository overrides, checked with the same parser the train reads
+        // them by: a malformed entry is refused here, at save time, never dropped where it matters.
+        if spec["format"].as_str() == Some("merge-train-overrides")
+            && let Some(s) = value.as_str()
+            && let Err(problem) = crate::merge_train::validate_overrides(s)
         {
             return Err(format!("setting `{key}`: {problem}"));
         }

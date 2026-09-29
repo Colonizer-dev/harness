@@ -61,6 +61,7 @@
 /api/memory/proposals                                GET    unauth=401    token=owner            activity=-
 /api/memory/proposals/{id}/approve                   POST   unauth=401    token=owner            activity=memory.review
 /api/memory/proposals/{id}/reject                    POST   unauth=401    token=owner            activity=memory.review
+/api/merge-train                                     GET    unauth=401    token=read             activity=-
 /api/models                                          GET    unauth=401    token=owner            activity=-
 /api/modules                                         GET    unauth=401    token=owner            activity=-
 /api/modules/{kind}                                  PUT    unauth=401    token=owner            activity=settings.save
