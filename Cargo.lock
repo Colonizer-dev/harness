@@ -633,8 +633,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-core"
-version = "0.5.0"
-source = "git+https://github.com/Cratefield/harness?rev=48d169f7b23f9fb003aeaddbb34a78957397c3ab#48d169f7b23f9fb003aeaddbb34a78957397c3ab"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "063509c507d59a67888527e7b2642877a83b5f344f9d51fc408c24e419a5b70d"
 dependencies = [
  "async-trait",
  "axum",
@@ -662,8 +663,9 @@ dependencies = [
 
 [[package]]
 name = "cratefield-module-telemetry"
-version = "0.1.0"
-source = "git+https://github.com/Cratefield/harness?rev=48d169f7b23f9fb003aeaddbb34a78957397c3ab#48d169f7b23f9fb003aeaddbb34a78957397c3ab"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "674226fa4128c4f30903d9543760e73457c30bcdecc41c9d98c7c056dcbddb28"
 dependencies = [
  "axum",
  "cratefield-core",

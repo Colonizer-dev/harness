@@ -28,7 +28,7 @@ chrono-tz = "0.10"
 # validated with (`payload::Batch::parse`) and the consent helpers. Not on crates.io, so a git
 # dependency pinned to a rev; the wire contract is docs/usage-data.md. The collector half runs on
 # the venture's side; this crate composes the client half only (docs/usage-data.md).
-cratefield-module-telemetry = { git = "https://github.com/Cratefield/harness", rev = "48d169f7b23f9fb003aeaddbb34a78957397c3ab" }
+cratefield-module-telemetry = "0.2"
 futures-util = "0.3.34"
 # Response body frame iteration, so tunnelled answers stream back to the relay in chunks (remote.rs).
 http-body-util = "0.1"
