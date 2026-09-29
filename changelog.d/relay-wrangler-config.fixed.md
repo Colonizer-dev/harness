@@ -1,1 +1,0 @@
-**The relay can deploy.** `services/relay/wrangler.toml` declared `[[durable_objects]]` as an array where wrangler requires a table, so `wrangler deploy` refused the file. The config is fixed, it points at the real `colonizer-relay` D1 database, and CI now dry-runs the relay deploy so a malformed config fails on the pull request. ([#531])

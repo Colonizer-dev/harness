@@ -9,8 +9,14 @@ into the colony image yet, and no end-to-end colony run has happened.**
 The runner is `runner.mjs`: one long-lived ACP agent process per colony. At boot it negotiates
 `initialize` (protocolVersion 1, clientCapabilities `fs.readTextFile`/`fs.writeTextFile` and
 `terminal`) and opens one `session/new` in the workspace; every `user_message` becomes one
-`session/prompt` turn, queued when one is already running. There is no `session/load`: the runner
-cannot resume a session, so it never emits `agent_session` (§2 rules).
+`session/prompt` turn, queued when one is already running. When the agent advertises
+`agentCapabilities.loadSession` at `initialize`, the runner announces its session id as
+`agent_session`, and a resume boot (`COLONIZER_RESUME_SESSION`: the harness continuing a colony
+that waited on its user) reloads that session with `session/load` instead — the `session/update`s
+the agent replays of the old conversation are history the harness already logged, never new
+events. A load that fails, or an agent without `loadSession`, falls back to a fresh `session/new`;
+that fresh session starts from the held answer alone, because the harness sends no task brief on a
+resumed boot, trusting the transcript to carry it ([boot.rs](../../../crates/colonizer/src/boot.rs)).
 
 ## Mapping
 
@@ -31,9 +37,10 @@ cannot resume a session, so it never emits `agent_session` (§2 rules).
 
 Interrupt sends `session/cancel` and answers every open permission request `cancelled`, so the turn
 ends as `interrupted by the user` and the runner keeps serving turns. `set_model` rides
-`session/set_model` — but only when the agent advertised model selection at `session/new`
-(`models.currentModelId`, which is also announced once as `model_changed`); otherwise it is a
-warning. On `shutdown` or stdin EOF the agent gets a `session/cancel` if a turn is running, then
+`session/set_model` — but only when the agent advertised model selection at `session/new`, or at
+`session/load` on a resumed boot (`models.currentModelId`, which is also announced once as
+`model_changed`); otherwise it is a warning. On `shutdown` or stdin EOF the agent gets a
+`session/cancel` if a turn is running, then
 SIGTERM (SIGKILL after 2 s), `status exited`, exit 0. An agent that dies on its own is a named
 `ACP_AGENT_FAILED` log plus `status error`, the turn in flight ends as an error, and the runner
 exits 1.
@@ -114,7 +121,10 @@ not checked, so the policy is guidance, and the microVM is the boundary.
 ## Limits
 
 - No `plan` event type in colonizer-runner/1: plans render as a `thinking` checklist.
-- No resume: a stopped colony starts a fresh ACP session (no `agent_session`, no `session/load`).
+- Resume rides the module's `session_resume` dir: the harness persists `/root/.gemini` outside the
+  VM, so the gemini preset keeps its conversation across a suspended colony's stop and
+  continuation (`session/load`, [above](#mapping)). A custom agent resumes only if it keeps its
+  sessions there too; otherwise the resumed boot starts a fresh session.
 - ACP names no token or cost figures, so `turn_end.cost_usd` is always null.
 
 ## Tests

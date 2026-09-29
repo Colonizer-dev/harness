@@ -59,7 +59,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `source` | `github` | List repositories and issues, fetch an issue for the prompt |
 | `sandbox` | `microsandbox` | Boot/stop/remove microVMs with mounts, secrets and network rules. A `preset` picks the image (pinned by digest from `crates/colonizer/images.lock`) and machine size; `auto`, the default, reads the stack off the repository's marker files when the colony's worktree is checked out and falls back to Node when a repository names none; explicit settings override it |
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
-| `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `codex`, `pi`, `hermes` and `grok-build` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
+| `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `pi` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
@@ -77,7 +77,8 @@ Two settings layers sit next to the modules:
   `<provider>/<model>`. The Claude Code runner starts a router inside
   the colony that sends those requests to the mothership's provider gateway
   (`host.microsandbox.internal:41750`). The gateway reaches loopback, LAN and tailnet providers, adds the
-  key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
+  key, queues requests per provider (`max_concurrent`) and per colony (at most 16 waiting), applies long
+  timeouts, and marks the colony busy
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`, `known-orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
@@ -93,8 +94,10 @@ Every authenticated gateway request appends one line to the colony's `gateway.js
 method and path, the requested and upstream model (each admitted only through the model-id
 validator), status, failure code, whether the answer licensed the Claude fallback, queue and total
 duration, request and response bytes, and token counts. The failure codes: `unknown_provider` (no
-such provider), `not_routed` (not this colony's), `restricted` (untrusted provider for a restricted
-task), `missing_key`, `budget`, `bad_request` (path or body the wire cannot serve), `queue_full`,
+such provider), `not_routed` (not this colony's provider or model), `restricted` (untrusted provider
+for a restricted task), `missing_key`, `budget`, `colony_inactive` (the colony or its token went
+away while the request waited for a slot), `bad_request` (path, method or body the wire cannot
+serve), `queue_full`,
 `unreachable`, `timeout`, `upstream_error` (a 4xx/5xx that is not quota), `quota_exhausted`,
 `body_read_failed` (the response broke after its headers). The record is a fixed struct and nothing
 else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
@@ -286,8 +289,14 @@ A colony waiting on its user holds a slot while doing nothing. Past a grace peri
 mothership tears the microVM down but keeps the worktree and the agent's own session transcript, the colony holds
 no parallel slot (the queue advances), and the status stays `waiting_for_answer` — the question stays answerable
 in the cockpit, over the events WebSocket, at `POST /api/sessions/{id}/answer`, and from the phone, exactly as
-before. The answer is persisted on the colony (`pending_answer`) before it is acknowledged, and the next queue
-tick brings the colony back ahead of new launches through the same slot admission every boot answers to: a fresh
+before. The answer is persisted on the colony (`pending_answer`, with `answered_at` recording when it arrived)
+before it is acknowledged. When a slot is free, the next queue tick brings the colony back through the same slot
+admission every boot answers to, ahead of new launches; when it is not, the colony stays `waiting_for_answer`
+with `suspended` and `pending_answer` both set — that pair, not a new status, is what "answered, waiting for a
+slot" reads as, and the answer-hold log line says whether a slot is free, how many answered colonies stand
+ahead, or that launches are paused. The restore pass takes answered colonies in answer order — `answered_at`,
+falling back to the suspension's own time for records saved before answers kept one, ties by colony id — still
+ahead of fresh launches, which the queue admits only after it. Either way the restore is a fresh
 microVM in which the runner resumes its own session — `COLONIZER_RESUME_SESSION` carries the `agent_session` id;
 the module declares where it keeps transcripts in `session_resume.dir`, and the harness mounts the colony's
 `transcripts/` directory there — with the answer as its first message. `pending_answer` is cleared only once a
@@ -305,20 +314,27 @@ in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
-microsandbox 0.6.18 cannot snapshot a running VM's memory: `msb snapshot create` is disk-only and wants a stopped
-sandbox, and `--resumable` answers `unsupported: resumable snapshots require VM pause/resume restore support`, so
-`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. microsandbox
-0.7.x can (`msb snapshot create --full`, `msb restore`, `msb pause/resume`); measured on a nested-KVM host, a full
-checkpoint of a running 512 MiB VM took 0.46 s (the VM pauses during capture) and 304 MB on disk, an incremental
-re-checkpoint +24 MB at 0.22 s, and a restore to usable 0.3 s. Adopting it wants a vendor pin bump, and
-`MSB_HOME` is version-locked — an older msb against a newer home fails every command — so it is follow-up work.
+microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
+checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
+`--guest-flush required` — but its restore cannot bring a colony back, measured on the pinned binaries. A
+sandbox that has ever carried a `--secret` fails its restore outright (`restore virtio device virtio_fs1 …
+No such file or directory`), whether or not the source sandbox still runs — and every colony carries one: its
+credential. `msb snapshot restore` accepts no `--secret` or `-e` that could restate the credential and
+environment on the restored sandbox, re-creates no volume bindings (the worktree and transcript mounts have to
+be passed again with `-v`), and has no per-direction network default — its `--net-default` is one value for
+both directions, so the deny-egress/allow-ingress fence every colony boots with cannot be restated. So
+`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. The
+function is the seam; what unblocks the switch is an upstream fix to the restore of secret-carrying sandboxes,
+plus a restore-time way to restate secrets, environment and the egress fence.
 Resuming a transcript whose `AskUserQuestion` tool_use was left unresolved is valid, too — verified with the
 SDK's bundled Claude Code CLI 2.1.270, which inserts the missing `tool_result` itself (`is_error`,
 "[Request interrupted by user for tool use]"), so the held answer arrives as the next user message.
 
 Disk-wise nothing new is kept: there is no snapshot file in this path. What a suspension keeps is the worktree
 and the transcript directory under the colony's session dir, which already count against the per-colony
-host-disk checks and are deleted with the colony.
+host-disk checks and are deleted with the colony. The same would hold for a snapshot artifact: the natural home
+is `<session dir>/snapshots/`, so it would be counted and cleaned up with the colony, with `msb snapshot remove`
+run before the directory goes away.
 
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
@@ -548,13 +564,19 @@ The microVM is the boundary; this is the layer inside it, for the case the wall 
 is root in the guest, and root can still reach kernel interfaces, another process's memory and the
 human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
 
-Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6.18 per
-`vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+Guest kernel baseline, measured 2026-09-25 on the stack as pinned then (microsandbox 0.6.18 per
+`vendor/vendor.lock`; the pin is 0.7.3 since issue #639, same libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
-`capability,selinux` — so Landlock pinning waits for a libkrunfw with `CONFIG_SECURITY_LANDLOCK=y`
-and landlock in its LSM list, a tracked follow-up. The guest also boots `nomodule`, with no
-debugfs, tracefs or sysrq.
+`capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the
+kernel configs at `libkrun/libkrunfw` leave `CONFIG_SECURITY_LANDLOCK` unset (x86_64's
+`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.3
+still bundles the same 5.6.1 build. Pinning stays blocked upstream (issue #638) until a libkrunfw
+ships `CONFIG_SECURITY_LANDLOCK=y` with `landlock` in its LSM list — `CONFIG_SECURITY=y` on
+aarch64 — inside a microsandbox release we pin, since an msb bump is one-way (`MSB_HOME` is
+version-locked); building our own kernel is not on the table. Once such a stack is pinned,
+harden.rs would apply the ruleset to the runner child and fail closed on `ENOSYS`. The guest also
+boots `nomodule`, with no debugfs, tracefs or sysrq.
 
 **Layer 1 — boot.sh** (`crates/colonizer/src/boot.rs`), as root before agentd is exec'd:
 `dmesg_restrict=1`, `kptr_restrict=2`; `/proc` remounted `hidepid=invisible` (fallback `hidepid=2`);
@@ -591,7 +613,8 @@ before exec, fail-closed — a step that fails fails the spawn:
   dumps off` to the event store before the first spawn, so a colony's log shows what guarded it.
 
 What it does not do: the agent stays root — DAC still gives it every file in the guest, the
-read-only `/colonizer` mounts' contents included. No Landlock yet; denials make no agentd events
+read-only `/colonizer` mounts' contents included. No Landlock yet (issue #638); denials make no
+agentd events
 yet (`EPERM` in the tool, a kernel-log line); network is [sandbox-network.md](sandbox-network.md).
 
 Verification and re-verification: `cargo test -p colonizer-agentd` runs a behavioural probe that

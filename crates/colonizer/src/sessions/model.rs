@@ -189,11 +189,15 @@ pub struct Park {
 /// A user answer that arrived while the colony was suspended and is still undelivered.
 /// `question_id` is the question it answered; `prompt` is the user message the resumed runner
 /// receives, formatted at answer time while the question text is still known — a manual resume
-/// rotates the event log, so boot time would be too late to quote the question.
+/// rotates the event log, so boot time would be too late to quote the question. `answered_at` is
+/// when the answer arrived, what the restore pass lines answered colonies up by; records saved
+/// before answers kept one carry no time, and the restore pass falls back to the suspension's own.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PendingAnswer {
     pub question_id: String,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<DateTime<Utc>>,
 }
 
 /// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
@@ -361,11 +365,18 @@ pub struct Session {
     /// The providers this colony may spend on through the gateway (issue #409): the ids its model
     /// settings actually route to, as computed at boot. `proxy` refuses a request for any other
     /// configured provider — providers.json is mothership-wide, and one colony's token must not
-    /// open another colony's provider. Empty for Claude-only colonies. `None` for a session saved
-    /// before the field existed: a colony already running across the upgrade keeps the access it
-    /// booted with, and its next boot derives and enforces the set.
+    /// open another colony's provider. Empty for Claude-only colonies. `None` reaches no provider:
+    /// the set is what the token's access is derived from, and boot records it before the token is
+    /// written (issue #681), so a live colony always has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_providers: Option<Vec<String>>,
+    /// The models this colony may request through the gateway, as `<provider-id>/<model>` pairs
+    /// derived at boot from the same model settings `allowed_providers` comes from (issue #681).
+    /// `proxy` refuses a request whose body names any other model on an allowed provider, checked
+    /// on the requested name before any `model_map` renaming. Empty for Claude-only colonies;
+    /// `None` reaches no model, like a `None` [`Session::allowed_providers`] reaches no provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_models: Option<Vec<String>>,
     /// The strictest file-sensitivity class this colony's task touches (sensitivity.rs, issue #472):
     /// `open`, `standard`, `custom` or `restricted`. The gateway refuses a `restricted` colony any
     /// provider not marked `trusted`, independently of `allowed_providers`. `None` for a colony that
@@ -498,6 +509,7 @@ impl Default for Session {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            allowed_models: None,
             sensitivity: None,
             routed_cost_usd: None,
             routed_tokens: None,
@@ -612,6 +624,7 @@ mod tests {
         s.pending_answer = Some(PendingAnswer {
             question_id: "q1".into(),
             prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
         });
         let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         assert_eq!(again.suspended, s.suspended);
@@ -622,6 +635,20 @@ mod tests {
         assert_eq!(wire["suspended"]["reason"], json!("waiting_for_answer"));
         assert_eq!(wire["suspended"]["path"], json!("session_resume"));
         assert_eq!(wire["pending_answer"]["question_id"], json!("q1"));
+        assert!(
+            wire["pending_answer"]["answered_at"].is_string(),
+            "the answer time rides the wire as RFC3339"
+        );
+    }
+
+    /// And a held answer saved before answers carried a time (issue #667) still loads: the restore
+    /// pass falls back to the suspension's own time for those.
+    #[test]
+    fn a_held_answer_saved_before_it_kept_a_time_still_deserialises() {
+        let saved = r#"{"question_id":"q1","prompt":"Q: Ship it?\nA: yes"}"#;
+        let answer: PendingAnswer = serde_json::from_str(saved).unwrap();
+        assert_eq!(answer.question_id, "q1");
+        assert_eq!(answer.answered_at, None, "no time on the record, none read back");
     }
 
     /// The park record (issue #213) survives the trip to the wire and back — this is the shape
@@ -693,6 +720,7 @@ mod tests {
         full.cost_usd = Some(1.5);
         full.model_usage = Some(json!({"claude-x": {"input_tokens": 1}}));
         full.allowed_providers = Some(vec!["acme".into()]);
+        full.allowed_models = Some(vec!["acme/claude-sonnet-5".into()]);
         full.routed_cost_usd = Some(0.25);
         full.host_disk_bytes = Some(1024);
         full.cleaned_up = true;

@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 // Minimal MCP stdio server for a Colonizer agent module, dependency-free: newline-delimited
 // JSON-RPC 2.0 (protocolVersion 2024-11-05). `wait` and `memory_search` read the local filesystem
-// here; `finding_file` and `memory_propose` leave the colony as protocol events, so they are
-// forwarded to the runner's loopback bridge (COLONIZER_BRIDGE_URL). finding_file is offered only
-// when the mothership set COLONIZER_FINDINGS=true, the memory tools only when COLONIZER_MEMORY_DIR
-// is mounted; `wait` is always offered.
+// here; `ask_user`, `finding_file`, `memory_propose`, `loop_next` and `loop_stop` leave the colony
+// as protocol events, so they are forwarded to the runner's loopback bridge (COLONIZER_BRIDGE_URL).
+// ask_user is the question channel (§2): the bridge is always up, so it is always offered.
+// finding_file is offered only when the mothership set COLONIZER_FINDINGS=true, the memory tools
+// only when COLONIZER_MEMORY_DIR is mounted, and the loop tools only for a loop colony
+// (COLONIZER_LOOP=true — loop_next additionally when the loop is self-paced); `wait` is always
+// offered. Asks can wait on a human for minutes, so while one is in flight the server sends
+// periodic progress notifications on the call's progressToken to hold the request open.
 
 import { realpathSync } from 'node:fs';
 import { open, readdir, readFile, stat } from 'node:fs/promises';
@@ -16,8 +20,19 @@ const BRIDGE = process.env.COLONIZER_BRIDGE_URL ?? '';
 const TOKEN = process.env.COLONIZER_BRIDGE_TOKEN ?? '';
 const MEMORY_DIR = process.env.COLONIZER_MEMORY_DIR ?? '';
 const FINDINGS = process.env.COLONIZER_FINDINGS === 'true';
+const LOOP = process.env.COLONIZER_LOOP === 'true';
+const SELF_PACED = process.env.COLONIZER_LOOP_SELF_PACED === 'true';
+// A self-paced loop's pacing bounds, the mothership's own (docs/loops.md): loop_next clamps into
+// them here, so the number in its answer is the schedule the mothership records.
+const NEXT_MIN_MINUTES = 15;
+const NEXT_MAX_MINUTES = 24 * 60;
 
 const TOOLS = [
+  {
+    name: 'ask_user',
+    description: 'Ask the user a question with 2-4 concrete options and wait for their answer. Use this whenever you need a decision, a clarification or any other input; never ask in plain text.',
+    inputSchema: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object', properties: { question: { type: 'string' }, header: { type: 'string' }, multiSelect: { type: 'boolean' }, options: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, description: { type: 'string' } }, required: ['label'] } } }, required: ['question', 'options'] } } }, required: ['questions'] },
+  },
   FINDINGS && {
     name: 'finding_file',
     description: 'File a confirmed problem found outside the task (what is wrong, where, why it matters). Include how you confirmed it as evidence.',
@@ -50,6 +65,23 @@ const TOOLS = [
       required: ['scope', 'title', 'content'],
     },
   },
+  LOOP && SELF_PACED && {
+    name: 'loop_next',
+    description: `Schedule this loop's next run: minutes from now (${NEXT_MIN_MINUTES} to ${NEXT_MAX_MINUTES}) and why.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        delay_minutes: { type: 'integer', description: `Minutes from now; clamped to ${NEXT_MIN_MINUTES}–${NEXT_MAX_MINUTES}` },
+        reason: { type: 'string', description: 'Why then: what the next run should find or do' },
+      },
+      required: ['delay_minutes', 'reason'],
+    },
+  },
+  LOOP && {
+    name: 'loop_stop',
+    description: "End this loop: it will not run again until the operator re-enables it. Use when the loop's goal is met.",
+    inputSchema: { type: 'object', properties: { reason: { type: 'string', description: 'Why the loop should stop' } }, required: ['reason'] },
+  },
   {
     name: 'wait',
     description: 'Block until something finishes instead of polling. Pass exactly one of: seconds, to sleep; file and pattern (a JavaScript regex), to return as soon as a line of the file matches — the file need not exist yet; or pid, to return when that process is gone. One call replaces repeated greps on a build log, and on timeout it reports the file\'s tail so you can decide what happened.',
@@ -73,7 +105,11 @@ const text = (value) => ({ content: [{ type: 'text', text: value }] });
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const secs = (ms) => `${Math.round(ms / 100) / 10} s`;
 
-async function forward(path, args) {
+// The bridge path per forwarded tool; the local tools (wait, memory_search) and the clamping
+// loop tools call forward with their path at the call site.
+const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory' };
+
+async function forward(path, args, progressToken) {
   let res;
   try {
     res = await fetch(`${BRIDGE}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify(args ?? {}) });
@@ -81,7 +117,18 @@ async function forward(path, args) {
     throw new Error(`colonizer bridge unreachable: ${error?.message ?? error}`);
   }
   if (!res.ok) throw new Error(`colonizer bridge answered HTTP ${res.status}`);
-  return res.json();
+  if (progressToken === undefined) return res.json();
+  // Hold a long ask open: a progress note every 15 s until the human answers.
+  let elapsed = 0;
+  const tick = setInterval(() => {
+    elapsed += 15;
+    send({ jsonrpc: '2.0', method: 'notifications/progress', params: { progressToken, progress: elapsed } });
+  }, 15_000);
+  try {
+    return await res.json();
+  } finally {
+    clearInterval(tick);
+  }
 }
 
 // --- shared memory search (docs/protocol.md §6.2) ----------------------------------------------
@@ -137,6 +184,31 @@ const formatResults = (results) =>
   results.length
     ? results.map((r) => `[${r.scope}] ${r.title} (/colonizer/memory/${r.file})\n${r.snippet}`).join('\n\n')
     : 'No shared memory matches that query.';
+
+// --- loops (docs/loops.md) ---------------------------------------------------------------------
+
+// A loop colony ends its loop with loop_stop, and a self-paced one names its next run with
+// loop_next. Both cross the bridge and leave the colony as protocol events; the mothership owns
+// the schedule and clamps the delay on its side too, but clamping here (NEXT_MIN_MINUTES,
+// NEXT_MAX_MINUTES above) keeps the answer the agent reads equal to the schedule it recorded.
+
+const refusal = (what, why) => text(`Could not ${what}: ${why}`);
+
+async function loopNext({ delay_minutes, reason }) {
+  if (!Number.isFinite(delay_minutes) || delay_minutes < 1) return refusal('schedule the next run', 'delay_minutes must be a number of minutes from now.');
+  if (!String(reason ?? '').trim()) return refusal('schedule the next run', 'reason is required — what the next run should find or do.');
+  const minutes = Math.min(NEXT_MAX_MINUTES, Math.max(NEXT_MIN_MINUTES, Math.round(delay_minutes)));
+  const data = await forward('/loop_next', { delay_minutes: minutes, reason: String(reason) });
+  if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
+  return text(`Next run scheduled in ${minutes} minutes.`);
+}
+
+async function loopStop({ reason }) {
+  if (!String(reason ?? '').trim()) return refusal('stop the loop', 'reason is required — why it should not run again.');
+  const data = await forward('/loop_stop', { reason: String(reason) });
+  if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
+  return text('The loop is stopped; this is its last run.');
+}
 
 // --- wait (issue #181) -------------------------------------------------------------------------
 
@@ -326,12 +398,17 @@ async function waitTool({ reason = '', seconds, file, pattern, pid, timeout_seco
 
 // --- JSON-RPC over stdio -----------------------------------------------------------------------
 
-async function onCall(name, args) {
+async function onCall(name, args, progressToken) {
   if (!TOOLS.some((tool) => tool.name === name)) throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
   try {
     if (name === 'wait') return await waitTool(args ?? {});
     if (name === 'memory_search') return text(formatResults(await searchMemory(args?.query)));
-    const data = await forward(name === 'finding_file' ? '/finding' : '/memory', args);
+    if (name === 'loop_next') return loopNext(args ?? {});
+    if (name === 'loop_stop') return loopStop(args ?? {});
+    const data = await forward(PATHS[name], args, progressToken);
+    // A cancelled ask (an interrupt, a turn end or a shutdown released the parked call) is a tool
+    // error the model can read, not a crash.
+    if (data?.cancelled) return { content: [{ type: 'text', text: 'The question was cancelled before the user answered.' }], isError: true };
     if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };
     return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data) }] };
   } catch (error) {
@@ -346,7 +423,7 @@ async function onMessage(msg) {
     let result;
     if (msg.method === 'initialize') result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'colonizer', version: '0.1.0' } };
     else if (msg.method === 'tools/list') result = { tools: TOOLS };
-    else if (msg.method === 'tools/call') result = await onCall(msg.params?.name, msg.params?.arguments);
+    else if (msg.method === 'tools/call') result = await onCall(msg.params?.name, msg.params?.arguments, msg.params?._meta?.progressToken);
     else throw Object.assign(new Error(`unknown method ${msg.method}`), { code: -32601 });
     send({ jsonrpc: '2.0', id: msg.id, result });
   } catch (error) {

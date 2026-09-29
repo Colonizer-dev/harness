@@ -51,6 +51,10 @@ pub struct AgentModule {
     /// cannot). The harness mounts a host directory over the path so transcripts survive a stopped
     /// microVM, and a suspended colony's answer resumes the same agent session (issue #562).
     pub resume_dir: Option<String>,
+    /// Whether the runner serves the loop MCP tools `loop_next` and `loop_stop` (issue #643),
+    /// declared as `"loop_tools": true` in the manifest. A loop's brief only names the tools when
+    /// the module it launches on declares them.
+    pub loop_tools: bool,
 }
 
 /// The manifest's `requires` declaration (issue #633): the binaries a colony needs on its `PATH`,
@@ -378,6 +382,12 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
                 .to_string(),
         ),
     };
+    // A loop-tools flag that is anything but a boolean would quietly strip a loop's colony of the
+    // tools its brief goes on to promise, so name the manifest problem now.
+    let loop_tools = match manifest.get("loop_tools") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("\"loop_tools\" must be a boolean")?,
+    };
     // A declared egress omitting a host its secrets are for would have the allowlist (#304) break
     // the requests those secrets authenticate; with no section, nothing is held to this.
     if let Some(egress) = &egress {
@@ -403,6 +413,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         requires,
         egress,
         resume_dir,
+        loop_tools,
     })
 }
 
@@ -422,6 +433,8 @@ pub struct Provider {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// Agent kind only: whether the module's runner serves the loop tools (`loop_tools`, #643).
+    pub loop_tools: bool,
 }
 
 pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
@@ -430,6 +443,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         name: name.into(),
         description: description.into(),
         schema,
+        loop_tools: false,
     };
     match kind {
         "source" => vec![p(
@@ -519,7 +533,13 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
         ],
         "agent" => agents
             .iter()
-            .map(|a| p(&a.id, &a.name, &a.description, a.schema.clone()))
+            .map(|a| Provider {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                description: a.description.clone(),
+                schema: a.schema.clone(),
+                loop_tools: a.loop_tools,
+            })
             .collect(),
         "interfaces" => vec![p(
             "default",
@@ -672,7 +692,14 @@ fn describe_kind(kind: &str, choice: &ModuleChoice, app: &App) -> Value {
         "kind": kind,
         "provider": choice.provider,
         "enabled": choice.enabled,
-        "providers": providers.iter().map(|p| json!({"id": p.id, "name": p.name, "description": p.description})).collect::<Vec<_>>(),
+        "providers": providers.iter().map(|p| {
+            let mut row = json!({"id": p.id, "name": p.name, "description": p.description});
+            // Only the agent kind's rows say it: the loop tools are a runner capability (#643).
+            if kind == "agent" {
+                row["loop_tools"] = json!(p.loop_tools);
+            }
+            row
+        }).collect::<Vec<_>>(),
         "settings": choice.settings,
         "schema": schema,
     });
@@ -927,6 +954,7 @@ mod tests {
             requires: Requires::default(),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
@@ -960,9 +988,32 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let pi = modules.iter().find(|m| m.id == "pi").expect("the pi manifest is discovered");
         assert!(!pi.needs_claude, "pi holds no claude binary and no Claude credential");
+        assert!(!pi.loop_tools, "pi serves no colonizer MCP server, so no loop tools");
         assert_eq!(pi.vm_command(), ["node", "/opt/colonizer/agent/runner.mjs"]);
         assert_eq!(pi.schema["properties"]["model"]["env"], "COLONIZER_MODEL");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_loop_tools_flag_is_parsed_from_the_manifest() {
+        // The loop tools (`loop_next`, `loop_stop`) are a per-module capability: the manifest
+        // declares them, and a loop's brief only names them when the module does (issue #643).
+        let dir = std::env::temp_dir().join(format!("colonizer-loop-tools-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("module.json");
+        let write = |manifest: &str| std::fs::write(&path, manifest).unwrap();
+
+        write(include_str!("../../../modules/agents/claude-code/module.json"));
+        assert!(read_agent(&path).unwrap().loop_tools, "claude-code serves the loop tools");
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"], "loop_tools": true}"#);
+        assert!(read_agent(&path).unwrap().loop_tools);
+        // Anything but a boolean is a manifest problem, not a silent default.
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"], "loop_tools": "yes"}"#);
+        assert_eq!(read_agent(&path).unwrap_err(), "\"loop_tools\" must be a boolean");
+        // And absent stays the default: no declaration, no loop tools.
+        write(r#"{"id": "x", "entry": ["node", "runner.mjs"]}"#);
+        assert!(!read_agent(&path).unwrap().loop_tools);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]
@@ -1021,6 +1072,7 @@ mod tests {
             requires: Requires::default(),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).
@@ -1499,6 +1551,7 @@ mod tests {
             requires,
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 
