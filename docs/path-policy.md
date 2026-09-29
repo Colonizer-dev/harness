@@ -75,6 +75,28 @@ it is already read-only, so masking it buys nothing. Protecting `.git/*`
 entries is allowed. Entries that fail are dropped again when the policy is
 resolved at boot, in case modules.json was edited by hand.
 
+## Per-org overrides
+
+An org can carry masked and protected lists of its own, on top of the global
+ones: `path_policy.mask_paths` and `path_policy.protect_paths` in the org's
+settings (`PUT /api/orgs/{org}`, or `orgs.json` beside `modules.json`). Both
+are optional arrays of worktree-relative paths, spelled like the global
+settings; `null` or an absent object inherits.
+
+The effective policy for an org's colonies is the union of the built-in
+defaults, the sandbox module's settings and the org's entries — and the org
+entries also beat the global `unmask_paths`, so an org can re-mask or
+re-protect a path the install opted out of. There is no per-org unmask: an org
+tightens, never loosens. Mask still wins between the lists.
+
+Org entries are validated like the global ones, with the same rules and the
+same 500-character cap, refused at save time (`PUT /api/orgs/{org}`); entries
+that fail anyway — `orgs.json` edited by hand — are dropped when the policy is
+resolved at boot. A global opt-out an org re-tightened is no longer logged as
+an opt-out at boot, since the colony does not see the path after all. The
+effective lists, org entries included, are what the boot writes to
+`vm/path-policy`.
+
 ## How enforcement works
 
 **Host, at boot.** Before the microVM starts, the boot walks each listed path
@@ -176,8 +198,6 @@ is held back as above.
 - **Paths created mid-session in nested checkouts** are caught only at
   publish: the placeholders and binds exist for the paths that existed at
   boot.
-- **Per-org overrides.** The three settings are global (the sandbox module);
-  an org cannot carry its own lists yet.
 - **The human's terminal can still unmount.** The colony runs as root inside
   its VM. Since in-guest hardening (#547), the agent and everything it spawns
   run without `CAP_SYS_ADMIN` and under a seccomp filter that answers `mount`,

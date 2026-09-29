@@ -1809,6 +1809,7 @@ other        9.9.9    linux-x64    agent  cc  https://x/other
             gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: Vec::new(),
             fleet_peers: Vec::new(),
+            bench_pool: None,
         };
         let staged = harness_staged_binaries(&cfg);
         assert_eq!(staged.len(), 1);
