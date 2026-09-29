@@ -15,15 +15,19 @@ spend and carry. Every field and route is in
 | :--- | :--- | :--- | :--- |
 | `claude-code` | yes — unrouted models go straight to Anthropic; `<provider>/<model>` rides the gateway's Anthropic Messages route | yes — same route; the gateway translates the openai wire | yes — the `disabled_tools` setting (`COLONIZER_DISABLED_TOOLS`) becomes the SDK session's `disallowedTools` |
 | `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`, grok: `api.x.ai`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | no — ACP names no per-tool switch, so the module declares no `disabled_tools` setting |
-| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | yes — native names (`shell`, `web_search`, `view_image`) become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, and the runner passes `--strict-config` so a key codex stops recognising fails the turn instead of silently keeping the tool; `apply_patch` (how codex writes files) and MCP tools cannot be turned off |
-| `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | yes — native tool ids (`run_terminal_cmd`, `read_file`, `write_file`, `search_replace`, `grep`, `list_dir`, `web_fetch`, `Agent`) go to `--disallowed-tools`; `web_search` is always off already |
+| `codex` | no — an `anthropic`-wire route is refused (`CODEX_MODEL_PROVIDER`): codex speaks the OpenAI wire only | yes — a `<provider>/<model>` whose prefix matches a route rides the gateway's OpenAI passthrough (`/v1/responses`) via a codex `model_provider` override; bare ids and `openai/` with no route go straight to `api.openai.com` with `CODEX_API_KEY` | yes — native names (`shell`, `web_search`, `view_image`) become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, and the runner passes `--strict-config` so a key codex stops recognising fails the turn instead of silently keeping the tool; `apply_patch` (how codex writes files) and MCP tools cannot be turned off |
+| `grok-build` | no — an `anthropic`-wire route is refused (`GROK_MODEL_PROVIDER`): grok speaks the OpenAI wire only | yes — same passthrough, via `GROK_MODELS_BASE_URL` and the colony token as the bearer key; bare ids and `xai-grok/` with no route go straight to `api.x.ai` with `XAI_API_KEY` | yes — native tool ids (`run_terminal_cmd`, `read_file`, `write_file`, `search_replace`, `grep`, `list_dir`, `web_fetch`, `Agent`) go to `--disallowed-tools`; `web_search` is always off already |
 | `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | yes, toolset-granular — the names are Hermes toolsets (`terminal`, `file`, `web`, `browser`, `vision`, `code_execution`, `todo`, `session_search`, `image_gen`, …) added to `agent.disabled_toolsets`; single tools inside a toolset (only `write_file`, say) cannot be turned off |
 | `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | yes — native tool ids become `permission: {"*": "allow", <id>: "deny"}` entries in the generated inline config; `edit` covers write/edit/apply_patch (the three share one permission) |
 | `pi` | yes — the runner writes `models.json` from the routes, `api: anthropic-messages` | yes — same; the gateway presents anthropic-messages to every guest | yes — native tool names (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) go to `--exclude-tools` |
 
-`codex` and `grok-build` run against their vendor API from the colony's own secret, so no route
-reaches them yet: no `model_map`, no spend accounting through the gateway, no connection-level tool
-strip.
+`codex` and `grok-build` speak only the OpenAI wire, so a route reaches them when the connection's
+wire is `openai`: the gateway forwards their Responses and Chat Completions requests to the
+connection verbatim and records the usage, so spend accounting and the budgets apply. A connection
+on the `anthropic` wire is refused by both runners, named in the model setting's error. A bare model
+id, or `openai/` / `xai-grok/` with no route configured, still runs against the vendor API from the
+colony's own secret, outside the gateway: no spend accounting through the gateway and no
+connection-level tool strip for those.
 
 ## `model_map` and wire names
 

@@ -47,6 +47,8 @@ const record = (extra = {}) => {
         GROK_MEMORY: process.env.GROK_MEMORY ?? null,
         GROK_TELEMETRY_ENABLED: process.env.GROK_TELEMETRY_ENABLED ?? null,
         GROK_DISABLE_AUTOUPDATER: process.env.GROK_DISABLE_AUTOUPDATER ?? null,
+        GROK_MODELS_BASE_URL: process.env.GROK_MODELS_BASE_URL ?? null,
+        GROK_CODE_XAI_API_KEY: process.env.GROK_CODE_XAI_API_KEY ? 'set' : 'unset',
         XAI_API_KEY: process.env.XAI_API_KEY ? 'set' : 'unset',
       },
       // The folder-trust preconditions the runner must hold: a headless child (no TTY on the pipes

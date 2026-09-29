@@ -711,6 +711,9 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
                 "base_url": format!("http://host.microsandbox.internal:{port}/providers/{}", provider.id),
                 "auth": "none",
                 "headers": {COLONY_HEADER: gateway_token},
+                // The wire the provider speaks, so a runner that talks the OpenAI wire itself (a
+                // non-Claude agent module) knows which routes serve it untranslated (issue #629).
+                "wire": provider.wire,
                 "timeout_secs": provider.timeout_secs(),
                 "context_tokens": provider.context_tokens,
                 "fallback_model": provider.fallback_model.as_deref().map(api_model),
@@ -992,10 +995,11 @@ fn valid_price(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
-/// The gateway appends the request's own path to an anthropic-wire base_url (e.g. `/v1/messages`, and
-/// `/v1/models` for the health probe), so a base already ending in `/v1` doubles it and 404s silently
-/// until the first real call surfaces it. `openai`-wire providers are unaffected: their base_url
-/// legitimately ends in `/v1` (e.g. xai-grok), since the translator appends `/chat/completions` itself.
+/// The gateway appends the request's own path to a base_url (e.g. `/v1/messages`, and `/v1/models`
+/// for the health probe), so on the `anthropic` wire — where the path is fixed — a base already
+/// ending in `/v1` doubles it and 404s silently until the first real call surfaces it, and is
+/// refused here instead. An `openai`-wire base legitimately ends in `/v1` (xai-grok's is
+/// `https://api.x.ai/v1`): the gateway's join there skips the guest path's repeated `/v1`.
 fn base_url_needs_stripping(base_url: &str, wire: Wire) -> bool {
     wire == Wire::Anthropic && base_url.ends_with("/v1")
 }
@@ -1495,9 +1499,10 @@ mod tests {
     }
 
     /// An anthropic-wire base_url ending in `/v1` doubles up with the path the gateway appends
-    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently. `openai`-wire
-    /// providers legitimately end in `/v1` (e.g. the xai-grok catalog entry), since the translator
-    /// appends `/chat/completions` itself, so the check only applies to `wire: anthropic`.
+    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently, so it is rejected.
+    /// An `openai`-wire base legitimately ends in `/v1` (e.g. the xai-grok catalog entry): the
+    /// gateway's join there skips the guest path's repeated `/v1`, so the check only applies to
+    /// `wire: anthropic`.
     #[test]
     fn an_anthropic_wire_base_url_ending_in_v1_is_rejected() {
         assert!(base_url_needs_stripping("https://api.example.com/v1", Wire::Anthropic));
