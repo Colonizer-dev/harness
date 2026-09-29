@@ -133,6 +133,28 @@ host path at boot already, so `.git/config` and `.git/hooks/` are beyond the
 colony's reach without a bind of their own; they are listed above for the
 record and for reporting.
 
+**While the colony runs.** The mount is silent by design — a blocked read is
+just an oddly empty file — so the runner reports the attempts instead. The
+Claude Code runner, and the ACP runner's `fs/read_text_file` and
+`fs/write_text_file`, judge each path-taking tool call against the same bind
+list the guest booted with (`/colonizer/path-policy`), resolve the path
+through any symlink the way the boot resolved its binds, and emit a
+`path_policy` event for a hit: a read of a masked path, or a write to a masked
+or protected one — a read of a protected path is allowed, so it is not an
+attempt. Reporting only: the event carries no decision, and the runner never
+blocks; the mount enforced before the report existed (docs/protocol.md §2).
+The harness turns each distinct (access, path) into one warn line on the
+colony — *path policy: agent tried to read masked `.env` (Read)* — and one
+entry in the History log (`colony.path_policy`), never repeating a path within
+a run and never carrying more than 100 distinct paths, so a colony circling
+against its policy cannot flood either log. Matching is anchored at the
+worktree root, which is where the binds sit: `vendor/lib/.env` reads as
+unmasked unless a settings entry names it, unlike the publish-time changed-path
+log below, which matches at any depth. What is *not* reported: an access that
+arrives through a shell command (`cat .env`) never touches a path-taking tool —
+that is the exec policy's `secret-paths` rule to refuse, and it does — and an
+agent module whose runner is not wired up reports nothing.
+
 **Host, whenever it reads the colony's work.** The placeholders are the
 policy's, never the colony's work, and the masked files are not the colony's to
 change. Every host-side git that snapshots or stages the worktree works from
@@ -173,9 +195,6 @@ is held back as above.
 
 ## Not yet covered
 
-- **Runtime per-access violation events.** A read of a masked file is blocked
-  by the mount, but nothing reports *attempted* access while the colony runs;
-  the only report is the publish-time changed-path log above.
 - **Paths created mid-session in nested checkouts** are caught only at
   publish: the placeholders and binds exist for the paths that existed at
   boot.

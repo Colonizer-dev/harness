@@ -537,6 +537,56 @@ pub(crate) fn violations(changed: &[String], policy: &Policy) -> Vec<String> {
         .collect()
 }
 
+/// The most distinct (access, path) attempts one run reports into the colony log and the activity
+/// (issue #647). A colony circling against its policy must not grow the set without bound; once
+/// the cap is hit further attempts stay unreported, and one notice says so.
+pub(crate) const ATTEMPT_CAP: usize = 100;
+
+/// The runtime report's dispatch arm (issue #647; events.rs keeps it thin, like `jev_ladder.rs`):
+/// one colony log line and one activity entry per distinct (access, path) a runner reports. The
+/// fields are untrusted runner output, so they re-clear the gates the trusted side passed before
+/// they reach a log: the access and the side must be exactly the contract's two words, the path
+/// must clear [`validate_path`] — relative, no control characters, no traversal, which is also
+/// every path a bind could carry — and the tool name is only clipped. Reporting only: nothing
+/// here blocks or decides anything, the mount did that before the report existed.
+pub(crate) async fn on_attempt(
+    app: &crate::Shared,
+    id: &str,
+    rt: &crate::sessions::Runtime,
+    access: &str,
+    policy: &str,
+    path: &str,
+    tool: &str,
+) {
+    if !matches!(access, "read" | "write") || !matches!(policy, "masked" | "protected") || validate_path(path).is_err() {
+        return;
+    }
+    let tool = crate::util::truncate(tool.trim(), 40);
+    let Some(first) = rt.note_path_policy(&format!("{access}\0{path}")).await else {
+        let notice =
+            format!("path policy: over {ATTEMPT_CAP} distinct attempted paths this run; further attempts are not reported");
+        if rt.warn_path_policy_once(&notice).await {
+            app.session_log(id, "warn", notice).await;
+        }
+        return;
+    };
+    if !first {
+        return;
+    }
+    let who = if !tool.is_empty() {
+        format!(" ({tool})")
+    } else {
+        String::new()
+    };
+    let message = format!("path policy: agent tried to {access} {policy} `{path}`{who}");
+    app.session_log(id, "warn", message.clone()).await;
+    if let Some(s) = app.session(id).await {
+        let mut entry = crate::activity::Entry::new("colony.path_policy", "colony").colony(&s);
+        entry.detail = Some(format!("tried to {access} {policy} `{path}`{who}"));
+        crate::activity::record(app, entry).await;
+    }
+}
+
 fn matches_any(path: &str, entries: &[String]) -> bool {
     let components: Vec<&str> = path.split('/').collect();
     entries.iter().any(|entry| {
@@ -1145,6 +1195,27 @@ mod tests {
             "only the filled one is left untracked"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The host-side dedupe and cap behind the runtime report (issue #647): one (access, path) is
+    /// carried once, the set stops at [`ATTEMPT_CAP`], and an already-carried path still dedupes
+    /// after the cap — reported as not-new either way, never as a fresh attempt.
+    #[tokio::test]
+    async fn attempts_are_deduped_and_capped_per_run() {
+        let dir = tempfile("attempts");
+        let rt = crate::sessions::Runtime::load(&dir.path);
+        assert_eq!(
+            rt.note_path_policy("read\0.env").await,
+            Some(true),
+            "the first of a kind is new"
+        );
+        assert_eq!(rt.note_path_policy("read\0.env").await, Some(false), "the repeat is not");
+        for i in 0..ATTEMPT_CAP {
+            rt.note_path_policy(&format!("write\0p{i}")).await;
+        }
+        assert_eq!(rt.note_path_policy("write\0one-more").await, None, "the cap holds");
+        assert_eq!(rt.note_path_policy("read\0.env").await, Some(false));
+        dir.close();
     }
 
     /// Little local tempdir helper, so the tests do not need a new dev-dependency. Named and
