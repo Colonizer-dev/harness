@@ -10,6 +10,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "../components/ui";
+import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewFromUrl, type SharedIssue } from "../launchUrl";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { colonyFromUrl } from "../push";
@@ -54,8 +55,9 @@ function storedDashOpen(): boolean | null {
 
 const THEME_KEY = "colonizer.theme";
 
-/** Every view the rail can route to; "home" is the Nest. */
-export const COCKPIT_VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
+/** Every view the rail can route to; "home" is the Nest. The list itself lives in launchUrl.ts,
+ *  next to the `?view=` parsing that must agree with it. */
+export { COCKPIT_VIEWS };
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -74,6 +76,7 @@ export function actionError(action: "stop" | "resume", colony: string, error: un
 
 export function Cockpit({
   sessions,
+  sessionsLoaded,
   orgs,
   redRuns = [],
   selectedOrg,
@@ -108,6 +111,8 @@ export function Cockpit({
 }: {
   /** Every colony the mothership knows; the cockpit filters to the chosen workspace itself. */
   sessions: Session[];
+  /** Whether the first session poll has landed; launch urls wait for it before acting. */
+  sessionsLoaded: boolean;
   orgs: OrgInfo[];
   /** Red-team runs; the overview card and the nest's raid overlay read them. */
   redRuns?: RedTeamRun[];
@@ -160,11 +165,16 @@ export function Cockpit({
 }) {
   const api = useApi();
   const toast = useToast();
-  const [view, setView] = useState<CockpitView>(storedView);
+  // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
+  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
   const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
+  // An issue a share-target launch handed over (`?share_url=…`, issue #745), kept until the colony
+  // list can say where it belongs; and the prefill that decision hands to the launch form.
+  const [shared, setShared] = useState<SharedIssue | null>(() => sharedIssueFromUrl(window.location.href));
+  const [launchPrefill, setLaunchPrefill] = useState<SharedIssue | null>(null);
   // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
   // `colonizer:open` message from the service worker, opened once the session list has it.
   const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
@@ -373,6 +383,7 @@ export function Cockpit({
     if (!deeplink) return;
     if (!sessions.some((s) => s.id === deeplink)) return;
     openColonyById(deeplink);
+    setPendingOpen(deeplink);
     setDeeplink(null);
     const url = new URL(window.location.href);
     if (url.searchParams.has("colony")) {
@@ -380,6 +391,51 @@ export function Cockpit({
       window.history.replaceState(null, "", url);
     }
   }, [deeplink, sessions, openColonyById]);
+
+  // The launch params are read into state at boot, so the address bar can lose them at once — a
+  // reload, a re-share or a copied url starts from the persisted view like any other day.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const before = url.search;
+    for (const name of LAUNCH_PARAMS) url.searchParams.delete(name);
+    if (url.search !== before) window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }, []);
+
+  // A shared issue (issue #745) waits for the first session poll, then goes where it belongs: the
+  // colony holding it opens, and otherwise Launch takes it prefilled. A pull request only ever
+  // follows a session that recorded its PR url, never an unrelated colony that happens to hold the
+  // same number.
+  useEffect(() => {
+    if (!shared || !sessionsLoaded) return;
+    const holder = holdingSession(sessions, shared);
+    if (holder) {
+      openColonyById(holder.id);
+      setPendingOpen(holder.id);
+    } else {
+      const owner = shared.repo.split("/")[0];
+      if (selectedOrg && !sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+      setLaunchPrefill(shared);
+      setView("launch");
+    }
+    setShared(null);
+  }, [shared, sessionsLoaded, sessions, openColonyById, selectedOrg, onSelectOrg]);
+
+  // The prefill is one-shot: the launch form reads it only when it mounts, so leaving Launch drops
+  // it — coming back starts from whatever the visitor last picked, not the shared issue again.
+  useEffect(() => {
+    if (view !== "launch") setLaunchPrefill(null);
+  }, [view]);
+
+  // Opening a colony from a deep link or a share competes with App's keep-a-valid-selection
+  // effect, which can run in the same commit still seeing the selection as empty and pick the
+  // newest live colony over the one just asked for. So the asked-for id is remembered, and once
+  // the selection has settled, re-asserted if it lost — a no-op whenever it stuck.
+  const [pendingOpen, setPendingOpen] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingOpen) return;
+    if (selectedId !== pendingOpen && sessions.some((s) => s.id === pendingOpen)) onSelectSession(pendingOpen);
+    setPendingOpen(null);
+  }, [pendingOpen, selectedId, sessions, onSelectSession]);
 
   const act = useCallback(
     async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
@@ -450,12 +506,16 @@ export function Cockpit({
       case "launch":
         return (
           <LaunchView
+            // A prefill that lands while Launch is already showing must remount the form, which
+            // reads the prefill only on mount.
+            key={launchPrefill ? `${launchPrefill.repo}#${launchPrefill.number}` : "blank"}
             org={selectedOrg}
             githubConnected={status?.github.connected ?? false}
             statusKnown={status !== null}
             autopilotDefault={autopilotDefault}
             maxParallel={status?.sandbox.max_parallel ?? null}
             sessions={sessions}
+            prefill={launchPrefill}
             onOpenColony={(session) => openColonyById(session.id)}
             onCreated={(session) => {
               onCreated(session);

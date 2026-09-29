@@ -66,6 +66,7 @@ import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
 import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
+import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
@@ -1563,6 +1564,9 @@ function DesktopPane({ back }: { back?: () => void }) {
               </Button>
               <span className="text-[12.5px] text-muted">Its own window and Dock/taskbar icon; same cockpit, same sign-in.</span>
             </div>
+          ) : showIosInstallHint() ? (
+            // On iOS the install and the push story are the same story: Add to Home Screen.
+            <IosHomeScreenSheet />
           ) : isSafari() ? (
             <p className="text-[12.5px] text-muted">
               In Safari: <Code>File → Add to Dock</Code>. It opens in its own window with the Colonizer icon.
@@ -1787,12 +1791,13 @@ function NotificationsPane({
               {subscribing ? "Subscribing…" : "Subscribe"}
             </Button>
           </Row>
-          {!pushable && (
+          {!pushable && !showIosInstallHint() && (
             <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
               This browser cannot join web push. On iPhone and iPad it needs iOS 16.4 or newer with Colonizer added to the Home Screen;
               everywhere else it needs a secure origin and a browser with push support.
             </p>
           )}
+          {!pushable && showIosInstallHint() && <IosHomeScreenSheet />}
           {subs !== null && subs.length > 0 && (
             <div className="mt-1 overflow-hidden rounded-xl border border-border">
               {subs.map((row) => (

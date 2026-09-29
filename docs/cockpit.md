@@ -517,7 +517,8 @@ Notifications only name the repository and issue number. They never include the 
 question, or an error.
 
 Limits: Web Push needs a secure origin (localhost counts) and a browser with push support. On iPhone
-and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen.
+and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen; on an iOS device that
+isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead.
 
 ### Desktop
 
@@ -525,7 +526,9 @@ and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen.
 
 - **Install app** installs the cockpit as an app with its own window and Dock or taskbar icon. The
   button appears when the browser offers installation (Chrome, Edge). In Safari, use File → Add to
-  Dock. Same cockpit, same sign-in.
+  Dock; on an iPhone or iPad the pane shows the Add to Home Screen steps instead. Same cockpit, same
+  sign-in. When the mothership ships a new build, a **Colonizer updated** card in the corner offers
+  **Reload**; the running build keeps working until you do.
 - **Start Colonizer at login** installs a macOS LaunchAgent or a Linux systemd user unit that starts
   the mothership when you log in. Turning it off never stops a running mothership. The same switch
   is `colonizer login-item enable|disable|status`.

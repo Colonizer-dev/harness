@@ -181,16 +181,28 @@ If the three mesh binaries are absent, colonies fall back to a loopback port, as
 taskbar icon, the same sign-in.
 
 - **Chrome or Edge:** use the install icon in the address bar, or **Settings → Desktop → Install
-  app**.
+  app**. On Android, Chrome offers the same install from the address-bar banner or the menu's
+  **Add to Home screen**.
 - **Safari:** **File → Add to Dock**.
+- **iPhone or iPad:** open the cockpit in Safari and pick **Add to Home Screen** from the share
+  sheet. When the device isn't installed yet, **Settings → Notifications** and **Settings →
+  Desktop** show those steps in the app itself, next to the web push they unlock.
 
-A small service worker makes that work. It caches the build's hashed `/assets` files and the GitHub
-avatars the mothership proxies, answers a short list of read-only views (repository details and
-package listings) from their last answer while it fetches a fresh one, shows the mothership's
+The installed app carries a few shortcuts — **Inbox**, **Colonize**, **Nest** — from the icon's
+long-press menu (right-click on the taskbar/Dock icon). Sharing a GitHub issue or pull request link
+to Colonizer (Android's share sheet) opens the colony holding it, or Colonize with that issue
+prefilled; a pull request only ever matches a colony that recorded it as its own pull request.
+
+A small service worker makes that work. It caches each build's hashed `/assets` files into a cache
+named for that build — the previous build's stays one build longer, so a tab that hasn't reloaded
+yet keeps working after an update — and caches the GitHub avatars the mothership proxies, answers
+a short list of read-only views (repository details and package listings) from their last answer
+while it fetches a fresh one, shows the mothership's
 [Web Push](https://developer.mozilla.org/docs/Web/API/Push_API) notifications, and shows an offline
 page when the mothership isn't running. It never caches pages, writes, the sign-in link or any other
-`/api` call. The manifest, service worker, offline page and icons load before sign-in; they contain
-nothing private.
+`/api` call. When a new build has installed and is waiting, a **Colonizer updated** card offers
+**Reload**; the running build keeps working until you do. The manifest, service worker, offline page
+and icons load before sign-in; they contain nothing private.
 
 **Start at login.**
 
