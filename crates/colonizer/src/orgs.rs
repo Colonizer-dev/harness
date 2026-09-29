@@ -99,6 +99,18 @@ pub struct EgressOverrides {
     pub block: Option<Vec<String>>,
 }
 
+/// Path-policy overrides for an org's colonies (#649). Every field optional: `None` inherits the
+/// global sandbox module setting. The lists add to the global ones and to the built-in defaults —
+/// an org tightens, never loosens: there is no per-org unmask, and an org entry even beats the
+/// global `unmask_paths`, re-tightening a path the install opted out of.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PathPolicyOverrides {
+    #[serde(default)]
+    pub mask_paths: Option<Vec<String>>,
+    #[serde(default)]
+    pub protect_paths: Option<Vec<String>>,
+}
+
 /// Every field is optional; `None` inherits the global module setting.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct OrgSettings {
@@ -131,6 +143,11 @@ pub struct OrgSettings {
     /// of the global sandbox module's, which always apply too. `None` inherits it whole.
     #[serde(default)]
     pub egress: Option<EgressOverrides>,
+    /// The path policy this org's colonies boot with (#649): masked and protected entries on top of
+    /// the global sandbox module's and the built-in defaults, which always apply too. `None`
+    /// inherits whole; an org tightens, never loosens (docs/path-policy.md).
+    #[serde(default)]
+    pub path_policy: Option<PathPolicyOverrides>,
     #[serde(default)]
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
@@ -719,6 +736,30 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
             }
         }
     }
+    // Path entries are checked with the same gate the boot resolves through and the same
+    // 500-character cap the global lists carry (modules.rs): a path the colony could not honour —
+    // absolute, traversal, the worktree root, a masked reach into `.git` — is refused at save time,
+    // while the operator is looking, never discovered from a boot log afterwards.
+    if let Some(policy) = &settings.path_policy {
+        for (kind, masked, list) in [
+            ("masked", true, &policy.mask_paths),
+            ("protected", false, &policy.protect_paths),
+        ] {
+            for entry in list.iter().flatten() {
+                let checked = if masked {
+                    crate::path_policy::validate_masked(entry)
+                } else {
+                    crate::path_policy::validate_path(entry)
+                };
+                if let Err(problem) = checked {
+                    return Err(format!("path policy {kind} entry {problem}"));
+                }
+                if entry.len() > 500 {
+                    return Err(format!("path policy {kind} entry is over 500 characters"));
+                }
+            }
+        }
+    }
     // The org may move the sensitivity bar either way (issue #626), but only within what the mark
     // vocabulary and the restricted floor allow; the helper names the problem when it isn't.
     if let Some(sensitivity) = &settings.sensitivity
@@ -867,6 +908,17 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
         }
         if unnamed_sub("egress", "block") {
             egress.block = saved_egress.block.clone();
+        }
+    }
+    if !named("path_policy") {
+        incoming.path_policy = saved.path_policy.clone();
+    } else if let (Some(saved_policy), Some(policy)) = (saved.path_policy.as_ref(), incoming.path_policy.as_mut()) {
+        // And inside it, a sub-field the client's build predates keeps its saved value.
+        if unnamed_sub("path_policy", "mask_paths") {
+            policy.mask_paths = saved_policy.mask_paths.clone();
+        }
+        if unnamed_sub("path_policy", "protect_paths") {
+            policy.protect_paths = saved_policy.protect_paths.clone();
         }
     }
     if !named("memory") {
@@ -1580,6 +1632,44 @@ mod tests {
         );
     }
 
+    /// The org's path lists are gated with the same checks the global ones are (issue #649): a
+    /// path the boot would have to drop — absolute, traversal, the root, a masked reach into
+    /// `.git` — is refused at save time, and the 500-character cap carries over.
+    #[test]
+    fn path_policy_overrides_are_validated() {
+        let org = |mask: &[&str], protect: &[&str]| OrgSettings {
+            path_policy: Some(PathPolicyOverrides {
+                mask_paths: Some(mask.iter().map(|s| s.to_string()).collect()),
+                protect_paths: Some(protect.iter().map(|s| s.to_string()).collect()),
+            }),
+            ..Default::default()
+        };
+        assert!(validate(&org(&["secrets/keys.json"], &["vendor/"])).is_ok());
+        assert!(
+            validate(&org(&[], &[".git/hooks/"])).is_ok(),
+            "protecting `.git` entries is allowed"
+        );
+        for bad in ["/etc/passwd", "../etc", "a/../b", "/", ".", " .env", "a:b"] {
+            assert!(validate(&org(&[bad], &[])).is_err(), "masked {bad:?} must be refused");
+            assert!(validate(&org(&[], &[bad])).is_err(), "protected {bad:?} must be refused");
+        }
+        assert!(
+            validate(&org(&[".git/config"], &[])).is_err(),
+            "masking inside `.git` is refused, protecting it is not"
+        );
+        let long = "a".repeat(501);
+        assert!(validate(&org(&[&long], &[])).is_err(), "the 500-character cap carries over");
+        assert!(validate(&org(&[&"a".repeat(500)], &[])).is_ok());
+        // Nothing set is the inherit case, and it stays valid.
+        assert!(
+            validate(&OrgSettings {
+                path_policy: None,
+                ..Default::default()
+            })
+            .is_ok()
+        );
+    }
+
     #[test]
     fn notify_settings_layer_over_the_module_like_the_watchdogs() {
         let modules = ModulesConfig::default();
@@ -1650,6 +1740,10 @@ mod tests {
             notify: Some(NotifyOverrides {
                 on_failed: Some(false),
                 ..Default::default()
+            }),
+            path_policy: Some(PathPolicyOverrides {
+                mask_paths: Some(vec!["secrets/".into()]),
+                protect_paths: Some(vec!["vendor/".into()]),
             }),
             sensitivity: Some(SensitivityOverrides {
                 restricted: Some("trusted".into()),
@@ -1738,9 +1832,15 @@ mod tests {
             saved.sensitivity.clone(),
             "and the sensitivity overrides a web build from before issue #626"
         );
+        assert_eq!(
+            incoming.path_policy,
+            saved.path_policy.clone(),
+            "and the path policy overrides a web build from before issue #649"
+        );
 
         // Inside the sensitivity object the merge reaches one level deeper, like egress: a build
-        // that knows the object but names only some classes keeps the rest of the saved ones.
+        // that knows the object but names only some classes keeps the rest of the saved ones. The
+        // path policy object merges the same way.
         let partial = json!({"sensitivity": {"standard": "vetted", "restricted": null}});
         let mut partial_incoming: OrgSettings = serde_json::from_value(partial.clone()).unwrap();
         keep_unnamed_fields(&mut partial_incoming, &saved, Some(&partial));
@@ -1753,6 +1853,28 @@ mod tests {
                 ..Default::default()
             }),
             "the named class wins (null inherits), the unnamed ones keep their saved values"
+        );
+        let partial = json!({"path_policy": {"mask_paths": ["keys/"]}});
+        let mut partial_incoming: OrgSettings = serde_json::from_value(partial.clone()).unwrap();
+        keep_unnamed_fields(&mut partial_incoming, &saved, Some(&partial));
+        assert_eq!(
+            partial_incoming.path_policy,
+            Some(PathPolicyOverrides {
+                mask_paths: Some(vec!["keys/".into()]),
+                protect_paths: Some(vec!["vendor/".into()]),
+            }),
+            "the named list wins, the unnamed one keeps its saved value"
+        );
+        let clears = json!({"path_policy": {"protect_paths": null}});
+        let mut cleared_policy: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared_policy, &saved, Some(&clears));
+        assert_eq!(
+            cleared_policy.path_policy,
+            Some(PathPolicyOverrides {
+                mask_paths: Some(vec!["secrets/".into()]),
+                protect_paths: None,
+            }),
+            "a named null clears the list back to inherit"
         );
 
         // A save with no settings object at all — an empty PUT — changes nothing.

@@ -319,9 +319,96 @@ fn wait_reason(n: usize) -> String {
 // Hunter briefs and launch
 // ---------------------------------------------------------------------------
 
+/// The bench's raid set (`scripts/bench/synth.mjs`, written to `<pool>/raid.json`): injected bugs
+/// the pool's own gate caught unreliably, kept out of scoring and carried with a brief naming what
+/// was injected and where. A mothership pointed at the pool (`COLONIZER_BENCH_POOL`) hands the
+/// entries recorded against the raided repository to the hunters with their briefs. The file is
+/// read through the same bounded regular-file reader as a colony report, so a raid.json that grew
+/// wrong or is not a plain file at all never becomes an unbounded read.
+const RAID_CAP: u64 = 1_000_000;
+
+/// The most raid leads one hunter's brief carries, however long the raid set is.
+const RAID_LEADS_PER_BRIEF: usize = 20;
+
+/// One raid-set lead, cut down to what a hunter's brief quotes: the bench's own one-line brief and
+/// the location, injected class and commit it recorded.
+#[derive(Debug)]
+struct RaidLead {
+    brief: String,
+    file: String,
+    line: Option<u64>,
+    method: String,
+    commit: Option<String>,
+}
+
+impl RaidLead {
+    /// The lead as one bullet line, every field cut so a raid set of long entries cannot push a
+    /// hunter's instructions anywhere near what a launch truncates at (20,000 chars,
+    /// sessions/launch.rs).
+    fn line(&self) -> String {
+        let place = match self.line {
+            Some(line) => format!("{}:{line}", truncate(&self.file, 200)),
+            None => truncate(&self.file, 200),
+        };
+        let mut parts = vec![place];
+        if !self.method.is_empty() {
+            parts.push(format!("class {}", truncate(&self.method, 80)));
+        }
+        if let Some(commit) = self.commit.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+            let short: String = commit.chars().take(12).collect();
+            parts.push(format!("at commit {short}"));
+        }
+        format!("- {} ({})", truncate(self.brief.trim(), 300), parts.join(", "))
+    }
+}
+
+/// The raid set's leads for `repo`: entries whose `source.repo` names the repository the run raids
+/// (ASCII case-insensitive — the label comes from a `git remote` URL). Entries that cannot name
+/// their bug and its file are skipped: there is nothing to chase. A missing, unreadable or
+/// malformed raid set reads as none, logged — a broken bench must not cost the swarm its launch.
+fn raid_leads(pool: &FsPath, repo: &str) -> Vec<RaidLead> {
+    let path = pool.join("raid.json");
+    let warn = |why: String| eprintln!("redteam: {why} — hunters are briefed without raid leads");
+    let Ok(content) = crate::github::read_regular_file(&path, RAID_CAP) else {
+        warn(format!("the bench raid set at {} is not readable", path.display()));
+        return Vec::new();
+    };
+    let Ok(entries) = serde_json::from_str::<Vec<Value>>(&content) else {
+        warn(format!("the bench raid set at {} is not a JSON array", path.display()));
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter(|entry| entry["source"]["repo"].as_str().is_some_and(|r| r.eq_ignore_ascii_case(repo)))
+        .filter_map(|entry| {
+            let brief = entry["brief"].as_str()?.trim().to_string();
+            let file = entry["source"]["file"].as_str()?.trim().to_string();
+            if brief.is_empty() || file.is_empty() {
+                return None;
+            }
+            Some(RaidLead {
+                brief,
+                file,
+                line: entry["source"]["line"].as_u64(),
+                method: entry["method"].as_str().unwrap_or_default().trim().to_string(),
+                commit: entry["source"]["commit"].as_str().map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+/// The leads hunter `i` of `n` chases: a round-robin over the set — lead `i`, then every `n`th after
+/// it — so no lead is handed to two hunters. The per-brief cap keeps a long raid set from bloating
+/// one brief; a set longer than the swarm can carry at the cap leaves its tail for a later run.
+fn leads_for(raid: &[RaidLead], i: usize, n: usize) -> Vec<&RaidLead> {
+    raid.iter().skip(i).step_by(n).take(RAID_LEADS_PER_BRIEF).collect()
+}
+
 /// The runner brief one hunter gets, as the request body of `POST /api/sessions`. Hunters are
-/// numbered from 1 in both the title and the brief, so the role line matches the UI.
-fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
+/// numbered from 1 in both the title and the brief, so the role line matches the UI. `raid` is the
+/// bench raid set for the raided repository ([`raid_leads`]); a hunter with no share of it is
+/// briefed exactly as before.
+fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Value {
     let focus = FOCUSES[i % FOCUSES.len()];
     let others: Vec<&str> = FOCUSES
         .iter()
@@ -337,6 +424,21 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
         "NEVER open, merge or autofix anything unless explicitly told to. You are here to find and \
          report bugs, not to change the code."
     };
+    let mine = leads_for(raid, i, n);
+    let raid = if mine.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = mine.iter().map(|lead| lead.line()).collect();
+        format!(
+            "\n\n\
+             The bench's raid set holds known injected bugs in this repository that no test run caught\n\
+             reliably. These leads are assigned to you — chase them first, even where they fall outside\n\
+             your assignment above; for these alone the focus split above does not apply:\n\
+             \n\
+             {}\n",
+            lines.join("\n"),
+        )
+    };
     let instructions = format!(
         "You are red-team hunter {} of {n} raiding {}, using the {module} module.\n\
          \n\
@@ -351,7 +453,7 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize) -> Value {
          \n\
          Report what you find with the findings tool.\n\
          \n\
-         {fix}",
+         {fix}{raid}",
         i + 1,
         run.repo,
         others.join("; "),
@@ -467,6 +569,12 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
     }
     let mut hunters = Vec::with_capacity(n);
     let mut any_live = false;
+    // The raid set is read once per launch and shared out round-robin; no pool configured, no raid
+    // paragraph — the briefs are exactly what they always were.
+    let raid = match app.cfg.bench_pool.as_deref() {
+        Some(pool) => raid_leads(pool, &run.repo),
+        None => Vec::new(),
+    };
     for i in 0..n {
         // A stop may have landed while this swarm was being created: its terminal state wins, and
         // no more hunters launch.
@@ -481,7 +589,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
         {
             break;
         }
-        let brief = hunter_brief(run, i, n);
+        let brief = hunter_brief(run, i, n, &raid);
         match launch_hunter(app.clone(), brief).await {
             Ok(session) => {
                 if session.status.is_live() {
@@ -2616,5 +2724,255 @@ mod tests {
         let err = schedule_from(&app, req, "rts_y".into(), now, now).unwrap_err();
         assert!(err.message().contains("not in acme"), "{}", err.message());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A raid-set entry, shaped the way `scripts/bench/synth.mjs` writes it: a procedural mutant of
+    /// one line in one file, with the brief the hunters are meant to chase.
+    fn raid_entry(repo: &str, file: &str, line: u64, brief: &str) -> Value {
+        json!({
+            "id": format!("{file}#{line}"),
+            "method": "procedural:swap-operands",
+            "stack": "node",
+            "source": {"repo": repo, "commit": "0123456789abcdef0123456789abcdef01234567", "file": file, "line": line},
+            "mutation": {"offset": 12, "from": "a", "to": "b"},
+            "gate": {"reference": "green", "bugged": "red"},
+            "cost_usd": 0,
+            "created": "2026-09-24T00:00:00Z",
+            "brief": brief,
+        })
+    }
+
+    /// A pool directory with the given raid set written to it, inside the test root so the cleanup
+    /// at the end of the test takes it with the rest.
+    fn raid_pool(root: &FsPath, entries: &[Value]) -> PathBuf {
+        let pool = root.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        std::fs::write(pool.join("raid.json"), serde_json::to_string(entries).unwrap()).unwrap();
+        pool
+    }
+
+    /// A run the brief builder can work from: `modules` must be non-empty or the brief panics.
+    fn raid_run(repo: &str) -> RedTeamRun {
+        RedTeamRun {
+            repo: repo.into(),
+            modules: vec!["general".into()],
+            ..Default::default()
+        }
+    }
+
+    /// The leads a brief carries, named by the `file` (or `file:line`) each bullet opens with.
+    fn lead_files(brief: &str) -> Vec<String> {
+        brief
+            .lines()
+            .filter(|l| l.starts_with("- "))
+            .map(|l| {
+                l.split('(')
+                    .nth(1)
+                    .unwrap_or_default()
+                    .split(", ")
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches(')')
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn raid_leads_keep_the_raided_repos_entries_case_insensitively_and_skip_the_rest() {
+        let root = temp_root();
+        let pool = raid_pool(
+            &root,
+            &[
+                raid_entry(
+                    "acme/repo",
+                    "src/kept.rs",
+                    42,
+                    "An injected bug of class c lives in src/kept.rs; find it and fix it.",
+                ),
+                raid_entry("ACME/REPO", "src/case.rs", 7, "A case-variant entry."),
+                raid_entry("other/repo", "src/elsewhere.rs", 3, "Someone else's bug."),
+                json!({"source": {"repo": "acme/repo", "file": "src/no-brief.rs", "line": 1}}),
+                json!({"brief": "A bug with nowhere to live.", "source": {"repo": "acme/repo"}}),
+                json!({"brief": "  ", "source": {"repo": "acme/repo", "file": "src/blank.rs"}}),
+                json!({"brief": "No source block at all."}),
+            ],
+        );
+        let leads = raid_leads(&pool, "Acme/Repo");
+        assert_eq!(leads.len(), 2, "two chaseable entries for the repo, any case: {leads:?}");
+        assert_eq!(leads[0].file, "src/kept.rs");
+        assert_eq!(leads[0].line, Some(42));
+        assert_eq!(leads[0].method, "procedural:swap-operands");
+        assert_eq!(leads[0].commit.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        assert_eq!(leads[1].file, "src/case.rs");
+        // The bullet quotes the bench's own brief, then where, what class and (shortened) at what commit.
+        assert_eq!(
+            leads[0].line(),
+            "- An injected bug of class c lives in src/kept.rs; find it and fix it. \
+             (src/kept.rs:42, class procedural:swap-operands, at commit 0123456789ab)"
+        );
+        // An entry with no line still reads as a place: just the file.
+        let no_line = RaidLead {
+            brief: "b".into(),
+            file: "src/x.rs".into(),
+            line: None,
+            method: String::new(),
+            commit: None,
+        };
+        assert_eq!(no_line.line(), "- b (src/x.rs)");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unreadable_or_malformed_raid_set_reads_as_none() {
+        let root = temp_root();
+        let pool = root.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        // No raid.json at all.
+        assert!(raid_leads(&pool, "acme/repo").is_empty());
+        // A directory where raid.json should be.
+        std::fs::create_dir_all(pool.join("raid.json")).unwrap();
+        assert!(raid_leads(&pool, "acme/repo").is_empty());
+        std::fs::remove_dir(pool.join("raid.json")).unwrap();
+        // Not JSON, and JSON that is not an array.
+        std::fs::write(pool.join("raid.json"), "not json at all").unwrap();
+        assert!(raid_leads(&pool, "acme/repo").is_empty());
+        std::fs::write(pool.join("raid.json"), "{}").unwrap();
+        assert!(raid_leads(&pool, "acme/repo").is_empty());
+        std::fs::remove_file(pool.join("raid.json")).unwrap();
+        // A symlink standing in for the real file is refused like any VM-written path.
+        std::fs::write(root.join("elsewhere.json"), "[]").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("elsewhere.json"), pool.join("raid.json")).unwrap();
+        assert!(raid_leads(&pool, "acme/repo").is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raid_leads_round_robin_over_the_swarm_and_leadless_briefs_are_unchanged() {
+        let run = raid_run("acme/repo");
+        let raid: Vec<RaidLead> = (0..7)
+            .map(|k| RaidLead {
+                brief: format!("Injected bug {k}."),
+                file: format!("src/bug-{k}.rs"),
+                line: Some(k * 100),
+                method: format!("procedural:op-{k}"),
+                commit: None,
+            })
+            .collect();
+        // Hunter i of 3 gets leads i, i+3, i+6 — each lead chased by exactly one hunter.
+        let lead = |k: usize| format!("src/bug-{k}.rs:{}", k * 100);
+        let dealt: Vec<Vec<String>> = (0..3)
+            .map(|i| lead_files(hunter_brief(&run, i, 3, &raid)["instructions"].as_str().unwrap()))
+            .collect();
+        assert_eq!(dealt[0], [lead(0), lead(3), lead(6)]);
+        assert_eq!(dealt[1], [lead(1), lead(4)]);
+        assert_eq!(dealt[2], [lead(2), lead(5)]);
+        // The paragraph says why the leads are there and suspends the focus split for them alone.
+        let briefed = hunter_brief(&run, 0, 3, &raid)["instructions"].as_str().unwrap().to_string();
+        assert!(
+            briefed.contains("The bench's raid set holds known injected bugs"),
+            "{briefed}"
+        );
+        assert!(briefed.contains("chase them first"), "{briefed}");
+        // An empty raid set (no pool, or nothing for this repo) briefs exactly as before.
+        let plain = hunter_brief(&run, 0, 3, &[]);
+        let plain = plain["instructions"].as_str().unwrap();
+        assert!(!plain.contains("raid set"), "{plain}");
+        let elsewhere = [raid_entry("other/repo", "src/elsewhere.rs", 1, "Someone else's bug.")];
+        let pool_leads = {
+            let root = temp_root();
+            let pool = raid_pool(&root, &elsewhere);
+            let leads = raid_leads(&pool, "acme/repo");
+            let _ = std::fs::remove_dir_all(root);
+            leads
+        };
+        assert!(pool_leads.is_empty());
+        assert_eq!(
+            hunter_brief(&run, 0, 3, &pool_leads)["instructions"].as_str().unwrap(),
+            plain,
+            "a raid set holding only other repositories' entries changes nothing"
+        );
+        // A long raid set is capped per brief: one hunter of one takes at most the cap.
+        let long: Vec<RaidLead> = (0..RAID_LEADS_PER_BRIEF + 10)
+            .map(|k| RaidLead {
+                brief: format!("Injected bug {k}."),
+                file: format!("src/bug-{k}.rs"),
+                line: None,
+                method: String::new(),
+                commit: None,
+            })
+            .collect();
+        let solo = hunter_brief(&raid_run("acme/repo"), 0, 1, &long)["instructions"]
+            .as_str()
+            .unwrap()
+            .matches("\n- ")
+            .count();
+        assert_eq!(solo, RAID_LEADS_PER_BRIEF);
+    }
+
+    #[tokio::test]
+    async fn a_configured_pool_hands_each_launched_hunter_its_own_raid_leads() {
+        let root = temp_root();
+        let pool = raid_pool(
+            &root,
+            &[
+                raid_entry("acme/repo", "src/first.rs", 10, "Injected bug one."),
+                raid_entry("acme/repo", "src/second.rs", 20, "Injected bug two."),
+                raid_entry("other/repo", "src/elsewhere.rs", 30, "Someone else's bug."),
+            ],
+        );
+        let app = crate::tests::test_app_with(&root, |cfg| cfg.bench_pool = Some(pool.clone()));
+        let run = create(State(app.clone()), Json(new_run("acme/repo", Some(2), false)))
+            .await
+            .unwrap()
+            .0;
+        let sessions = app.sessions.read().await;
+        let instructions: Vec<String> = run
+            .hunters
+            .iter()
+            .map(|h| {
+                sessions
+                    .iter()
+                    .find(|s| s.id == h.session_id)
+                    .expect("the hunter session exists")
+                    .instructions
+                    .clone()
+            })
+            .collect();
+        assert!(instructions[0].contains("src/first.rs:10"), "{}", instructions[0]);
+        assert!(instructions[1].contains("src/second.rs:20"), "{}", instructions[1]);
+        for briefed in &instructions {
+            assert!(
+                !briefed.contains("src/elsewhere.rs"),
+                "another repo's lead never reaches a hunter: {briefed}"
+            );
+            assert_eq!(
+                briefed.matches("\n- ").count(),
+                1,
+                "two leads over a swarm of two is one each: {briefed}"
+            );
+        }
+        // Without a pool, the same launch briefs without a raid paragraph.
+        drop(sessions);
+        let bare_root = temp_root();
+        let bare = test_app(&bare_root);
+        let bare_run = create(State(bare.clone()), Json(new_run("acme/repo", Some(2), false)))
+            .await
+            .unwrap()
+            .0;
+        let bare_sessions = bare.sessions.read().await;
+        for h in &bare_run.hunters {
+            let briefed = bare_sessions
+                .iter()
+                .find(|s| s.id == h.session_id)
+                .expect("the hunter session exists")
+                .instructions
+                .as_str();
+            assert!(!briefed.contains("raid set"), "{briefed}");
+        }
+        drop(bare_sessions);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(bare_root);
     }
 }
