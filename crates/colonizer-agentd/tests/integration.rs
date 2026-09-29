@@ -382,6 +382,59 @@ fn unmount_seal(path: &Path) {
 #[cfg(not(target_os = "linux"))]
 fn unmount_seal(_path: &Path) {}
 
+/// Unmounts everything mounted anywhere under `dir`, deepest first — every bind the path-policy
+/// watcher applied — so the scratch tree can be removed afterwards.
+#[cfg(target_os = "linux")]
+fn unmount_tree(dir: &Path) {
+    use std::os::unix::ffi::OsStringExt;
+    let Ok(bytes) = std::fs::read("/proc/self/mountinfo") else {
+        return;
+    };
+    let mut points: Vec<PathBuf> = bytes
+        .split(|b| *b == b'\n')
+        .filter_map(|line| line.split(|b| *b == b' ').nth(4))
+        .map(|field| PathBuf::from(std::ffi::OsString::from_vec(field.to_vec())))
+        .filter(|p| p.starts_with(dir))
+        .collect();
+    points.sort_by_key(|p| std::cmp::Reverse(p.as_os_str().len()));
+    for point in points {
+        if let Ok(c) = std::ffi::CString::new(point.as_os_str().as_encoded_bytes()) {
+            // SAFETY: the argument is a NUL-terminated C string.
+            unsafe { libc::umount(c.as_ptr()) };
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unmount_tree(_dir: &Path) {}
+
+/// Waits until the event stream carries a log message containing each needle, and answers
+/// everything seen on the way.
+async fn wait_for_logs(port: u16, needles: &[&str]) -> Vec<Value> {
+    let mut events = ws(port, "/v1/events?since=0", Some(TOKEN)).await.unwrap();
+    let mut seen = Vec::new();
+    let missing = |seen: &[Value]| {
+        needles.iter().any(|n| {
+            !seen
+                .iter()
+                .any(|e| e["type"] == "log" && e["message"].as_str().is_some_and(|m| m.contains(n)))
+        })
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while missing(&seen) {
+        let message = tokio::time::timeout_at(deadline, events.next())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needles:?}; events so far: {seen:#?}"))
+            .expect("event stream ended")
+            .expect("websocket error");
+        if let Message::Text(text) = message {
+            seen.push(serde_json::from_str(&text).unwrap());
+        }
+    }
+    drop(events);
+    seen
+}
+
 /// An empty (after trim) token file stops the start (`main.rs` refuses): a `Bearer ` header with
 /// nothing after it must never authorize anything, and a sealed token path (#640) reads exactly
 /// empty, so a re-read from disk must never become the daemon's token.
@@ -495,6 +548,95 @@ async fn seal_token_hides_the_token_from_the_runner_and_the_pty() {
         .output()
         .unwrap();
     assert!(!umount.status.success(), "the runner profile cannot umount the seal");
+
+    drop(daemon);
+}
+
+/// The path policy beyond boot (issue #648): a nested checkout created mid-session — staged
+/// whole next to the workspace and renamed in, the way a clone or a `git init` lands — gets the
+/// policy's binds as its paths appear, while a `.env` at the workspace root (no nested checkout;
+/// the boot's business) is left alone. The protected `.git/config` the boot never binds — the
+/// root's git dir is host-mounted read-only instead — is covered for a nested checkout too. Where
+/// mount(2) is unavailable (stock CI), the same run asserts the watcher's fail-soft branch
+/// instead: it finds the checkout and names every bind it could not apply, warn events, never a
+/// stopped daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_path_policy_covers_a_nested_checkout_created_mid_session() {
+    let dir = scratch("path-policy");
+    let mounted = mount_permitted(&dir);
+    let policy = dir.join("path-policy");
+    std::fs::write(&policy, "mask-file .env\nprotect AGENTS.md\n").unwrap();
+    let (child, port) = spawn_daemon(&dir, "", TOKEN, &[&format!("--path-policy={}", policy.display())]);
+    // Undoes every bind below the scratch dir even when an assertion fires mid-test: a leaked
+    // mount would keep the tree unremovable.
+    struct Mounted(PathBuf);
+    impl Drop for Mounted {
+        fn drop(&mut self) {
+            unmount_tree(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _cleanup = Mounted(dir.clone());
+    let daemon = wait_healthy(child, port).await;
+
+    // The checkout appears after boot, whole: written first in a sibling the watcher has no
+    // interest in, then renamed into place, so no `.git`-half-written state can race the binds.
+    let staged = dir.join("staged");
+    std::fs::create_dir_all(staged.join(".git")).unwrap();
+    std::fs::write(staged.join(".git/config"), "[core]").unwrap();
+    std::fs::write(staged.join(".env"), "SECRET=1").unwrap();
+    std::fs::write(staged.join("AGENTS.md"), "rules").unwrap();
+    std::fs::create_dir(dir.join("workspace/vendor")).unwrap();
+    std::fs::rename(&staged, dir.join("workspace/vendor/lib")).unwrap();
+    let checkout = dir.join("workspace/vendor/lib");
+    std::fs::write(dir.join("workspace/.env"), "ROOT=1").unwrap();
+
+    let applied = [
+        "masked `vendor/lib/.env`",
+        "protected `vendor/lib/AGENTS.md`",
+        "protected `vendor/lib/.git/config`",
+    ];
+    let needles: Vec<String> = applied
+        .iter()
+        .map(|bind| {
+            if mounted {
+                format!("{bind} (nested checkout `vendor/lib`)")
+            } else {
+                format!("cannot apply {bind}:")
+            }
+        })
+        .collect();
+    let refs: Vec<&str> = needles.iter().map(String::as_str).collect();
+    let seen = wait_for_logs(port, &refs).await;
+    // The needle a wrongly-bound root `.env` would actually produce — the events spell paths
+    // workspace-relative, so the root's own is bare.
+    let stray = if mounted {
+        "masked `.env`"
+    } else {
+        "cannot apply masked `.env`:"
+    };
+    assert!(
+        !has(&seen, |e| e["message"].as_str().is_some_and(|m| m.contains(stray))),
+        "the workspace root is not the watcher's business: {seen:#?}"
+    );
+
+    // With the binds live: the nested .env reads empty, the protected paths refuse writes.
+    if mounted {
+        assert_eq!(
+            std::fs::read(checkout.join(".env")).unwrap(),
+            b"" as &[u8],
+            "the nested .env reads empty"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("workspace/.env")).unwrap(),
+            b"ROOT=1",
+            "the workspace-root .env is untouched"
+        );
+        for protected in ["AGENTS.md", ".git/config"] {
+            let write = std::fs::write(checkout.join(protected), "rewritten");
+            assert!(write.is_err(), "the nested {protected} is read-only");
+        }
+    }
 
     drop(daemon);
 }
