@@ -11,7 +11,15 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
-import { evaluateExecPolicy, execPolicyLogLine, execPolicyQuestion, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import {
+  EXEC_POLICY_QUESTION_KIND,
+  createExecAllowCache,
+  evaluateExecPolicy,
+  execPolicyLogLine,
+  execPolicyQuestion,
+  execPolicyReason,
+  loadExecPolicy,
+} from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
@@ -700,13 +708,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {object} [args.execPolicy]  the layered exec policy (issue #471); an `ask` becomes a question
+ * @param {object} [args.execAllowCache]  the colony's remembered Allows (issue #759); one per run when absent
  * @param {object} [args.pathPolicy]  the mounted path policy (issue #647), as loadPathPolicy returned; a path-taking
  *   tool call that lands on a masked or protected path emits one `path_policy` event per (access, path)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, execAllowCache = createExecAllowCache(), pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -757,7 +766,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   };
 
   /** Puts one question to the colony and resolves with its answer (null when cancelled or shut down). */
-  const putQuestion = (questionId, questions, { signal }) => {
+  const putQuestion = (questionId, questions, { signal, kind = null }) => {
     const reply = new Promise((resolve) => {
       pending.set(questionId, { resolve });
       if (signal?.aborted) resolve(null);
@@ -768,6 +777,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
       question_id: questionId,
       message_id: toolMessage.get(questionId) ?? null,
       risk: riskClass(questions),
+      ...(kind ? { kind } : {}),
       questions,
     });
     settleStatus();
@@ -816,13 +826,23 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
    * Raises an exec-policy `ask` as a colony question (the same `question`/`question_answered` pair
    * AskUserQuestion uses, so the cockpit card and the autonomy judge both work unchanged) and
    * resolves true only when the answer is Allow. Any other answer — Deny, a free-text "Other",
-   * a cancellation — leaves the command refused with the policy reason.
+   * a cancellation — leaves the command refused with the policy reason. The question carries
+   * `kind: "exec_policy"` so the mothership keeps the colony running while it waits (issue #759),
+   * and an Allow is remembered for the colony: the same command under the same rule, from this
+   * agent or a subagent spawned after it, runs without asking again.
    */
   const askColony = async (hit, toolInput, { signal, toolUseID }) => {
+    if (execAllowCache.has(hit, toolInput.command)) {
+      process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
+      return true;
+    }
     const questionId = toolUseID || `exec-policy-${pending.size + 1}`;
-    const answer = await putQuestion(questionId, normalizeQuestions(execPolicyQuestion(hit, toolInput.command)), { signal });
+    const questions = normalizeQuestions(execPolicyQuestion(hit, toolInput.command));
+    const answer = await putQuestion(questionId, questions, { signal, kind: EXEC_POLICY_QUESTION_KIND });
     settleAnswer(questionId, answer);
-    return Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
+    const allowed = Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
+    if (allowed) execAllowCache.remember(hit, toolInput.command);
+    return allowed;
   };
 
   const blockSlot = (messageId, index) => {

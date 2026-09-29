@@ -381,6 +381,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             question_id,
             questions,
             risk,
+            kind,
             ..
         } => {
             // The questions travel with the id: autonomous mode answers among the options the
@@ -388,11 +389,17 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             // too — the judge answers only at or below its ceiling — and a question without one,
             // from an older runner, counts as a workspace write.
             let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
+            // Before the question opens, so a suspension tick that sees it open reads its kind too.
+            rt.question_holds_tool_call.store(
+                crate::protocol::question_holds_tool_call(kind.as_deref()),
+                std::sync::atomic::Ordering::SeqCst,
+            );
             *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {
             *rt.open_question.lock().await = None;
+            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
             let mut activity = rt.activity.lock().await;
             activity.question_since = None;
             // The question is resolved either way, so an unanswered-provider streak behind it is over.

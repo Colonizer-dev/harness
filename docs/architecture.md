@@ -309,6 +309,11 @@ Two sandbox module settings drive this, global with no per-org override: `suspen
 reported its session id is suspended; anything else keeps its microVM, said once in the colony log. A suspension
 lasts until answered, stopped or deleted — stopping clears the suspension and any held answer — and the sandbox
 watchdog and restart recovery both leave a suspended colony alone: its microVM is gone by design, not by crash.
+A colony whose open question is an exec-policy `ask` (the question event's `kind` is `exec_policy`, issue #759)
+is never suspended: the tool call that asked is blocked in flight inside a live agent — often a subagent — and a
+resumed transcript cannot pick that call back up, so suspending it killed the agent and the lead only spawned
+another that asked again. The runtime keeps the flag beside the open question and restores it from the saved
+events the same way.
 Suspension also requires the question to still be open in the runtime: the live answer path and the suspension
 claim take the same open-question lock, so an answer and a claim cannot interleave and an answer is never lost
 in between.

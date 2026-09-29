@@ -95,7 +95,10 @@ setting is carried over here) and `.colonizer/exec-policy.json` in the worktree.
 `deny` answers the request with the agent's `reject_once` option (any other `reject*` kind, else
 `cancelled`) and no question is shown; an `allow` answers with `allow_once` (any other `allow*`
 kind — with neither, the question surfaces as usual); an `ask` surfaces the question with the rule
-and its reason on the card, answered like any other.
+and its reason on the card, answered like any other. That question carries `kind: "exec_policy"`,
+so the mothership does not suspend the colony while the call waits on it, and an answer with one of
+the agent's `allow*` options is remembered for the run: the same command under the same rule is
+answered with the allow option without asking again (issue #759).
 
 The fence only sees commands the agent asks permission for: calls the agent runs without asking are
 not checked, so the policy is guidance, and the microVM is the boundary.

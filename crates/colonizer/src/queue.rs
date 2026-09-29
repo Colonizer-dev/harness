@@ -561,6 +561,15 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_some() || open_question.is_none() {
             continue;
         }
+        // An exec-policy `ask` (issue #759) is not the agent waiting between turns: its tool call is
+        // blocked in flight on the answer, inside a live agent — often a subagent. Tearing the
+        // microVM down kills that call and the agent that made it, and a resumed transcript cannot
+        // pick it back up, so the lead only spawns another agent that asks again. Such a colony
+        // keeps its microVM (and its slot) until the question is answered. Read under the gate: the
+        // flag is set before the question opens and cleared with its answer.
+        if rt.question_holds_tool_call.load(std::sync::atomic::Ordering::SeqCst) {
+            continue;
+        }
         // How the colony comes back. Today's sandbox has no memory snapshot (the seam in
         // `sandbox::supports_memory_snapshot`), so the path is always the fallback: the agent
         // resumes its own session transcript in a fresh microVM.
@@ -1871,6 +1880,12 @@ mod tests {
         asked(&app, "past-grace", 20).await;
         asked(&app, "within-grace", 1).await;
         asked(&app, "no-timestamp", 20).await;
+        // An exec-policy ask (issue #759) waited just as long, but its tool call is in flight.
+        asked(&app, "exec-policy", 20).await;
+        app.runtime("exec-policy")
+            .await
+            .question_holds_tool_call
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         app.runtime("no-timestamp").await.activity.lock().await.question_since = None;
         app.sessions
             .write()
@@ -1902,7 +1917,7 @@ mod tests {
             "the status is untouched, so the question stays answerable"
         );
         assert!(!suspended.holds_slot(), "the slot is back");
-        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent"] {
+        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent", "exec-policy"] {
             assert!(by_id(id).suspended.is_none(), "{id} must keep its microVM and its slot");
         }
         drop(sessions);
@@ -1948,6 +1963,10 @@ mod tests {
         assert!(
             by_id("other-agent").suspended.is_none(),
             "the agent cannot resume, never suspended"
+        );
+        assert!(
+            by_id("exec-policy").suspended.is_none(),
+            "an exec-policy ask holds a tool call in flight: never suspended, however long it waits"
         );
         assert!(by_id("past-grace").suspended.is_some(), "already suspended, left as it is");
         drop(sessions);

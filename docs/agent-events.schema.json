@@ -166,6 +166,7 @@
         "question_id": { "type": "string" },
         "message_id": { "type": ["string", "null"] },
         "risk": { "type": "string", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "The question's risk class (§2 rules), assigned by the runner and enforced by the Mothership's autonomy judge (§6.2b). Absent means workspace_write; a value outside the vocabulary is treated as above every ceiling and is never answered automatically." },
+        "kind": { "type": "string", "description": "What raised the question, when the agent did not ask of its own accord. exec_policy: an exec-policy ask, whose tool call is blocked in flight on the answer, so the Mothership never suspends the colony while it waits (issue #759). Absent means the agent asked; an unknown value is treated as absent." },
         "questions": { "type": "array", "items": { "$ref": "#/$defs/question_shape" }, "description": "Forwarded as the model produced them, so it can be empty or hold fewer options than the §2 rules ask the model for." }
       },
       "required": ["type", "question_id", "questions"]

@@ -58,6 +58,17 @@ pub(crate) enum QuestionRisk {
     Unknown,
 }
 
+/// The question `kind` an exec-policy `ask` carries (issue #759; modules/agents/*/execpolicy.mjs).
+pub(crate) const EXEC_POLICY_QUESTION_KIND: &str = "exec_policy";
+
+/// Whether a question of this `kind` holds a tool call in flight inside the live agent (issue
+/// #759). Such a colony must keep its microVM while it waits: suspending it kills the call and the
+/// agent that made it, and a resumed transcript cannot pick the call back up. An absent or unknown
+/// kind is an ordinary question the agent asked, which a suspension resumes cleanly.
+pub(crate) fn question_holds_tool_call(kind: Option<&str>) -> bool {
+    kind == Some(EXEC_POLICY_QUESTION_KIND)
+}
+
 impl QuestionRisk {
     /// The wire spelling, for log lines.
     pub(crate) fn as_str(self) -> &'static str {
@@ -220,6 +231,10 @@ pub(crate) enum AgentEvent {
         message_id: Option<String>,
         #[serde(default)]
         risk: Option<QuestionRisk>,
+        /// What raised the question, when it is not the agent asking of its own accord (issue #759).
+        /// `exec_policy` is an exec-policy `ask`: a tool call is blocked in flight on the answer.
+        #[serde(default)]
+        kind: Option<String>,
     },
     /// The user's answer travelled the four hops back (§2); the harness only closes the question.
     QuestionAnswered {
@@ -602,6 +617,25 @@ mod tests {
     /// as the class above every ceiling, never answered automatically. The wire parse and the
     /// replay parse (`QuestionRisk::from_wire`) must agree, since a restart moves a question
     /// between them.
+    /// Issue #759: only an exec-policy ask marks a question as holding a tool call in flight; a
+    /// question without a kind, or with one this build does not know, is an ordinary question.
+    #[test]
+    fn a_question_kind_says_whether_a_tool_call_is_in_flight() {
+        let kind = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
+            AgentEvent::Question { kind, .. } => kind,
+            other => panic!("a question, got {other:?}"),
+        };
+        let exec = kind(r#"{"type":"question","question_id":"q","kind":"exec_policy"}"#);
+        assert_eq!(exec.as_deref(), Some(EXEC_POLICY_QUESTION_KIND));
+        assert!(question_holds_tool_call(exec.as_deref()));
+        assert!(!question_holds_tool_call(
+            kind(r#"{"type":"question","question_id":"q"}"#).as_deref()
+        ));
+        assert!(!question_holds_tool_call(
+            kind(r#"{"type":"question","question_id":"q","kind":"something_newer"}"#).as_deref()
+        ));
+    }
+
     #[test]
     fn a_question_risk_is_ordered_and_tolerant_of_the_field_being_absent_or_unknown() {
         let risk = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {

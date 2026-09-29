@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
 import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
@@ -329,6 +329,9 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // before the agent can run anything. Warnings ride stderr; agentd turns those into `log` events.
   const execPolicy = loadExecPolicy(env, { cwd: workspace });
   for (const warning of execPolicy.warnings) process.stderr.write(`${warning}\n`);
+  // The operator's Allows of exec-policy asks, kept for this run (issue #759): the same command
+  // under the same rule is not asked about twice. In memory only, so the agent cannot forge one.
+  const execAllowCache = createExecAllowCache();
   // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
   // the runtime reports against. Absent (an older harness) means the feature is off, silently.
   const pathPolicy = loadPathPolicy(env).policy;
@@ -402,12 +405,19 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
       }
       const allow = optionByKind(options, 'allow');
       if (hit.decision === 'allow' && allow) return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      if (execAllowCache.has(hit, command) && allow) {
+        process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
+        return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      }
     }
     const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
     emit({
       type: 'question', question_id: questionId, message_id: turn?.messageId ?? null, risk: riskForKind(call.kind),
+      // An exec-policy ask holds the agent's tool call in flight: the mothership must not suspend
+      // the colony while it waits (issue #759).
+      ...(hit ? { kind: EXEC_POLICY_QUESTION_KIND } : {}),
       questions: [{ question: text, header: 'Permission', multi_select: false, options: options.map((o) => ({ label: o.name, description: o.kind })) }],
     });
     emit({ type: 'status', state: 'waiting_for_answer' });
@@ -420,6 +430,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (!chosen && answer.response) {
       emit({ type: 'log', level: 'info', message: `a free-text reply cannot select one of the agent's options; answered cancelled for ${questionId}` });
     }
+    if (hit && chosen && !chosen.synthetic && chosen.kind?.startsWith('allow')) execAllowCache.remember(hit, command);
     reply({ outcome: chosen && !chosen.synthetic ? { outcome: 'selected', optionId: chosen.optionId } : { outcome: 'cancelled' } });
   };
 

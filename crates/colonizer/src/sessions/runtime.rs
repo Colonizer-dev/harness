@@ -25,6 +25,10 @@ pub struct Runtime {
     /// The open question: its id, the questions themselves — which autonomous mode needs to answer
     /// among the options the agent offered — and the question's risk class, which its ceiling reads.
     pub(crate) open_question: Mutex<Option<(String, Vec<Value>, QuestionRisk)>>,
+    /// Whether the open question holds a tool call in flight (issue #759): an exec-policy `ask`,
+    /// whose colony must not be suspended while it waits. Set with each question, cleared with its
+    /// answer, and restored from the saved events like the open question itself.
+    pub(crate) question_holds_tool_call: std::sync::atomic::AtomicBool,
     /// Question ids the autonomy judge has sent an `answer` for and whose `question_answered` echo
     /// has not come back yet (autonomy.rs writes, events.rs spends one entry resolving that echo's
     /// origin). In memory only: after a mothership restart the set is empty, so a judge answer still
@@ -122,6 +126,7 @@ impl Runtime {
         // The replayed open question: its id, its questions, when it was asked, its risk class.
         type Replayed = (String, Vec<Value>, Option<DateTime<Utc>>, QuestionRisk);
         let mut open_question: Option<Replayed> = None;
+        let mut holds_tool_call = false;
         for v in events_bytes
             .split(|b| *b == b'\n')
             .filter_map(|line| serde_json::from_str::<Value>(std::str::from_utf8(line).ok()?).ok())
@@ -145,10 +150,12 @@ impl Runtime {
                         .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
                         .map(|ts| ts.with_timezone(&Utc));
                     let risk = QuestionRisk::from_wire(v.get("risk"));
+                    holds_tool_call = crate::protocol::question_holds_tool_call(v.get("kind").and_then(Value::as_str));
                     open_question = Some((id.to_string(), questions, asked, risk));
                 }
                 ("question_answered", Some(id)) if open_question.as_ref().is_some_and(|(open, ..)| open == id) => {
                     open_question = None;
+                    holds_tool_call = false;
                 }
                 _ => {}
             }
@@ -195,6 +202,7 @@ impl Runtime {
                     .as_ref()
                     .map(|(id, questions, _, risk)| (id.clone(), questions.clone(), *risk)),
             ),
+            question_holds_tool_call: std::sync::atomic::AtomicBool::new(open_question.is_some() && holds_tool_call),
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
@@ -559,6 +567,29 @@ mod tests {
         assert!(rt.open_question.try_lock().unwrap().is_none());
         assert!(rt.activity.try_lock().unwrap().question_since.is_none());
         assert_eq!(rt.agent_seq.load(Ordering::SeqCst), 4);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Issue #759: an exec-policy ask keeps its colony from being suspended, and that has to survive
+    /// a mothership restart as the open question does — while an ordinary question, or an
+    /// exec-policy one already answered, does not hold the colony.
+    #[test]
+    fn a_restored_exec_policy_question_still_holds_its_tool_call() {
+        let dir = std::env::temp_dir().join(format!("colonizer-open-question-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exec = r#"{"seq":1,"type":"question","question_id":"toolu_bash","kind":"exec_policy","questions":[]}"#;
+        let plain = r#"{"seq":2,"type":"question","question_id":"q2","questions":[]}"#;
+        let answered = r#"{"seq":2,"type":"question_answered","question_id":"toolu_bash","answers":{}}"#;
+        for (lines, expected, why) in [
+            (vec![exec], true, "an open exec-policy ask"),
+            (vec![plain], false, "an ordinary question"),
+            (vec![exec, answered], false, "an answered exec-policy ask"),
+            (vec![exec, plain], false, "a later ordinary question replaces it"),
+        ] {
+            std::fs::write(dir.join("events.jsonl"), format!("{}\n", lines.join("\n"))).unwrap();
+            let rt = Runtime::load(&dir);
+            assert_eq!(rt.question_holds_tool_call.load(Ordering::SeqCst), expected, "{why}");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
