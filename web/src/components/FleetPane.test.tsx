@@ -228,6 +228,13 @@ describe("member health (issue #764)", () => {
     expect(wrap(<MemberHealthBadge />)).toBe("");
   });
 
+  it("shows a note such as 'History sync off' under a healthy member, without calling it a problem", () => {
+    const ok = { state: "ok" as const, code: null, reason: null, hint: null, note: "History sync off" };
+    const html = pane({ ...ownerState, members: [{ ...ownerState.members[0], health: ok }] });
+    expect(html).toContain(">OK</span>");
+    expect(html).toContain(">History sync off</div>");
+  });
+
   it("shows the badge and the hint in the owner's member list", () => {
     const html = pane({ ...ownerState, members: [{ ...ownerState.members[0], health: stale }] });
     expect(html).toContain(">No heartbeat for 12 min</span>");

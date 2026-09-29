@@ -390,6 +390,7 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                           {member.health?.hint && member.health.state !== "ok" && (
                             <div className="truncate text-[11.5px] text-muted">{member.health.hint}</div>
                           )}
+                          {member.health?.note && <div className="truncate text-[11.5px] text-faint">{member.health.note}</div>}
                         </Row>
                       ))}
                     </div>

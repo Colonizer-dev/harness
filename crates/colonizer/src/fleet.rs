@@ -8,7 +8,7 @@
 
 use crate::{Shared, orgs, runtime, sessions::SessionStatus};
 use axum::{Json, extract::State};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::Mutex;
@@ -46,6 +46,28 @@ pub struct HostSummary {
     /// RFC 3339, `None` for a peer that has never once answered.
     pub last_heartbeat: Option<String>,
     pub health: HostHealth,
+    /// Seconds since the host's queue loop last ticked, as its status reported it (issue #764);
+    /// omitted when unknown — an older peer, or a loop that has not ticked yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_tick_age_s: Option<i64>,
+    /// A fleet member's history-push drain state, as its status reported it (issue #764).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_sync: Option<PeerSync>,
+}
+
+/// A member's `fleet_sync` block of the reduced `/api/status` (`fleet_sync::health_summary`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PeerSync {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub backlog_rows: u64,
+    #[serde(default)]
+    pub oldest_unsent_age_s: Option<i64>,
+    #[serde(default)]
+    pub last_error_class: Option<String>,
+    #[serde(default)]
+    pub consent: bool,
 }
 
 /// Last-known `HostSummary` per configured peer base URL (not per host id: an unreachable peer we
@@ -70,6 +92,9 @@ pub struct PeerObservation {
     pub reachable: bool,
     pub disk_free_bytes: Option<u64>,
     pub disk_total_bytes: Option<u64>,
+    /// What its last answer said about its queue loop and its history push.
+    pub runner_tick_age_s: Option<i64>,
+    pub fleet_sync: Option<PeerSync>,
 }
 
 impl FleetCache {
@@ -91,6 +116,8 @@ impl FleetCache {
             reachable: known.as_ref().is_some_and(|k| k.health == HostHealth::Online),
             disk_free_bytes: known.as_ref().and_then(|k| k.disk_free_bytes),
             disk_total_bytes: known.as_ref().and_then(|k| k.disk_total_bytes),
+            runner_tick_age_s: known.as_ref().and_then(|k| k.runner_tick_age_s),
+            fleet_sync: known.as_ref().and_then(|k| k.fleet_sync.clone()),
         })
     }
 
@@ -125,6 +152,8 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
         disk_total_bytes: host.disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
+        runner_tick_age_s: crate::queue::last_tick_age_s(),
+        fleet_sync: None,
     }
 }
 
@@ -173,6 +202,13 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
     let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
     let disk_free_bytes = host.and_then(|host| host.get("disk_free_bytes")).and_then(Value::as_u64);
     let disk_total_bytes = host.and_then(|host| host.get("disk_total_bytes")).and_then(Value::as_u64);
+    let runner_tick_age_s = body
+        .get("runner")
+        .and_then(|runner| runner.get("last_tick_age_s"))
+        .and_then(Value::as_i64);
+    let fleet_sync = body
+        .get("fleet_sync")
+        .and_then(|sync| serde_json::from_value::<PeerSync>(sync.clone()).ok());
     Some(HostSummary {
         id,
         name,
@@ -186,6 +222,8 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
+        runner_tick_age_s,
+        fleet_sync,
     })
 }
 
@@ -212,6 +250,8 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
         disk_total_bytes: None,
         last_heartbeat: None,
         health: HostHealth::Unreachable,
+        runner_tick_age_s: None,
+        fleet_sync: None,
     };
     cache.insert(base_url.to_string(), placeholder.clone());
     placeholder
@@ -345,7 +385,25 @@ mod tests {
         assert_eq!(peer.queue_depth, 2);
         assert_eq!(peer.disk_free_bytes, Some(123456));
         assert!(peer.last_heartbeat.is_some());
+        assert_eq!(peer.runner_tick_age_s, None, "an older peer reports no runner tick");
+        assert_eq!(peer.fleet_sync, None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #764: a member's reduced status carries its queue-loop tick and its drain state.
+    #[test]
+    fn a_members_runner_tick_and_sync_state_are_read_from_its_status() {
+        let mut body = peer_status_body("peer-123", "peer-box");
+        body["runner"] = json!({"last_tick_age_s": 400});
+        body["fleet_sync"] = json!({"state": "unauthorized", "backlog_rows": 3, "oldest_unsent_age_s": 7200,
+                                    "last_error_class": "unauthorized", "consent": true});
+        let row = summary_from_status_json("http://peer:7878", &body).unwrap();
+        assert_eq!(row.runner_tick_age_s, Some(400));
+        let sync = row.fleet_sync.unwrap();
+        assert_eq!(sync.state, "unauthorized");
+        assert_eq!((sync.backlog_rows, sync.oldest_unsent_age_s), (3, Some(7200)));
+        assert_eq!(sync.last_error_class.as_deref(), Some("unauthorized"));
+        assert!(sync.consent);
     }
 
     /// A peer answering without our token serves the reduced status (no id, no hostname): the row
@@ -417,6 +475,8 @@ mod tests {
             disk_total_bytes: None,
             last_heartbeat: Some("2026-09-20T12:00:00+00:00".into()),
             health: HostHealth::Online,
+            runner_tick_age_s: None,
+            fleet_sync: None,
         };
         app.fleet_cache
             .last_known

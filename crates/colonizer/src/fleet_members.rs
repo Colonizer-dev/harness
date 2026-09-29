@@ -576,6 +576,16 @@ async fn member_signals(app: &Shared, member: &Member) -> crate::fleet_health::S
         signals.reachable = Some(seen.reachable);
         signals.disk_free_bytes = seen.disk_free_bytes;
         signals.disk_total_bytes = seen.disk_total_bytes;
+        signals.runner_tick_age = seen.runner_tick_age_s.map(Duration::seconds);
+        if let Some(sync) = seen.fleet_sync {
+            signals.sync_consent = Some(sync.consent);
+            signals.last_sync_error = sync
+                .last_error_class
+                .as_deref()
+                .and_then(crate::fleet_health::SyncError::from_class);
+            signals.sync_backlog_rows = Some(sync.backlog_rows);
+            signals.sync_backlog_age = sync.oldest_unsent_age_s.map(Duration::seconds);
+        }
     }
     signals
 }
@@ -1423,6 +1433,8 @@ mod tests {
             disk_total_bytes: Some(500 << 30),
             last_heartbeat: Some((now - Duration::minutes(12)).to_rfc3339()),
             health: crate::fleet::HostHealth::Unreachable,
+            runner_tick_age_s: None,
+            fleet_sync: None,
         };
         app.fleet_cache.record_poll(&url, now, row).await;
 
@@ -1438,6 +1450,98 @@ mod tests {
         assert_eq!(health["state"], "stopped", "{health}");
         assert_eq!(health["reason"], "Token revoked");
         assert_eq!(health["hint"], "re-pair this machine");
+    }
+
+    /// Issue #764: the sync and runner signals a member reports in its status reach its health —
+    /// a 401 or 403 sync stops it, an hour-old backlog or a stalled queue loop degrades it, and
+    /// consent off is only a note.
+    #[tokio::test]
+    async fn a_members_sync_and_runner_reports_map_to_its_health() {
+        let (_root, app, router, owner) = rig();
+        let owner = owner.as_deref();
+        let (member_id, _token) = join_member(&router, owner, &an_invite(&router, &app.api_token).await).await;
+        let url = {
+            let state = app.fleet_members.state.read().await;
+            state.members.iter().find(|m| m.id == member_id).unwrap().url.clone().unwrap()
+        };
+        let poll = |runner: Option<i64>, sync: Option<crate::fleet::PeerSync>| {
+            let app = app.clone();
+            let url = url.clone();
+            async move {
+                let now = Utc::now();
+                let row = crate::fleet::HostSummary {
+                    id: "worker-host".into(),
+                    name: "worker".into(),
+                    platform: "linux-x86_64".into(),
+                    os: "Debian".into(),
+                    version: Some("0.1.10".into()),
+                    slots_in_use: 0,
+                    slots_ceiling: 4,
+                    queue_depth: 0,
+                    disk_free_bytes: Some(400 << 30),
+                    disk_total_bytes: Some(500 << 30),
+                    last_heartbeat: Some(now.to_rfc3339()),
+                    health: crate::fleet::HostHealth::Online,
+                    runner_tick_age_s: runner,
+                    fleet_sync: sync,
+                };
+                app.fleet_cache.record_poll(&url, now, row).await;
+            }
+        };
+        let synced = crate::fleet::PeerSync {
+            state: "synced".into(),
+            consent: true,
+            ..Default::default()
+        };
+
+        poll(Some(3), Some(synced.clone())).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "{health}");
+        assert_eq!(health["note"], Value::Null);
+
+        let behind = crate::fleet::PeerSync {
+            state: "error".into(),
+            backlog_rows: 5,
+            oldest_unsent_age_s: Some(2 * 3600),
+            last_error_class: Some("error".into()),
+            consent: true,
+        };
+        poll(Some(3), Some(behind)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "sync_backlog");
+        assert_eq!(health["reason"], "Sync behind by 5 rows");
+
+        for (state, class) in [("unauthorized", "unauthorized"), ("removed", "forbidden")] {
+            let rejected = crate::fleet::PeerSync {
+                state: state.into(),
+                last_error_class: Some(class.into()),
+                consent: true,
+                ..Default::default()
+            };
+            poll(Some(3), Some(rejected)).await;
+            let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+            assert_eq!(health["state"], "stopped", "{state}: {health}");
+            assert_eq!(health["code"], "sync_rejected");
+            assert_eq!(health["reason"], "Token revoked");
+            assert_eq!(health["hint"], "re-pair this machine");
+        }
+
+        poll(Some(600), Some(synced)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "runner_down");
+        assert_eq!(health["reason"], "Colony runner not ticking");
+
+        let off = crate::fleet::PeerSync {
+            state: "consent_required".into(),
+            consent: false,
+            ..Default::default()
+        };
+        poll(Some(3), Some(off)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "consent off is not a fault: {health}");
+        assert_eq!(health["note"], "History sync off");
     }
 
     #[tokio::test]

@@ -450,6 +450,8 @@ export interface FleetMemberHealth {
   code: string | null;
   reason: string | null;
   hint: string | null;
+  /** Something worth knowing that is not a fault, whatever the state: "History sync off". Absent from an older owner. */
+  note?: string | null;
 }
 
 /** A mothership that joined this one's fleet; it hosts colonies and sees the fleet view. */

@@ -312,7 +312,11 @@ async fn a_401_stops_the_drain_and_asks_for_attention() {
     assert_eq!(report.status, SyncStatus::Unauthorized);
     assert!(report.detail.unwrap().contains("re-join"));
     assert_eq!(fake.with(|o| o.requests), 1, "the first 401 ends the drain");
-    assert_eq!(DrainState::load(&data).status, SyncStatus::Unauthorized);
+    let state = DrainState::load(&data);
+    assert_eq!(state.status, SyncStatus::Unauthorized);
+    // What member health reads (#764): the backlog it left, and since when.
+    assert_eq!(state.backlog_rows, 4);
+    assert!(state.backlog_since.is_some());
 
     // The background drain stays stopped; a manual one tries again.
     let quiet = drain(&data, &origin(), &stale, &cfg(10), &SystemClock, false).await.unwrap();
@@ -323,6 +327,59 @@ async fn a_401_stops_the_drain_and_asks_for_attention() {
         .unwrap();
     assert_eq!(forced.status, SyncStatus::Synced);
     assert_eq!(fake.with(|o| o.rows.len()), 4);
+    let state = DrainState::load(&data);
+    assert_eq!(
+        (state.backlog_rows, state.backlog_since),
+        (0, None),
+        "a drained queue has no backlog"
+    );
+}
+
+/// Issue #764: what a member reports to its owner — state, backlog, error class and consent —
+/// from the persisted drain state alone.
+#[test]
+fn the_health_summary_carries_state_backlog_error_class_and_consent() {
+    let now = Utc::now();
+    let t = target("http://owner:7878");
+    let mut state = DrainState {
+        member_id: Some("mem_1".into()),
+        status: SyncStatus::Error,
+        backlog_rows: 7,
+        backlog_since: Some(now - chrono::Duration::minutes(90)),
+        ..DrainState::default()
+    };
+    let summary = summary_of(&state, &t, true, now);
+    assert_eq!(
+        summary,
+        json!({"state": "error", "backlog_rows": 7, "oldest_unsent_age_s": 5400,
+               "last_error_class": "error", "consent": true})
+    );
+
+    for (status, class) in [
+        (SyncStatus::Unauthorized, "unauthorized"),
+        (SyncStatus::Removed, "forbidden"),
+        (SyncStatus::Backoff, "rate_limited"),
+    ] {
+        state.status = status;
+        assert_eq!(summary_of(&state, &t, true, now)["last_error_class"], class, "{status:?}");
+    }
+    state.status = SyncStatus::Synced;
+    assert_eq!(summary_of(&state, &t, true, now)["last_error_class"], Value::Null);
+
+    // Consent off: no backlog is claimed, the state says why.
+    let off = summary_of(&state, &t, false, now);
+    assert_eq!(off["state"], "consent_required");
+    assert_eq!(
+        (off["backlog_rows"].clone(), off["oldest_unsent_age_s"].clone()),
+        (json!(0), Value::Null)
+    );
+    assert_eq!(off["consent"], false);
+
+    // A previous membership's state does not count for this one.
+    state.member_id = Some("mem_old".into());
+    let fresh = summary_of(&state, &t, true, now);
+    assert_eq!(fresh["state"], "idle");
+    assert_eq!(fresh["backlog_rows"], 0);
 }
 
 #[tokio::test]

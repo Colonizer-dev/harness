@@ -196,6 +196,13 @@ pub struct DrainState {
     pub last_drain_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_synced_at: Option<DateTime<Utc>>,
+    /// Rows still unsent after the last drain (retired ones not counted) — member health (#764).
+    #[serde(default)]
+    pub backlog_rows: usize,
+    /// Since when every drain has ended with rows still unsent: set by the first drain that leaves
+    /// a backlog, cleared by the first that leaves none. A lower bound on the oldest row's wait.
+    #[serde(default)]
+    pub backlog_since: Option<DateTime<Utc>>,
 }
 
 impl DrainState {
@@ -717,13 +724,19 @@ pub async fn drain(
     drainer.state.status = status;
     drainer.state.detail = detail.clone();
     drainer.state.next_attempt_at = next;
-    drainer.state.save(data_dir).await?;
     let state = &drainer.state;
     let mut report = drainer.report.clone();
     report.status = status;
     report.detail = detail;
     report.next_attempt_at = next;
     report.pending = pending.iter().filter(|p| !state.skips(&p.row.id, &p.fingerprint)).count();
+    drainer.state.backlog_rows = report.pending;
+    drainer.state.backlog_since = if report.pending == 0 {
+        None
+    } else {
+        drainer.state.backlog_since.or(Some(now))
+    };
+    drainer.state.save(data_dir).await?;
     Ok(report)
 }
 
@@ -839,6 +852,46 @@ fn status_of(data_dir: &Path, target: Option<&Target>, consent: bool) -> Value {
         "last_drain_at": state.last_drain_at.filter(|_| current),
         "last_synced_at": state.last_synced_at.filter(|_| current),
         "next_attempt_at": state.next_attempt_at.filter(|_| current),
+    })
+}
+
+/// What a member tells its owner about its history push, inside the reduced `/api/status` the
+/// owner polls (issue #764): `{state, backlog_rows, oldest_unsent_age_s, last_error_class,
+/// consent}`, or `None` on a machine that is not a member. Counts and classes only — never a row
+/// id, a path or the owner's URL. Read from the persisted drain state: no collection, no hashing.
+pub(crate) async fn health_summary(app: &Shared) -> Option<Value> {
+    let target = app.fleet_members.membership().await?;
+    let consent = app.fleet_members.history_sync().await.unwrap_or(false);
+    let data_dir = app.cfg.data_dir.clone();
+    let state = tokio::task::spawn_blocking(move || DrainState::load(&data_dir)).await.ok()?;
+    Some(summary_of(&state, &target, consent, Utc::now()))
+}
+
+/// The pure half of [`health_summary`].
+fn summary_of(state: &DrainState, target: &Target, consent: bool, now: DateTime<Utc>) -> Value {
+    let current = state.member_id.as_deref() == Some(target.member_id.as_str());
+    let status = match (consent, current) {
+        (false, _) => SyncStatus::ConsentRequired,
+        (true, true) => state.status,
+        (true, false) => SyncStatus::Idle,
+    };
+    let last_error_class = match status {
+        SyncStatus::Unauthorized => Some("unauthorized"),
+        SyncStatus::Removed => Some("forbidden"),
+        SyncStatus::Backoff => Some("rate_limited"),
+        SyncStatus::Error => Some("error"),
+        _ => None,
+    };
+    let backlog = consent && current;
+    json!({
+        "state": status,
+        "backlog_rows": if backlog { state.backlog_rows } else { 0 },
+        "oldest_unsent_age_s": state
+            .backlog_since
+            .filter(|_| backlog && state.backlog_rows > 0)
+            .map(|since| (now - since).num_seconds().max(0)),
+        "last_error_class": last_error_class,
+        "consent": consent,
     })
 }
 

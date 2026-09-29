@@ -277,7 +277,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
 | `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
@@ -1090,8 +1090,10 @@ every poll and stays cheap without a cache.
 
 Without the API token this endpoint answers a reduced body, and only that: `version`, `queue_depth`,
 `host` with `microvms_live`, `microvms_ceiling` and the numeric capacity figures (no `id`, `hostname`,
-`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, and `storage` with only `ok`.
-It always uses the cached probes and ignores `?fresh`. This is what fleet peers read.
+`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, `storage` with only `ok`,
+`runner` with `last_tick_age_s`, and — on a fleet member only — `fleet_sync` (both described under
+[Member health](#member-health-issue-764)). It always uses the cached probes and ignores `?fresh`.
+This is what fleet peers read.
 
 ### `GET /api/hosts`
 
@@ -1244,7 +1246,9 @@ Each entry of `GET /api/fleet`'s `members` carries one verdict:
 ```
 
 `state` is `ok`, `unknown`, `degraded` or `stopped`; `code`, `reason` and `hint` are `null`
-exactly when it is `ok`. `unknown` means no poll has checked the member yet: it is never reported
+exactly when it is `ok`. `note` is independent of the state: something worth knowing that is not a
+fault — today only `"History sync off"`, when the member's operator has not consented to the
+history push — else `null`. `unknown` means no poll has checked the member yet: it is never reported
 as `ok` on no evidence. `code` is stable; `reason` and `hint` are for showing verbatim. Reading the view never dials a
 member: it evaluates what the owner already holds (`crates/colonizer/src/fleet_health.rs`), and
 every signal that fires is a finding. The worst state wins (`stopped` over `degraded` over `unknown` over `ok`); findings of the same state break ties in
@@ -1253,22 +1257,47 @@ the order below.
 | Order | `code` | Fires when | State | Hint | Wired |
 |---|---|---|---|---|---|
 | 1 | `token_revoked` | the member's fleet token is gone from the registry | stopped | re-pair this machine | yes |
-| 2 | `sync_rejected` | the last sync failed 401 or 403 | stopped | re-pair this machine | not yet |
-| 3 | `runner_down` | the colony runner is not alive | stopped | restart colonizer on this machine | not yet |
+| 2 | `sync_rejected` | the member's last sync drew a 401 (`unauthorized`) or a 403 (`removed`); reason "Token revoked" | stopped | re-pair this machine | yes |
+| 3 | `runner_down` | the member's queue loop last ticked ≥ 5 min ago; reason "Colony runner not ticking" | degraded | restart colonizer on this machine | yes |
 | 4 | `disk_full` | disk ≥ 90% used (≥ 95% stopped); without a total, < 5 GB free (< 1 GB stopped) | degraded / stopped | clean target/ dirs | yes |
 | 5 | `no_heartbeat` | the member last answered ≥ 5 min before the owner's latest poll (≥ 30 min stopped) | degraded / stopped | the machine may be asleep | yes |
 | 6 | `unreachable` | the owner's latest poll went unanswered | degraded | check that it is awake and on the network | yes |
-| 7 | `sync_backlog` | the oldest unsynced item waited ≥ 10 min (≥ 60 min stopped) | degraded / stopped | check its network, then restart colonizer there | not yet |
-| 8 | `sync_rate_limited` | the last sync failed 429 | degraded | it backs off by itself; wait a few minutes | not yet |
+| 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
+| 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
 | 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
 | 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
 
 The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
 A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
 because nobody looked; before the first poll those signals are unmeasured, so the member reads `unknown` (any other
-finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. Signals marked "not yet" have their
-inputs defined and stay unmeasured until the harness records them. `GET /api/hosts` rows gained
+finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. `GET /api/hosts` rows gained
 `disk_total_bytes` (omitted when unknown) for the disk percentage.
+
+The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
+caller without the API token gets) carries two more keys, both ages, counts and classes only:
+
+```json
+{"runner": {"last_tick_age_s": 3},
+ "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
+                "last_error_class": "error", "consent": true}}
+```
+
+- `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
+  tick). The loop ticks every 5 s and stamps the time before it starts queued colonies, so a tick
+  that wedges leaves the stamp to age.
+- `fleet_sync` — present only on a fleet member, read from its drain state
+  (`<data_dir>/fleet-sync.json`) without collecting or hashing anything. `state` is the drain
+  status of [the history push](#fleet-history-push-issue-762) (`consent_required` while the
+  operator has not said yes). `backlog_rows` is how many rows the last drain left unsent, and
+  `oldest_unsent_age_s` how long every drain since has ended with a backlog — a lower bound on the
+  oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
+  `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
+  `consent` is the operator's answer; with it off, no backlog is claimed.
+
+`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
+peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
+signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
+grows from it does.
 
 ### `GET /api/version`
 

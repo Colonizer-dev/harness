@@ -165,6 +165,20 @@ asleep"). The owner works it out from what it already sees — the member's answ
 poll, its disk, whether its token still exists — and the worst problem wins. The rule, the
 thresholds and which signals are wired are in [protocol.md](protocol.md#member-health-issue-764).
 
+Each member's answer to that poll also says how its [history push](#history-push) and its colony
+runner are doing, so the badge covers them too:
+
+- A member whose last sync drew a **401** or a **403** (removed) reads **stopped**, "Token revoked",
+  with "re-pair this machine" underneath.
+- A member whose drain has ended with rows still unsent for an hour or more reads **degraded**,
+  "Sync behind by N rows". The drain runs every five minutes, so that is a dozen drains in a row.
+- A member whose queue loop has not ticked for five minutes or more (it ticks every five seconds)
+  reads **degraded**, "Colony runner not ticking", with "restart colonizer on this machine".
+- A member whose operator has not turned history sync on is **not** degraded: that is a choice,
+  not a fault. It shows a grey "History sync off" note under the badge instead.
+
+A member running an older colonizer reports neither, and those signals stay unmeasured.
+
 ## The mesh ACL: ready, but nothing can use it yet
 
 The fleet rides the same embedded headscale the colonies use

@@ -100,6 +100,19 @@ pub(crate) async fn with_slot<T>(
     claim(&mut guard, room)
 }
 
+/// When the queue loop last came round, as Unix seconds; 0 until its first tick. A wedged tick
+/// (a `start_queued` that never returns) leaves it to age, which is what member health reads as
+/// "colony runner not ticking" (issue #764).
+static LAST_TICK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Seconds since the queue loop last ticked, or `None` before its first tick.
+pub fn last_tick_age_s() -> Option<i64> {
+    match LAST_TICK.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        at => Some((chrono::Utc::now().timestamp() - at).max(0)),
+    }
+}
+
 /// Starts queued colonies as slots free up, oldest first. A colony whose org or repository is at its own
 /// limit doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
 /// is stacked on.
@@ -108,6 +121,7 @@ pub async fn run_queue(app: Shared) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        LAST_TICK.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
         start_queued(&app).await;
     }
 }
