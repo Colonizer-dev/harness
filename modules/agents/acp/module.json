@@ -22,6 +22,10 @@
       }
     }
   },
+  "session_resume": {
+    "dir": "/root/.gemini",
+    "description": "The gemini preset keeps its sessions under ~/.gemini and the runner reloads one with session/load, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact; a custom agent resumes only if it keeps its sessions there too."
+  },
   "secrets": [
     {
       "env": [
