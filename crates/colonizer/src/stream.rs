@@ -137,9 +137,10 @@ struct LastSent {
 }
 
 /// The sources exactly as their GET handlers answer them: the hub calls the handlers directly and
-/// unwraps the `Json`, so hub and HTTP can never drift apart. No handler changes were needed.
+/// unwraps the `Json`, so hub and HTTP can never drift apart. The sessions hub reads the bare
+/// array the list route answers without pagination params, which is the same handler underneath.
 async fn sessions_snapshot(app: &Shared) -> Vec<sessions::Session> {
-    sessions::list(State(app.clone()), None).await.0
+    sessions::list_bare(State(app.clone()), None).await.0
 }
 
 async fn orgs_snapshot(app: &Shared) -> Vec<Value> {
@@ -398,7 +399,7 @@ mod tests {
             app.sessions.write().await.push(session);
         }
         let frames = full_frames(&app).await;
-        let body = sessions::list(State(app.clone()), None).await.0;
+        let body = sessions::list_bare(State(app.clone()), None).await.0;
         let parsed: Value = serde_json::from_str(&frames[0]).unwrap();
         let frame_ids: Vec<&str> = parsed["sessions"]
             .as_array()
