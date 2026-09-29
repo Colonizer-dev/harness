@@ -18,6 +18,672 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.1.10] - 2026-09-29
+
+### Added
+
+- **A quota probe per provider.** A provider can now carry `quota: {url, pointer}` — a `GET` and an
+  RFC 6901 JSON pointer into its answer — fetched with the provider's own credential whenever
+  `GET /api/providers/{id}/health` runs, so the cockpit shows what is left in a prepaid token plan. The
+  probe rides along on the reachability check and never changes its verdict; its URL must sit on the
+  base URL's origin — scheme, host and port, because the credential is sent there — and its pointer
+  must start with `/`. Saving with `quota` omitted keeps the stored
+  probe, an empty URL clears it, and with no probe the `quota` field stays out of the health answer.
+  ([#199])
+- **A token budget per colony.** A new `budget_tokens` sandbox setting caps the tokens one colony
+  routes through the gateway, counted for every routed response whether or not the provider prices it —
+  a prepaid token or coding plan prices nothing, so its colonies cost $0 and the USD budget can never
+  trip; this is what holds them. Enforced exactly like `budget_usd`: past the budget the colony is
+  stopped with its worktree kept, its next routed request is refused with `403`, and raising the budget
+  and pressing Resume continues. It is global, with no per-org override; `0`, the default, means
+  unlimited. ([#199])
+- **A workspace dashboard beside the nest.** With no colony picked, the cockpit home's right-hand
+  pane now summarises the chosen workspace's colonies — working against parallelism, needs-you with
+  each colony's reason, queued, returned, failed or stopped, total spend, and the last colonies to
+  move — read from the same scoped list the nest draws, so switching workspaces switches the panel
+  with it. Clearing the workspace filter aggregates every workspace under "All workspaces". It
+  occupies the inspector's slot, gives it back on a chamber click, and yields on narrow windows to
+  a Dashboard button parked above the nest's own view toggle. ([#200])
+- **Parking is a real status: `parked`, no longer `Stopped` wearing a flag.** A colony the host sets
+  aside — the provider's quota ran out, or an autopilot hold outlived its slot — now carries a
+  `parked` record (`{at, reason, resets_at?, vm_kept}`) instead of masquerading as stopped: it holds
+  no parallel slot, is never auto-reclaimed, and reads as paused rather than finished everywhere a
+  finished colony once matched. Parking persists the record first and tears down only after git
+  verified the worktree (uncommitted work is the only copy of unpushed work), so an unverifiable
+  worktree keeps the microVM running instead. Resume honours that: a park that kept the microVM
+  resumes warm — the agent, still idle in its machine, is told to pick up where it left off — and
+  every other resume boots cold with a short digest of the previous run's event log in the brief,
+  so the colony knows its own story. A recovered provider recovers both park shapes: a
+  discarded-VM park rejoins the queue, and a kept-VM park is routed through the same resume (warm
+  when possible, cold otherwise), so nothing sits parked on a provider that has long since
+  recovered — and a parked colony can be published directly, the cold push a stopped one takes.
+  Whether parking discards the microVM at all is the new `resume` module's `discard_vm` setting
+  (default on). ([#213])
+- **A scan runner for the security hunters.** `hunters::scan` now drives an installed,
+  checksum-verified hunter end to end from its manifest: it renders the `scan` template into argv
+  without a shell, runs the binary from a working directory with the hunter's LLM client pinned to
+  the Colonizer gateway — required for a scan, so hunter spend can never bypass it — then reads the
+  run's artifacts back through the manifest's parser into `Finding`s, copying `llm_usage.cost` out
+  of Strix's `run.json` so a run's spend is visible from both sides. Fatal exits (Strix: anything
+  but 0 and 2), claimed vulnerabilities with no artifacts behind them, a missing binary and a
+  four-hour deadline all fail loudly. Nothing decides when to scan yet, and Strix still needs a
+  Docker daemon inside the colony. ([#216])
+- **Spend you can attribute.** Every colony-scoped row of the spend journal (`<data>/spend.jsonl`)
+  now names the colony (`session`) and the agent module — the harness — that ran it, and the routing
+  decision recorded at boot carries the same `agent`, so a routing choice can be joined with what the
+  colony went on to spend. `node scripts/colony-report.mjs --costs` reads the journal grouped per
+  colony: the agent's own turn-end estimate against what the gateway metered for routed providers,
+  shown separately (a `–` is unmeasured, never $0), colonies with tokens but no measured dollar
+  labelled `unpriced — tokens only`, rows with no colony — chat, and older rows — under
+  `unattributed` so the totals still sum to the whole window, and a harness × model rollup for the
+  question the per-colony table cannot answer. The report defaults to the spend history's own
+  window — the last 30 days ending today, `--days` changing the length and `--since` the floor —
+  and names it in its Total line and `--json`. Bench comparisons gain a Harness · model column per
+  task. See [docs/protocol.md](docs/protocol.md) §6.8 and [docs/bench.md](docs/bench.md). ([#296])
+- **A published UHP conformance report, and a CI gate that keeps it honest.** [docs/conformance.md](docs/conformance.md)
+  says plainly where the mothership stands against the Unified Harness Protocol — not conformant
+  (no class) at spec 2026-09-12, with every failing check named and each gap either followed up or
+  accepted — and `docs/uhp-conformance.json` records the per-check outcomes the new `conformance`
+  CI job re-measures on every pull request: `scripts/ci/uhp-conformance.sh` builds the mothership,
+  boots it on loopback with throwaway config and data, runs the commit-pinned suite, and fails when
+  any check's outcome moved, so a protocol-behaviour change is re-measured deliberately instead of
+  absorbed. The same run validates the Claude Code runner's event fixture against
+  `docs/agent-events.schema.json`. ([#297])
+- **The hosted contract, and its first two pieces in the code.** Setting
+  `COLONIZER_DEPLOYMENT=hosted` makes the mothership refuse to save a credential without
+  `COLONIZER_MASTER_KEY` — nothing is written and the existing value is left alone; `local`, the
+  default, keeps the documented plaintext 0600 fallback. `GET /api/upload/manifest` returns the
+  manifest an upload would carry before anything is uploaded: `copied` is an allowlist of
+  module selections, providers without their keys, org overrides and skill-pack pins, `stays_home`
+  names the rest, and the `digest` is what a future confirm step echoes back. The design contract
+  that keeps a hosted deployment the same API as a laptop — routes, events, errors, the
+  workspace-credential seams, credential recovery when the master key changes, the outpost seam
+  and the audit gate — is in [docs/hosted.md](docs/hosted.md). ([#298])
+- **An escape-vector review checklist for the sandbox.** `docs/escape-vectors.md` tests each documented colony-escape class against the mount / TLS-proxy / mesh setup and records a verdict per vector — blocked (with the exact mechanism), open (with a follow-up), or not-applicable (with the reason) — plus a per-release sign-off line and a manual KVM procedure for the attempts that need a live microVM. New publish-path regression tests assert the `.git` rewrite, nested-repo stripping and hook/fsmonitor neutralisation that `git`-shaped smuggling relies on. ([#299])
+- **Path policy: masked and protected worktree paths.** Credential files in a checkout — `.env`,
+  `.envrc`, `.npmrc`, `.netrc`, `.git-credentials`, `.pypirc` — are now masked out of a colony's
+  view (the guest gets an empty file instead, before the agent starts), and agent-facing config —
+  `.git/config`, `.git/hooks/`, `.gitmodules`, `.claude/`, `.codex/`, `.mcp.json`, `.devcontainer/`,
+  `.vscode/`, `.idea/` — is pinned read-only. Three sandbox settings add to the lists or opt paths
+  out of them (`mask_paths`, `protect_paths`, `unmask_paths`; every opt-out is logged at boot);
+  unusable entries are refused at save time. At publish, empty boot placeholders are removed before
+  staging and changed masked or protected paths are logged on the colony — reported, not rewritten.
+  See [docs/path-policy.md](docs/path-policy.md). ([#300])
+- **In-guest hardening for the agent.** The colony's agent runs as root in its microVM, and three
+  layers now bound what that root can do before its first instruction: `boot.sh` locks the guest's
+  kernel interfaces down (`dmesg_restrict=1`, `kptr_restrict=2`, `hidepid` on `/proc`, the readable
+  `/proc` files masked with `/dev/null`, an empty read-only tmpfs over debugfs, tracefs, BPF,
+  firmware and the ACPI/SCSI/ALSA corners, `/proc/sys` and `/sys` remounted read-only); agentd
+  makes itself non-dumpable with core dumps off, so the agent can neither see nor read the
+  daemon's `/proc` entries; and the runner child — the agent and everything it spawns — is exec'd
+  with 21 capabilities dropped (mount, ptrace, `SYS_ADMIN`, BPF, kernel modules out;
+  package-manager caps in), core dumps off, `no_new_privs`, and a seccomp denylist that turns
+  io_uring, userfaultfd, mount, namespaces, ptrace, kexec and friends into ordinary `EPERM` tool
+  failures instead of kills. Landlock path pinning waits for a libkrunfw built with it — measured
+  2026-09-25, `landlock_create_ruleset` returns `ENOSYS` on the pinned stack's Linux 6.12.99. See
+  the In-guest hardening section of [docs/architecture.md](docs/architecture.md). ([#301])
+- **Every gateway request leaves one audit line.** The provider gateway now appends a per-request
+  record to the colony's `gateway.jsonl`: what was asked for (provider, wire, method, path, the
+  requested and sent model), how it ended (status, a typed failure code, whether the Claude fallback
+  was licensed, queue and total duration, bytes, token counts) — and nothing else. The record is a
+  fixed struct that is the whole allowlist, so keys, tokens and request bodies never reach the log,
+  and the colony's own credential headers are never forwarded upstream. `colony-report` counts each
+  colony's gateway requests and failures, Settings shows a provider's last failure code beside its
+  failure rate, and the provider-degraded notification carries it. ([#302])
+- **An egress policy on the colony fence.** Every colony now boots behind a configurable two-class
+  egress policy (`crates/colonizer/src/egress.rs`): `open`, today's behaviour, and `allowlist`, which
+  names no public profile, sets `--net-default-egress deny` and reaches only the hosts on the allow
+  list. Both modes compile a non-overridable always-blocked deny set — cloud metadata, private and
+  loopback ranges, CGNAT, benchmark and reserved ranges, NAT64, DNS64 and 6to4 prefixes — ahead of
+  every configured allow, so no setting can reopen them, with `allow@dns` in front so name
+  resolution survives. Sandbox settings gain `egress`, `egress_allow` and `egress_block` (validated
+  at save time); an org can fix the mode and extend, never shrink, the lists. Each boot records the
+  resolved policy to `<session>/egress.json` and serves it at `GET /api/sessions/{id}/egress`. The
+  policy is applied at boot: a change takes a stop plus Resume. See the Egress policy section of
+  [docs/sandbox-network.md](docs/sandbox-network.md). ([#303])
+- **Declared egress, denial hints, and the boundary/guidance split.** Every agent module's
+  `module.json` now declares the hosts its agent may reach — `egress: {api, auth, telemetry,
+  extra}`, bare hostnames, a leading `*.` allowed — validated by a test that walks every manifest
+  and requires each `secrets[].hosts` entry to be covered; deriving a colony's enforceable
+  allowlist from it is a follow-up egress-policy issue. The claude-code runner classifies denied
+  tool calls (`classifyDenial(text)` → `egress`, `read_only` or `tool_disabled`) and adds
+  `denial: {class, hint}` to the errored `tool_result` event — `is_error` and content unchanged —
+  and repeats the hint to the agent itself through a `PostToolUseFailure` hook's
+  `additionalContext`, at most once per class per session.
+  Two docs: [docs/boundaries.md](docs/boundaries.md) — what the harness enforces (boundary) versus
+  what it only suggests (guidance), how a finding classifies on arrival, and the planned watchdog
+  signatures on denial events — and [docs/runner-authoring.md](docs/runner-authoring.md), the
+  checklist for a new agent module. ([#304])
+- **Red-team synthesis.** A red-team run that finds something launches one more colony at `done` —
+  the synthesis judge — which merges the hunters' findings into a single ranked report, tracked by
+  the run's `synthesis` object and the tally's `merged` count. It fires exactly once, publishes
+  nothing, and is retried via `POST /api/redteam/runs/{id}/synthesize`. ([#309])
+- **The offline evolver loop, first slice.** `node scripts/evolve.mjs` turns what the bench and
+  red-team runs already recorded into failure classes, prompt-only proposals against one agent
+  module, and a retained-or-discarded verdict measured on a rerun of the same bench tasks: cost
+  bounded, a single task regression flags the whole proposal, and a widened trajectory-monitor gap is
+  never silently retained. It reads logs and writes proposal files into `<data
+  dir>/evolver/proposals` — it launches no colonies, edits no repository files and opens no pull
+  requests; writing the proposed prompt text and approving each proposal stay with you, and approval
+  hands you the `git apply` for an ordinary pull request. See [docs/evolver.md](docs/evolver.md).
+  ([#310])
+- **A shared anti-spam ledger for the mothership's proactive messages.** Every outbound proactive
+  action — a notify announcement, an autonomous judge answer — is now counted in one ledger
+  (`<data_dir>/ledger.json`) before it leaves: duplicate facts within a window are dropped, a
+  question that blocks its colony bypasses the soft layers but never the hard ones (quiet hours are
+  configured, not yet on by default; a per-topic daily cap and per-kind hourly and daily quotas
+  always are), and what the soft layers hold is summarised once an hour as one line ("Colonizer: 5
+  held announcements — provider_degraded ×2, question ×3") with counts by class only, no colony ids
+  or question text. The tallies ride the authenticated `/api/status` as `ledger`. The watchdog's
+  nudges join the ledger in a later slice. ([#311])
+- **Wait behind the holder.** A launch on an issue another colony already holds can now queue for
+  the issue instead of being refused or duplicating it: `queue_behind_holder` on `POST /api/sessions`
+  admits the colony as a `claim_wait` successor (`queued_behind` naming the holder), the oldest
+  waiter takes over when the holder releases — carrying the GitHub `colonizer:claimed` mark with
+  it — and the cockpit's launch form offers the choice beside Allow duplicate, with each waiter's
+  place in line on its Inspector card. ([#321])
+- **The mothership verifies a completion claim before publishing it.** When a colony's turn ends
+  having written `pr.md`, the host snapshots its work without touching the worktree, reads the git
+  state itself (commits ahead of base, changed files, the paths the PR description names) and re-runs
+  the repository's test command in a fresh one-shot microVM over a git archive of the snapshot —
+  never on the host, never trusting the agent's own logs. A confirmed claim publishes as before, an
+  unverifiable one publishes too (said so, never counted as confirmed), and a contradicted one holds
+  autopilot with `autopilot_held` and the contradictions stated. What runs comes from the `publish`
+  module's new `verify` setting — `auto` (the default) reads the repository's own test declaration
+  from the base branch (package.json, Cargo.toml, Makefile), `none` opts out per colony or globally,
+  or an explicit command — and the verdict lands in the colony's event log as a `verification` host
+  event. ([#328])
+- **Trajectory monitor: resolved versus clean-resolved.** A post-hoc audit of a colony's persisted event log — every archived `events-N.jsonl` and the current one — for the shapes of shortcutting (history mining, weakened tests, writes to what the scorer executes, solution fetches, unflagged injections), as a versioned, calibrated pattern set: any pattern whose false-positive rate on the committed calibration set's normal transcripts passes its budget is demoted to advisory automatically, so it reports without judging. `node scripts/trajectory-monitor.mjs --session <id> [--bench run.json | --calibration]` reports hits with redacted evidence and logs its own operation to the colony's `audit.jsonl`; `scripts/bench.mjs run` records `clean` and `hacks` per result, its summaries add `clean_resolved`, `hacked_resolved`, `clean_rate` and `gap`, and comparisons gain the clean verdict and the gap. The contract a future Evolver consumes — fitness is the clean rate, and a proposal that widens the gap is rejected — is fixed in [docs/trajectory-monitor.md](docs/trajectory-monitor.md). ([#329])
+- **External calibration against SWE-bench.** `scripts/swebench.mjs` runs the colonies on work nobody
+  here chose: each instance becomes a private single-commit snapshot of the upstream repo (no history, no
+  eval artifacts, no remote), runs under a required budget envelope that stops cleanly without
+  extrapolating unpaid tasks, and is scored by the official SWE-bench harness, with raw and clean rates —
+  a patch that edits the hidden tests is flagged and kept out of the clean count. Stages: Lite, then
+  Verified, then Multilingual. Runs stay labeled uncalibrated until the remaining controls (#330's gold
+  sanity gate, network and trajectory monitoring) land. ([#331])
+- **Exec policy: programmable deny/ask/allow rules over the commands a colony runs.** Every Bash
+  command — and, for `bash x.sh` / `python x.py` / `node x.js`-style commands, the contents of the
+  script it runs — now meets layered rules before it runs. The built-in policy denies reads of
+  secret paths (`~/.ssh`, `.env*` and the files the path policy masks; committed env templates
+  like `.env.example` stay readable) and denies network calls
+  inside a script (a direct `curl` command stays the egress policy's business), and asks before a
+  command writes outside the repository. An `ask` becomes a question card you — or the autonomy
+  judge, within its risk ceiling — answer with Allow or Deny. Rules are `{"id", "decision",
+  "deny"|"ask"|"allow", "reason", "command"|"script"|"touches"|"writes_outside"}`, layered install
+  (the agent module's `exec_policy` setting) → org (`COLONIZER_EXEC_POLICY_ORG`) → repository
+  (`.colonizer/exec-policy.json`, read once at start), and a layer can only ever narrow: the
+  strictest decision wins, so nothing a later layer allows can widen the built-in denies. Every
+  decision leaves one line in the harness log naming the rule that matched. Guidance in front of
+  the model, not a boundary — the microVM remains that. ([#471])
+- **Sensitive paths reach only trusted providers.** At boot, the file paths a task names are now
+  classified for sensitivity — `open` (docs, vendored code), `standard` (ordinary app code),
+  `custom` and `restricted` (secrets: `.env` files, private keys, cloud credentials, infra config)
+  — from built-in defaults, extendable per repository with `.colonizer/sensitivity.toml`, and the
+  strictest class is recorded on the colony. The gateway refuses a `restricted` colony any provider
+  not marked `trusted` in providers.json: configured is not vetted, and cheap is not private.
+  Other classes change nothing yet; a vetted tier and org-level policy are still to come. ([#472])
+- **Conditional instructions: per-directory `FOOTGUNS.md` that survive compaction.** A `FOOTGUNS.md`
+  (or `AGENTS.md`) in any subdirectory is now injected when the agent works on files in or under it,
+  and a repo `.colonizer/instructions.toml` can map instruction files to gitignore-style path globs
+  or to the task's labels. Fragments load through harness hooks once per context window, so unlike
+  `CLAUDE.md` they are re-injected after a compaction while their condition still holds — and
+  dropped when it no longer does. Every load is logged to the colony log, and a repo with neither
+  file pays only a couple of failed stat calls per directory the agent touches. ([#473])
+- **A read-only `repo-explorer` subagent.** A new first-party agent alongside Explore, always
+  available regardless of `subagent_effort`: before grepping, it checks the Skill tool for a shipped
+  retrieval skill (starting with graft's code map) and prefers it, falling back to find/grep like
+  Explore when none applies. First slice of #474 — pinning ast-grep, ast-outline and fff as skills of
+  their own, and a bench comparison of read/search token share with and without them, are follow-up
+  work. ([#474])
+- **Optional deja memory: colonies can recall what earlier colonies of the same org did.** After a
+  colony finishes, its Claude Code transcripts are indexed — secrets scrubbed first — into a per-org
+  local deja index (github.com/vshulcz/deja-vu, a local binary: no LLM, nothing leaves the machine),
+  and later colonies of the same org read it back through a new `recall` tool on the colony gateway.
+  The scrub replaces each known secret value raw and JSON-escaped, six characters and up, and deja's
+  own pattern redaction runs on top; base64- or percent-encoded forms of a secret are not caught.
+  Off by default at both levels: switch it on for the install under Settings → Memory ("Transcript
+  recall (deja)"), then per org in the org's memory settings; an org can also opt an enabled install
+  back out. The mothership needs the deja binary (the installer fetches it; an install without one
+  just leaves recall empty, with a one-line note). `GET /api/deja` reports whether the binary is
+  installed and, per org, whether recall is on, the index size and the last index time;
+  `GET /api/deja/search?org=<org>&q=<query>` runs the same recall a colony would get. Both switches
+  are in the cockpit: the install-level one under Settings → Memory, the org-level one in the org
+  settings dialog's Memory group. ([#495])
+- **A local log archive, with opt-in retention.** When a colony ends, its session directory — `events.jsonl`, the
+  rotated logs, `out/pr.md`, `egress.json` — is tarred, zstd-compressed and filed under
+  `<data_dir>/archive/<org>/<repo>/<yyyy>/<mm>/`, one revision per real change (`<id>.tar.zst`, then `<id>.r2`,
+  …) and never overwriting the bundle before it. Deleting a colony archives its logs first, so a delete moves them
+  into the archive instead of destroying them; `DELETE /api/sessions/{id}?purge_logs=true` is the only way the
+  bundles go with it. `GET /api/archive` lists every revision with its index record (cost, tokens, models, PR,
+  mothership), and `POST /api/archive/retention` is the preview/dry-run pair: a pure plan over the index (bundles
+  older than `keep_days`, then oldest-first until `max_gb`), and an apply that refuses to remove anything unless
+  `expect` repeats exactly the preview's list — and nothing at all while a bundle is the only copy, unless the
+  request explicitly allows it. First slice of #496. ([#496])
+- **A CLI, an MCP server, and scoped API tokens.** The `colonizer` binary is now also a client:
+  `launch`, `list`, `status`, `logs`, `ask`, `answer`, `stop`, `resume` and `pr` drive a mothership
+  here or across a tailnet (`--host`, `COLONIZER_TOKEN` or `--token-file`), with exit codes a
+  script can read, shell completions and a man page. `token create/list/revoke` mints scoped API
+  tokens — named, least-privilege keys ordered `read` < `operate` < `launch`, with org and repo
+  limits, a concurrency cap and a daily dollar budget, stored as a SHA-256 hash and accepted as a
+  Bearer header only; what a token launches is marked to the agent as external input, and the
+  activity log records it as `token:<name>`. And `colonizer mcp` serves the harness to MCP clients
+  over stdio, its tool set following the token's scope. See [docs/cli.md](docs/cli.md) and
+  [docs/mcp.md](docs/mcp.md). ([#508])
+- **An agent module for any ACP agent.** A new `acp` module drives an Agent Client Protocol agent
+  (Zed's ACP: JSON-RPC 2.0 over stdio) as a colony agent: one long-lived agent process per colony,
+  every user message a `session/prompt` turn, streamed updates mapped onto the runner protocol
+  (permission requests become question cards, plan updates render as a thinking checklist, and the
+  agent's file requests resolve inside the workspace). Google's Gemini CLI
+  (`gemini --experimental-acp`) is the first verified agent, pinned by npm version and integrity;
+  any other ACP agent runs by setting the custom-command option. Nothing stages the `gemini` binary
+  into the colony image yet. ([#509])
+- **Web Push notifications, and a cockpit that works on a phone.** When a colony needs an answer,
+  stalls, fails or opens a pull request, the mothership can now wake the phone on the operator's
+  nightstand: the browser subscribes from Settings → Notifications and the harness delivers an
+  RFC 8291-encrypted Web Push message, authorized by a VAPID key generated on first use and kept
+  beside the other secrets. Subscribing is the opt-in — no new module setting to forget — each
+  device carries a name of the operator's choosing and can be revoked alone, and a push service
+  reporting an endpoint gone (404/410) drops the subscription by itself. A push carries only what
+  the desktop popup already carries — a short title, the colony's one line, and a link back into
+  the cockpit for the colony it names — never question text, agent output, or repository content,
+  and it passes the same anti-spam ledger as every other channel. The cockpit grows a
+  narrow-screen bottom tab bar, so the same pages work on the phone the pushes arrive on.
+  ([#516])
+- **Cached views survive a restart and a GitHub outage.** The Packages tab, repository meta,
+  lines of code and registry facts are kept on disk (`<data>/cache`, capped, least-recently-used
+  first out) and served at once after a restart with "updated 5m ago · refreshing" and a Refresh
+  button, instead of "scanning" for minutes. Scans are reused per commit, GitHub and registry
+  requests are conditional (a 304 costs nothing), a colony's push or merge refreshes only that
+  repository, and GitHub avatars load through the mothership's week-long cache (`/api/img`). ([#519])
+- **History shows what happened, and what you did.** The mothership now keeps an activity log
+  (`<data>/activity.jsonl`, rolled over at 2 MB with one previous file kept): every colony outcome —
+  pull request opened, merged or closed, nothing to change, stopped, failed, waiting on an answer —
+  recorded once at the moment it happens, and every change a person makes through the API — launching,
+  stopping, resuming, deleting, answering, Create PR, loops, red-team runs, workspaces switched on or
+  off, providers, modules, secrets and tokens saved or removed — with who (`you` in the cockpit, or the
+  API token) and when. Names only: a secret's id is logged, never its value, and request bodies are
+  never read. `GET /api/activity` pages it (`before`, `limit`) and filters it (`kind`, `actor`, `org`,
+  `repo`, `q`). The History page is rebuilt on it: one timeline with an icon per kind, sticky day
+  headings, counts of pull requests, merges, failures, questions and your actions, filters by kind,
+  repository and actor plus search, 50 rows a page with older activity on request, runs of quiet
+  events folded into one expandable row ("12 colonies finished with nothing to change, 00:15–00:16"),
+  and each row linking to its colony, pull request or settings section. See
+  [docs/protocol.md](docs/protocol.md) §6.9. ([#527])
+- **Remote access: the relay.** A Cloudflare Worker at `my.colonizer.dev` puts every install one
+  subdomain away: the mothership registers an install — an Ed25519 public key in D1, nothing else —
+  and dials `/tunnel/<id>`, where a Durable Object per install holds its tunnel: an Ed25519
+  challenge/hello handshake proves the dialer holds the key, one live tunnel per install (a new dial
+  replaces the old and fails what was riding on it), request, response and body frames for HTTP plus
+  `ws_*` passthrough frames for WebSockets, 32 streams at a time, a per-install token-bucket rate
+  limit, and a 502 offline page when no tunnel is connected. The owner signs in through GitHub; on
+  an install with no owner the account is parked behind a 6-digit pairing code that the local
+  cockpit confirms with a signed request, so the machine gets the final say on who owns it. No
+  request or response body is ever stored or logged: D1 keeps the public key, the created-at and
+  the owner binding, and the access log is method, path template, status, bytes and milliseconds.
+  Deployment is manual (services/relay/README.md). ([#532], [#534])
+- **Remote access: drive the cockpit through a relay.** An opt-in switch (`PUT /api/remote`) that
+  keeps one outbound WebSocket to `my.colonizer.dev` — nothing is ever listened on — and serves the
+  cockpit's own API and websockets through it, so the mothership is reachable from outside the
+  machine without opening a port or joining the mesh. The install proves itself with an Ed25519 key
+  (generated on first use, kept 0600 under the config dir, never logged) that the relay binds to a
+  per-install host at registration; every tunnelled request then lands on the same router as
+  localhost, under the same API token, admitted only while the switch is on, only for the tunnel's
+  own Host, with the Origin fence pinned to exactly `https://<host>` — the tunnel host is never a
+  LAN host. Disabling closes the tunnel and every in-flight stream at once but keeps the key;
+  `POST /api/remote/reset` retires a leaked identity with a fresh one, reconnecting immediately.
+  `GET /api/remote` shows the switch, the host and whether the link is live. Switch changes are
+  recorded in the activity log. See [docs/protocol.md](docs/protocol.md) §6.10. ([#533])
+- **Remote access in the cockpit.** Settings → Remote access carries the switch — off by default, explained in plain words — and, while on, the link with Copy and a QR code, the tunnel's status, the relay's pending pairing codes to confirm, and a two-step "Reset link"; a small **Remote access ON** badge sits in the top bar, and History reads the `remote.*` rows. ([#535])
+- **Waiting colonies free their slot.** A colony whose question has waited past a grace period is
+  now suspended: the mothership removes its microVM but keeps the worktree and the agent's own
+  session transcript, freeing the parallel slot for the queue, while the status stays
+  `waiting_for_answer` and the question stays answerable exactly as before — in the cockpit
+  ("Suspended — resumes when you answer"), over the events WebSocket, at
+  `POST /api/sessions/{id}/answer`, and from the phone. The answer is held on the record
+  (persisted before it is acknowledged, cleared only once delivered, so a failed boot or a restart
+  never loses it), and the next queue tick boots a fresh microVM ahead of new launches that resumes
+  the agent's own session and delivers the answer as its first message. Only agents that can resume
+  a session are suspended: Claude Code declares `session_resume` in its `module.json` (a writable
+  mount on `/root/.claude/projects`) and reports its session id through a new `agent_session` runner
+  event; anything else keeps its microVM. Two global sandbox settings: `suspend_waiting` (default
+  on) and `suspend_after_minutes` (default 10). This is transcript resume, not a VM snapshot — the
+  pinned microsandbox 0.6.18 cannot checkpoint a running VM's memory (0.7.x can; measured at
+  0.46 s and 304 MB for a 512 MiB VM). The activity log gains `outcome.suspended` and
+  `outcome.restored`. See [docs/architecture.md](docs/architecture.md). ([#562])
+- **Loops on a longer leash, and maps that stay fresh.** A new `every_days` cadence runs a loop
+  every N days (1–365) at a fixed UTC time — every 14 days at 03:00, say, anchored so a run that
+  fires late never drifts the schedule. A loop can also now be a map loop (`kind: "map"`): instead
+  of a prompt it keeps architecture maps current, drawing its own repository each firing or
+  `owner/*` mapping every repository of the org one at a time, ten minutes apart, with the list
+  taken fresh each cycle so repositories added later join in. Refreshes run through the same
+  admission path as the Map view — parallel limits, budgets and the archify skillset rule them in —
+  and a refresh that fails keeps the old map, notes why on the loop and records `map.refresh` in
+  History. The Map view asks "Keep this map up to date?" once per repository, defaulting to every
+  14 days with presets 7/14/30/60/90 or a custom number ("Not now" is remembered in that browser
+  for 30 days); map loops are also creatable from the Loops page. See
+  [docs/loops.md](docs/loops.md). ([#564])
+- **The map's shaft from the surface comes straight down.** The mothership's entrance always sat at
+  the middle of the surface, so on a map whose entry chamber is off to one side its corridor ran as
+  one long diagonal across the map, cutting through a boundary's title on the way. The entrance now
+  sits on the surface right above the entry chamber, stepping aside only when that way down would
+  pass through another chamber, a name or a title, and its shaft drops straight down and turns in.
+  Boundary titles are also drawn over the tunnels, so a passing tunnel no longer hides one. ([#566])
+- Remote access can now bind an owner. The first GitHub sign-in on the link shows a six-digit code, and Settings → Remote access lists it with Confirm and Reject; once paired it names the owner, with Unbind. The mothership serves `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject` and `DELETE /api/remote/owner` as signed calls to the relay. Confirming, rejecting and unbinding work only from the cockpit on this machine, never through the link, and scoped API tokens cannot reach them. Reset link also unbinds the old link's owner.
+- **Orgs can tune which providers sensitive work may reach.** Providers can be marked `vetted` —
+  one step below `trusted`, which implies it — and record the `vendor` that actually runs their
+  model; `.colonizer/sensitivity.toml` can classify paths `vetted` (between `custom` and
+  `restricted`, which still need a trusted provider); and an org's workspace settings set the
+  minimum provider mark per class (`any`, `vetted` or `trusted`). An org can tighten a loose class
+  or loosen `restricted`, which never drops below `vetted`, and can pin restricted work to a list
+  of vendors, matched case-insensitively against the provider's recorded `vendor` — a provider with
+  no vendor recorded never matches. ([#626])
+- **Scoped launch tokens can keep their recurring work in loops.** A loop a token creates records
+  the token (`created_by_token`), and every run is admitted against the token's org/repo limits,
+  concurrency cap and daily budget and marked as external input, exactly like a colony the token
+  launched by hand — a run a cap refuses is recorded in the loop's note, and revoking the token ends
+  its loops the next time they would run, so nothing launches after revocation. A read token lists
+  loops and their runs; a launch token edits and runs only the loops it created, and map loops stay
+  with the owner. ([#627])
+- **Usage data has a sender — and no default endpoint, so nothing is sent until you name one.** The
+  anonymous usage batch now composes Cratefield's `module-telemetry` payload: it is validated against
+  the same grammar the collector parses before it is shown, and a background sender posts it at most
+  once every 24 hours to the URL named in `COLONIZER_TELEMETRY_ENDPOINT`. There is no default endpoint,
+  so an install that never sets it sends nothing, ever — the switch, the first-start notice and
+  `colonizer telemetry show` all work exactly as before. The batch's shape changed with it: what was a
+  flat record is now the payload's five fields (`schema`, `install`, `client`, `modules`, `events`),
+  where the old flat fields become counted events whose names carry the label (`colonies.parallel_now.2-3`,
+  `boot.vm-boot.5-15s`, `setting.agent.model`), the usage id becomes the 32-hex `install` value, and the
+  id now rotates every 30 days. `GET /api/telemetry/usage` shows the new shape; a batch that cannot be
+  sent is dropped, never queued or retried. ([#628])
+- **Codex, Grok Build and Hermes colonies can ask you questions.** Each module now serves an
+  `ask_user` tool through its vendored MCP server (`mcp.mjs`): a call turns into a `question` event
+  on the runner's loopback bridge; the cockpit's answer comes back as the tool result and the turn
+  continues (an interrupt or a turn end cancels a pending ask, per §2 the question is never also a
+  `tool_call`/`tool_result`). Hermes only loads MCP servers with the optional `mcp` Python extra,
+  so its colony image now installs hermes-agent with `pip install -e ".[mcp]"`. ([#630])
+- **Codex and Grok Build colonies get the colonizer MCP tools.** The codex and grok-build modules now
+  register a `colonizer` MCP server with every turn: `finding_file`, `memory_search`, `memory_propose`
+  and `wait`, served by a dependency-free stdio server wired to the runner's loopback bridge, and gated
+  on the same `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` switches as the other agent modules.
+  ([#631])
+- **Agent modules are preflighted against the colony image before a colony starts.** The harness now reads `requires.binaries` and `requires.pins` from every module's `module.json`: launch and boot refuse a module whose declared binary the harness does not stage (`claude` today) and no stock colony image carries, naming the binary and, when the module pins it, the pinned version and install command, instead of leaving a colony to die in the runner's in-VM preflight after boot. A runner that fetches its own binary (OpenCode) declares it under `requires.fetched_by_runner` and is never refused; a custom `sandbox.image` stays the operator's word and is still only checked inside the VM. ([#633])
+- **ACP colonies apply the exec policy.** Commands an ACP agent asks permission for now meet the same layered exec policy as Claude Code's Bash commands: a deny is answered with the agent's reject option, an allow with its allow option, and an ask surfaces on the question card with the rule and its reason named. Modules that do not apply the policy are now refused at launch while one is set. ([#635])
+- **`disabled_tools` now works on every shipped agent backend, in each CLI's own language.** Each
+  module declares the harness-level switch its CLI speaks — codex `-c` config overrides, grok-build
+  `--disallowed-tools`, Hermes `agent.disabled_toolsets`, opencode permissions, pi `--exclude-tools`
+  (ACP names no per-tool switch, so it declares no setting) — where before only `claude-code` could
+  take tools away, via its session `disallowedTools`. A module names the values it accepts as
+  `x-known-tools` on the setting's schema property, and the boot check validates
+  `COLONIZER_DISABLED_TOOLS` against that list, falling back to Claude Code's tool names where none
+  is declared. See [docs/providers.md](docs/providers.md). ([#636])
+- **The bench grades colonies' Jev compaction against each other.** `node scripts/bench.mjs jev
+  [bench-<label>.json ...]` reads the Jev visibility ladder (`<data dir>/jev_ladder.jsonl`), groups its
+  rows by colony and by the bench run each colony worked in, and prints precision and recall per colony,
+  per run and overall, with the tp/fp/fn/tn counts beside them so a small sample is visible.
+  `--threshold` moves the predicted-positive cutoff (default 0.5, the score the plugin itself keeps at)
+  and `--json` prints the report object. ([#637])
+- **`loop_next` and `loop_stop` on Codex, Grok Build and OpenCode, not just Claude Code.** An agent module declares the loop tools with `"loop_tools": true` in its `module.json`, and a loop's brief names them only when the module its colony launches on declares them. On a module without them — Pi, Hermes and ACP, which serve no colonizer MCP server yet — the brief says nothing about pacing or stopping, a self-paced loop simply runs again in 24 hours, and the Loops form warns when you pick self-paced for an org whose agent module lacks the tools. ([#643])
+- **A `colonizer loop` subcommand.** Loops are no longer cockpit-only: `colonizer loop list`, `create`, `run`, `stop`, `start` and `delete` drive the same `/api/loops` routes from a terminal, over the usual `--host`, `--token-file` and `--json`. The cadence reads the way the composer's `/loop` does — `30m`, `2h`, `7d`, `14d@03:00`, `daily@09:00`, `weekly@mon@09:00`, `monthly@15@09:00`, `self` — with local clock times stored as UTC, and `--kind map`, `--model`, `--no-autopilot` and `--max-runs` mirroring `launch`. `stop`/`start` are the Loops page's pause switch. See [docs/loops.md](docs/loops.md) and [docs/cli.md](docs/cli.md).
+- **API tokens are managed in the Settings UI.** Settings → API tokens lists every scoped token with
+  its scope, org/repo limits, launch caps and last use, and creates and revokes them over the same
+  owner-only routes as `colonizer token` — the CLI and the raw API are no longer the only ways. A
+  new token's plaintext is shown once, with a Copy button, and never again. ([#646])
+- **A held-out bench suite with gap reporting.** `scripts/bench/heldout.mjs` gives each bench task family a
+  companion check kept outside the repository (a set inside it is refused). `run --heldout <dir>` resolves
+  every family's companion before any colony launches, scores each pull request against it on a fresh,
+  guarded clone keeping only the pass bit, retires companions after three scoring decisions, and fails the
+  run naming any family whose visible-vs-held-out gap beats `--max-gap` (0.25). See [docs/bench.md](docs/bench.md).
+- **Chat keeps its images.** Pasted, dropped or picked images upload to the Mothership (with progress) and are stored once, content-addressed, with location-bearing metadata stripped; only real PNG, JPEG, GIF and WebP files up to 10 MB, 8 per message. Messages show them as thumbnails that open full size, and regenerate, edit and resend, branch and compare send them to the model again — a model that cannot read images is told one was left out. Deleting a conversation removes the images nothing else uses. The Markdown export becomes a zip with the images beside it. Persona preset edits and notes on unhelpful replies now live on the Mothership instead of one browser, moved up automatically.
+- **Chat personas are ants now.** The top bar's persona picker is a cast of four named, animated ants, each keeping its preset and prompt: Pip the forager (Plain), Sarge the soldier ant (Code reviewer), Silka the weaver ant (Architect) and Mellie the honeypot ant (Release writer). Cards show the ant, its caste, role and what it does, with the full system prompt a click away; the chosen ant sits in the top bar and speaks the conversation's replies (walking while one streams in). Small inline SVGs, still under reduced motion. Conversations keep their stored persona, so older ones find their ant.
+- **Chat, redesigned.** A searchable conversation list (workspace filter, pinned and Today / Yesterday / Previous 7 days / Older groups, inline rename, delete with undo, ⌘\\ to collapse); an empty-state hero with suggestions from the workspace (explain a repo's architecture from its map, what the colonies did today, why a colony failed, release notes from merged PRs, review a file, plan an issue); a centred composer with a model picker (provider marks, key status, prices, fast/cheap/strong tags), a "+" menu to attach a repository file, colony, map or map component, GitHub issue, snippet or image, slash commands (`/colony`, `/file`, `/loop`, `/model`, `/system`, `/clear`) and a token and cost estimate for what is attached. Replies show model, tokens, cost and latency, with syntax-highlighted code (loaded on demand) and file paths that open in the Code page. Edit and resend in a branch, regenerate with another model, branch from any message, compare two models side by side and keep one, persona presets, temperature and max tokens, Markdown export, search within a conversation, and hand-offs to a colony, a loop or a GitHub issue. The first reply names the conversation with the cheap summary model. See `/api/chat` in [docs/protocol.md](docs/protocol.md).
+- **Chat.** Talk to a model directly from the cockpit, no colony: conversations stored on the Mothership, replies streamed, stop and regenerate, a colony's summary and recent activity as optional context, and "Turn into a colony" on any reply. Any configured `<provider>/<model>`, or a Claude model with an Anthropic API key or an Anthropic provider — never the Claude subscription login. The composer's Ask mode sends a question there. The dashboard's issues button is now the orange **Send colonies** action.
+- **Codex as an agent module.** `modules/agents/codex` runs OpenAI's Codex CLI headlessly (`codex
+  exec --json`) on the same runner protocol as Claude Code: one process per turn, the first turn's
+  thread id resumed into one continuous thread, token totals (codex reports no cost) on each
+  `turn_end`, and a `CODEX_API_KEY` colony secret for `api.openai.com` — no ChatGPT sign-in. The
+  module is pickable now; nothing stages the `codex` binary into the colony image yet, so a codex
+  colony stops at the runner's preflight until the pinned CLI is on the image's PATH.
+- **graft as a downloadable skillset.** Settings → Skillsets offers graft (a code
+  map of the repository: `graft ask`, `callers`, `skeleton`, `grep`) with a Download
+  button. The bundle is not shipped with the app: the mothership downloads the
+  per-architecture bundle pinned by sha256 in `crates/colonizer/graft.lock` into
+  `<data>/plugins/graft`, where it is an ordinary skillset to switch on. Each colony
+  builds its own map of its own worktree on first use, outside the worktree and
+  offline — no model key reaches graft and its telemetry stays closed. The bundle
+  carries its own Node 22, because graft's native tree-sitter core does not build
+  on the Node 24 colonies run. Bundles are built by `.github/workflows/graft-bundle.yml`
+  on `graft-*` tags; until one is published and pinned, the row says it is not
+  available yet.
+- **Loops: colonies on a schedule, like `/loop`.** A saved prompt on a repository launches a colony every N minutes (15 minutes to 7 days), daily, weekly, monthly, or self-paced, where each run names the next with a `loop_next` tool (15 minutes–24 hours). Any run can end its loop with `loop_stop`, and a loop also ends after its max runs or end date. One run at a time: a tick that finds the previous run still live skips and says so. Loops has its own page (templates, history with status, PR and cost, run now), loop colonies carry a ↻ badge, and `/loop 1h <task>` in the composer makes one. Red-team schedules now share the cadence code. See [docs/loops.md](docs/loops.md).
+- **Org settings: pick which installed agent module an org's colonies launch on** (falls back to
+  the mothership's agent choice).
+- **Prompt screening at publish time.** A new opt-in `screen` module (provider `promptdecode`)
+  scans the colony's final diff and the pull request body for hidden code points — tag characters
+  encoding ASCII, bidi controls reordering what a reviewer reads, variation selectors smuggling
+  bytes — after the commit and before the push, the first moment anything could leave the machine.
+  A tiny deterministic decoder built into the mothership: no heuristics, no network, no model.
+  `warn` (the default once the module is on) logs the findings, records them on the colony's event
+  log and lists them in a sanitized section at the foot of the pull request;
+  `block` holds the publish — no push, no pull request — naming the count per class and the way
+  out. Flag emoji, ZWJ sequences, and Arabic or Hebrew prose without direction controls pass
+  clean; direction embeddings, isolates and overrides are flagged even when balanced. Off until
+  configured, like notify. See [docs/prompt-screening.md](docs/prompt-screening.md).
+- **Where a colony's tokens go.** The colony report files every turn's token spend under one of six
+  categories — read, search, command_output, edit, reasoning, replay — from the tools the turn called,
+  a subagent's calls included (edit beats command_output beats search beats read beats reasoning; cache
+  reads and writes are always replay). Each `turn_end`'s cumulative `model_usage` is diffed against the
+  previous snapshot and floored at zero exactly as the spend journal does, so a colony's categories add
+  up to its recorded usage; a `turn_end` without `model_usage` leaves the baseline for the next measured
+  turn instead of re-counting it. The report gains a "Token categories" table, `--json` carries
+  `tokenCategories`/`tokenCategoriesByModel`, and `bench-<label>.json` records `token_categories` per
+  task and run so a change to where tokens go becomes measurable. A first slice of #469: the Rust
+  journal and the cockpit chart are still to come.
+
+### Changed
+
+- **Vendored plugins are refreshed.** superpowers moves from v6.4.1 to v6.4.2 (the writing-plans
+  skill changed), and vendored google-skills from `3863d56` to `f566651` (adds
+  `cloud/gke-workload-scaling-troubleshooting`, updates 21 skills; the staged catalog is now 147).
+  Run `scripts/fetch-vendor.sh` (or install a release) to restage. ([#556])
+- **The colony launch path goes through the `ExecutionBackend` trait.** Boot pulls the image and boots the microVM, teardown removes it, and the liveness checks (the minute-tick watchdog, the restart sweep, warm resume) ask what is running — all through the new `execution` field on `App`, whose only backend is still the local microsandbox one. No behavior change. ([#625])
+- **Settings and launch refusals say what they wanted.** A module setting of the wrong type is
+  refused naming the type the schema asks for ("setting `cpus` must be an integer"), and one outside
+  its declared range names the bounds it must sit inside, one-sided or both ("setting
+  `hold_timeout_minutes` must be between 1 and 1440"), instead of a bare "wrong type" / "out of
+  range". The launch refusals in `POST /api/sessions` — an unknown model tier, a
+  `<provider>/<model>` override no configured provider owns, an uninstalled agent module, missing
+  Claude credentials — are unchanged, but now carry direct unit tests. ([#642])
+- **The cockpit uses wide screens.** Every view but the Nest now sits in one shared page container: fluid to the window with gutters that grow from 24px to 56px, capped at 2560px of content for dashboards, tables and lists and at 1280px for forms (Settings, Secrets, Launch). Charts grow taller with the window, the chart and its side list scale together, KPI notes wrap instead of being cut off, and on a wide desktop the Overview puts Workspaces and Colonies side by side, the Inbox its two lists, and Memory its review queue and notes. Phones and laptops look as before.
+- **Colonize: one button that turns issues and plain words into colonies.** The sidebar's
+  "New colony" and the dashboard's "Send colonies" are now one orange **Colonize** button, with an
+  ant in place of the plus and the GitHub mark (its antennae twitch on hover, and hold still under reduced
+  motion); both open the same pane, and so does ⌘K / Ctrl+K from anywhere in the cockpit. The pane
+  keeps the old hand-off list (repository scope, search, labels, now ten to a page with the shared
+  pager) and adds a box above it: type or speak what you want, press Enter, and the summary model
+  that already titles chats (`summary_model`) drafts one issue, or a few when the text lists
+  independent tasks. Confirm or edit the title and body, pick the repository when the scope has more
+  than one, and **Create** files them with the Mothership's `gh` (the same path as a chat's "file an
+  issue"); the new issues land at the top of the list, pre-selected, and are dispatched at once
+  unless "Dispatch right after creating" is off. Without a summary model the text itself is the one
+  draft. New routes: `POST /api/colonize/draft` and `POST /api/repos/{owner}/{repo}/issues`; the
+  activity log and History record `colonize.issue` (issue created from Colonize) and
+  `colonize.colony` (a colony dispatched from it). What moved: `/loop 1h <task>`, voice and
+  "Launch without an issue" (an open colony on the text) are in the pane's box; the full launch form
+  is behind the pane's "launch form" link and the phone's More sheet (now "Launch"); the floating
+  composer stays, with `#123` links and Ask, but ⌘K now opens Colonize. On the workspace dashboard
+  the button sits on the title row, centred on the org name, with the range and Compare controls
+  below it.
+- **The README is a front door again, and every doc says what is built and what is not.** The README covers what Colonizer is, how to install it, a first colony from the cockpit and from the CLI, and a "Read more" index of every doc; its settings table moved to docs/install.md. Agent modules are labelled honestly: Claude Code, OpenCode and Pi run on the stock images, while Codex, Hermes, Grok Build and ACP are `EXPERIMENTAL` because their CLIs are not staged. docs/gaps.md is now the register of everything the docs, the cockpit or the design promise that the code does not do yet, each row with its tracking issue. loops.md, burn-down.md, red-team.md, path-policy.md, sandbox-network.md, prompt-screening.md, skill-packs.md, runner-authoring.md, bench.md and the module READMEs were corrected against the code.
+- **The reference docs match the code again, and a broken doc link now fails CI.** protocol.md documents every route in `routes.snap` (credentials, device and install settings, `DELETE /api/sessions/{id}`, diff, catch-up, egress), the reclamation and diagnosis rules as the code applies them, and the `loop_next`/`loop_stop` events; install.md lists every mothership setting and what the config and data directories hold; cli.md, mcp.md and `colonizer launch --help` say what autopilot really does (open the pull request, not answer questions); architecture.md follows the #577 server composition and the `sessions/` split; remote-tunnel.md says where the code differs from the pinned contract. Two new guides: docs/colonies.md (a colony's life: claims, epics, questions, suspension, budgets, verification, the log archive) and docs/cockpit.md (every cockpit view and shortcut). `node scripts/check-doc-links.mjs` checks every relative link and anchor, in the `scripts` job.
+- **Filed issues carry the Source labels, so they stay in the list.** When Settings → Source
+  offers only issues with certain labels, an issue created from Colonize or from a chat's "file an
+  issue" now gets all of those include labels (none when the setting is empty), and Colonize's
+  confirm step shows them ("labels: ready, colonize"). A label the repository lacks is created
+  first; one that cannot be created is skipped, logged and named in the toast, and the issue is
+  filed anyway. Both routes now also refuse while external writes are blocked, like every other
+  filed issue.
+- **Long cockpit lists page ten at a time.** The workspace dashboard's Packages tables (Published, Dependencies, Supply chain) and the colony lists on the overview and the workspace dashboard now show ten rows per page with a pager ("11–20 of 54"), a search box and filters that fit the data: status, ecosystem, repository and unreleased changes on Published; repository on Dependencies; search, ecosystem and repository on Supply chain; a failed bucket in the overview's status menu; and status, repository and agent on a workspace's colonies. Changing the search or a filter goes back to page one, and the tab counts still show totals. The Code page gets a Grid | List toggle, where List is one compact row per repository, and the browser remembers the choice.
+- **The relay knows its GitHub OAuth app.** `services/relay/wrangler.toml` now carries the Colonizer Remote Access OAuth app's client id (public; the secret is a Worker secret), so owner sign-in on `my.colonizer.dev` can start once the relay is deployed. ([#531])
+
+### Fixed
+
+- **Read-only shared memory, enforced twice.** Subagents and background tasks can search shared memory but never
+  propose: the runner's hook already refused `memory_propose` for any agent but the orchestrator, and now the
+  mothership re-checks each proposal's `origin` before it touches a store — with the mem0 provider, a refused
+  proposal is never sent upstream. Proposals record who made them (`source.origin` beside `source.session_id`,
+  shown in review), the access matrix and what is *not* implemented (automatic extraction of memories from
+  conversation turns) are documented. ([#324])
+- **A swappable session store.** The session index (`sessions.json`) is now written through one
+  interface, `SessionStore`, with the on-disk layout as the default backend and a reference
+  object-store backend beside it, so the same semantics can later be served off the local disk and
+  the per-session files under `data/sessions/<id>/` can follow. Each operation states its
+  consistency contract (atomic replace, at-least-once appends deduplicated by `seq` on read, one
+  writer per session), ids and file names are validated so host paths like worktrees are refused,
+  and `migrate` copies colonies between stores — source untouched, destination verified, empty by
+  requirement — with a dry-run mode. The contract, the local assumptions the object-store backend
+  surfaced, and the migration procedure are in docs/session-store.md; the reads and per-session
+  file writes, and a CLI to run a migration, are follow-ups. ([#325])
+- **Misconfiguration refuses with a name and a fix instead of degrading silently.** A settings save
+  refuses an unknown key, naming it and the settings the module does take (a key already stored still
+  passes, or a provider switch would lock you out of saving); an enum refusal lists the options; a
+  corrupt `colonizer.toml` names the file, the error and the fix instead of a bare "using defaults"; a
+  corrupt `claude-accounts.json` is logged instead of silently resetting your default account, and its
+  writers refuse to overwrite it; a local plugin copy shadowing a vendored one is logged when the
+  skillset is saved; and duplicate provider ids in a hand-edited `providers.json` are named, with the
+  save over them refused. The house rule and its audit table are in
+  [docs/architecture.md](docs/architecture.md). ([#326])
+- **History no longer repeats or re-dates events.** The page dated each colony by its `updated_at`,
+  which moves on every housekeeping write — a reclaim sweep marking worktrees cleaned up, an update or
+  restart touching every colony — so one sweep re-dated days-old outcomes to "just now" and drew them as
+  a burst of identical lines, and three colonies launched on the same issue read as one event repeated.
+  Outcomes now come from the activity log at the time they happened; a colony that finished before the
+  log existed is shown once, with its time marked approximate, and every row names its colony. ([#527])
+- **A pull request description that names a file it did not create no longer holds autopilot.**
+  The done-claim verifier treated every path in `pr.md` as a claimed change, so a docs-only colony
+  that explained its file name by pointing at a `docs/remote-access.md` it had deliberately avoided
+  came back `contradicted` — the same path listed twice — and autopilot held. A described path that
+  is missing now only contradicts the claim when **none** of the description's in-repo paths is on the
+  branch or in the diff (and no changed file is named in it): the work it describes is not there.
+  Otherwise the missing path is an advisory, recorded in the verification's new `advisories`, shown
+  once in the activity line and added to the published pull request as a verification note, without
+  changing the verdict. Empty branches (unverifiable) and failing tests (contradicted) are unchanged.
+  ([#531])
+- **Colonies are no longer launched on epics.** An epic is a planning container: a colony on it
+  duplicates the colonies on its sub-issues (one spent $1.82 and an hour on #531). A launch on an
+  issue with sub-issues, an `epic` label, or a title ending "(epic)" or starting "Epic:" is now a
+  **409** naming why and listing up to ten open sub-issues to launch instead; `allow_epic: true`
+  starts one anyway. The check sits in `POST /api/sessions`, so the dashboard, the Colonize pane,
+  the MCP tool and the CLI all get it. Issue lists mark epics ("Epic · 5 sub-issues") and leave them
+  out of bulk hand-offs, noting how many were skipped. ([#531])
+- **The Overview's workspace card shows whole again.** Hovering a row of "Share by workspace" beside
+  the merged-PRs chart opens a card for that workspace, centred on the row; for the top rows it
+  reaches above the chart's top rule, and the chart body's `overflow: hidden` (there so the KPI
+  strip's hairline grid does not poke past its edges) cut the card's top, rounded border and all,
+  off at that rule. The chart section now clips sideways only, so the card rises over the heading
+  intact; the KPI strip and every other ruled section still clip both ways. ([#565])
+- **Remote access answers again instead of hanging on every request.** The relay read the response
+  headers the mothership sends — a list of `[name, value]` pairs — as an object, threw on the first
+  tunnelled response, and left the browser waiting until it timed out. It now reads headers in any
+  of the shapes the two sides send, and forwards repeated `set-cookie` headers as separate headers
+  instead of joining them into one value, so a sign-in behind the tunnel no longer loses the second
+  cookie. ([#618])
+- **Remote access no longer fights another mothership for the same link.** When the relay closed the
+  tunnel because a newer one took the install over (close code 4000, or the pinned 4409), the
+  mothership redialed at once and took the link straight back — so two motherships sharing one
+  install key kept replacing each other forever. A replaced close now parks the tunnel: nothing
+  redials until you re-enable remote access or reset the link, `GET /api/remote` reports
+  `"replaced": true` meanwhile, and the cockpit shows "Another mothership took over this link" in
+  place of "Offline — reconnecting". Transient closes still reconnect with the usual backoff.
+  ([#619])
+- **The agent can no longer read the session token that opens the unfiltered terminal shell.** agentd now covers the session token file with a read-only bind of `/dev/null` as soon as it has read it (`--seal-token`, passed by the boot script): a runner child that read `/colonizer/token` could open `ws://127.0.0.1:7070/v1/pty` and get a root shell without its seccomp/capability profile. The daemon refuses to start when the seal cannot be applied. The separate network route to the same token — a raw socket sniffing agentd's plaintext traffic — is tracked as a follow-up. ([#640])
+- **Unknown `/api/*` paths answer a JSON 404.** A request for an API route no module serves used to
+  fall through to the cockpit's SPA fallback and come back `200 text/html`, so a mistyped or
+  probed route read as a success. Unmatched `/api` paths — with or without a trailing slash — now
+  answer `404` with the API's `{"error": …}` body, behind the same token wall as every other API
+  route; page loads outside `/api` keep the SPA fallback, and missing `/assets` chunks keep their
+  own 404. ([#641])
+- **A suspended colony you have answered no longer looks stuck.** Answering a suspended colony
+  saves the answer with the time it arrived (`pending_answer.answered_at`), and the colony keeps
+  its `waiting_for_answer` status with `suspended` and `pending_answer` both set until a slot
+  frees — that pair means "answered, waiting for a slot". Suspended colonies now come back in
+  answer order rather than the order they were suspended in, still ahead of fresh launches, and
+  the answer-hold log line says whether a slot is free or how many answered colonies stand ahead.
+  The cockpit chip reads "Answered · resumes when a slot frees" and the colony card shows the
+  place in line (for example "2nd in line"). ([#667])
+- **Building the app works again with the ACP agent module.** `modules/agents/acp` shipped without a `package-lock.json`, so `scripts/install.sh` (which runs `npm ci` for every agent module) failed, and so did the CI bundle jobs. The module now ships its lockfile like the others. ([#591])
+- **Path-policy placeholders never count as the colony's work.** The empty files a boot makes as bind targets for the path policy (`.envrc`, `.git-credentials`, `.gitmodules`, `.mcp.json`, `.netrc`, `.pypirc` and the rest) sat untracked in the worktree, so the verification snapshot listed them as changed files. The snapshot and the publish commit now take them back out of the index after `git add -A` (recorded placeholders, or any empty policy path HEAD does not carry when the list was lost), and hold every masked path at HEAD's version, so a real masked file is never committed emptied or changed and an untracked one under a mask is never added. Stopping or tearing down a colony removes its still-empty placeholders from the kept worktree (a resume makes them again), and no cleanup ever deletes a file HEAD carries.
+- **The relay can deploy.** `services/relay/wrangler.toml` declared `[[durable_objects]]` as an array where wrangler requires a table, so `wrangler deploy` refused the file. The config is fixed, it points at the real `colonizer-relay` D1 database, and CI now dry-runs the relay deploy so a malformed config fails on the pull request. ([#531])
+- **Verification runs the repository's own package manager.** The fresh-checkout test run picked `npm install && npm test` for every package.json repository, so a bun, pnpm or yarn repository failed its install and the claim came back contradicted, holding autopilot (a colony on a bun repository sat held for twenty hours). The command now follows the base branch's `packageManager` field (through corepack), else its lockfile (`bun.lock`/`bun.lockb` → `bun install --frozen-lockfile && bun run test`, `pnpm-lock.yaml`, `yarn.lock` for Yarn 1 or 2+, `package-lock.json`), else npm, and `command_source` names what decided it. The VM checks for that tool before it runs anything: one the colony image does not carry (the default node image has no bun or pnpm) makes the claim unverifiable with the tool named, never contradicted.
+
+### Security
+
+- **Publishing, filing and resuming now require an authority grant, checked against the bytes the operator approved.**
+
+  The governance machinery from #98 is wired into the paths that act. Creating a pull
+  request (a press or an autopilot confirmation) mints a grant bound to the tree the publish would
+  commit plus the pr.md body, and the commit, push and pull request each re-check it as they run —
+  a worktree that moved between the approval and the commit is refused, not published. The body
+  that finally goes up is that approved pr.md with harness-composed footers added on top
+  (verification notes, a staleness note, screen warnings); those exact leaving bytes are hashed
+  into the audit trail. A finding is filed only under a FileIssue grant over the exact issue body,
+  checked before any `gh` call, and every resume boot checks a fresh Resume grant; a colony found
+  mid-publish after a restart is fenced because no grant survives the restart. Grants live in
+  memory for fifteen minutes and are never persisted, so anything still unspent after that — or
+  after a harness restart — needs approving again. The kill-switch
+  (`COLONIZER_NO_EXTERNAL_EFFECTS`) still refuses everything it did. ([#624])
+- **Grok Build colonies now switch off project-scope hooks, plugins, MCP servers and skills instead of hoping.**
+
+  The grok-build runner forces grok's folder-trust gate on with `GROK_FOLDER_TRUST=1` in every
+  child environment (env beats a `[folder_trust] enabled` kill-switch in any config, and an
+  inherited host value can no longer pass through), alongside the fresh `GROK_HOME` it already
+  assigned. A headless run against an empty trust store then resolves the workspace untrusted, and
+  grok skips a colonized repo's project `.grok/` MCP servers, plugins, hooks and skills, plus
+  project LSP servers and instructions (AGENTS.md — brief the colony through the prompt instead).
+  The runner never passes `--trust`, and a new `GROK_WORKSPACE_UNTRUSTABLE` preflight refuses to
+  start at all when the workspace is the home directory or the filesystem root, the two paths
+  folder trust auto-trusts because it could never record them. The gate exists in release-stamped
+  binaries only, which the pinned install.sh build is. A live contract test
+  (`COLONIZER_GROK_LIVE_BIN=/path/to/grok npm test`) drives the real binary and asserts it reports
+  the workspace untrusted with none of a planted `.grok/` loadable. Note the boundary: this fences
+  project scope only; the user-scope `~/.claude`/`~/.cursor` compat scanners are a separate issue.
+  ([#634])
+- **A colony's gateway token now opens only the inference requests its own model settings name, and only while the colony is there to receive them.**
+
+  The provider gateway used to authorize a request once — the bearer token had
+  to belong to a live colony — and then forward whatever method, path and body
+  it carried. The token's reach is now the routing boot derived it from, recorded
+  on the session before the token file is written: a colony reaches only the
+  providers and the `<provider>/<model>` pairs its model settings name, a colony
+  with no recorded set reaches nothing, and only `POST /v1/messages` (plus
+  `/v1/messages/count_tokens` on the anthropic wire) is served — any other path or
+  method is refused before the upstream is touched, with the query string limited
+  to path-safe characters. Two checks cover the time a request spends waiting for
+  a provider slot: a colony has at most 16 requests queued at once (agents fan out
+  through parallel subagents, so bursts are routine; past the cap a further request
+  is refused `429 overloaded_error` on arrival), and once a request holds its slot
+  it re-checks that its token still belongs to that live colony and that the budget
+  still admits it, refusing without sending anything upstream if not. Colonies
+  started after the upgrade pick the set up from the settings boot already read;
+  one whose machine survived the mothership upgrade keeps no record, so it needs
+  a resume before its gateway calls are admitted again. ([#681])
+- **The cockpit editor now ships a patched DOMPurify.** `monaco-editor` in the web console moves from 0.56.0 to 0.57.0. Monaco's ESM build inlines its own copy of DOMPurify into the app bundle, so pinning the npm `dompurify` package alone — through the lockfile or an `overrides` entry — would quiet scanners without changing what ships. 0.57.0 inlines DOMPurify 3.4.15 in place of 3.4.8, clearing GHSA-cmwh-pvxp-8882 (permanent `ALLOWED_ATTR` pollution via `setConfig()`), GHSA-c2j3-45gr-mqc4 (`CUSTOM_ELEMENT_HANDLING` bypasses `afterSanitizeElements` for allowed custom elements), GHSA-vxr8-fq34-vvx9 (a Trusted Types policy surviving `clearConfig()`) and GHSA-55q2-fjhq-7xh7 (IN_PLACE hook removal leaving a detached subtree executable). `npm audit` on `web/` reports no vulnerabilities.
+
+### Take care
+
+- **Colony agents can no longer ptrace, unshare or mount**, and `/proc/sys` and `/sys` are
+  read-only in the guest: the runner child's seccomp denylist answers those with `EPERM` and the
+  boot script remounts the kernel filesystems before the agent runs. A workload that relied on one
+  of them now fails with an ordinary tool error instead of succeeding. Check a workload against
+  the profile with `colonizer-agentd --seccomp-profile` and
+  `scripts/seccomp-evidence.sh -- <workload>`. ([#301])
+- **Claude Code colonies now mount a writable host directory at `/root/.claude/projects`**, where
+  the runner keeps its session transcripts, so a suspension can stop the microVM without losing the
+  conversation. The directory lives under the colony's session dir on the host: it counts against
+  the per-colony host-disk quota and is deleted with the colony. ([#562])
+- **Colonies waiting on an answer when you upgrade get suspended** once the default 10-minute grace
+  has passed on the new build — the question stays answerable and answering brings the colony back
+  — unless `suspend_waiting` is switched off first. ([#562])
+
 ## [v0.1.9] - 2026-09-24
 
 ### Added
@@ -560,11 +1226,15 @@ Macs. ([#74])
 [#184]: https://github.com/Colonizer-dev/harness/issues/184
 [#195]: https://github.com/Colonizer-dev/harness/pull/195
 [#197]: https://github.com/Colonizer-dev/harness/pull/197
+[#199]: https://github.com/Colonizer-dev/harness/issues/199
+[#200]: https://github.com/Colonizer-dev/harness/issues/200
 [#202]: https://github.com/Colonizer-dev/harness/issues/202
 [#205]: https://github.com/Colonizer-dev/harness/issues/205
 [#210]: https://github.com/Colonizer-dev/harness/issues/210
 [#212]: https://github.com/Colonizer-dev/harness/issues/212
+[#213]: https://github.com/Colonizer-dev/harness/issues/213
 [#215]: https://github.com/Colonizer-dev/harness/issues/215
+[#216]: https://github.com/Colonizer-dev/harness/issues/216
 [#219]: https://github.com/Colonizer-dev/harness/issues/219
 [#220]: https://github.com/Colonizer-dev/harness/issues/220
 [#226]: https://github.com/Colonizer-dev/harness/issues/226
@@ -572,6 +1242,25 @@ Macs. ([#74])
 [#240]: https://github.com/Colonizer-dev/harness/issues/240
 [#276]: https://github.com/Colonizer-dev/harness/pull/276
 [#286]: https://github.com/Colonizer-dev/harness/pull/286
+[#296]: https://github.com/Colonizer-dev/harness/issues/296
+[#297]: https://github.com/Colonizer-dev/harness/issues/297
+[#298]: https://github.com/Colonizer-dev/harness/issues/298
+[#299]: https://github.com/Colonizer-dev/harness/issues/299
+[#300]: https://github.com/Colonizer-dev/harness/issues/300
+[#301]: https://github.com/Colonizer-dev/harness/issues/301
+[#302]: https://github.com/Colonizer-dev/harness/issues/302
+[#303]: https://github.com/Colonizer-dev/harness/issues/303
+[#304]: https://github.com/Colonizer-dev/harness/issues/304
+[#309]: https://github.com/Colonizer-dev/harness/issues/309
+[#310]: https://github.com/Colonizer-dev/harness/issues/310
+[#311]: https://github.com/Colonizer-dev/harness/issues/311
+[#321]: https://github.com/Colonizer-dev/harness/issues/321
+[#324]: https://github.com/Colonizer-dev/harness/issues/324
+[#325]: https://github.com/Colonizer-dev/harness/issues/325
+[#326]: https://github.com/Colonizer-dev/harness/issues/326
+[#328]: https://github.com/Colonizer-dev/harness/issues/328
+[#329]: https://github.com/Colonizer-dev/harness/issues/329
+[#331]: https://github.com/Colonizer-dev/harness/issues/331
 [#332]: https://github.com/Colonizer-dev/harness/issues/332
 [#333]: https://github.com/Colonizer-dev/harness/issues/333
 [#334]: https://github.com/Colonizer-dev/harness/issues/334
@@ -604,12 +1293,56 @@ Macs. ([#74])
 [#457]: https://github.com/Colonizer-dev/harness/pull/457
 [#462]: https://github.com/Colonizer-dev/harness/pull/462
 [#468]: https://github.com/Colonizer-dev/harness/pull/468
+[#471]: https://github.com/Colonizer-dev/harness/issues/471
+[#472]: https://github.com/Colonizer-dev/harness/issues/472
+[#473]: https://github.com/Colonizer-dev/harness/issues/473
+[#474]: https://github.com/Colonizer-dev/harness/issues/474
 [#475]: https://github.com/Colonizer-dev/harness/issues/475
 [#482]: https://github.com/Colonizer-dev/harness/pull/482
 [#486]: https://github.com/Colonizer-dev/harness/pull/486
 [#488]: https://github.com/Colonizer-dev/harness/pull/488
 [#489]: https://github.com/Colonizer-dev/harness/pull/489
 [#490]: https://github.com/Colonizer-dev/harness/pull/490
+[#495]: https://github.com/Colonizer-dev/harness/issues/495
+[#496]: https://github.com/Colonizer-dev/harness/issues/496
+[#508]: https://github.com/Colonizer-dev/harness/issues/508
+[#509]: https://github.com/Colonizer-dev/harness/issues/509
+[#516]: https://github.com/Colonizer-dev/harness/issues/516
+[#519]: https://github.com/Colonizer-dev/harness/pull/519
+[#527]: https://github.com/Colonizer-dev/harness/pull/527
+[#531]: https://github.com/Colonizer-dev/harness/issues/531
+[#532]: https://github.com/Colonizer-dev/harness/issues/532
+[#533]: https://github.com/Colonizer-dev/harness/issues/533
+[#534]: https://github.com/Colonizer-dev/harness/issues/534
+[#535]: https://github.com/Colonizer-dev/harness/issues/535
+[#556]: https://github.com/Colonizer-dev/harness/issues/556
+[#562]: https://github.com/Colonizer-dev/harness/issues/562
+[#564]: https://github.com/Colonizer-dev/harness/issues/564
+[#565]: https://github.com/Colonizer-dev/harness/pull/565
+[#566]: https://github.com/Colonizer-dev/harness/pull/566
+[#591]: https://github.com/Colonizer-dev/harness/issues/591
+[#618]: https://github.com/Colonizer-dev/harness/issues/618
+[#619]: https://github.com/Colonizer-dev/harness/issues/619
+[#624]: https://github.com/Colonizer-dev/harness/issues/624
+[#625]: https://github.com/Colonizer-dev/harness/issues/625
+[#626]: https://github.com/Colonizer-dev/harness/issues/626
+[#627]: https://github.com/Colonizer-dev/harness/issues/627
+[#628]: https://github.com/Colonizer-dev/harness/issues/628
+[#630]: https://github.com/Colonizer-dev/harness/issues/630
+[#631]: https://github.com/Colonizer-dev/harness/issues/631
+[#633]: https://github.com/Colonizer-dev/harness/issues/633
+[#634]: https://github.com/Colonizer-dev/harness/issues/634
+[#635]: https://github.com/Colonizer-dev/harness/issues/635
+[#636]: https://github.com/Colonizer-dev/harness/issues/636
+[#637]: https://github.com/Colonizer-dev/harness/issues/637
+[#640]: https://github.com/Colonizer-dev/harness/issues/640
+[#641]: https://github.com/Colonizer-dev/harness/issues/641
+[#642]: https://github.com/Colonizer-dev/harness/issues/642
+[#643]: https://github.com/Colonizer-dev/harness/issues/643
+[#646]: https://github.com/Colonizer-dev/harness/issues/646
+[#667]: https://github.com/Colonizer-dev/harness/issues/667
+[#681]: https://github.com/Colonizer-dev/harness/issues/681
+[v0.1.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.10
 [v0.1.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.9
 [v0.1.8]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.8
 [v0.1.7]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.7
