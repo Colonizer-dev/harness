@@ -38,6 +38,8 @@ export interface QuotaAlternative {
   label: string;
   /** `anthropic` for Claude's own models. */
   provider: string;
+  /** The provider's wire; null for Claude's own models, which any provider can fall back to. */
+  wire?: "anthropic" | "openai" | null;
   failure_pct: number;
   rated: boolean;
   degraded: boolean;
@@ -76,6 +78,8 @@ export interface QuotaCard {
   waiting: number;
   resume_unix: number | null;
   fallback_model: string | null;
+  /** The provider's wire: a remembered fallback on another provider must speak the same one. */
+  wire?: "anthropic" | "openai";
   alternatives: QuotaAlternative[];
 }
 
@@ -83,12 +87,23 @@ export interface QuotaCard {
 export interface QuotaActionRequest {
   action: "switch" | "wait" | "stop";
   model?: string;
-  /** `colonies` (default) or `org` (their orgs' model settings too). */
-  scope?: "colonies" | "org";
+  /** `colonies` (default), `org` (their orgs' model settings too) or `all` (every model role on the
+   *  provider install-wide: the agent module's settings and every org's overrides, plus the colonies). */
+  scope?: "colonies" | "org" | "all";
   colonies?: string[];
   org?: string;
-  /** Save the model as the provider's `fallback_model` (a Claude model only). */
+  /** Save the model as the provider's `fallback_model`: a Claude model, or one on a provider of the same wire. */
   remember?: boolean;
+}
+
+/** One setting a quota switch changed, with the value it replaced. */
+export interface QuotaChange {
+  /** `install` (target: the agent module), `org`, `colony` or `provider` (the remembered fallback). */
+  scope: "install" | "org" | "colony" | "provider";
+  target: string;
+  key: string;
+  was: string | null;
+  now: string;
 }
 
 export interface QuotaActionReply {
@@ -96,6 +111,8 @@ export interface QuotaActionReply {
   provider: string;
   colonies: string[];
   failed: { id: string; ok: false; error: string }[];
+  /** What a switch changed and what it replaced; older builds omit it. */
+  changes?: QuotaChange[];
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */

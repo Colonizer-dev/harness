@@ -9,6 +9,7 @@ import type { QuotaActionReply, QuotaCard } from "../types";
 import { InboxView } from "./InboxView";
 import {
   ProviderQuotaCard,
+  QuotaChangeSummary,
   alternativeLabel,
   canRemember,
   defaultAlternative,
@@ -17,6 +18,7 @@ import {
   quotaActionSummary,
   quotaCardColonyIds,
   quotaCardHeader,
+  quotaChangeLines,
   quotaWaitingLine,
   runQuotaAction,
   switchRequest,
@@ -42,10 +44,12 @@ function card(overrides: Partial<QuotaCard> = {}): QuotaCard {
     waiting: 0,
     resume_unix: null,
     fallback_model: null,
+    wire: "anthropic",
     alternatives: [
-      { id: "zai/glm-5", label: "glm-5 · Z.AI", provider: "zai", failure_pct: 32.5, rated: true, degraded: true, healthy: false },
-      { id: "sonnet", label: "Claude Sonnet (latest)", provider: "anthropic", failure_pct: 0, rated: false, degraded: false, healthy: true },
-      { id: "deepseek/ds4", label: "ds4 · DeepSeek", provider: "deepseek", failure_pct: 1.2, rated: true, degraded: false, healthy: true },
+      { id: "zai/glm-5", label: "glm-5 · Z.AI", provider: "zai", wire: "anthropic", failure_pct: 32.5, rated: true, degraded: true, healthy: false },
+      { id: "sonnet", label: "Claude Sonnet (latest)", provider: "anthropic", wire: null, failure_pct: 0, rated: false, degraded: false, healthy: true },
+      { id: "deepseek/ds4", label: "ds4 · DeepSeek", provider: "deepseek", wire: "anthropic", failure_pct: 1.2, rated: true, degraded: false, healthy: true },
+      { id: "grok/grok-5", label: "grok-5 · xAI", provider: "grok", wire: "openai", failure_pct: 0, rated: false, degraded: false, healthy: true },
     ],
     ...overrides,
   };
@@ -112,6 +116,7 @@ describe("quota card rendering", () => {
     expect(html).toMatch(/<option value="zai\/glm-5" disabled="">glm-5 · Z\.AI — degraded, 32\.5% failing<\/option>/);
     expect(html).toContain("these colonies");
     expect(html).toContain("this org (acme)");
+    expect(html).toContain('<option value="all">every role using bailian</option>');
   });
 
   it("puts the card first in the inbox and does not list its colonies again as questions", () => {
@@ -131,11 +136,39 @@ describe("quota card rendering", () => {
 });
 
 describe("quota card actions", () => {
-  it("builds the switch request, remembering only a Claude model", () => {
+  it("builds the switch request, remembering a Claude or same-wire model only", () => {
     expect(switchRequest("sonnet", "colonies", true)).toEqual({ action: "switch", model: "sonnet", scope: "colonies", remember: true });
-    expect(switchRequest("deepseek/ds4", "org", true)).toEqual({ action: "switch", model: "deepseek/ds4", scope: "org" });
-    expect(canRemember("sonnet")).toBe(true);
-    expect(canRemember("deepseek/ds4")).toBe(false);
+    expect(switchRequest("deepseek/ds4", "org", false)).toEqual({ action: "switch", model: "deepseek/ds4", scope: "org" });
+    expect(switchRequest("zai/glm-5", "all", false)).toEqual({ action: "switch", model: "zai/glm-5", scope: "all" });
+    expect(canRemember(card(), "sonnet")).toBe(true);
+    expect(canRemember(card(), "deepseek/ds4")).toBe(true);
+    expect(canRemember(card(), "grok/grok-5")).toBe(false);
+    expect(canRemember(card({ wire: "openai" }), "grok/grok-5")).toBe(true);
+    expect(canRemember(card(), "")).toBe(false);
+  });
+
+  it("says what an every-role switch changed, was X → now Y", () => {
+    const switched = reply({
+      colonies: ["c1"],
+      changes: [
+        { scope: "provider", target: "bailian", key: "fallback_model", was: null, now: "zai/glm-5" },
+        { scope: "install", target: "claude-code", key: "model", was: "bailian/qwen3.8-max", now: "zai/glm-5" },
+        { scope: "org", target: "beta", key: "subagent_model", was: "bailian/qwen3.8-max", now: "zai/glm-5" },
+        { scope: "colony", target: "c1", key: "model", was: "bailian/qwen3.8-max", now: "zai/glm-5" },
+      ],
+    });
+    expect(quotaChangeLines(switched)).toEqual([
+      "bailian fallback: was unset → now zai/glm-5",
+      "install model: was bailian/qwen3.8-max → now zai/glm-5",
+      "org beta subagent_model: was bailian/qwen3.8-max → now zai/glm-5",
+      "colony c1 model: was bailian/qwen3.8-max → now zai/glm-5",
+    ]);
+    expect(quotaActionSummary(switched)).toBe("bailian: 1 colony switched, 3 settings changed");
+    const html = renderToStaticMarkup(<QuotaChangeSummary reply={switched} onDismiss={() => undefined} />);
+    expect(html).toContain("install model: was bailian/qwen3.8-max → now zai/glm-5");
+    expect(html).toContain("Dismiss");
+    expect(renderToStaticMarkup(<QuotaChangeSummary reply={reply()} />)).toBe("");
+    expect(renderToStaticMarkup(<QuotaChangeSummary reply={null} />)).toBe("");
   });
 
   it("sends switch, wait and stop to the provider and says what happened", async () => {

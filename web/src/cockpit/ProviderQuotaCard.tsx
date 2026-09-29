@@ -1,6 +1,7 @@
 // The "Provider out of quota" card (issue #767): one per provider whose plan ran out, naming the
 // provider and model, when the plan resets, and every colony blocked on it — with three answers.
-// Switch moves those colonies (or their orgs) to a healthy model and restarts them on it; Wait parks
+// Switch moves those colonies (or their orgs, or every role on the provider install-wide) to a
+// healthy model and restarts them on it, and says what each setting was; Wait parks
 // them and the mothership resumes them at the reset, counted down here; Stop stops them. It is a
 // dedicated card, not a free-form question from an agent: the agents cannot answer this themselves.
 //
@@ -8,7 +9,7 @@
 // render the card to static markup.
 import { useEffect, useState, type ReactElement } from "react";
 
-import type { QuotaActionReply, QuotaActionRequest, QuotaAlternative, QuotaCard } from "../types";
+import type { QuotaActionReply, QuotaActionRequest, QuotaAlternative, QuotaCard, QuotaChange } from "../types";
 import { Button, cx, inputClass } from "../components/ui";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -67,23 +68,54 @@ export function defaultAlternative(card: QuotaCard): string {
   return (card.alternatives.find((a) => a.healthy) ?? card.alternatives[0])?.id ?? "";
 }
 
-export type SwitchScope = "colonies" | "org";
+export type SwitchScope = "colonies" | "org" | "all";
 
-/** The switch request. `remember` only rides along for a Claude model: fallback_model is Claude-only. */
+/**
+ * Whether "remember as fallback" can apply to this model: any Claude model (the colony's router
+ * retries it), or a model on another provider that speaks the card's provider's wire (the gateway
+ * retries it there). A cross-wire model cannot be a fallback.
+ */
+export function canRemember(card: QuotaCard, model: string): boolean {
+  if (model === "") return false;
+  if (!model.includes("/")) return true;
+  const alt = card.alternatives.find((a) => a.id === model);
+  return alt?.wire != null && alt.wire === (card.wire ?? "anthropic");
+}
+
+/** The switch request; the caller passes `remember` only where [`canRemember`] allows it. */
 export function switchRequest(model: string, scope: SwitchScope, remember: boolean): QuotaActionRequest {
   const body: QuotaActionRequest = { action: "switch", model, scope };
-  if (remember && !model.includes("/")) body.remember = true;
+  if (remember) body.remember = true;
   return body;
 }
 
-/** Whether "remember as fallback" can apply to this model. */
-export const canRemember = (model: string): boolean => model !== "" && !model.includes("/");
+/** Where each change landed, in words: `install model`, `org beta subagent_model`, `bailian fallback`. */
+function changeWhere(change: QuotaChange): string {
+  switch (change.scope) {
+    case "install":
+      return `install ${change.key}`;
+    case "org":
+      return `org ${change.target} ${change.key}`;
+    case "colony":
+      return `colony ${change.target} ${change.key}`;
+    case "provider":
+      return `${change.target} fallback`;
+  }
+}
+
+/** One line per setting a switch changed: `install model: was bailian/qwen3.8-max → now zai/glm-5`. */
+export function quotaChangeLines(reply: QuotaActionReply): string[] {
+  return (reply.changes ?? []).map((c) => `${changeWhere(c)}: was ${c.was ?? "unset"} → now ${c.now}`);
+}
 
 /** The toast after an action: what happened, and what did not. */
 export function quotaActionSummary(reply: QuotaActionReply): string {
   const done = reply.colonies.length;
   const verb = reply.action === "switch" ? "switched" : reply.action === "wait" ? "parked until the reset" : "stopped";
-  const head = `${reply.provider}: ${done} ${done === 1 ? "colony" : "colonies"} ${verb}`;
+  const settings = (reply.changes ?? []).filter((c) => c.scope !== "colony").length;
+  const head =
+    `${reply.provider}: ${done} ${done === 1 ? "colony" : "colonies"} ${verb}` +
+    (settings > 0 ? `, ${settings} ${settings === 1 ? "setting" : "settings"} changed` : "");
   if (reply.failed.length === 0) return head;
   return `${head}; ${reply.failed.length} could not be: ${reply.failed.map((f) => `${f.id} (${f.error})`).join(", ")}`;
 }
@@ -186,23 +218,24 @@ export function ProviderQuotaCard({
         >
           <option value="colonies">these colonies</option>
           <option value="org">this org ({card.orgs.join(", ") || "none"})</option>
+          <option value="all">every role using {card.provider}</option>
         </select>
         <Button
           size="sm"
           variant="primary"
           disabled={busy !== null || model === ""}
-          onClick={() => void run(switchRequest(model, scope, remember))}
+          onClick={() => void run(switchRequest(model, scope, remember && canRemember(card, model)))}
         >
           {busy === "switch" ? "Switching…" : "Switch model"}
         </Button>
         <label
-          className={cx("flex items-center gap-1.5 text-[12px]", canRemember(model) ? "text-muted" : "text-faint")}
-          title="Save it as this provider's fallback_model, so the next time its plan runs out colonies retry on it by themselves. Claude models only."
+          className={cx("flex items-center gap-1.5 text-[12px]", canRemember(card, model) ? "text-muted" : "text-faint")}
+          title="Save it as this provider's fallback_model, so the next time its plan runs out colonies retry on it by themselves. A Claude model, or a model on a provider that speaks the same wire."
         >
           <input
             type="checkbox"
-            checked={remember && canRemember(model)}
-            disabled={!canRemember(model)}
+            checked={remember && canRemember(card, model)}
+            disabled={!canRemember(card, model)}
             onChange={(e) => setRemember(e.target.checked)}
           />
           remember as {card.provider}'s fallback
@@ -239,6 +272,51 @@ export async function runQuotaAction(
     say(e instanceof Error ? e.message : String(e), "error");
     return null;
   }
+}
+
+/**
+ * What a switch changed, "was X → now Y" per setting, kept on screen after the card itself goes
+ * (its colonies are no longer blocked). Nothing when the reply changed no setting.
+ */
+export function QuotaChangeSummary({
+  reply,
+  onDismiss,
+}: {
+  reply: QuotaActionReply | null;
+  onDismiss?: () => void;
+}): ReactElement | null {
+  const lines = reply ? quotaChangeLines(reply) : [];
+  if (!reply || lines.length === 0) return null;
+  return (
+    <div
+      role="status"
+      aria-label={`Switched ${reply.provider}`}
+      className="rounded-md border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-text"
+    >
+      <div className="flex items-center gap-2">
+        <span className="font-medium">{quotaActionSummary(reply)}</span>
+        {onDismiss && (
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="ml-auto cursor-pointer border-0 bg-transparent p-0 text-[12px] text-muted hover:underline"
+          >
+            Dismiss
+          </button>
+        )}
+      </div>
+      <ul className="m-0 mt-1 list-none p-0 font-mono text-[12px] text-muted">
+        {lines.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Whether an `onAction` result is a quota reply (the wiring may also resolve to nothing). */
+export function isQuotaReply(value: unknown): value is QuotaActionReply {
+  return typeof value === "object" && value !== null && "action" in value && "colonies" in value;
 }
 
 /** Colonies a quota card already covers: the inbox shows them on the card, not again as questions. */

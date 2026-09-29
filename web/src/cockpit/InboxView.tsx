@@ -9,8 +9,8 @@ import { Page } from "./Page";
 
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { QuotaActionRequest, QuotaCard, Session } from "../types";
-import { ProviderQuotaCard, quotaCardColonyIds } from "./ProviderQuotaCard";
+import type { QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
+import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
@@ -46,6 +46,13 @@ export function InboxView({
 }): ReactElement {
   // Nothing server-side records a read; this is a local high-water mark, so "read" is per browser.
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
+  // The last switch's "was X → now Y" summary, kept after its card goes (issue #767).
+  const [switched, setSwitched] = useState<QuotaActionReply | null>(null);
+  const quotaAction = async (provider: string, body: QuotaActionRequest) => {
+    const reply = await onQuotaAction?.(provider, body);
+    if (isQuotaReply(reply) && (reply.changes?.length ?? 0) > 0) setSwitched(reply);
+    return reply;
+  };
 
   // A colony a quota card covers is answered on the card, not listed again as a question.
   const onCards = quotaCardColonyIds(quotaCards);
@@ -83,13 +90,9 @@ export function InboxView({
         <section aria-label="Needs you" className="flex min-w-0 flex-col gap-4">
           <h2 className="m-0 text-[14px] font-medium">Needs you</h2>
 
+          <QuotaChangeSummary reply={switched} onDismiss={() => setSwitched(null)} />
           {quotaCards.map((card) => (
-            <ProviderQuotaCard
-              key={card.provider}
-              card={card}
-              onOpenColony={onOpenColony}
-              onAction={onQuotaAction ?? (async () => undefined)}
-            />
+            <ProviderQuotaCard key={card.provider} card={card} onOpenColony={onOpenColony} onAction={quotaAction} />
           ))}
 
           {waiting.length === 0 && quotaCards.length > 0 ? null : waiting.length === 0 ? (

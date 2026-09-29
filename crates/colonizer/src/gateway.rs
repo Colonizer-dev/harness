@@ -311,7 +311,11 @@ impl UsageCounters {
     /// the fallback to Claude the colony's router will make with it (see [`ProviderUsage::fallbacks`]).
     fn add_failure_with_fallback(&self, provider: &Provider, failure: GatewayFailure) {
         self.add_failure(failure);
-        if provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) {
+        // The router retries the transport failures on a Claude fallback only; a provider-prefixed
+        // fallback is the gateway's own retry, which quota exhaustion alone triggers (issue #767).
+        let retried = provider.claude_fallback().is_some()
+            || (failure == GatewayFailure::QuotaExhausted && provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()));
+        if retried {
             self.fallbacks.fetch_add(1, Ordering::SeqCst);
             self.dirty.store(true, Ordering::SeqCst);
         }
@@ -1254,6 +1258,19 @@ fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<
     )
 }
 
+/// The request body with its `model` replaced, for the fallback retry; `None` for a body that is
+/// not a JSON object.
+fn with_model(body: &Bytes, model: &str) -> Option<Bytes> {
+    let mut request: Value = serde_json::from_slice(body).ok()?;
+    request.as_object_mut()?.insert("model".into(), json!(model));
+    serde_json::to_vec(&request).ok().map(Bytes::from)
+}
+
+/// The gateway's route for `/providers/{id}/...`: one pass through [`proxy_to`], plus — when the
+/// provider answered quota-exhausted and its `fallback_model` is `<provider>/<model>` on another
+/// same-wire provider — one retry there with the model swapped (issue #767). A Claude fallback stays
+/// the colony router's; the retry is a single hop, and a fallback provider that is out of quota
+/// itself, missing, or on another wire leaves the original answer (and the colony blocked on it).
 async fn proxy(
     State(app): State<Shared>,
     Path((id, _)): Path<(String, String)>,
@@ -1261,6 +1278,74 @@ async fn proxy(
     uri: Uri,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let response = proxy_to(
+        app.clone(),
+        id.clone(),
+        method.clone(),
+        uri.clone(),
+        headers.clone(),
+        body.clone(),
+        false,
+    )
+    .await;
+    if !response.headers().contains_key(QUOTA_HEADER) || !Gateway::quota_fallback_enabled() {
+        return response;
+    }
+    let providers = app.providers();
+    let Some(provider) = providers.iter().find(|p| p.id == id) else {
+        return response;
+    };
+    let Some((to, model)) = provider.provider_fallback() else {
+        return response;
+    };
+    let (to, model) = (to.to_string(), model.to_string());
+    let token = headers.get(COLONY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let colony = app.colony_for_token(token).await.map(|s| s.id);
+    let skip = match providers.iter().find(|p| p.id == to) {
+        None => Some("is not configured"),
+        Some(target) if target.wire != provider.wire => Some("speaks another wire"),
+        Some(_) if app.gateway.is_quota_exhausted(&to) => Some("is out of quota too"),
+        Some(_) => None,
+    };
+    let rest = uri.path().strip_prefix(&format!("/providers/{id}")).unwrap_or_default();
+    let query = uri.query().map(|q| format!("?{q}")).unwrap_or_default();
+    let retry = match (
+        skip,
+        with_model(&body, &model),
+        format!("/providers/{to}{rest}{query}").parse::<Uri>(),
+    ) {
+        (None, Some(body), Ok(uri)) => Some((body, uri)),
+        _ => None,
+    };
+    let Some((body, retry_uri)) = retry else {
+        eprintln!(
+            "gateway: provider \"{id}\" is out of quota and its fallback {to}/{model} {}; no retry",
+            skip.unwrap_or("could not take the request")
+        );
+        // No retry is coming after all, so the colony is blocked on this provider (#760, #767).
+        if let Some(colony) = &colony {
+            app.gateway.note_colony_quota(colony, &id);
+        }
+        return response;
+    };
+    drop(response);
+    eprintln!("gateway: provider \"{id}\" is out of quota; retrying on its fallback {to}/{model}");
+    proxy_to(app, to, method, retry_uri, headers, body, true).await
+}
+
+/// One pass of a colony request to provider `id`. `fallback` marks the gateway's own quota retry
+/// ([`proxy`]): the operator configured that hop on the provider, so the colony's recorded
+/// provider and model scope (which admitted the first pass) does not refuse it; every other check —
+/// sensitivity, key, budget — applies as to any request.
+async fn proxy_to(
+    app: Shared,
+    id: String,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    fallback: bool,
 ) -> Response {
     let token = headers.get(COLONY_HEADER).and_then(|v| v.to_str().ok()).unwrap_or_default();
     let Some(session) = app.colony_for_token(token).await else {
@@ -1301,10 +1386,11 @@ async fn proxy(
     // what the token's access is derived from, and boot records it before the token is written.
     // Refused with the other local refusals — before credentials, budget, or any upstream call —
     // and like the budget 403, one Claude Code does not retry in a loop.
-    if !session
-        .allowed_providers
-        .as_ref()
-        .is_some_and(|allowed| allowed.contains(&id))
+    if !fallback
+        && !session
+            .allowed_providers
+            .as_ref()
+            .is_some_and(|allowed| allowed.contains(&id))
     {
         audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::NotRouted);
         return api_error(
@@ -1431,7 +1517,8 @@ async fn proxy(
     // such a colony keeps the pre-#727 scope, its recorded providers, until it next boots and
     // records its models. A colony with neither set is still refused at the provider check above.
     let legacy = session.allowed_models.is_none() && session.allowed_providers.is_some();
-    let routed = legacy
+    let routed = fallback
+        || legacy
         || model
             .as_deref()
             .map(|m| format!("{id}/{m}"))
@@ -1795,10 +1882,12 @@ async fn anthropic_error(
         eprintln!("gateway: provider \"{}\" answered {status} for colony {colony}", provider.id);
         flag_model_error(app, colony).await;
     }
+    // Any fallback: a Claude one the colony's router retries, or a provider-prefixed one the
+    // gateway retries itself in [`proxy`] (issue #767).
     let fallback =
         quota.is_some() && provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
     if quota.is_some() && !fallback {
-        // No Claude retry is coming, so the colony is blocked on this provider (#760, #767).
+        // No retry is coming, so the colony is blocked on this provider (#760, #767).
         app.gateway.note_colony_quota(colony, &provider.id);
     }
     if quota.is_some() {
@@ -1819,7 +1908,7 @@ async fn anthropic_error(
         response
             .headers_mut()
             .insert(HeaderName::from_static(QUOTA_HEADER), quota_header_value(&hit));
-        if fallback {
+        if fallback && provider.claude_fallback().is_some() {
             response.headers_mut().insert(
                 HeaderName::from_static(FALLBACK_HEADER),
                 HeaderValue::from_static(provider_quota::QUOTA_FALLBACK),
@@ -1974,7 +2063,9 @@ async fn openai_response(
                     status,
                     kind,
                     &message,
-                    quota_fallback.then_some(provider_quota::QUOTA_FALLBACK),
+                    // The router's licence is for a Claude fallback only; a provider-prefixed one
+                    // is the gateway's own retry (issue #767).
+                    (quota_fallback && provider.claude_fallback().is_some()).then_some(provider_quota::QUOTA_FALLBACK),
                 );
                 response
                     .headers_mut()
@@ -2520,6 +2611,110 @@ mod tests {
         clear_model_error(&app, "c1").await;
         let cards = crate::quota_cards::cards(&app).await;
         assert_eq!(cards[0]["colonies"].as_array().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider whose remembered fallback is a model on another anthropic-wire provider (issue
+    /// #767): its 429 quota_exhausted is retried by the gateway on that provider with the model
+    /// swapped, and the colony gets the fallback's answer — not blocked, and no Claude licence for
+    /// the router. A cross-wire fallback (a hand-edited file) is not retried: the 429 stands and the
+    /// colony is blocked on the provider.
+    #[tokio::test]
+    async fn a_quota_exhausted_provider_is_retried_on_its_same_wire_fallback_provider() {
+        let quota = Router::new().route(
+            "/v1/messages",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(json!({"type": "error", "error": {"type": "rate_limit_error",
+                        "message": "quota_exhausted: the token plan quota has been exhausted"}})),
+                )
+            }),
+        );
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen_by = seen.clone();
+        let fallback = Router::new().route(
+            "/v1/messages",
+            axum::routing::post(move |body: Bytes| {
+                let seen = seen_by.clone();
+                async move {
+                    let request: Value = serde_json::from_slice(&body).unwrap();
+                    seen.lock()
+                        .unwrap()
+                        .push(request["model"].as_str().unwrap_or_default().to_string());
+                    axum::Json(
+                        json!({"id": "msg_1", "type": "message", "role": "assistant", "model": "glm-5",
+                        "content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                        "usage": {"input_tokens": 3, "output_tokens": 1}}),
+                    )
+                }
+            }),
+        );
+        let serve = |router: Router| async move {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            addr
+        };
+        let (quota_addr, fallback_addr) = (serve(quota).await, serve(fallback).await);
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-provider-fallback-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let write = |fallback_model: &str| {
+            std::fs::write(
+                root.join("config/providers.json"),
+                serde_json::to_string(&[
+                    json!({"id": "bailian", "name": "Bailian", "base_url": format!("http://{quota_addr}"), "auth": "none",
+                        "models": ["qwen3.8-max"], "fallback_model": fallback_model}),
+                    json!({"id": "zai", "name": "Z.AI", "base_url": format!("http://{fallback_addr}"), "auth": "none",
+                        "models": ["glm-5"]}),
+                    json!({"id": "grok", "name": "xAI", "base_url": format!("http://{fallback_addr}/v1"), "auth": "none",
+                        "wire": "openai", "models": ["grok-5"]}),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        };
+        write("zai/glm-5");
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        // Only bailian is the colony's: the fallback hop is the operator's, not the colony's scope.
+        colony.allowed_providers = Some(vec!["bailian".into()]);
+        colony.allowed_models = Some(vec!["bailian/qwen3.8-max".into()]);
+        app.sessions.write().await.push(colony);
+        let token = "f".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        let body = || Bytes::from_static(br#"{"model":"qwen3.8-max","max_tokens":8,"messages":[]}"#);
+
+        let response = post_to_gateway(&app, &token, "bailian", HeaderMap::new(), body()).await;
+        assert_eq!(response.status(), StatusCode::OK, "answered by the fallback provider");
+        let answer: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(answer["content"][0]["text"], "ok");
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["glm-5".to_string()],
+            "the model swapped to the fallback's"
+        );
+        assert!(app.gateway.is_quota_exhausted("bailian"), "the provider is still marked out");
+        assert!(
+            app.gateway.colony_quota("c1").is_none(),
+            "a colony served by the fallback is not blocked"
+        );
+
+        // Cross-wire: not retried, the 429 stands without the router's Claude licence, and the
+        // colony is blocked on the provider.
+        write("grok/grok-5");
+        let response = post_to_gateway(&app, &token, "bailian", HeaderMap::new(), body()).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response.headers().get(FALLBACK_HEADER).is_none(),
+            "no Claude retry for a provider fallback"
+        );
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1, "nothing reached the other wire");
+        assert_eq!(app.gateway.colony_quota("c1").map(|h| h.provider), Some("bailian".into()));
         let _ = std::fs::remove_dir_all(root);
     }
 

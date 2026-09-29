@@ -171,6 +171,7 @@ pub(crate) fn build_cards(
             "waiting": waiting.len(),
             "resume_unix": waiting.iter().min(),
             "fallback_model": provider.fallback_model,
+            "wire": provider.wire,
             "alternatives": picker,
         }));
     }
@@ -187,7 +188,7 @@ async fn alternatives(app: &Shared, exhausted: &[(String, Option<String>, Option
         .iter()
         .map(|(id, label)| {
             json!({
-                "id": id, "label": label, "provider": "anthropic",
+                "id": id, "label": label, "provider": "anthropic", "wire": null,
                 "failure_pct": 0.0, "rated": false, "degraded": account_out, "healthy": !account_out,
             })
         })
@@ -202,6 +203,7 @@ async fn alternatives(app: &Shared, exhausted: &[(String, Option<String>, Option
                 "id": format!("{}/{model}", provider.id),
                 "label": format!("{model} · {}", provider.name),
                 "provider": provider.id,
+                "wire": provider.wire,
                 "failure_pct": h.failure_pct,
                 "rated": h.rated,
                 "degraded": h.degraded,
@@ -316,8 +318,10 @@ pub struct QuotaActionRequest {
     /// The model to switch to (`switch` only): a Claude alias/id or `<provider>/<model>`.
     #[serde(default)]
     model: Option<String>,
-    /// Where a switch applies: `colonies` (the default — the card's colonies) or `org` (their
-    /// orgs' model settings as well, so the next colony there starts on the new model).
+    /// Where a switch applies: `colonies` (the default — the card's colonies), `org` (their orgs'
+    /// model settings as well, so the next colony there starts on the new model) or `all` (every
+    /// model role on the provider install-wide: the agent module's settings and every org's
+    /// overrides, plus the card's colonies).
     #[serde(default)]
     scope: Option<String>,
     /// Limit the action to these colony ids (all of them must be on the card).
@@ -326,7 +330,8 @@ pub struct QuotaActionRequest {
     /// With `org` scope, limit the settings change (and the colonies) to this org.
     #[serde(default)]
     org: Option<String>,
-    /// Remember the switch model as this provider's `fallback_model` (a Claude model only).
+    /// Remember the switch model as this provider's `fallback_model`: a Claude model, or a model on
+    /// another provider of the same wire ([`providers::fallback_error`]).
     #[serde(default)]
     remember: bool,
 }
@@ -358,6 +363,7 @@ pub async fn quota_action(
     if let Some(org) = &req.org {
         targets.retain(|s| &s.org == org);
     }
+    let mut changes: Vec<Value> = Vec::new();
     let results = match req.action.as_str() {
         "stop" => stop_all(&app, &targets).await,
         "wait" => wait_all(&app, &provider, &targets).await,
@@ -368,24 +374,80 @@ pub async fn quota_action(
             };
             check_switch_model(&app, &id, model).await?;
             let scope = req.scope.as_deref().unwrap_or("colonies");
-            if !matches!(scope, "colonies" | "org") {
+            if !matches!(scope, "colonies" | "org" | "all") {
                 return Err(bad(&format!(
-                    "scope {scope:?} is not supported; use \"colonies\" or \"org\" (every-role switching is not built yet)"
+                    "scope {scope:?} is not supported; use \"colonies\", \"org\" or \"all\""
                 )));
             }
-            if req.remember && (model.contains('/') || !providers::valid_model(model)) {
-                return Err(bad(
-                    "remember sets the provider's fallback_model, which must be a Claude model (no provider prefix)",
-                ));
+            if req.remember
+                && let Some(error) = providers::fallback_error(&id, provider.wire, model, &providers)
+            {
+                return Err(bad(&format!("remember sets the provider's fallback_model: {error}")));
+            }
+            // Everything is validated before anything changes: the settings plans are computed
+            // (and refused) up front, and the colonies' roles are read before the settings move.
+            let modules = app.modules.read().await.clone();
+            let install = if scope == "all" {
+                Some(plan_install(&app, &modules, &id, model)?)
+            } else {
+                None
+            };
+            let every_org = if scope == "all" {
+                Some(plan_every_org(&app, &modules, &id, model)?)
+            } else {
+                None
+            };
+            let colony_plan = plan_overrides(&app, &modules, &id, &targets);
+            if let Some((settings, install_changes)) = install {
+                if let Some(settings) = settings {
+                    let update = crate::modules::UpdateModule {
+                        provider: modules.agent.provider.clone(),
+                        enabled: modules.agent.enabled,
+                        settings,
+                    };
+                    // Through the modules API's own handler, so the save is validated and written
+                    // exactly as a Settings save would be.
+                    let _ = crate::modules::update(State(app.clone()), Path("agent".into()), Json(update)).await?;
+                }
+                changes.extend(install_changes);
+            }
+            if let Some((_, planned)) = every_org
+                && !planned.is_empty()
+            {
+                // Planned (and validated) above; re-read under the config lock for the write, so a
+                // concurrent org save between the two is not lost.
+                let _config = app.config_write.lock().await;
+                let (all, org_changes) = plan_every_org(&app, &modules, &id, model)?;
+                app.save_org_settings(&all).await?;
+                changes.extend(org_changes);
             }
             if req.remember {
-                remember_fallback(&app, &id, model).await?;
+                changes.push(remember_fallback(&app, &id, model).await?);
             }
             if scope == "org" {
                 let orgs: BTreeSet<String> = targets.iter().map(|s| s.org.clone()).collect();
-                switch_orgs(&app, &id, model, &orgs).await?;
+                changes.extend(switch_orgs(&app, &id, model, &orgs).await?);
             }
-            switch_all(&app, &id, model, &targets).await
+            changes.extend(apply_overrides(&app, &id, model, &colony_plan).await);
+            if !changes.is_empty() {
+                let said: Vec<String> = changes
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{} {} {} (was {})",
+                            c["scope"].as_str().unwrap_or_default(),
+                            c["target"].as_str().unwrap_or_default(),
+                            c["key"].as_str().unwrap_or_default(),
+                            c["was"].as_str().unwrap_or("unset")
+                        )
+                    })
+                    .collect();
+                eprintln!(
+                    "quota-action: provider \"{id}\" out of quota: switched to {model} (scope {scope}): {}",
+                    said.join("; ")
+                );
+            }
+            restart_all(&app, &targets).await
         }
         other => return Err(bad(&format!("unknown action {other:?}; use switch, wait or stop"))),
     };
@@ -395,6 +457,7 @@ pub async fn quota_action(
         "provider": id,
         "colonies": results.iter().filter(|r| r["ok"] == true).map(|r| r["id"].clone()).collect::<Vec<_>>(),
         "failed": failed,
+        "changes": changes,
     })))
 }
 
@@ -534,37 +597,196 @@ fn role_models(app: &Shared, modules: &crate::config::ModulesConfig, s: &Session
     ]
 }
 
-/// Points every colony's role on `provider` at `model` and restarts it on the new model scope: the
-/// orchestrator and subagent overrides are the per-colony settings boot reads, and boot re-derives
-/// `allowed_models` from them (#727), so the restart is what lets the gateway admit the new model.
-/// A colony with no role visibly on the provider (a tier or background model routed there) gets the
-/// orchestrator override, the role that hit the quota most often.
-async fn switch_all(app: &Shared, provider: &str, model: &str, targets: &[Session]) -> Vec<Value> {
-    let modules = app.modules.read().await.clone();
-    let mut out = Vec::new();
-    for s in targets {
-        let [main, sub, _] = role_models(app, &modules, s);
-        let on = |m: &Option<String>| m.as_deref().is_some_and(|m| providers::names_model_on(m, provider));
-        let (main_on, sub_on) = (on(&main), on(&sub));
-        app.update_session(&s.id, |x| {
-            if main_on || !sub_on {
+/// One setting a switch changed, with what it held before: `scope` is `install` (target: the agent
+/// module), `org` (target: the org), `colony` (target: the colony id) or `provider` (the remembered
+/// fallback), so the cockpit can say "was X, now Y" for each.
+fn change(scope: &str, target: &str, key: &str, was: Option<&str>, now: &str) -> Value {
+    json!({"scope": scope, "target": target, "key": key, "was": was, "now": now})
+}
+
+/// One colony's roles on the exhausted provider, read before any setting moves: whether its
+/// orchestrator and subagent resolve there, and what they resolve to.
+struct OverridePlan {
+    id: String,
+    main: Option<String>,
+    sub: Option<String>,
+    main_on: bool,
+    sub_on: bool,
+}
+
+/// Which role of each colony moves: the orchestrator and subagent overrides are the per-colony
+/// settings boot reads, and boot re-derives `allowed_models` from them (#727). A colony with no role
+/// visibly on the provider (a tier or background model routed there) gets the orchestrator override,
+/// the role that hit the quota most often.
+fn plan_overrides(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    provider: &str,
+    targets: &[Session],
+) -> Vec<OverridePlan> {
+    targets
+        .iter()
+        .map(|s| {
+            let [main, sub, _] = role_models(app, modules, s);
+            let on = |m: &Option<String>| m.as_deref().is_some_and(|m| providers::names_model_on(m, provider));
+            let (main_on, sub_on) = (on(&main), on(&sub));
+            OverridePlan {
+                id: s.id.clone(),
+                main,
+                sub,
+                main_on,
+                sub_on,
+            }
+        })
+        .collect()
+}
+
+/// Points each planned colony's roles at `model`; returns what changed, with the values the roles
+/// resolved to before.
+async fn apply_overrides(app: &Shared, provider: &str, model: &str, plan: &[OverridePlan]) -> Vec<Value> {
+    let mut changes = Vec::new();
+    for p in plan {
+        let (set_main, set_sub) = (p.main_on || !p.sub_on, p.sub_on);
+        app.update_session(&p.id, |x| {
+            if set_main {
                 x.model_override = Some(model.to_string());
             }
-            if sub_on {
+            if set_sub {
                 x.subagent_model_override = Some(model.to_string());
             }
         })
         .await;
-        app.gateway.clear_colony_quota(&s.id);
+        if set_main {
+            changes.push(change("colony", &p.id, "model", p.main.as_deref(), model));
+        }
+        if set_sub {
+            changes.push(change("colony", &p.id, "subagent_model", p.sub.as_deref(), model));
+        }
+        app.gateway.clear_colony_quota(&p.id);
         app.session_log(
-            &s.id,
+            &p.id,
             "info",
             format!("provider \"{provider}\" is out of quota: switched to {model} from its card; restarting on the new model"),
         )
         .await;
+    }
+    changes
+}
+
+/// Restarts every colony on the new model scope ([`restart`]).
+async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for s in targets {
         out.push(outcome(&s.id, restart(app, &s.id).await));
     }
     out
+}
+
+/// The model roles in the install's agent module settings a scope-`all` switch moves.
+const INSTALL_ROLES: [&str; 6] = [
+    "model",
+    "subagent_model",
+    "background_model",
+    "summary_model",
+    "model_low",
+    "model_high",
+];
+
+/// Why `model` cannot fill `role`, if it cannot (scope `all`, issue #767): a `<provider>/<model>`
+/// whose provider maps its models must map this one (the boot would refuse the launch otherwise),
+/// and `summary_model` on a plain Claude model needs an Anthropic provider or API key — summaries
+/// never use the subscription login.
+fn role_error(app: &Shared, role: &str, model: &str) -> Option<String> {
+    if let Some((id, canonical)) = model.split_once('/')
+        && let Some(p) = app.providers().into_iter().find(|p| p.id == id)
+        && !p.model_map.is_empty()
+        && !p.model_map.contains_key(canonical)
+    {
+        return Some(format!(
+            "{model} can't be `{role}`: provider \"{id}\" maps its models and \"{canonical}\" is not among them"
+        ));
+    }
+    if role == "summary_model" && !model.contains('/') && !crate::summaries::claude_summaries_possible(app) {
+        return Some(format!(
+            "{model} can't be `summary_model`: summaries never use the Claude subscription login, and this install has no Anthropic API key or Anthropic provider"
+        ));
+    }
+    None
+}
+
+/// The install's new agent settings (`None` when no role is on the provider) and the changes.
+type InstallPlan = (Option<serde_json::Map<String, Value>>, Vec<Value>);
+
+/// Scope `all`, the install half: every model role in the agent module's settings that routes to
+/// `provider`, moved to `model`. Returns the new settings (`None` when no role is on the provider)
+/// and the changes, having validated the result the way `PUT /api/modules/agent` will.
+fn plan_install(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    provider: &str,
+    model: &str,
+) -> Result<InstallPlan, crate::AppError> {
+    let choice = &modules.agent;
+    let schema = crate::modules::schema_for("agent", &choice.provider, &app.agents);
+    let mut settings = choice.settings.clone();
+    let mut changes = Vec::new();
+    for role in INSTALL_ROLES {
+        let was = setting_str(choice, &schema, role);
+        if !providers::names_model_on(&was, provider) {
+            continue;
+        }
+        if let Some(error) = role_error(app, role, model) {
+            return Err(bad(&error));
+        }
+        settings.insert(role.to_string(), Value::String(model.to_string()));
+        changes.push(change("install", &choice.provider, role, Some(&was), model));
+    }
+    if changes.is_empty() {
+        return Ok((None, changes));
+    }
+    crate::modules::validate_settings(&choice.provider, &schema, &settings, &choice.settings)
+        .map_err(|e| bad(&format!("the agent module's settings would not save: {e}")))?;
+    Ok((Some(settings), changes))
+}
+
+/// Scope `all`, the org half: in every org, each model override (`model`, `subagent_model`,
+/// `background_model`) that routes to `provider`, moved to `model` and checked against the org's
+/// agent module schema. Returns the whole orgs file to save, and the changes.
+fn plan_every_org(
+    app: &Shared,
+    modules: &crate::config::ModulesConfig,
+    provider: &str,
+    model: &str,
+) -> Result<(BTreeMap<String, orgs::OrgSettings>, Vec<Value>), crate::AppError> {
+    let mut all: BTreeMap<String, orgs::OrgSettings> =
+        crate::util::read_json_or_default(&app.orgs_file()).map_err(|e| config_unreadable(&app.orgs_file(), &e))?;
+    let mut changes = Vec::new();
+    for (org, settings) in all.iter_mut() {
+        let module = orgs::effective_agent_module(settings, modules);
+        let Some(agent) = settings.agent.as_mut() else { continue };
+        let mut moved = serde_json::Map::new();
+        for (role, slot) in [
+            ("model", &mut agent.model),
+            ("subagent_model", &mut agent.subagent_model),
+            ("background_model", &mut agent.background_model),
+        ] {
+            let Some(was) = slot.clone().filter(|m| providers::names_model_on(m, provider)) else {
+                continue;
+            };
+            if let Some(error) = role_error(app, role, model) {
+                return Err(bad(&format!("org {org}: {error}")));
+            }
+            *slot = Some(model.to_string());
+            moved.insert(role.to_string(), Value::String(model.to_string()));
+            changes.push(change("org", org, role, Some(&was), model));
+        }
+        if !moved.is_empty() {
+            let schema = crate::modules::schema_for("agent", &module, &app.agents);
+            crate::modules::validate_settings(&module, &schema, &moved, &moved)
+                .map_err(|e| bad(&format!("org {org}'s agent settings would not save: {e}")))?;
+        }
+    }
+    Ok((all, changes))
 }
 
 /// Restarts a colony so its next boot reads its new model settings: a live or parked one is stopped
@@ -596,11 +818,12 @@ async fn switch_orgs(
     provider: &str,
     model: &str,
     orgs_to_change: &BTreeSet<String>,
-) -> Result<(), crate::AppError> {
+) -> Result<Vec<Value>, crate::AppError> {
     let modules = app.modules.read().await.clone();
     let _config = app.config_write.lock().await;
     let mut all: BTreeMap<String, orgs::OrgSettings> =
         crate::util::read_json_or_default(&app.orgs_file()).map_err(|e| config_unreadable(&app.orgs_file(), &e))?;
+    let mut changes = Vec::new();
     for org in orgs_to_change {
         let mut settings = all.get(org).cloned().unwrap_or_default();
         let agent_id = orgs::effective_agent_module(&settings, &modules);
@@ -617,32 +840,35 @@ async fn switch_orgs(
             continue;
         }
         let agent = settings.agent.get_or_insert_with(Default::default);
-        if main {
-            agent.model = Some(model.to_string());
-        }
-        if sub {
-            agent.subagent_model = Some(model.to_string());
-        }
-        if background {
-            agent.background_model = Some(model.to_string());
+        for (moves, role, slot) in [
+            (main, "model", &mut agent.model),
+            (sub, "subagent_model", &mut agent.subagent_model),
+            (background, "background_model", &mut agent.background_model),
+        ] {
+            if moves {
+                let was = setting_str(&choice, &schema, role);
+                changes.push(change("org", org, role, Some(&was), model));
+                *slot = Some(model.to_string());
+            }
         }
         all.insert(org.clone(), settings);
     }
     app.save_org_settings(&all).await?;
-    Ok(())
+    Ok(changes)
 }
 
-/// `remember`: the provider's `fallback_model`, so the next exhaustion retries on Claude by itself.
-async fn remember_fallback(app: &Shared, provider: &str, model: &str) -> Result<(), crate::AppError> {
+/// `remember`: the provider's `fallback_model`, so the next exhaustion retries on it by itself — the
+/// colony's router for a Claude model, the gateway for a same-wire provider's model.
+async fn remember_fallback(app: &Shared, provider: &str, model: &str) -> Result<Value, crate::AppError> {
     let _config = app.config_write.lock().await;
     let mut list: Vec<Provider> =
         crate::util::read_json_or_default(&app.providers_file()).map_err(|e| config_unreadable(&app.providers_file(), &e))?;
     let Some(entry) = list.iter_mut().find(|p| p.id == provider) else {
         return Err(client_error(StatusCode::NOT_FOUND, &format!("no provider \"{provider}\"")));
     };
-    entry.fallback_model = Some(model.to_string());
+    let was = entry.fallback_model.replace(model.to_string());
     app.save_providers(&list).await?;
-    Ok(())
+    Ok(change("provider", provider, "fallback_model", was.as_deref(), model))
 }
 
 /// The API routes this module serves; `server::api_routes` merges them.

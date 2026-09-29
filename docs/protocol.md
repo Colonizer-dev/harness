@@ -2303,7 +2303,10 @@ are estimates.
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
 `fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes,
-because a fallback request goes to the API as is). `quota` is where to read what is left in a prepaid token
+because a fallback request goes to the API as is — or, for quota exhaustion only, `<provider>/<model>` on another
+configured provider that lists the model and speaks the same wire, which the gateway retries itself; see Quota
+exhaustion below. A cross-wire, unknown-provider, own-provider or unlisted fallback is a `400` on save, and only a
+Claude fallback reaches the colony's route, so only it covers an unreachable, timed-out or full connection). `quota` is where to read what is left in a prepaid token
 plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
@@ -2409,9 +2412,16 @@ restart keeps it; a record whose reset has passed or whose TTL has run out is dr
 the reset the message named — or, when the message names none, a 15-minute TTL after which the record
 lapses and the queue re-probes — and the answer carries `x-colonizer-quota-exhausted` (the reset
 words, or `exhausted`). An upstream 2xx clears the record at once. When the
-provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
-provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
-failover happens at request level, so an operator opts a role out by unsetting that role's
+provider has a Claude `fallback_model` the answer also carries `x-colonizer-fallback:
+provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504. When
+its `fallback_model` is `<provider>/<model>` ([#767]) the gateway retries the request itself, once:
+the same body with `model` set to the fallback's model, to that provider, which must speak the same
+wire (anthropic to anthropic, openai to openai — the gateway has no path that re-shapes a response for
+the other wire mid-request). The retry is the operator's hop, so the colony's recorded
+`allowed_providers`/`allowed_models` do not refuse it; sensitivity, key and budget checks apply as
+to any request, and it is audited as its own request to the fallback provider. The colony gets the
+fallback's answer; a fallback provider that is itself exhausted, missing or on another wire is not
+tried, and the original answer (without `x-colonizer-fallback`) stands. Failover happens at request level, so an operator opts a role out by unsetting that role's
 provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
 `GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
 provider, and there a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
@@ -2445,8 +2455,8 @@ keeps its banner (`quota.kind: "account"`).
  "title": "bailian · qwen3.8-max is out of quota", "reset_at": "Oct 1, 16:00 UTC", "reset_unix": 1790870400,
  "colonies": [{"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "issue_title": "…",
                "status": "running", "hits": 3, "waiting": false, "resume_unix": null}],
- "orgs": ["acme"], "waiting": 0, "resume_unix": null, "fallback_model": null,
- "alternatives": [{"id": "sonnet", "label": "Claude Sonnet (latest)", "provider": "anthropic",
+ "orgs": ["acme"], "waiting": 0, "resume_unix": null, "fallback_model": null, "wire": "anthropic",
+ "alternatives": [{"id": "sonnet", "label": "Claude Sonnet (latest)", "provider": "anthropic", "wire": null,
                    "failure_pct": 0.0, "rated": false, "degraded": false, "healthy": true}]}
 ```
 
@@ -2457,8 +2467,8 @@ provider, with its provider's usage health (Claude's models read degraded only w
 own cap holds), healthy ones first.
 
 `POST /api/providers/{id}/quota-action` answers the card with
-`{action: "switch"|"wait"|"stop", model?, scope?: "colonies"|"org", colonies?: [id], org?, remember?}`
-and replies `{action, provider, colonies: [id], failed: [{id, ok: false, error}]}`. `colonies` limits
+`{action: "switch"|"wait"|"stop", model?, scope?: "colonies"|"org"|"all", colonies?: [id], org?, remember?}`
+and replies `{action, provider, colonies: [id], failed: [{id, ok: false, error}], changes: [change]}`. `colonies` limits
 the action to some of the card's colonies (an id not on the card is a `400`); `org` limits it to one
 org.
 
@@ -2470,9 +2480,22 @@ org.
   boot re-derives `allowed_providers`/`allowed_models` from the new settings. `scope: "org"` also
   moves the colonies' orgs' `model`, `subagent_model` and `background_model` overrides that route to
   the provider, so the orgs' next colonies start on the new model. `remember: true` saves `model` as
-  the provider's `fallback_model`, which must be a Claude model (`400` otherwise). Every-role
-  switching across the install's own module settings is not built yet (`scope` anything else is a
-  `400`).
+  the provider's `fallback_model`: a Claude model, or a model on another provider of the same wire
+  (the rules of Provider fields above; `400` otherwise, before anything changes). `scope: "all"`
+  ([#767]) moves every model role on the provider install-wide: each of the agent module's
+  `model`, `subagent_model`, `background_model`, `summary_model`, `model_low` and `model_high`
+  settings that routes to the provider (saved through `PUT /api/modules/agent`'s own handler and
+  validation), every org's `model`, `subagent_model` and `background_model` override that does (every
+  org, not only the card's), and the card's colonies as above. Every role is checked before anything
+  changes — the module's schema, a `model_map` that must list the model, and `summary_model` on a
+  Claude model needing an Anthropic provider or API key (summaries never use the login) — so a model
+  one role cannot take is a `400` with nothing moved. Any other `scope` is a `400`.
+
+  A switch's reply also carries `changes: [{scope, target, key, was, now}]`, one per setting it
+  moved, with the value it replaced (`was`, null when unset): `scope` is `install` (target: the agent
+  module), `org` (target: the org), `colony` (target: the colony id; `was` is the model the role
+  resolved to) or `provider` (target: the provider; key `fallback_model`, from `remember`). The
+  mothership logs the same list. There is no undo; the cockpit shows each as "was X → now Y".
 - `wait` parks every live colony (`status` `parked`, the worktree kept — suspended, not failed) and
   re-stamps an already-parked one: `attention` gains `provider`, `action: "wait"`, `reset_at` and
   `resume_unix` (the provider's `reset_unix`). The queue's 5 s resume pass requeues it once

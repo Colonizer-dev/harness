@@ -34,6 +34,7 @@ import type {
   ProviderPreset,
   ProviderPricing,
   ProviderWire,
+  QuotaActionReply,
   QuotaCard,
   SchemaField,
   TelemetryStatus,
@@ -61,7 +62,7 @@ import {
 import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
-import { ProviderQuotaCard, runQuotaAction } from "../cockpit/ProviderQuotaCard";
+import { ProviderQuotaCard, QuotaChangeSummary, runQuotaAction } from "../cockpit/ProviderQuotaCard";
 import { RemoteAccessPane } from "./RemoteAccessPane";
 import { TokensPane } from "./TokensPane";
 import { FleetPane } from "./FleetPane";
@@ -2922,6 +2923,7 @@ function ProvidersPane({
                 <ProviderForm
                   key={provider.id}
                   initial={provider}
+                  peers={providers}
                   preset={provider.preset}
                   takenIds={[]}
                   onCancel={() => setEditing(null)}
@@ -2954,6 +2956,7 @@ function ProvidersPane({
               <ProviderForm
                 key={`new-${editing.preset}`}
                 preset={editing.preset}
+                peers={providers}
                 takenIds={providers.map((p) => p.id)}
                 onCancel={() => setEditing(null)}
                 onSaved={(saved) => {
@@ -3026,6 +3029,8 @@ function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promis
   const api = useApi();
   const toast = useToast();
   const [cards, setCards] = useState<QuotaCard[]>([]);
+  // The last switch's "was X → now Y" summary, kept after its card goes (issue #767).
+  const [switched, setSwitched] = useState<QuotaActionReply | null>(null);
   const load = useCallback(async () => {
     try {
       setCards((await api.attention()).quota_cards ?? []);
@@ -3040,15 +3045,17 @@ function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promis
     }, 5000);
     return () => clearInterval(timer);
   }, [load]);
-  if (cards.length === 0) return null;
+  if (cards.length === 0 && !switched) return null;
   return (
     <div className="space-y-2">
+      <QuotaChangeSummary reply={switched} onDismiss={() => setSwitched(null)} />
       {cards.map((card) => (
         <ProviderQuotaCard
           key={card.provider}
           card={card}
           onAction={async (provider, body) => {
-            await runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body);
+            const reply = await runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body);
+            if ((reply?.changes?.length ?? 0) > 0) setSwitched(reply);
             await Promise.all([load(), reloadProviders()]);
           }}
         />
@@ -3457,9 +3464,21 @@ function CatalogBrowser({
   );
 }
 
+/**
+ * The fallback picker's non-Claude choices (issue #767): every model on another provider that speaks
+ * the same wire, as `<provider>/<model>` — the gateway retries a quota-exhausted request there
+ * itself. A cross-wire provider is left out; the Mothership refuses it too.
+ */
+export function sameWireFallbacks(ownId: string, wire: ProviderWire, peers: ModelProvider[]): string[] {
+  return peers
+    .filter((p) => p.id !== ownId && p.wire === wire)
+    .flatMap((p) => p.models.map((m) => `${p.id}/${m}`));
+}
+
 function ProviderForm({
   initial,
   preset,
+  peers = [],
   takenIds,
   onCancel,
   onSaved,
@@ -3467,6 +3486,8 @@ function ProviderForm({
 }: {
   initial?: ModelProvider;
   preset: ProviderPreset;
+  /** The providers on file, for the same-wire fallback choices. */
+  peers?: ModelProvider[];
   takenIds: string[];
   onCancel: () => void;
   onSaved: (provider: ModelProvider) => void;
@@ -3506,6 +3527,7 @@ function ProviderForm({
   // A new Local provider opens Advanced so the prefilled limits are visible.
   const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
   const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
+  const sameWire = sameWireFallbacks(initial?.id ?? "", wire, peers);
   const ids = {
     id: useId(),
     name: useId(),
@@ -3825,13 +3847,29 @@ function ProviderForm({
               error={limits.context_tokens.error}
               help="The model's context size, so agents compact before they hit it."
             />
-            <FormField id={ids.fallback} label="Fallback model" info={<p>Used when the provider is unreachable, times out or the queue is full.</p>}>
+            <FormField
+              id={ids.fallback}
+              label="Fallback model"
+              info={
+                <p>
+                  A Claude model is used when the provider is unreachable, times out, the queue is full or its plan runs out. A
+                  model on another provider of the same wire is used when its plan runs out: the Mothership retries there.
+                </p>
+              }
+            >
               <select id={ids.fallback} value={fallback} onChange={(e) => setFallback(e.target.value)} className={inputClass}>
                 <option value="">None</option>
-                {fallback && !anthropicModels.some((m) => m.id === fallback) && <option value={fallback}>{fallback}</option>}
+                {fallback && !anthropicModels.some((m) => m.id === fallback) && !sameWire.includes(fallback) && (
+                  <option value={fallback}>{fallback}</option>
+                )}
                 {anthropicModels.map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.label === model.id ? model.id : `${model.id} · ${model.label}`}
+                  </option>
+                ))}
+                {sameWire.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
                   </option>
                 ))}
               </select>

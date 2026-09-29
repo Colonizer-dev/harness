@@ -204,13 +204,6 @@ async fn switch_changes_the_colonies_model_and_restarts_them() {
         StatusCode::BAD_REQUEST,
         "only a model on offer"
     );
-    let refused = act(&app, json!({"action": "switch", "model": "zai/glm-5", "remember": true})).await;
-    assert_eq!(
-        refused.unwrap_err().status(),
-        StatusCode::BAD_REQUEST,
-        "fallback_model is Claude-only"
-    );
-
     let reply = act(&app, json!({"action": "switch", "model": "zai/glm-5", "remember": false}))
         .await
         .unwrap();
@@ -375,5 +368,215 @@ async fn a_starting_colony_blocked_on_quota_is_flagged() {
     // A success lifts the block: the next pass leaves it alone.
     app.gateway.clear_colony_quota("boot");
     assert!(flag_blocked(&app).await.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The claude-code agent module with its model roles, so the install's settings save through the
+/// modules API as they do in production.
+fn claude_code_agent(root: &std::path::Path) -> crate::modules::AgentModule {
+    let role = || json!({"type": "string", "default": ""});
+    crate::modules::AgentModule::test("claude-code")
+        .dir(root.to_path_buf())
+        .entry(vec!["node".into()])
+        .needs_claude(true)
+        .schema(json!({"type": "object", "properties": {
+            "model": role(), "subagent_model": role(), "background_model": role(),
+            "summary_model": role(), "model_low": role(), "model_high": role(),
+        }}))
+}
+
+/// An install whose own agent settings, two orgs' overrides and one parked colony all run on the
+/// exhausted `bailian`, with a third org and the background model elsewhere.
+async fn every_role_install(name: &str) -> (std::path::PathBuf, Shared) {
+    let root = test_root(name);
+    write_providers(&root);
+    std::fs::write(
+        root.join("config/orgs.json"),
+        serde_json::to_vec(&json!({
+            "acme": {"agent": {"model": "bailian/qwen3.8-max"}},
+            "beta": {"agent": {"subagent_model": "bailian/qwen3.8-max", "background_model": "haiku"}},
+            "gamma": {"agent": {"model": "sonnet"}},
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = crate::tests::test_app_with_agents(&root, vec![claude_code_agent(&root)], |_| {});
+    {
+        let mut modules = app.modules.write().await;
+        modules.agent.settings = serde_json::from_value(json!({
+            "model": "bailian/qwen3.8-max",
+            "subagent_model": "bailian/qwen3.8-max",
+            "background_model": "haiku",
+            "summary_model": "bailian/qwen3.8-max",
+        }))
+        .unwrap();
+    }
+    app.gateway.mark_quota_exhausted("bailian", None, None);
+    {
+        let mut sessions = app.sessions.write().await;
+        let mut s = on_bailian("p1", "acme", SessionStatus::Parked);
+        s.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "provider": "bailian"}));
+        sessions.push(s);
+    }
+    std::fs::create_dir_all(app.session_dir("p1")).unwrap();
+    fill_the_parallel_limit(&app).await;
+    (root, app)
+}
+
+/// Scope `all` (issue #767): every model role on the provider install-wide moves — the agent
+/// module's settings, every org override that names it — and the card's colonies restart on the
+/// new model; the reply lists each change with the value it replaced.
+#[tokio::test]
+async fn an_every_role_switch_moves_the_install_and_every_org_and_restarts_the_colonies() {
+    let (root, app) = every_role_install("all").await;
+    let reply = act(&app, json!({"action": "switch", "model": "zai/glm-5", "scope": "all"}))
+        .await
+        .unwrap();
+
+    let agent = app.modules.read().await.agent.settings.clone();
+    for role in ["model", "subagent_model", "summary_model"] {
+        assert_eq!(agent[role], "zai/glm-5", "the install's {role} moves");
+    }
+    assert_eq!(agent["background_model"], "haiku", "a role on another provider stays");
+    let saved: Value = serde_json::from_slice(&std::fs::read(root.join("config/modules.json")).unwrap()).unwrap();
+    assert_eq!(
+        saved["agent"]["settings"]["model"], "zai/glm-5",
+        "saved through the modules API"
+    );
+
+    assert_eq!(app.org_settings("acme").agent.unwrap().model.as_deref(), Some("zai/glm-5"));
+    let beta = app.org_settings("beta").agent.unwrap();
+    assert_eq!(
+        beta.subagent_model.as_deref(),
+        Some("zai/glm-5"),
+        "every org, not only the card's"
+    );
+    assert_eq!(beta.background_model.as_deref(), Some("haiku"));
+    assert_eq!(app.org_settings("gamma").agent.unwrap().model.as_deref(), Some("sonnet"));
+
+    let p1 = app.session("p1").await.unwrap();
+    assert_eq!(p1.model_override.as_deref(), Some("zai/glm-5"));
+    assert_eq!(p1.status, SessionStatus::Queued, "restarted on the new model");
+    assert_eq!(reply["colonies"], json!(["p1"]), "{reply}");
+
+    let changes = reply["changes"].as_array().unwrap();
+    let find = |scope: &str, target: &str, key: &str| {
+        changes
+            .iter()
+            .find(|c| c["scope"] == scope && c["target"] == target && c["key"] == key)
+            .unwrap_or_else(|| panic!("no {scope} {target} {key} change in {changes:?}"))
+    };
+    let install = find("install", "claude-code", "model");
+    assert_eq!(
+        (install["was"].as_str(), install["now"].as_str()),
+        (Some("bailian/qwen3.8-max"), Some("zai/glm-5"))
+    );
+    find("install", "claude-code", "subagent_model");
+    find("install", "claude-code", "summary_model");
+    assert_eq!(find("org", "beta", "subagent_model")["was"], "bailian/qwen3.8-max");
+    find("org", "acme", "model");
+    // The colony's orchestrator resolved to the provider through its org before the switch.
+    assert_eq!(find("colony", "p1", "model")["was"], "bailian/qwen3.8-max");
+    assert!(
+        !changes.iter().any(|c| c["key"] == "background_model"),
+        "nothing on another provider is reported: {changes:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A model one of the roles cannot take is refused before anything moves: here Claude for the
+/// summary role on an install with no Anthropic API key (summaries never use the login).
+#[tokio::test]
+async fn an_every_role_switch_refuses_a_disallowed_model_before_any_change() {
+    let (root, app) = every_role_install("all-refused").await;
+    let orgs_before = std::fs::read(root.join("config/orgs.json")).unwrap();
+    let err = act(&app, json!({"action": "switch", "model": "sonnet", "scope": "all"}))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.message().contains("summary_model"), "{}", err.message());
+    assert_eq!(
+        app.modules.read().await.agent.settings["model"],
+        "bailian/qwen3.8-max",
+        "the install is untouched"
+    );
+    assert_eq!(
+        std::fs::read(root.join("config/orgs.json")).unwrap(),
+        orgs_before,
+        "no org moved"
+    );
+    let p1 = app.session("p1").await.unwrap();
+    assert!(p1.model_override.is_none(), "no colony moved");
+    assert_eq!(p1.status, SessionStatus::Parked, "and none restarted");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Remember takes a model on another provider when it speaks the same wire — the gateway retries a
+/// quota-exhausted request there itself — and refuses a cross-wire one before anything changes.
+#[tokio::test]
+async fn remember_takes_a_same_wire_model_and_refuses_a_cross_wire_one() {
+    let root = test_root("remember-wire");
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(
+        root.join("config/providers.json"),
+        serde_json::to_vec(&json!([
+            {"id": "bailian", "name": "Bailian", "base_url": "http://127.0.0.1:1", "auth": "none", "models": ["qwen3.8-max"]},
+            {"id": "zai", "name": "Z.AI", "base_url": "http://127.0.0.1:1", "auth": "none", "models": ["glm-5"]},
+            {"id": "grok", "name": "xAI", "base_url": "http://127.0.0.1:1/v1", "auth": "none", "wire": "openai", "models": ["grok-5"]},
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let app = crate::tests::test_app(&root);
+    app.gateway.mark_quota_exhausted("bailian", None, None);
+    {
+        let mut sessions = app.sessions.write().await;
+        for id in ["r1", "r2"] {
+            let mut s = on_bailian(id, "acme", SessionStatus::Parked);
+            s.attention = Some(json!({"reason": provider_quota::QUOTA_EXHAUSTED_REASON, "provider": "bailian"}));
+            sessions.push(s);
+        }
+    }
+    for id in ["r1", "r2"] {
+        std::fs::create_dir_all(app.session_dir(id)).unwrap();
+    }
+    fill_the_parallel_limit(&app).await;
+
+    let err = act(
+        &app,
+        json!({"action": "switch", "model": "grok/grok-5", "remember": true, "colonies": ["r1"]}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert!(err.message().contains("same wire"), "{}", err.message());
+    assert!(
+        app.session("r1").await.unwrap().model_override.is_none(),
+        "refused before any change"
+    );
+    let bailian = || app.providers().into_iter().find(|p| p.id == "bailian").unwrap();
+    assert!(bailian().fallback_model.is_none());
+
+    let reply = act(
+        &app,
+        json!({"action": "switch", "model": "zai/glm-5", "remember": true, "colonies": ["r2"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bailian().fallback_model.as_deref(),
+        Some("zai/glm-5"),
+        "a same-wire model is remembered"
+    );
+    let remembered = reply["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["scope"] == "provider")
+        .cloned()
+        .unwrap();
+    assert_eq!(remembered["key"], "fallback_model");
+    assert_eq!(remembered["was"], Value::Null);
+    assert_eq!(remembered["now"], "zai/glm-5");
     let _ = std::fs::remove_dir_all(root);
 }
