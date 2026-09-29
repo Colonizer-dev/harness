@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import { evaluateExecPolicy, execPolicyLogLine, execPolicyQuestion, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
@@ -699,11 +700,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {object} [args.execPolicy]  the layered exec policy (issue #471); an `ask` becomes a question
+ * @param {object} [args.pathPolicy]  the mounted path policy (issue #647), as loadPathPolicy returned; a path-taking
+ *   tool call that lands on a masked or protected path emits one `path_policy` event per (access, path)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -727,6 +730,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   // compaction pass can then remove from (an applied drop_call) or score again.
   const jevPendingCalls = new Map(); // tool_call_id -> { tool, result } until the result arrives
   let jevLivePairs = []; // pairs present in the transcript, in call order: { tool_call_id, tool }
+  const pathPolicySeen = new Set(); // `access\0path` already reported, so one attempt is one event
 
   /**
    * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
@@ -881,6 +885,20 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     return next;
   };
 
+  /**
+   * The path policy's runtime report (issue #647): a path-taking tool call that lands on a masked
+   * or protected path emits one `path_policy` event per (access, path) per run. Reporting only —
+   * no decision, no permission field; the mount enforced before this ever ran (pathpolicy.mjs).
+   */
+  const reportPathPolicy = (block, parent) => {
+    const event = evaluatePathPolicy(pathPolicy, block.name, block.input ?? {}, { workspace: process.cwd() });
+    if (!event) return;
+    const key = `${event.access}\u0000${event.path}`;
+    if (pathPolicySeen.has(key)) return;
+    pathPolicySeen.add(key);
+    emit(withAgent(event, parent));
+  };
+
   const onAssistant = (msg) => {
     const messageId = msg.message?.id ?? msg.uuid ?? null;
     const parent = msg.parent_tool_use_id ?? null;
@@ -922,6 +940,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
               parent,
             ),
           );
+          reportPathPolicy(block, parent);
         }
       }
     }
@@ -1241,6 +1260,9 @@ async function main() {
   // The layered exec policy (issue #471), loaded once: the repo layer's file is read before the
   // agent can run anything, and the same object is what runAgent answers questions from.
   const execPolicy = loadExecPolicy(process.env);
+  // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
+  // the runtime reports against. Absent (an older harness) means the feature is off, silently.
+  const pathPolicy = loadPathPolicy(process.env);
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
@@ -1255,6 +1277,7 @@ async function main() {
     execPolicy,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+  for (const message of pathPolicy.warnings) emit({ type: 'log', level: 'warn', message });
 
   // Before the agent sees the workspace, not after. In block mode a finding
   // ends the colony here, with the terminal still reachable for a human.
@@ -1267,7 +1290,7 @@ async function main() {
   }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
-  await runAgent({ query, commands, emit, options, execPolicy, enforceChoices, instructions });
+  await runAgent({ query, commands, emit, options, execPolicy, pathPolicy: pathPolicy.policy, enforceChoices, instructions });
   await headroom?.close();
   await router?.close();
   process.exit(0);

@@ -28,7 +28,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/plugins/<name>/` | ro | Claude Code plugin directories, one per entry in `COLONIZER_PLUGIN_DIRS`. Absent when none are configured |
 | `/opt/colonizer/{caveman,headroom,jev-compaction}/`, `/opt/colonizer/bin/rtk` | ro | The token-saving payloads (Token savings, §4), each mounted only when its switch is on and the payload is installed |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
-| `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code module only) |
+| `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code: `/root/.claude/projects`, codex: `/root/.codex`, acp: `/root/.gemini`) |
 | `/opt/node/bin/node` | ro | Vendored Node runtime for the agent runner, pinned in `vendor/node.lock` and fetched at install by `scripts/fetch-node-binary.sh`, mounted read-only beside agentd |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -53,7 +53,8 @@ must be ignored (forward compatibility).
 One more variable reaches `agent.env` on a boot that delivers an answer held while the colony was
 suspended ([#562]): `COLONIZER_RESUME_SESSION` carries the `agent_session` id the runner reported
 last run, for it to continue that conversation (the Claude Code runner passes it to the SDK's
-`resume` option); the held answer is the `initial_prompt`. Absent means a fresh conversation.
+`resume` option, codex to `codex exec … resume`, ACP to `session/load`); the held answer is the
+`initial_prompt`. Absent means a fresh conversation.
 
 ### Where the agent runtime comes from
 
@@ -153,6 +154,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
   {"tool_call_id":"toolu_…","tool":"Bash","action":"keep|drop_result|drop_call","keep_call":0.98,"keep_result":0.87}]}  // Jev compaction's per-chunk decisions, shadow telemetry the harness grades into `jev_ladder.jsonl` (below); `applied:false` marks a fallback pass, which is not measured
 {"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}   // a self-paced loop's colony names its next run (Loops, below)
 {"type":"loop_stop","reason":"all flakes fixed"}                      // a loop's colony ends its loop
+{"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}  // the agent reached for a masked or write-protected path (docs/path-policy.md); reporting only — the mount enforced before this ran, and the harness logs it once per distinct (access, path)
 ```
 
 `memory_proposal` (§6.2) and `finding` (§6.6) are runner events too; they are described with the
@@ -187,8 +189,8 @@ Rules:
   outside the vocabulary counts as above every ceiling and is never answered automatically.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `agent_session` names the runner's own conversation id, so the harness can have it continued later
-  (§1's `COLONIZER_RESUME_SESSION`). Emit it when the SDK's init first names a session, the same
-  once-only rule `model_changed` follows for the model; an init re-reporting the known id emits
+  (§1's `COLONIZER_RESUME_SESSION`). Emit it as soon as the runner knows its conversation id, the
+  same once-only rule `model_changed` follows for the model; re-reporting the known id emits
   nothing. A runner that cannot resume a session never emits it.
 - `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
   names the model (`previous: null`), so a client always knows it, and after each `set_model` the
