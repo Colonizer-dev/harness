@@ -571,6 +571,11 @@ describe("reduceFrame", () => {
       });
     });
 
+    it("inconclusive is info, not trouble: the check fails on the base too (issue #672)", () => {
+      const s = send(colony(), verdict({ verdict: "inconclusive", summary: "inconclusive: fails on base as well", exit_code: 101, ms: 41234 }));
+      expect(s.logs[0]).toMatchObject({ source: "harness", level: "info", message: "verification: INCONCLUSIVE — inconclusive: fails on base as well (41.2s)" });
+    });
+
     it("verify: none is unverifiable by declaration, with nothing measured", () => {
       const s = send(colony(), verdict({ verdict: "unverifiable", by_declaration: true, command: null, command_source: null, exit_code: null, tests_ms: null, snapshot: null, ms: 12 }));
       expect(s.logs[0]).toMatchObject({ level: "info", message: "verification: unverifiable by declaration (verify: none)" });

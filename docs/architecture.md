@@ -261,20 +261,29 @@ stateDiagram-v2
    Before a completion claim is published, the host verifies it independently: it snapshots
    the colony's work (commits and uncommitted files) without touching the worktree, reads the git state
    itself — commits ahead of base, changed files, whether the paths the PR description names are on the
-   branch — and re-runs the repository's test command in a fresh one-shot microVM over a git archive of
-   the snapshot, never on the host and never from the agent's own logs. The verdict, recorded as a
+   branch — and re-runs the repository's checks in fresh one-shot microVMs over a git archive of the
+   snapshot, never on the host and never from the agent's own logs. With `verify: auto` the checks come
+   from the diff rather than one root declaration: a diff touching Rust files or `Cargo.toml`/`Cargo.lock`
+   runs `cargo test`; every other changed file runs the test script of the nearest ancestor directory
+   with a `package.json`, by that package's own package manager (so `web/**` runs web's own vitest, not
+   the root's); files neither covers fall back to the root Makefile's `test:` target when declared, and
+   are not checked when it is not — a diff with no Rust in it never runs `cargo test`. The checks run
+   sequentially, one microVM each, from the subdirectory they belong to. The verdict, recorded as a
    `verification` host event in the colony's log, is `confirmed`, `contradicted` (the contradictions
-   stated plainly) or `unverifiable`, which is never treated as confirmed. Only a description whose
+   stated plainly), `inconclusive` or `unverifiable`, which is never treated as confirmed. A check that
+   fails is re-run once on the merge-base, in a fresh checkout of the same kind: failing there too is
+   `inconclusive` — not this colony's doing — and autopilot still publishes, with a note in the pull
+   request; only a failure new against the base contradicts the claim, and a base that cannot be run
+   leaves the head failure a contradiction. The last 200 lines of a failing check's output are kept in
+   the colony's `out/verify-<check>.log`, and the failing test names ride the contradiction — and the
+   held colony's attention detail. Only a description whose
    in-repo paths are *all* missing from the branch and the diff contradicts the claim; a missing path
    beside ones that are there — a file deliberately not created, or one for other work — is an
-   advisory, shown with the verdict and in the pull request, and never changes it. The command comes from the
-   `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
-   the base branch (package.json `scripts.test`, run by the repository's own package manager —
-   the `packageManager` field, else the root lockfile: bun, pnpm, yarn or npm, and `npm install &&
-   npm test` without one — else Cargo.toml → `cargo test`; else a Makefile `test:` target →
-   `make test`; a tool the colony image lacks leaves the claim unverifiable), `none` means unverifiable by declaration, and a colony's own `verify`
-   overrides it. Autopilot publishes on `confirmed` and `unverifiable` exactly as before; on
-   `contradicted` it holds the colony the same way an errored turn does. The mesh node is deleted.
+   advisory, shown with the verdict and in the pull request, and never changes it. An explicit `verify`
+   — the `publish` module's setting or the colony's own — still replaces the whole selection, and
+   `none` means unverifiable by declaration. Autopilot publishes on `confirmed`, `inconclusive` and
+   `unverifiable` exactly as before; on `contradicted` it holds the colony the same way an errored
+   turn does. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM

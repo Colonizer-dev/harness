@@ -23,6 +23,8 @@ export interface Attention {
   reason: AttentionReason;
   since: string;
   nudges: number;
+  /** Why, in the mothership's own words — the failing checks and where their output went for `autopilot_held` (issue #672). Absent otherwise and on older motherships. */
+  detail?: string;
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
@@ -1300,12 +1302,15 @@ export type AgentEventBody =
    */
   | {
       type: "verification";
-      verdict: "confirmed" | "contradicted" | "unverifiable";
+      /** `inconclusive` (issue #672): a check failed on the colony's work but fails on the merge-base too, so it is not this colony's doing — autopilot publishes anyway. */
+      verdict: "confirmed" | "contradicted" | "inconclusive" | "unverifiable";
       by_declaration: boolean;
       summary: string;
       contradictions: string[];
       /** Observations that do not change the verdict, e.g. a described path missing beside ones that are there. Absent on events recorded before it existed. */
       advisories?: string[];
+      /** Checks that failed on the merge-base as well, one reviewer-ready clause each (issue #672). Absent on events recorded before it existed. */
+      inconclusive?: string[];
       command: string | null;
       command_source:
         | "config"
