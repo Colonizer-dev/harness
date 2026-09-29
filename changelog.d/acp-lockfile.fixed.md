@@ -1,1 +1,0 @@
-**Building the app works again with the ACP agent module.** `modules/agents/acp` shipped without a `package-lock.json`, so `scripts/install.sh` (which runs `npm ci` for every agent module) failed, and so did the CI bundle jobs. The module now ships its lockfile like the others. ([#591])

@@ -90,9 +90,15 @@ pub async fn remove(msb: &str, name: &str) {
 
 /// Whether this sandbox provider can snapshot a running microVM's memory, so a colony waiting on its
 /// user could be frozen in place and thawed with the conversation and every open process intact
-/// (issue #562). The pinned microsandbox (0.6.18) cannot: a suspend therefore stops the VM and keeps
-/// the worktree plus the agent's own session transcript, and the answer re-boots a fresh VM that
-/// resumes that session. If a provider ever gains a real snapshot, this is the seam it switches.
+/// (issue #562, re-measured on the 0.7.3 pin of issue #639). The capture now exists — `msb snapshot
+/// create --full` checkpoints a running VM in about half a second — but its restore cannot bring a
+/// colony back, so the answer is still no: a sandbox that has ever carried a `--secret` (every
+/// colony's credential rides in one) fails its restore outright (`restore virtio device
+/// virtio_fs1`), whether or not the source sandbox still runs, and `msb snapshot restore` accepts
+/// no `--secret` that could re-register one. A suspend therefore stops the VM and keeps the
+/// worktree plus the agent's own session transcript, and the answer re-boots a fresh VM that
+/// resumes that session. If upstream ever restores a colony-shaped sandbox, this is the seam that
+/// switches.
 pub(crate) fn supports_memory_snapshot() -> bool {
     false
 }
