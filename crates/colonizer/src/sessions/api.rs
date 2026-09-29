@@ -2,24 +2,148 @@
 //! terminal WebSockets.
 
 use super::*;
+use axum::http::HeaderMap;
 
-pub async fn list(
-    State(app): State<Shared>,
-    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
-) -> Json<Vec<Session>> {
+/// The query `GET /api/sessions` takes (issue #651): with neither field the route answers the
+/// cockpit's bare array as it always has; with `limit` or `cursor` it answers a page. Both stay
+/// strings here so a malformed value is this route's own **400** `invalid_input`, not the
+/// extractor's plain-text rejection.
+#[derive(Deserialize, Default)]
+pub(crate) struct ListQuery {
+    limit: Option<String>,
+    cursor: Option<String>,
+}
+
+impl ListQuery {
+    /// Whether the query asks for a page at all: either field present changes the reply shape.
+    fn paginated(&self) -> bool {
+        self.limit.is_some() || self.cursor.is_some()
+    }
+}
+
+/// The page size `GET /uhp/v1/sessions` always uses and `GET /api/sessions` defaults to (§7,
+/// sessions: a client must not have to guess the end of the list from a short page).
+const DEFAULT_PAGE_LIMIT: usize = 20;
+const MAX_PAGE_LIMIT: usize = 100;
+
+/// One page of the colony list: the page itself, newest first, and the cursor a client sends
+/// back for the next one — the last session's id, or none when the list is exhausted.
+pub(crate) struct SessionPage {
+    sessions: Vec<Session>,
+    next_cursor: Option<String>,
+}
+
+/// Slices one page off the visible list. The cursor names a colony the caller can already see,
+/// and the page starts right after it; a cursor outside the visible list is refused, so ids
+/// cannot be probed through it.
+fn paginate(visible: Vec<Session>, limit: usize, cursor: Option<&str>) -> Result<SessionPage, ()> {
+    let start = match cursor {
+        None => 0,
+        Some(cursor) => visible.iter().position(|s| s.id == cursor).ok_or(())? + 1,
+    };
+    let end = (start + limit).min(visible.len());
+    let more = end < visible.len();
+    // `more` means at least one session sits past `end`, so the page is not empty and its last
+    // member is the cursor.
+    let next_cursor = more.then(|| visible[end - 1].id.clone());
+    let sessions = visible.into_iter().skip(start).take(end - start).collect();
+    Ok(SessionPage { sessions, next_cursor })
+}
+
+/// The colonies a caller may see, newest first: the store's order reversed, with a scoped
+/// token's org/repo limits applied as a filter that hides what it does not cover (issue #508) —
+/// a colony outside them is not in the answer at all, the same hiding a single-colony read gets.
+pub(crate) async fn visible_sessions(
+    app: &App,
+    scoped: Option<&axum::Extension<crate::api_tokens::ScopedToken>>,
+) -> Vec<Session> {
     let sessions = app.sessions.read().await.clone();
     let mut out = Vec::with_capacity(sessions.len());
     for session in sessions.into_iter().rev() {
-        // A scoped token's org/repo limits are also the list filter (issue #508): a colony outside
-        // them is not in the answer at all, the same hiding a single-colony read gets.
-        if let Some(token) = &scoped
+        if let Some(token) = scoped
             && !token.covers(&session.org, &session.repo)
         {
             continue;
         }
-        out.push(with_activity(&app, session).await);
+        out.push(session);
     }
-    Json(out)
+    out
+}
+
+/// The colony list the cockpit's sockets read beside the HTTP one (`stream.rs`) and
+/// `diagnosis` builds on: the same newest-first, visibility-filtered `Session` array
+/// `GET /api/sessions` answers without pagination params, decorated, as the hub has always
+/// unwrapped it.
+pub(crate) async fn list_bare(
+    State(app): State<Shared>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+) -> Json<Vec<Session>> {
+    let visible = visible_sessions(&app, scoped.as_ref()).await;
+    Json(decorated(&app, visible).await)
+}
+
+/// The visible list with each colony's live activity attached — the one decoration loop, so the
+/// hub's bare array and every page's `sessions` member answer the same bytes.
+async fn decorated(app: &App, visible: Vec<Session>) -> Vec<Session> {
+    let mut out = Vec::with_capacity(visible.len());
+    for session in visible {
+        out.push(with_activity(app, session).await);
+    }
+    out
+}
+
+/// The paginated colony list both surfaces answer with: `GET /api/sessions` when its query asks
+/// for a page, `GET /uhp/v1/sessions` always (§7). `next_cursor` is the id of the page's last
+/// session while more follow, so walking pages ends at `null` — the marker §7 sessions wants
+/// instead of a client guessing the end from a short page.
+pub(crate) async fn paged_list(app: &App, visible: Vec<Session>, query: &ListQuery, uhp: bool, headers: &HeaderMap) -> Response {
+    let limit = match query.limit.as_deref() {
+        None => DEFAULT_PAGE_LIMIT,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(parsed) => parsed.clamp(1, MAX_PAGE_LIMIT),
+            Err(_) => {
+                return wrong_input(
+                    uhp,
+                    headers,
+                    format!("`limit` must be an integer between 1 and {MAX_PAGE_LIMIT}"),
+                );
+            }
+        },
+    };
+    let page = match paginate(visible, limit, query.cursor.as_deref()) {
+        Ok(page) => page,
+        Err(()) => {
+            return wrong_input(
+                uhp,
+                headers,
+                "`cursor` names no colony in this list; read a page and send back its `next_cursor`",
+            );
+        }
+    };
+    let sessions = decorated(app, page.sessions).await;
+    Json(json!({"sessions": sessions, "next_cursor": page.next_cursor})).into_response()
+}
+
+/// The **400** `invalid_input` a malformed pagination query answers (§7.7): envelope when the
+/// request speaks UHP, Colonizer's string error with the code as a sibling otherwise.
+fn wrong_input(uhp: bool, headers: &HeaderMap, message: impl std::fmt::Display) -> Response {
+    crate::uhp::error_for(uhp, headers, StatusCode::BAD_REQUEST, "invalid_input", message, None)
+}
+
+/// `GET /api/sessions`: the cockpit's bare array, newest first, unless the query asks for a page
+/// (`limit`/`cursor`, issue #651) — then `{"sessions": […], "next_cursor": …}`, the §7 shape,
+/// with the page's items alone decorated with their live activity.
+pub async fn list(
+    State(app): State<Shared>,
+    Query(query): Query<ListQuery>,
+    headers: HeaderMap,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+) -> Response {
+    let visible = visible_sessions(&app, scoped.as_ref()).await;
+    if !query.paginated() {
+        return Json(decorated(&app, visible).await).into_response();
+    }
+    paged_list(&app, visible, &query, false, &headers).await
 }
 
 pub async fn get(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<diagnosis::SessionDetail> {
@@ -726,7 +850,7 @@ async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut sock
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
-    axum::Router::new()
+    super::files::routes()
         .route("/api/sessions", routing::get(list).post(create))
         .route("/api/sessions/{id}", routing::get(get))
         .route("/api/sessions/{id}/question", routing::get(question))
@@ -740,6 +864,166 @@ mod tests {
 
     use super::*;
     use crate::sessions::tests::*;
+
+    /// Two colonies in one store, inserted oldest first so the newest-first order is visible.
+    async fn two_colonies() -> (Shared, PathBuf) {
+        let (app, root) = app_with_colony("older", SessionStatus::Running).await;
+        let mut newer = colony("acme", SessionStatus::Idle);
+        newer.id = "newer".into();
+        app.sessions.write().await.push(newer);
+        (app, root)
+    }
+
+    async fn list_response(app: &Shared, query: ListQuery) -> Value {
+        let response = list(State(app.clone()), Query(query), HeaderMap::new(), None).await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn page(limit: &str, cursor: Option<&str>) -> ListQuery {
+        ListQuery {
+            limit: Some(limit.into()),
+            cursor: cursor.map(String::from),
+        }
+    }
+
+    /// Without `limit` or `cursor` the route answers the cockpit's bare array, newest first —
+    /// the shape the web UI and the sockets hub have always unwrapped.
+    #[tokio::test]
+    async fn the_list_stays_a_bare_array_without_pagination_params() {
+        let (app, root) = two_colonies().await;
+        let parsed = list_response(&app, ListQuery::default()).await;
+        let ids: Vec<&str> = parsed.as_array().unwrap().iter().map(|s| s["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["newer", "older"], "newest first, no wrapper: {parsed}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With a pagination param the answer is the §7 page shape, and walking `next_cursor`
+    /// reaches every colony exactly once and ends at `null`.
+    #[tokio::test]
+    async fn the_list_pages_newest_first_until_the_cursor_is_null() {
+        let (app, root) = two_colonies().await;
+
+        let first = list_response(&app, page("1", None)).await;
+        assert_eq!(first["sessions"][0]["id"], "newer", "the page keeps the newest-first order");
+        assert_eq!(first["next_cursor"], "newer", "the page's last colony is the next cursor");
+
+        let second = list_response(&app, page("1", Some("newer"))).await;
+        assert_eq!(
+            second["sessions"][0]["id"], "older",
+            "the cursor starts right after its colony"
+        );
+        assert_eq!(second["next_cursor"], Value::Null, "nothing follows the last colony");
+
+        let last = list_response(&app, page("5", Some("older"))).await;
+        assert_eq!(
+            last["sessions"].as_array().unwrap().len(),
+            0,
+            "nothing follows the last colony"
+        );
+        assert_eq!(last["next_cursor"], Value::Null, "the walk ends at null");
+
+        let both = list_response(&app, page("100", None)).await;
+        let ids: Vec<&str> = both["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["newer", "older"], "one page holds them in order");
+        assert_eq!(both["next_cursor"], Value::Null, "nothing follows a whole list");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A cursor that names no visible colony is a **400** `invalid_input`, not a page.
+    #[tokio::test]
+    async fn a_bad_cursor_is_invalid_input() {
+        let (app, root) = two_colonies().await;
+        for cursor in ["missing", "OLDER"] {
+            let response = list(State(app.clone()), Query(page("1", Some(cursor))), HeaderMap::new(), None).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{cursor}");
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(parsed["code"], "invalid_input", "{cursor}: {parsed}");
+        }
+        // A malformed limit is the same refusal, naming its parameter.
+        let response = list(State(app.clone()), Query(page("soon", None)), HeaderMap::new(), None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The page bounds are clamped, not refused: a zero limit reads one colony, an enormous one
+    /// reads the whole list.
+    #[tokio::test]
+    async fn the_page_limit_is_clamped() {
+        let (app, root) = two_colonies().await;
+        let one = list_response(&app, page("0", None)).await;
+        assert_eq!(one["sessions"].as_array().unwrap().len(), 1, "limit 0 clamps to 1");
+        let all = list_response(&app, page("100000", None)).await;
+        assert_eq!(
+            all["sessions"].as_array().unwrap().len(),
+            2,
+            "limit past the list clamps to it"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A scoped token's org/repo limits filter the bare array and every page: outside them a
+    /// colony is not in the answer at all, and its id is no cursor either.
+    #[tokio::test]
+    async fn the_scoped_filter_applies_to_bare_and_paged_alike() {
+        let (app, root) = two_colonies().await;
+        let mut elsewhere = colony("other", SessionStatus::Running);
+        elsewhere.id = "elsewhere".into();
+        elsewhere.repo = "other/repo".into();
+        elsewhere.org = "other".into();
+        app.sessions.write().await.push(elsewhere);
+
+        let token = axum::Extension(crate::api_tokens::ScopedToken {
+            id: "tok_test".into(),
+            name: "watcher".into(),
+            scope: crate::api_tokens::Scope::Read,
+            orgs: Vec::new(),
+            repos: vec!["acme/repo".into()],
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        });
+
+        let bare = list_bare(State(app.clone()), Some(token.clone())).await;
+        let ids: Vec<&str> = bare.0.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["newer", "older"], "the token sees only acme/repo: {ids:?}");
+
+        let paged = list_response_with_token(&app, page("10", None), Some(token.clone())).await;
+        let ids: Vec<&str> = paged["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["newer", "older"], "the page is filtered too: {paged}");
+        assert_eq!(paged["next_cursor"], Value::Null);
+
+        // A hidden colony's id is not a valid cursor either: it names no visible colony.
+        let response = list(
+            State(app.clone()),
+            Query(page("1", Some("elsewhere"))),
+            HeaderMap::new(),
+            Some(token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "a hidden id is no cursor");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn list_response_with_token(
+        app: &Shared,
+        query: ListQuery,
+        token: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+    ) -> Value {
+        let response = list(State(app.clone()), Query(query), HeaderMap::new(), token).await;
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
 
     #[test]
     fn commands_only_reach_a_colony_whose_microvm_is_up() {
