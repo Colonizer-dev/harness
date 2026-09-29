@@ -327,6 +327,71 @@ impl AgentModule {
     }
 }
 
+/// Test-only construction of `AgentModule` (issue #707): every field starts at a neutral default in
+/// this one place, so adding a field means editing here rather than every test helper that builds a
+/// module. Chain the setters for what a test actually varies, or mutate the fields directly. The
+/// manifest parser (`read_agent`) keeps its struct literal on purpose: it is the one production
+/// place that must name every field.
+#[cfg(test)]
+impl AgentModule {
+    /// A module with the given `id` and neutral defaults everywhere else (`name` follows the id).
+    pub(crate) fn test(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            dir: PathBuf::new(),
+            entry: Vec::new(),
+            needs_claude: false,
+            schema: json!({}),
+            requires: Requires::default(),
+            egress: None,
+            resume_dir: None,
+            loop_tools: false,
+        }
+    }
+
+    pub(crate) fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
+
+    pub(crate) fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    pub(crate) fn dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = dir.into();
+        self
+    }
+
+    pub(crate) fn entry(mut self, entry: Vec<String>) -> Self {
+        self.entry = entry;
+        self
+    }
+
+    pub(crate) fn needs_claude(mut self, needs_claude: bool) -> Self {
+        self.needs_claude = needs_claude;
+        self
+    }
+
+    pub(crate) fn schema(mut self, schema: Value) -> Self {
+        self.schema = schema;
+        self
+    }
+
+    pub(crate) fn requires(mut self, requires: Requires) -> Self {
+        self.requires = requires;
+        self
+    }
+
+    pub(crate) fn resume_dir(mut self, resume_dir: Option<String>) -> Self {
+        self.resume_dir = resume_dir;
+        self
+    }
+}
+
 /// Agent modules discovered under `modules/agents`, plus one problem per manifest that is there but
 /// unusable. A broken manifest is a misconfiguration, so it is named rather than silently skipped.
 pub fn discover_agents(assets: Option<&FsPath>) -> (Vec<AgentModule>, Vec<String>) {
@@ -943,19 +1008,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("colonizer-vm-command-{}", crate::util::short_id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
-        let module = AgentModule {
-            id: "claude-code".into(),
-            name: String::new(),
-            description: String::new(),
-            dir,
-            entry: vec!["node".into(), "runner.mjs".into()],
-            needs_claude: true,
-            schema: Value::Null,
-            requires: Requires::default(),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        };
+        let module = AgentModule::test("claude-code")
+            .dir(dir)
+            .entry(vec!["node".into(), "runner.mjs".into()])
+            .needs_claude(true);
         let command = module.vm_command();
         assert_eq!(command.first().map(String::as_str), Some("node"), "{command:?}");
         assert_eq!(
@@ -1061,19 +1117,11 @@ mod tests {
     #[tokio::test]
     async fn an_agent_setting_naming_an_unknown_skillset_is_refused_at_save_time() {
         let root = std::env::temp_dir().join(format!("colonizer-plugin-dirs-{}", crate::util::short_id()));
-        let agent = AgentModule {
-            id: "claude-code".into(),
-            name: String::new(),
-            description: String::new(),
-            dir: root.clone(),
-            entry: vec!["node".into()],
-            needs_claude: true,
-            schema: json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}),
-            requires: Requires::default(),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        };
+        let agent = AgentModule::test("claude-code")
+            .dir(root.clone())
+            .entry(vec!["node".into()])
+            .needs_claude(true)
+            .schema(json!({"type": "object", "properties": {"plugins": {"type": "string", "format": "plugin-dirs"}}}));
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |_| {});
         // A skillset needs a manifest to pass validation (plugins::validate).
         std::fs::create_dir_all(app.cfg.data_dir.join("plugins/ecc")).unwrap();
@@ -1540,19 +1588,7 @@ mod tests {
 
     /// An agent module carrying exactly these `requires`, for the preflight tests below.
     fn agent_with(requires: Requires) -> AgentModule {
-        AgentModule {
-            id: "grok-build".into(),
-            name: String::new(),
-            description: String::new(),
-            dir: PathBuf::new(),
-            entry: vec!["node".into()],
-            needs_claude: false,
-            schema: Value::Null,
-            requires,
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        }
+        AgentModule::test("grok-build").requires(requires)
     }
 
     #[test]

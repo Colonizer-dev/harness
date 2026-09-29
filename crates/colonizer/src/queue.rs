@@ -1796,19 +1796,10 @@ mod tests {
     /// The smallest agent module, with or without the `session_resume` declaration that makes a
     /// colony's suspension possible at all.
     fn agent_module(id: &str, resume_dir: Option<&str>) -> crate::modules::AgentModule {
-        crate::modules::AgentModule {
-            id: id.into(),
-            name: id.into(),
-            description: String::new(),
-            dir: std::path::PathBuf::from("/opt/colonizer/agent"),
-            entry: vec!["runner.mjs".into()],
-            needs_claude: false,
-            requires: crate::modules::Requires::default(),
-            schema: json!({}),
-            egress: None,
-            resume_dir: resume_dir.map(String::from),
-            loop_tools: false,
-        }
+        crate::modules::AgentModule::test(id)
+            .dir(std::path::PathBuf::from("/opt/colonizer/agent"))
+            .entry(vec!["runner.mjs".into()])
+            .resume_dir(resume_dir.map(String::from))
     }
 
     /// A colony waiting on its user, with whatever session id its runner has (or has not) reported.

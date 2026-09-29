@@ -1061,19 +1061,12 @@ mod tests {
         let root = std::env::temp_dir().join(format!("colonizer-answer-race-{}", crate::util::short_id()));
         let app = crate::tests::test_app_with_agents(
             &root,
-            vec![crate::modules::AgentModule {
-                id: "claude-code".into(),
-                name: "claude-code".into(),
-                description: String::new(),
-                dir: std::path::PathBuf::from("/opt/colonizer/agent"),
-                entry: vec!["runner.mjs".into()],
-                needs_claude: false,
-                requires: crate::modules::Requires::default(),
-                schema: json!({}),
-                egress: None,
-                resume_dir: Some("/root/.claude/projects".into()),
-                loop_tools: false,
-            }],
+            vec![
+                crate::modules::AgentModule::test("claude-code")
+                    .dir(std::path::PathBuf::from("/opt/colonizer/agent"))
+                    .entry(vec!["runner.mjs".into()])
+                    .resume_dir(Some("/root/.claude/projects".into())),
+            ],
             |_| {},
         );
         app.modules
