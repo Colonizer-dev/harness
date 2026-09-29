@@ -9,6 +9,8 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
 import { Cockpit } from "./cockpit/Cockpit";
+import { DemoBanner } from "./components/DemoBanner";
+import { DEMO } from "./demo";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
@@ -699,7 +701,9 @@ export function App() {
 
   return (
     <SecretsNavContext.Provider value={openSecrets}>
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      {DEMO && <DemoBanner />}
+      <div className="flex min-h-0 flex-1">
       {narrow ? (
         <>
           {sidebarOpen && (
@@ -813,6 +817,7 @@ export function App() {
         onClose={() => setOrgSettingsFor(null)}
         onSaved={saveOrgInfo}
       />
+      </div>
     </div>
     </SecretsNavContext.Provider>
   );

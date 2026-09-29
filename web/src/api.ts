@@ -1,4 +1,5 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
+import { DEMO } from "./demo";
 import type {
   ActivityPage,
   ActivityQuery,
@@ -734,9 +735,9 @@ export const httpApi: Api = {
   openStream: () => new WebSocket(wsUrl("/api/stream")),
 };
 
-/** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness. */
+/** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness; the demo build forces it on. */
 export async function loadApi(): Promise<Api> {
-  if (new URLSearchParams(location.search).get("mock") === "1") {
+  if (DEMO || new URLSearchParams(location.search).get("mock") === "1") {
     const { createMockApi } = await import("./mock");
     return createMockApi();
   }
