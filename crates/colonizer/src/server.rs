@@ -169,7 +169,10 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
 
 /// Every `/api` path no module route claims, answered as the API error it is (`#641`): before,
 /// it fell through to the SPA fallback and read as a 200 `text/html` success, so a probe for an
-/// unknown route looked like a page. The API fence is segment-aware — `/apiary` is a cockpit
+/// unknown route looked like a page. The `/uhp` prefix gets the same fence in the §7.7 envelope
+/// (issue #651): a protocol probe that misses — including the un-normalised and percent-encoded
+/// `..` segments a router never matches — must read as a JSON 404, never as the cockpit's page.
+/// The API fence is segment-aware — `/apiary` is a cockpit
 /// path — and a matched route never reaches this: the router stamps `MatchedPath` on what it
 /// matched, and only a request that fell to a fallback gets here without one. Which is also the
 /// invariant that API routes stay registered flat: a router `nest`ed under `/api` carries only
@@ -178,8 +181,11 @@ fn web_router(assets: Option<&FsPath>) -> Router<Shared> {
 /// built.
 async fn api_not_found(req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    if (path == "/api" || path.starts_with("/api/")) && req.extensions().get::<MatchedPath>().is_none() {
+    let unmatched = req.extensions().get::<MatchedPath>().is_none();
+    if (path == "/api" || path.starts_with("/api/")) && unmatched {
         client_error(StatusCode::NOT_FOUND, "no such API route").into_response()
+    } else if (path == "/uhp" || path.starts_with("/uhp/")) && unmatched {
+        crate::uhp::unknown_route()
     } else {
         next.run(req).await
     }
@@ -217,6 +223,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::loops::routes())
         .merge(crate::maps::routes())
         .merge(crate::memory::routes())
+        .merge(crate::merge_train::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
         .merge(crate::orgs::routes())
@@ -268,6 +275,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);
     crate::loops::start_tasks(app);
+    crate::merge_train::start_tasks(app);
     crate::mesh::start_tasks(app).await;
     crate::notify::start_tasks(app);
     crate::publish::start_tasks(app);
@@ -853,6 +861,72 @@ mod tests {
             body_text(res).await.contains("Colonizer is running"),
             "/ is the not-built page"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Every `/uhp` path no route claims answers a JSON 404 in the §7.7 envelope, never the
+    /// cockpit's page (issue #651) — including the traversal probes the conformance suite sends,
+    /// whose `..` segments no router matches and whose encoded ones name no artifact. The body
+    /// never carries file contents, and without a token the wall stays the wall.
+    #[tokio::test]
+    async fn unknown_uhp_paths_answer_a_json_404_never_the_spa() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let router = router(&app);
+
+        for uri in [
+            "/uhp",
+            "/uhp/",
+            "/uhp/does-not-exist",
+            "/uhp/v1/does-not-exist",
+            // Un-normalised traversal: the dots are literal path segments, so nothing matches.
+            "/uhp/v1/containers/cntr_x/files/../../etc/passwd/content",
+        ] {
+            let res = router
+                .clone()
+                .oneshot(guarded(Method::GET, uri, vec![bearer(&app)]))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "GET {uri}");
+            assert_eq!(
+                res.headers().get(header::CONTENT_TYPE).unwrap(),
+                "application/json",
+                "GET {uri}"
+            );
+            let text = body_text(res).await;
+            let body: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(body["error"]["type"], "invalid_request_error", "GET {uri}: {text}");
+            assert!(body["error"]["code"].is_string(), "GET {uri}: {text}");
+            assert!(!text.contains("root:"), "GET {uri} leaks no file");
+        }
+
+        // The encoded traversal does match the artifact route — one segment, decoded by the
+        // extractor — and is refused there: an unknown container first, and the name would be
+        // `file_not_found`. Either way a JSON 404 that carries no file contents.
+        let uri = "/uhp/v1/containers/cntr_x/files/..%2f..%2fetc%2fpasswd/content";
+        let res = router
+            .clone()
+            .oneshot(guarded(Method::GET, uri, vec![bearer(&app)]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "GET {uri}");
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json",
+            "GET {uri}"
+        );
+        let text = body_text(res).await;
+        assert!(!text.contains("root:"), "GET {uri} leaks no file: {text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "session_not_found", "GET {uri}: {body}");
+
+        // Without a token the /uhp surface sits behind sign-in like every other route — the 401
+        // wall, not the page and not a JSON answer a client could read as a protocol reply.
+        let res = router
+            .oneshot(guarded(Method::GET, "/uhp/does-not-exist", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let _ = std::fs::remove_dir_all(root);
     }
 }

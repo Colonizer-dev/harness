@@ -28,6 +28,8 @@ hand.
 - **Keeps the event log.** It numbers each event, appends it to `/var/lib/colonizer/events.jsonl` and
   broadcasts it, so the mothership can reconnect and replay from any point.
 - **Serves the terminal.** A login shell in `/workspace` over a WebSocket PTY.
+- **Enforces the path policy beyond boot.** Masked and protected paths are bound inside nested
+  checkouts as they appear, with the same mounts the boot script applied at boot.
 - **Answers only the mothership.** It listens on port 7070 in the colony, and every request needs the
   colony's own bearer token, even inside the private mesh.
 

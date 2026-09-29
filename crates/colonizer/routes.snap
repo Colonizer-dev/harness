@@ -61,6 +61,7 @@
 /api/memory/proposals                                GET    unauth=401    token=owner            activity=-
 /api/memory/proposals/{id}/approve                   POST   unauth=401    token=owner            activity=memory.review
 /api/memory/proposals/{id}/reject                    POST   unauth=401    token=owner            activity=memory.review
+/api/merge-train                                     GET    unauth=401    token=read             activity=-
 /api/models                                          GET    unauth=401    token=owner            activity=-
 /api/modules                                         GET    unauth=401    token=owner            activity=-
 /api/modules/{kind}                                  PUT    unauth=401    token=owner            activity=settings.save
@@ -139,6 +140,9 @@
 /api/sessions/{id}/diff                              GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/egress                            GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/events                            GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/files                             GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/files/archive                     GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/files/{name}/content              GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/publish                           POST   unauth=401    token=owner            activity=colony.publish
 /api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
@@ -171,3 +175,8 @@
 /api/voice                                           GET    unauth=401    token=owner            activity=-
 /api/voice/key                                       PUT    unauth=401    token=owner            activity=settings.save
 /api/voice/transcribe                                POST   unauth=401    token=owner            activity=-
+/uhp/v1/containers/{cid}/files/{fid}/content         GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions                                     GET    unauth=401    token=read             activity=-
+/uhp/v1/sessions/{id}/files                          GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions/{id}/files/archive                  GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions/{id}/files/{name}/content           GET    unauth=401    token=session>=read    activity=-

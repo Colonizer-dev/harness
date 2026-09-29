@@ -91,6 +91,7 @@ const FIXED_ERRORS: &[(&str, &str)] = &[
     (sessions::VM_GONE_AFTER_RESTART, "harness_restarted"),
     (sessions::VM_STOPPED_EARLY, "vm_stopped"),
     (sessions::PUBLISH_LOST_TO_RESTART, "publish_interrupted"),
+    (sessions::PUBLISH_VM_UNCONFIRMED, "publish_unconfirmed"),
 ];
 
 /// The one module name a batch declares, in Cratefield's `modules` list: the thing being reported
@@ -958,19 +959,13 @@ mod tests {
     }
 
     fn agent() -> AgentModule {
-        AgentModule {
-            id: "claude-code".into(),
-            name: "Claude Code".into(),
-            description: "Anthropic's coding agent".into(),
-            dir: PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"),
-            entry: vec!["runner.mjs".into()],
-            needs_claude: true,
-            requires: crate::modules::Requires::default(),
-            schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        }
+        AgentModule::test("claude-code")
+            .name("Claude Code")
+            .description("Anthropic's coding agent")
+            .dir(PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"))
+            .entry(vec!["runner.mjs".into()])
+            .needs_claude(true)
+            .schema(json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}))
     }
 
     /// Every event name the batch carries, in order.
