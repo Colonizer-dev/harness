@@ -5,7 +5,7 @@ import { cloneElement, useEffect, useState, type FormEvent, type ReactElement, t
 
 import { errorMessage, useApi, useToast } from "../context";
 import { formatBytes } from "../cockpit/host";
-import type { CreatedFleetInvite, FleetJoinStatus, FleetPending, FleetRole, FleetState, FleetSyncPreview } from "../types";
+import type { CreatedFleetInvite, FleetJoinStatus, FleetMemberHealth, FleetMemberHealthState, FleetPending, FleetRole, FleetState, FleetSyncPreview } from "../types";
 import { Pane } from "./SettingsDialog";
 import { Badge, Button, Spinner, cx, inputClass, timeAgo, type Tone } from "./ui";
 
@@ -38,6 +38,26 @@ export async function runFleet(run: () => Promise<unknown>): Promise<string | nu
 
 const ROLE_TONE: Record<FleetRole, Tone> = { owner: "accent", member: "info", none: "neutral" };
 const ROLE_LABEL: Record<FleetRole, string> = { owner: "Owner", member: "Member", none: "Not in a fleet" };
+
+const HEALTH_TONE: Record<FleetMemberHealthState, Tone> = { ok: "ok", unknown: "neutral", degraded: "warn", stopped: "err" };
+const HEALTH_LABEL: Record<FleetMemberHealthState, string> = { ok: "OK", unknown: "Not checked yet", degraded: "Degraded", stopped: "Stopped" };
+
+/** "Token revoked: re-pair this machine" — the badge's hover text; null when there is nothing to say. */
+export function healthText(health: FleetMemberHealth): string | null {
+  if (!health.reason) return null;
+  return health.hint ? `${health.reason}: ${health.hint}` : health.reason;
+}
+
+/** A member's health (issue #764): the state's colour, the reason beside it, the hint on hover. */
+export function MemberHealthBadge({ health }: { health?: FleetMemberHealth }) {
+  if (!health) return null;
+  const text = healthText(health);
+  return (
+    <Badge tone={HEALTH_TONE[health.state]} title={text ?? undefined}>
+      {health.reason ?? HEALTH_LABEL[health.state]}
+    </Badge>
+  );
+}
 
 /** What "Codes match" reports when the owner has not said yes — or said no, or the invite died. */
 const JOIN_NOTE: Record<Exclude<FleetJoinStatus, "joined">, string> = {
@@ -362,8 +382,14 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                           key={member.id}
                           actions={ask(member.id, "Remove", `Remove ${member.name}?`, () => api.removeFleetMember(member.id))}
                         >
-                          <div className="truncate text-[13px] font-medium">{member.name}</div>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <span className="truncate text-[13px] font-medium">{member.name}</span>
+                            <MemberHealthBadge health={member.health} />
+                          </div>
                           <div className="truncate text-[11.5px] text-faint">{member.url ? `${member.url} · ` : ""}joined {joinedDay(member.joined_at)}</div>
+                          {member.health?.hint && member.health.state !== "ok" && (
+                            <div className="truncate text-[11.5px] text-muted">{member.health.hint}</div>
+                          )}
                         </Row>
                       ))}
                     </div>

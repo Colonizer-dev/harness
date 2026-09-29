@@ -156,6 +156,15 @@ shows where it stands.
 Background drains stay stopped after a 401 or a 403; a manual `fleet sync` tries again. Leaving
 and re-joining starts the drain state over, since a new membership is a new owner's view.
 
+## Member health
+
+Settings → Fleet shows each member with one badge: **OK**, a grey **Not checked yet** until the
+owner has polled it, or a degraded (amber) or stopped (red)
+reason such as "No heartbeat for 12 min", with the one thing to do underneath ("the machine may be
+asleep"). The owner works it out from what it already sees — the member's answers to the fleet
+poll, its disk, whether its token still exists — and the worst problem wins. The rule, the
+thresholds and which signals are wired are in [protocol.md](protocol.md#member-health-issue-764).
+
 ## The mesh ACL: ready, but nothing can use it yet
 
 The fleet rides the same embedded headscale the colonies use

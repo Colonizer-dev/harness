@@ -279,7 +279,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | --- | --- |
 | `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
-| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders |
+| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
 | `POST /api/fleet/pending/{id}/approve` · `…/reject` | The owner's decision on a redeemed invite. Approve answers `{member}` and mints the member's `fleet`-scoped token, handed over exactly once; reject leaves the joiner's next confirm reading `rejected` |
 | `DELETE /api/fleet/members/{id}` | End one membership from the owner's side: the member's fleet token is revoked, its local data stays |
@@ -1233,6 +1233,42 @@ all and not yet acknowledged) from the same collection the drain sends, and
 `POST /api/fleet/sync/consent` `{"enabled": true|false}` records the answer on the membership in
 `<config_dir>/fleet.json`. A new join starts with it off; until it is on, `GET /api/fleet/sync`
 reads `status: "consent_required"` and `POST /api/fleet/sync` answers **409**.
+
+### Member health (issue #764)
+
+Each entry of `GET /api/fleet`'s `members` carries one verdict:
+
+```json
+{"id": "mem_…", "name": "worker", "url": "http://10.0.0.2:7878", "joined_at": "…",
+ "health": {"state": "degraded", "code": "no_heartbeat", "reason": "No heartbeat for 12 min", "hint": "the machine may be asleep"}}
+```
+
+`state` is `ok`, `unknown`, `degraded` or `stopped`; `code`, `reason` and `hint` are `null`
+exactly when it is `ok`. `unknown` means no poll has checked the member yet: it is never reported
+as `ok` on no evidence. `code` is stable; `reason` and `hint` are for showing verbatim. Reading the view never dials a
+member: it evaluates what the owner already holds (`crates/colonizer/src/fleet_health.rs`), and
+every signal that fires is a finding. The worst state wins (`stopped` over `degraded` over `unknown` over `ok`); findings of the same state break ties in
+the order below.
+
+| Order | `code` | Fires when | State | Hint | Wired |
+|---|---|---|---|---|---|
+| 1 | `token_revoked` | the member's fleet token is gone from the registry | stopped | re-pair this machine | yes |
+| 2 | `sync_rejected` | the last sync failed 401 or 403 | stopped | re-pair this machine | not yet |
+| 3 | `runner_down` | the colony runner is not alive | stopped | restart colonizer on this machine | not yet |
+| 4 | `disk_full` | disk ≥ 90% used (≥ 95% stopped); without a total, < 5 GB free (< 1 GB stopped) | degraded / stopped | clean target/ dirs | yes |
+| 5 | `no_heartbeat` | the member last answered ≥ 5 min before the owner's latest poll (≥ 30 min stopped) | degraded / stopped | the machine may be asleep | yes |
+| 6 | `unreachable` | the owner's latest poll went unanswered | degraded | check that it is awake and on the network | yes |
+| 7 | `sync_backlog` | the oldest unsynced item waited ≥ 10 min (≥ 60 min stopped) | degraded / stopped | check its network, then restart colonizer there | not yet |
+| 8 | `sync_rate_limited` | the last sync failed 429 | degraded | it backs off by itself; wait a few minutes | not yet |
+| 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
+| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+
+The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
+A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
+because nobody looked; before the first poll those signals are unmeasured, so the member reads `unknown` (any other
+finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. Signals marked "not yet" have their
+inputs defined and stay unmeasured until the harness records them. `GET /api/hosts` rows gained
+`disk_total_bytes` (omitted when unknown) for the disk percentage.
 
 ### `GET /api/version`
 

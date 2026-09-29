@@ -538,11 +538,46 @@ async fn read_bounded(mut res: reqwest::Response) -> std::result::Result<Vec<u8>
 // The cockpit's routes. Owner-only: `api_tokens::classify` leaves them there.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/fleet`: the state both pages need, minus every secret.
+/// `GET /api/fleet`: the state both pages need, minus every secret — and on each member, its
+/// `health` (issue #764): `{state, code, reason, hint}`, from signals this owner already holds.
+/// Reading it never dials a member; the numbers are those of the last `GET /api/hosts` poll.
 pub async fn view(State(app): State<Shared>) -> Json<Value> {
     let mut state = app.fleet_members.state.write().await;
     state.prune();
-    Json(state.view())
+    let mut view = state.view();
+    let members = state.members.clone();
+    drop(state);
+    if let Some(rows) = view["members"].as_array_mut() {
+        for (row, member) in rows.iter_mut().zip(&members) {
+            let signals = member_signals(&app, member).await;
+            row["health"] = crate::fleet_health::evaluate(&signals).to_json();
+        }
+    }
+    Json(view)
+}
+
+/// What this owner knows about one member, as health signals (fleet_health.rs names which are
+/// wired). The heartbeat's age is measured at the latest poll, not now: a member does not go
+/// stale because the cockpit was closed; a member never answered counts from when it joined.
+async fn member_signals(app: &Shared, member: &Member) -> crate::fleet_health::Signals {
+    let token_valid = Some(app.api_tokens.scoped(&member.token_id).await.is_some());
+    let observation = match &member.url {
+        Some(url) => app.fleet_cache.observation(url).await,
+        None => None,
+    };
+    let mut signals = crate::fleet_health::Signals {
+        token_valid,
+        has_url: member.url.is_some(),
+        ..Default::default()
+    };
+    if let Some(seen) = observation {
+        let since = seen.last_answer.unwrap_or(member.joined_at).max(member.joined_at);
+        signals.heartbeat_age = Some((seen.polled_at - since).max(Duration::zero()));
+        signals.reachable = Some(seen.reachable);
+        signals.disk_free_bytes = seen.disk_free_bytes;
+        signals.disk_total_bytes = seen.disk_total_bytes;
+    }
+    signals
 }
 
 /// `POST /api/fleet/invites`: a fresh single-use code, shown here and never again.
@@ -1351,6 +1386,60 @@ mod tests {
 
     /// Removing a member from the cockpit and a member's own leave both revoke the token and drop
     /// the row; the leave of an already-removed machine still ends cleanly.
+    /// Issue #764: each member in `GET /api/fleet` carries a `health` verdict. A member whose last
+    /// answer is 12 minutes older than the owner's latest poll reads degraded, with its hint; a
+    /// revoked token reads stopped.
+    #[tokio::test]
+    async fn a_member_with_a_stale_heartbeat_reads_degraded_with_a_hint() {
+        let (_root, app, router, owner) = rig();
+        let owner = owner.as_deref();
+        let (member_id, _token) = join_member(&router, owner, &an_invite(&router, &app.api_token).await).await;
+
+        // Never polled yet: nobody checked it, so unknown — never ok.
+        let view = fleet_view(&router, owner).await;
+        let health = &view["members"][0]["health"];
+        assert_eq!(health["state"], "unknown", "{view}");
+        assert_eq!(health["reason"], "Not checked yet");
+        assert_eq!(health["hint"], "open the cockpit or wait for the next poll");
+
+        // It joined an hour ago; it last answered 12 minutes before the latest poll, which failed.
+        let now = Utc::now();
+        let (url, token_id) = {
+            let mut state = app.fleet_members.state.write().await;
+            let member = state.members.iter_mut().find(|m| m.id == member_id).unwrap();
+            member.joined_at = now - Duration::hours(1);
+            (member.url.clone().unwrap(), member.token_id.clone())
+        };
+        let row = crate::fleet::HostSummary {
+            id: "worker-host".into(),
+            name: "worker".into(),
+            platform: "linux-x86_64".into(),
+            os: "Debian".into(),
+            version: Some("0.1.10".into()),
+            slots_in_use: 0,
+            slots_ceiling: 4,
+            queue_depth: 0,
+            disk_free_bytes: Some(400 << 30),
+            disk_total_bytes: Some(500 << 30),
+            last_heartbeat: Some((now - Duration::minutes(12)).to_rfc3339()),
+            health: crate::fleet::HostHealth::Unreachable,
+        };
+        app.fleet_cache.record_poll(&url, now, row).await;
+
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "no_heartbeat", "the heartbeat outranks plain unreachability");
+        assert_eq!(health["reason"], "No heartbeat for 12 min");
+        assert_eq!(health["hint"], "the machine may be asleep");
+
+        // Revoke its token behind the fleet's back: stopped, and the hint says re-pair.
+        app.api_tokens.revoke(&token_id).await.unwrap();
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "stopped", "{health}");
+        assert_eq!(health["reason"], "Token revoked");
+        assert_eq!(health["hint"], "re-pair this machine");
+    }
+
     #[tokio::test]
     async fn removal_and_leaving_both_revoke_the_token_and_drop_the_member() {
         let (_root, app, router, owner) = rig();

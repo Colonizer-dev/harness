@@ -401,6 +401,8 @@ export interface FleetHost {
   queue_depth: number;
   /** Absent when the peer has never reported it. */
   disk_free_bytes: number | null;
+  /** The disk's size (issue #764); absent when unknown. */
+  disk_total_bytes?: number;
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
@@ -435,12 +437,29 @@ export interface FleetPending {
   status: "pending" | "approved" | "rejected";
 }
 
+/** GET /api/fleet member `health.state` (issue #764): the worst of what the owner observed; `unknown` until a poll has checked the member. */
+export type FleetMemberHealthState = "ok" | "unknown" | "degraded" | "stopped";
+
+/**
+ * GET /api/fleet member `health` (issue #764): one state, and when it is not `ok`, why and what to do.
+ * `code` is a stable key (`token_revoked`, `no_heartbeat`, `unreachable`, `disk_full`, `unwatched`, `not_checked`, …);
+ * `reason` and `hint` are for showing verbatim, e.g. "No heartbeat for 12 min" / "the machine may be asleep".
+ */
+export interface FleetMemberHealth {
+  state: FleetMemberHealthState;
+  code: string | null;
+  reason: string | null;
+  hint: string | null;
+}
+
 /** A mothership that joined this one's fleet; it hosts colonies and sees the fleet view. */
 export interface FleetMember {
   id: string;
   name: string;
   url: string | null;
   joined_at: string;
+  /** Absent from owners built before issue #764. */
+  health?: FleetMemberHealth;
 }
 
 /** GET /api/fleet `membership`: this mothership's place in the fleet it joined. */

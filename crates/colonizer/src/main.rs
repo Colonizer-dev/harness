@@ -41,6 +41,7 @@ mod execution;
 mod findings;
 mod fleet;
 mod fleet_export;
+mod fleet_health;
 mod fleet_members;
 mod fleet_sync;
 mod gateway;

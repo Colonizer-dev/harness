@@ -1413,7 +1413,16 @@ export function createMockApi(): Api {
   let fleetPending: FleetPending[] = [
     { id: "pen_seed1", name: "rfc-annex", url: "http://10.0.0.6:7878", confirm_code: "512849", expires_at: new Date(Date.now() + 11 * 60_000).toISOString(), status: "pending" },
   ];
-  let fleetMembers: FleetMember[] = [{ id: "mem_seed1", name: "studio-2", url: "http://10.0.0.5:7878", joined_at: ago(3 * 1440) }];
+  // Issue #764: the seeded member shows a degraded badge, so the demo has something to point at.
+  let fleetMembers: FleetMember[] = [
+    {
+      id: "mem_seed1",
+      name: "studio-2",
+      url: "http://10.0.0.5:7878",
+      joined_at: ago(3 * 1440),
+      health: { state: "degraded", code: "no_heartbeat", reason: "No heartbeat for 12 min", hint: "the machine may be asleep" },
+    },
+  ];
   let fleetMembership: FleetMembership | null = null;
   let fleetJoining: FleetJoining | null = null;
   const fleetRole = (): FleetRole => (fleetMembership ? "member" : fleetMembers.length > 0 ? "owner" : "none");
@@ -2745,7 +2754,13 @@ export function createMockApi(): Api {
       const at = fleetPending.findIndex((row) => row.id === id);
       if (at < 0) throw new ApiError("no such pending request", 404);
       const [row] = fleetPending.splice(at, 1);
-      const member: FleetMember = { id: row.id, name: row.name, url: row.url, joined_at: now() };
+      const member: FleetMember = {
+        id: row.id,
+        name: row.name,
+        url: row.url,
+        joined_at: now(),
+        health: { state: "unknown", code: "not_checked", reason: "Not checked yet", hint: "open the cockpit or wait for the next poll" },
+      };
       fleetMembers.push(member);
       return { member: clone(member) };
     },

@@ -40,6 +40,9 @@ pub struct HostSummary {
     pub slots_ceiling: usize,
     pub queue_depth: usize,
     pub disk_free_bytes: Option<u64>,
+    /// The disk's size, beside `disk_free_bytes`: what makes "97% full" sayable (issue #764).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
     /// RFC 3339, `None` for a peer that has never once answered.
     pub last_heartbeat: Option<String>,
     pub health: HostHealth,
@@ -51,11 +54,50 @@ pub struct HostSummary {
 #[derive(Default)]
 pub struct FleetCache {
     last_known: Mutex<HashMap<String, HostSummary>>,
+    /// When each peer URL was last polled, answered or not: the instant a heartbeat's age is
+    /// measured at, so a member does not read as stale merely because nobody looked (issue #764).
+    last_polled: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+}
+
+/// What the latest poll of one peer URL saw, for member health (issue #764, fleet_health.rs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerObservation {
+    /// When the latest poll ran.
+    pub polled_at: chrono::DateTime<chrono::Utc>,
+    /// When the peer last answered one; `None` if it never has.
+    pub last_answer: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the latest poll was answered.
+    pub reachable: bool,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
 }
 
 impl FleetCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The latest poll of `url`, or `None` if it has never been polled.
+    pub async fn observation(&self, url: &str) -> Option<PeerObservation> {
+        let polled_at = *self.last_polled.lock().await.get(url)?;
+        let known = self.last_known.lock().await.get(url).cloned();
+        Some(PeerObservation {
+            polled_at,
+            last_answer: known
+                .as_ref()
+                .and_then(|k| k.last_heartbeat.as_deref())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&chrono::Utc)),
+            reachable: known.as_ref().is_some_and(|k| k.health == HostHealth::Online),
+            disk_free_bytes: known.as_ref().and_then(|k| k.disk_free_bytes),
+            disk_total_bytes: known.as_ref().and_then(|k| k.disk_total_bytes),
+        })
+    }
+
+    /// Records one poll of `url`: `summary` is its row as the fleet view shows it.
+    pub(crate) async fn record_poll(&self, url: &str, at: chrono::DateTime<chrono::Utc>, summary: HostSummary) {
+        self.last_polled.lock().await.insert(url.to_string(), at);
+        self.last_known.lock().await.insert(url.to_string(), summary);
     }
 }
 
@@ -80,6 +122,7 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
         slots_ceiling,
         queue_depth,
         disk_free_bytes: host.disk_free_bytes,
+        disk_total_bytes: host.disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
     }
@@ -129,6 +172,7 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
     let slots_ceiling = host_num("microvms_ceiling");
     let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
     let disk_free_bytes = host.and_then(|host| host.get("disk_free_bytes")).and_then(Value::as_u64);
+    let disk_total_bytes = host.and_then(|host| host.get("disk_total_bytes")).and_then(Value::as_u64);
     Some(HostSummary {
         id,
         name,
@@ -139,6 +183,7 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         slots_ceiling,
         queue_depth,
         disk_free_bytes,
+        disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
     })
@@ -164,6 +209,7 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
         slots_ceiling: 0,
         queue_depth: 0,
         disk_free_bytes: None,
+        disk_total_bytes: None,
         last_heartbeat: None,
         health: HostHealth::Unreachable,
     };
@@ -203,18 +249,14 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     let polls = peers
         .iter()
         .map(|url| async { (url.as_str(), poll_peer(&client, url, PEER_POLL_TIMEOUT).await) });
+    let polled_at = chrono::Utc::now();
     for (url, result) in futures_util::future::join_all(polls).await {
-        match result {
-            Some(summary) => {
-                app.fleet_cache
-                    .last_known
-                    .lock()
-                    .await
-                    .insert(url.to_string(), summary.clone());
-                hosts.push(summary);
-            }
-            None => hosts.push(unreachable_summary(app, url).await),
-        }
+        let summary = match result {
+            Some(summary) => summary,
+            None => unreachable_summary(app, url).await,
+        };
+        app.fleet_cache.record_poll(url, polled_at, summary.clone()).await;
+        hosts.push(summary);
     }
     hosts
 }
@@ -372,6 +414,7 @@ mod tests {
             slots_ceiling: 4,
             queue_depth: 1,
             disk_free_bytes: Some(999),
+            disk_total_bytes: None,
             last_heartbeat: Some("2026-09-20T12:00:00+00:00".into()),
             health: HostHealth::Online,
         };

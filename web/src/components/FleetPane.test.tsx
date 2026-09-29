@@ -8,7 +8,7 @@ import { createMockApi } from "../mock";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
 import type { FleetState, FleetSyncPreview } from "../types";
-import { FleetPane, HistorySync, InviteReveal, expiresText, joinedDay, runFleet, spacedCode } from "./FleetPane";
+import { FleetPane, HistorySync, InviteReveal, MemberHealthBadge, expiresText, healthText, joinedDay, runFleet, spacedCode } from "./FleetPane";
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(node);
 // The pane reads the api itself; static markup runs no effects, so a stub context is enough.
@@ -191,5 +191,46 @@ describe("HistorySync", () => {
 
   it("the member pane carries the switch", () => {
     expect(pane(memberState)).toContain("History sync");
+  });
+});
+
+describe("member health (issue #764)", () => {
+  const stale = { state: "degraded" as const, code: "no_heartbeat", reason: "No heartbeat for 12 min", hint: "the machine may be asleep" };
+
+  it("colours the badge by state and puts the hint on hover", () => {
+    const html = wrap(<MemberHealthBadge health={stale} />);
+    expect(html).toContain("text-warn");
+    expect(html).toContain(">No heartbeat for 12 min</span>");
+    expect(html).toContain('title="No heartbeat for 12 min: the machine may be asleep"');
+    const stopped = wrap(<MemberHealthBadge health={{ state: "stopped", code: "token_revoked", reason: "Token revoked", hint: "re-pair this machine" }} />);
+    expect(stopped).toContain("text-err");
+    expect(stopped).toContain(">Token revoked</span>");
+  });
+
+  it("shows a never-polled member as a grey 'Not checked yet', never OK", () => {
+    const unchecked = { state: "unknown" as const, code: "not_checked", reason: "Not checked yet", hint: "open the cockpit or wait for the next poll" };
+    const html = wrap(<MemberHealthBadge health={unchecked} />);
+    expect(html).toContain("text-muted");
+    expect(html).toContain(">Not checked yet</span>");
+    expect(html).not.toContain(">OK</span>");
+    expect(html).toContain('title="Not checked yet: open the cockpit or wait for the next poll"');
+    const row = pane({ ...ownerState, members: [{ ...ownerState.members[0], health: unchecked }] });
+    expect(row).toContain(">open the cockpit or wait for the next poll</div>");
+  });
+
+  it("reads OK with no hover text when healthy, and nothing at all from an older owner", () => {
+    const ok = { state: "ok" as const, code: null, reason: null, hint: null };
+    expect(healthText(ok)).toBeNull();
+    const html = wrap(<MemberHealthBadge health={ok} />);
+    expect(html).toContain("text-ok");
+    expect(html).toContain(">OK</span>");
+    expect(html).not.toContain("title=");
+    expect(wrap(<MemberHealthBadge />)).toBe("");
+  });
+
+  it("shows the badge and the hint in the owner's member list", () => {
+    const html = pane({ ...ownerState, members: [{ ...ownerState.members[0], health: stale }] });
+    expect(html).toContain(">No heartbeat for 12 min</span>");
+    expect(html).toContain(">the machine may be asleep</div>");
   });
 });
