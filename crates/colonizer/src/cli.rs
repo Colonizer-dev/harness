@@ -206,6 +206,44 @@ enum Command {
         #[command(subcommand)]
         command: TokenCommand,
     },
+    /// Export this machine's stats, logs and colony history, or import another machine's (issue #687)
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
+}
+
+/// The `fleet` subcommands. Export and import run locally off the settings — no mothership, no
+/// token. #686's join slots a sibling in beside them.
+#[derive(Subcommand, Debug)]
+enum FleetCommand {
+    /// Write a bundle of this machine's stats, logs and colony history for a fleet import
+    Export {
+        /// Where to write the bundle (default: colonizer-export-<host>-<date>.tar.zst here)
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+        /// Leave the colony history out
+        #[arg(long)]
+        no_history: bool,
+        /// Leave the session logs and transcripts out
+        #[arg(long)]
+        no_logs: bool,
+        /// Leave the spend, routing and usage stats out
+        #[arg(long)]
+        no_stats: bool,
+        /// Show what would be exported, and write nothing
+        #[arg(long)]
+        preview: bool,
+    },
+    /// Preview a fleet bundle, then import it into this machine's data dir
+    Import {
+        /// The .tar.zst bundle to import
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Show the bundle's manifest, and import nothing
+        #[arg(long)]
+        preview: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1162,6 +1200,43 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         }
         Command::Loop { command } => loop_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
+        Command::Fleet { command } => fleet_command(cli, command),
+    }
+}
+
+/// `fleet export` and `fleet import` run on this machine's own data dir (`Settings::from_env`),
+/// locally: no mothership to reach and no token to present (issue #687).
+fn fleet_command(cli: &Cli, command: FleetCommand) -> i32 {
+    let cfg = match Settings::from_env() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("colonizer: {e:#}");
+            return EXIT_ERROR;
+        }
+    };
+    let result = match command {
+        FleetCommand::Export {
+            out,
+            no_history,
+            no_logs,
+            no_stats,
+            preview,
+        } => {
+            let cats = crate::fleet_export::Categories {
+                history: !no_history,
+                logs: !no_logs,
+                stats: !no_stats,
+            };
+            crate::fleet_export::cli_export(&cfg, cli.json, out, cats, preview)
+        }
+        FleetCommand::Import { file, preview } => crate::fleet_export::cli_import(&cfg, &file, preview, cli.json),
+    };
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("colonizer: {e:#}");
+            EXIT_ERROR
+        }
     }
 }
 

@@ -32,6 +32,11 @@ pub struct Settings {
     /// nothing here auto-exposes anything. For a peer to be pollable, its operator sets *that peer's*
     /// `COLONIZER_BIND` to a private interface IP of their own choosing (never `0.0.0.0`).
     pub fleet_peers: Vec<String>,
+    /// The bench pool directory (`scripts/bench/synth.mjs --pool`), when the operator points the
+    /// mothership at one with `COLONIZER_BENCH_POOL`; a red-team run reads its `raid.json` so each
+    /// hunter's brief carries the injected bugs recorded against the repository being raided
+    /// (docs/bench.md, "The raid set").
+    pub bench_pool: Option<PathBuf>,
 }
 
 impl Settings {
@@ -75,6 +80,7 @@ impl Settings {
                 .map(|u| u.trim().to_string())
                 .filter(|u| !u.is_empty())
                 .collect(),
+            bench_pool: env_nonempty("COLONIZER_BENCH_POOL").map(PathBuf::from),
         };
         let data = settings.data_dir.display().to_string();
         if data.contains(':') || data.contains(',') {
@@ -718,6 +724,7 @@ mod tests {
             gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: Vec::new(),
             fleet_peers: Vec::new(),
+            bench_pool: None,
         };
 
         let missing = cfg.linux_binary("bin/colonizer-agentd").unwrap_err().to_string();

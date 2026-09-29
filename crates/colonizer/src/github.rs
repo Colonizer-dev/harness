@@ -984,6 +984,18 @@ pub struct PrInfo {
     pub created_at: Option<DateTime<Utc>>,
     /// The checks on the head commit, summed up (see [`ci_verdict`]).
     pub ci: CiState,
+    /// Whether the pull request is a draft; a field `gh` leaves out reads as not.
+    pub is_draft: bool,
+    /// The pull request's title; empty when GitHub gave none.
+    pub title: String,
+    /// The pull request's labels, by name.
+    pub labels: Vec<String>,
+    /// The branch the pull request merges from, and the commit at its tip (the merge train pins
+    /// `--match-head-commit` to it); `None` when `gh` left either out.
+    pub head_ref_name: Option<String>,
+    pub head_ref_oid: Option<String>,
+    /// The branch the pull request targets, as GitHub sees it right now.
+    pub base_ref_name: Option<String>,
 }
 
 /// A pull request's checks in one word, from `gh pr view`'s `statusCheckRollup`: any failed check
@@ -1041,7 +1053,7 @@ pub fn ci_verdict(rollup: Option<&Value>) -> CiState {
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid,createdAt,statusCheckRollup";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid,createdAt,statusCheckRollup,isDraft,title,labels,headRefName,headRefOid,baseRefName";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
 /// `gh --json` prints only the fields it was asked for, so real output never trips it. The
@@ -1064,6 +1076,24 @@ struct PrView {
     /// Kept as raw JSON: its items come in two shapes, and [`ci_verdict`] reads both.
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<Value>,
+    #[serde(rename = "isDraft", default)]
+    is_draft: Option<bool>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    labels: Option<Vec<LabelName>>,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: Option<String>,
+    #[serde(rename = "headRefOid", default)]
+    head_ref_oid: Option<String>,
+    #[serde(rename = "baseRefName", default)]
+    base_ref_name: Option<String>,
+}
+
+/// One label of a pull request, as `gh pr view --json labels` names it.
+#[derive(Deserialize)]
+struct LabelName {
+    name: String,
 }
 
 /// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
@@ -1101,6 +1131,70 @@ fn pr_file_paths(out: &str) -> Vec<String> {
         .collect()
 }
 
+/// One commit of a pull request, as the merge train's guards read it: who wrote it and what the
+/// message says. Own call, not a `PR_VIEW_FIELDS` field: only the train reads commits, and only
+/// for its candidates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrCommit {
+    /// The commit's authors as `(login, email)`, lowercased; either side may be empty.
+    pub authors: Vec<(String, String)>,
+    /// Headline plus body, the message the attribution guard reads.
+    pub message: String,
+}
+
+/// Reads `gh pr view --json commits` for one pull request. A commit GitHub names no author or
+/// message for still yields a [`PrCommit`], so a caller can refuse what it cannot vouch for.
+pub async fn pr_commits(app: &App, url: &str) -> Result<Vec<PrCommit>> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "commits"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    pr_commits_from_json(&out)
+}
+
+/// Reads `gh pr view --json commits` output, split from `pr_commits` so it is tested without `gh`.
+fn pr_commits_from_json(out: &str) -> Result<Vec<PrCommit>> {
+    #[derive(Deserialize)]
+    struct Commits {
+        #[serde(default)]
+        commits: Vec<CommitView>,
+    }
+    #[derive(Deserialize)]
+    struct CommitView {
+        #[serde(default)]
+        authors: Vec<AuthorView>,
+        #[serde(rename = "messageHeadline", default)]
+        message_headline: Option<String>,
+        #[serde(rename = "messageBody", default)]
+        message_body: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct AuthorView {
+        login: Option<String>,
+        email: Option<String>,
+    }
+    let view: Commits = serde_json::from_str(out).context("could not parse `gh pr view` commits")?;
+    Ok(view
+        .commits
+        .into_iter()
+        .map(|c| PrCommit {
+            authors: c
+                .authors
+                .into_iter()
+                .map(|a| {
+                    (
+                        a.login.unwrap_or_default().to_lowercase(),
+                        a.email.unwrap_or_default().to_lowercase(),
+                    )
+                })
+                .collect(),
+            message: [c.message_headline.unwrap_or_default(), c.message_body.unwrap_or_default()].join("\n"),
+        })
+        .collect())
+}
+
 /// Reads `gh pr view --json` output into a [`PrInfo`], split from `pr_info` so it is tested
 /// without `gh`.
 fn pr_info_from_json(out: &str) -> Result<PrInfo> {
@@ -1121,6 +1215,12 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         base_ref_oid: view.base_ref_oid,
         created_at: view.created_at.as_deref().and_then(parse_merged_at),
         ci: ci_verdict(view.status_check_rollup.as_ref()),
+        is_draft: view.is_draft.unwrap_or(false),
+        title: view.title.unwrap_or_default(),
+        labels: view.labels.unwrap_or_default().into_iter().map(|l| l.name).collect(),
+        head_ref_name: view.head_ref_name,
+        head_ref_oid: view.head_ref_oid,
+        base_ref_name: view.base_ref_name,
     })
 }
 
@@ -1991,8 +2091,9 @@ fn parse_ls_remote(out: &str, branch: &str) -> Option<String> {
 
 /// Commits the worktree on the host, pushes the branch and opens the pull request. Resumably: whatever a
 /// previous attempt already got done (commit, push, pull request) is detected against git and the remote
-/// and skipped, so retrying after a failure never duplicates work. The microVM must already be gone:
-/// everything it left behind is treated as untrusted data. `grant` is the publish approval minted
+/// and skipped, so retrying after a failure never duplicates work. The caller has confirmed the colony's
+/// microVM is gone (`publish_session` gates on the host's sandbox list before calling), and everything the
+/// microVM left behind is treated as untrusted data. `grant` is the publish approval minted
 /// where this run was approved — the operator's Create PR press or autopilot's confirmed verdict —
 /// and every external effect below checks itself against it (issue #98).
 pub async fn publish(
@@ -2157,21 +2258,59 @@ fn strip_nested_git(root: &FsPath) -> Result<Vec<PathBuf>> {
 /// blocks until a writer turns up, and a publisher parked on that would hang; it is a no-op on the
 /// regular files that get this far.
 pub(crate) fn read_regular_file(path: &FsPath, cap: u64) -> std::io::Result<String> {
-    use std::io::Read;
+    let bytes = read_regular_file_bytes(path, cap).map_err(|e| match e {
+        RegularFileRead::TooLarge(_) => std::io::Error::other("not a regular file within the size cap"),
+        RegularFileRead::Unreadable(e) => e,
+    })?;
+    String::from_utf8(bytes).map_err(|_| std::io::Error::other("not valid UTF-8"))
+}
+
+/// Why [`open_regular_file`] refused a file the VM may have written. The size cap is its own
+/// answer (`TooLarge`, e.g. the §7.5 artifact routes' 413); everything else — a symlink, a
+/// FIFO, a vanished file — reads as "not there" to its callers.
+pub(crate) enum RegularFileRead {
+    /// A regular file, but larger than the cap it was asked for.
+    TooLarge(u64),
+    /// Not openable as a regular file within the cap: the OS error says which.
+    Unreadable(std::io::Error),
+}
+
+/// Opens and handles a file the VM may have written through a single fd it cannot redirect: the
+/// same [`read_regular_file`] trick with the read left to the caller, so the §7.5 artifact
+/// routes can size a tar header from the fstat and stream from the same handle. `O_NOFOLLOW`
+/// refuses a symlinked final component outright, and the handle is fstat'ed before anything is
+/// read, so only a regular file within `cap` bytes is ever handed over. `O_NONBLOCK` is for the
+/// same trick with a FIFO: opening one for reading blocks until a writer turns up, and a caller
+/// parked on that would hang; it is a no-op on the regular files that get this far.
+pub(crate) fn open_regular_file(path: &FsPath, cap: u64) -> Result<std::fs::File, RegularFileRead> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.len() > cap {
-        return Err(std::io::Error::other("not a regular file within the size cap"));
+        .open(path)
+        .map_err(RegularFileRead::Unreadable)?;
+    let meta = file.metadata().map_err(RegularFileRead::Unreadable)?;
+    if !meta.is_file() {
+        return Err(RegularFileRead::Unreadable(std::io::Error::other("not a regular file")));
     }
-    let mut content = String::new();
-    file.take(cap + 1).read_to_string(&mut content)?;
-    if content.len() > cap as usize {
-        return Err(std::io::Error::other("grew past the size cap while being read"));
+    if meta.len() > cap {
+        return Err(RegularFileRead::TooLarge(cap));
     }
-    Ok(content)
+    Ok(file)
+}
+
+/// [`read_regular_file`] for bytes, so a binary artifact survives the trip: same handle, same
+/// cap, with the grew-past-the-cap re-check after the read, since the VM can append meanwhile.
+pub(crate) fn read_regular_file_bytes(path: &FsPath, cap: u64) -> Result<Vec<u8>, RegularFileRead> {
+    use std::io::Read;
+    let file = open_regular_file(path, cap)?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1)
+        .read_to_end(&mut bytes)
+        .map_err(RegularFileRead::Unreadable)?;
+    if bytes.len() > cap as usize {
+        return Err(RegularFileRead::TooLarge(cap));
+    }
+    Ok(bytes)
 }
 
 /// Reads `pr.md` written by the VM. It must be a regular file (not a symlink to a host secret):
@@ -3350,6 +3489,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         assert_eq!(
@@ -3362,6 +3507,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -3375,6 +3526,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
@@ -3426,7 +3583,18 @@ mod tests {
         let fields: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
         let sample: serde_json::Map<String, Value> = fields
             .iter()
-            .map(|f| (f.to_string(), Value::String("MERGED".into())))
+            .map(|f| {
+                (
+                    f.to_string(),
+                    // The two fields that are not strings are given their own shapes; everything
+                    // else a string is fine for.
+                    match *f {
+                        "isDraft" => Value::Bool(true),
+                        "labels" => json!([{"name": "bug"}]),
+                        _ => Value::String("MERGED".into()),
+                    },
+                )
+            })
             .collect();
         let view: PrView = serde_json::from_value(Value::Object(sample)).unwrap();
         assert_eq!(view.state, "MERGED");
@@ -3436,6 +3604,12 @@ mod tests {
         assert_eq!(view.base_ref_oid.as_deref(), Some("MERGED"));
         assert_eq!(view.created_at.as_deref(), Some("MERGED"));
         assert!(view.status_check_rollup.is_some());
+        assert_eq!(view.is_draft, Some(true));
+        assert_eq!(view.title.as_deref(), Some("MERGED"));
+        assert_eq!(view.labels.as_deref().map(|l| l.len()), Some(1));
+        assert_eq!(view.head_ref_name.as_deref(), Some("MERGED"));
+        assert_eq!(view.head_ref_oid.as_deref(), Some("MERGED"));
+        assert_eq!(view.base_ref_name.as_deref(), Some("MERGED"));
     }
 
     #[test]

@@ -91,6 +91,7 @@ const FIXED_ERRORS: &[(&str, &str)] = &[
     (sessions::VM_GONE_AFTER_RESTART, "harness_restarted"),
     (sessions::VM_STOPPED_EARLY, "vm_stopped"),
     (sessions::PUBLISH_LOST_TO_RESTART, "publish_interrupted"),
+    (sessions::PUBLISH_VM_UNCONFIRMED, "publish_unconfirmed"),
 ];
 
 /// The one module name a batch declares, in Cratefield's `modules` list: the thing being reported
@@ -938,6 +939,7 @@ mod tests {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            allowed_models: None,
             sensitivity: None,
             cleaned_up: false,
             keep_worktree: false,

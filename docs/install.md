@@ -289,6 +289,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/share/mise/installs/claude/latest/claude`, `~/.local/bin/claude`, `~/.claude/local/claude` | The native Claude Code binary to mount into colonies |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | The provider gateway; colonies reach it through `host.microsandbox.internal`. Must be an IP and port: a hostname such as `localhost:41750` refuses startup |
 | `COLONIZER_FLEET_PEERS` | – | Base URLs of other motherships, comma separated, polled for the fleet view (`GET /api/hosts`). Nothing is exposed by setting it |
+| `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
 | `COLONIZER_NO_EXTERNAL_EFFECTS`, `COLONIZER_NO_WRITE` | – | A kill switch: set either to anything but `0`, `false`, `off` or `no`, and every write that leaves the harness (commits, pushes, pull requests, merges, comments, filed issues) refuses to run |
@@ -309,6 +310,18 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_TELEMETRY_ENDPOINT` | – (nothing is sent) | The collector URL usage data is posted to, at most once a day. No default: unset, no [usage data](usage-data.md) is ever sent, whatever the switch says |
 | `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
+
+### Upgrading across the microsandbox 0.7 pin
+
+Since [#639](https://github.com/Colonizer-dev/harness/issues/639) the vendored `msb` is 0.7.x.
+Microsandbox's home (`MSB_HOME`, default `~/.microsandbox`) is version-locked: the first 0.7
+command migrates a 0.6-era home in place, and the migrated home still lists and removes microVMs a
+0.6 `msb` created. The migration is one-way: after it, a 0.6 `msb` fails every command against the
+home (`database schema is newer than this msb binary`). If you have to roll the harness itself back
+to a 0.6-era release, downgrade the home first, with the 0.7 binary: `msb self downgrade 0.6.18
+--yes`. It refuses while sandboxes are active (stop them first), backs the database up
+(`db/msb.db.bak-…`), purges the image cache (re-downloaded on the next boot) and installs the
+0.6.18 binaries, after which the old `msb` works again.
 
 ### Credentials read from the environment
 

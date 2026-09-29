@@ -89,6 +89,7 @@ import type {
   PushSubscribeBody,
   RemotePairing,
   RemoteStatus,
+  MergeTrainStatus,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -432,6 +433,8 @@ export interface Api {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
+  mergeTrain(): Promise<MergeTrainStatus>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
   createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
   updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
@@ -724,6 +727,7 @@ export const httpApi: Api = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  mergeTrain: () => request("/api/merge-train"),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
   updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),
