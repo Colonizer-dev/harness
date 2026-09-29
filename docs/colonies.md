@@ -380,14 +380,27 @@ agent session that wrote it. The patch-id names the change rather than the commi
 survives a rebase, a cherry-pick or a message-only amend.
 
 After the branch is rewritten, a reconcile re-points each link whose commit is no longer on the
-branch to the one commit there with the same patch-id, keeping the old shas in `previous`. It runs
-after the watcher's own auto-rebase pushes, and again at every publish.
+branch to the one commit there with the same patch-id, keeping the old shas in `previous`. It runs:
+
+- after the watcher's own auto-rebase pushes, and again at every publish;
+- when the PR watcher or the merge train reads a head (`headRefOid`) different from the last one
+  seen: a live colony's own force-push, GitHub's update-branch, a rewrite from elsewhere. The
+  mothership fetches the colony branch into its mirror (the hardened host git) and reconciles
+  against it, off the watcher's tick;
+- after `sync_repo` fetches a repository, for each colony there with links whose branch tip moved.
+
+Each stamps the tip it reconciled against (`tip` in `commits.json`), so a head seen again, or a
+branch that did not move, costs one comparison and no fetch.
+
+The links show in the cockpit's colony pane under **Commits**, and in
+`GET /api/sessions/{id}/commits` ([protocol.md](protocol.md)). An orphaned link carries an
+**orphaned** badge whose tooltip says why: a squash or rewrite made the match ambiguous, so the link
+was kept rather than guessed.
 
 **Limits.** The reconcile never guesses. A squash, an amend that changed the content, or more than
-one matching commit leaves the link in place, flagged `orphaned`. A failing git call changes
-nothing, and while a rebase is in progress the reconcile does not run. A rewrite the mothership did
-not make itself (a force-push from elsewhere, the merge train's update) is picked up at the next
-publish or auto-rebase, not the moment it lands.
+one matching commit leaves the link in place, flagged `orphaned`. A failing git call or fetch
+changes nothing, and while a rebase is in progress the reconcile does not run. Merged and closed
+colonies are not reconciled after a sync. A redo colony taking over a branch is not a trigger yet.
 
 ## The log archive
 

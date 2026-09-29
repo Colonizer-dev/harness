@@ -658,6 +658,12 @@ pub async fn watch_pull_requests(app: Shared) {
                         })
                         .await;
                     }
+                    // Issue #765: a head that moved since the last reading (the colony's own
+                    // force-push, GitHub's update-branch, a rewrite from elsewhere) fetches the branch
+                    // into the host mirror and re-points the colony's commit links, off this tick.
+                    if info.state == github::PrState::Open {
+                        crate::commit_links::head_seen(&app, &s.id, info.head_ref_oid.as_deref());
+                    }
                     let (state, mergeability, pr_merged_at, base_ref_oid) =
                         (info.state, info.mergeability, info.merged_at, info.base_ref_oid);
                     poll.failing = false;

@@ -2825,6 +2825,7 @@ export function createMockApi(): Api {
         200,
       ),
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
+    sessionCommits: () => later(() => ({ commits: [] })),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) =>

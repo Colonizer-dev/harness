@@ -43,6 +43,10 @@ const GIT_LIMIT: Duration = Duration::from_secs(30);
 pub struct CommitLinks {
     #[serde(default)]
     pub links: Vec<CommitLink>,
+    /// The branch tip the links were last reconciled against. A head the mothership sees again
+    /// (the PR watcher, the merge train, a `sync_repo` fetch) that matches it is a no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
 }
 
 /// One commit a colony wrote, and where it lives now.
@@ -356,31 +360,58 @@ pub async fn record_for_session(app: &App, id: &str, admin: &Path, base: &str) -
     let mut links = load(app, id).await?;
     reconcile(&git, admin, &mut links, "HEAD", Some(&base_ref)).await?;
     let added = record(&git, admin, &mut links, "HEAD", &base_ref, id, agent_session.as_deref()).await?;
+    // The push just landed HEAD on origin: the PR watcher's next reading of this head is no news.
+    links.tip = Some(resolve(&git, "HEAD").await?);
     save(app, id, &links).await?;
     Ok(added)
 }
 
 /// The mothership noticed a colony's branch moved (it rewrote it itself, or a fetch brought a
-/// force-push): re-point that colony's links. Best effort and quiet on success; what it changed
-/// and any failure are said in the colony's own log. A failure changes nothing.
+/// force-push): re-point that colony's links against its worktree's `HEAD`. Best effort and quiet
+/// on success; what it changed and any failure are said in the colony's own log. A failure changes
+/// nothing.
 pub async fn reconcile_session(app: &App, id: &str) -> Option<Reconciled> {
     let s = app.session(id).await?;
     let admin = std::path::PathBuf::from(s.git_admin_dir.as_ref()?);
     let base_ref = format!("refs/remotes/origin/{}", s.base.as_deref().unwrap_or("main"));
+    let git = || app.git(&admin);
+    let result = reconcile_locked(app, id, &git, &admin, "HEAD", &base_ref, None).await;
+    report(app, id, result).await
+}
+
+/// Load, reconcile against `tip`, stamp the resolved tip, save when anything changed — all under
+/// the file lock. `skip_if_tip` short-circuits (`Ok(None)`) when the links were already reconciled
+/// against exactly that sha, read under the same lock.
+async fn reconcile_locked(
+    app: &App,
+    id: &str,
+    git: GitBuilder<'_>,
+    rebase_dir: &Path,
+    tip: &str,
+    base_ref: &str,
+    skip_if_tip: Option<&str>,
+) -> Result<Option<Reconciled>> {
     let _guard = FILE_LOCK.lock().await;
-    let result = async {
-        let mut links = load(app, id).await?;
-        let before = links.clone();
-        let git = || app.git(&admin);
-        let outcome = reconcile(&git, &admin, &mut links, "HEAD", Some(&base_ref)).await?;
-        if links != before {
-            save(app, id, &links).await?;
-        }
-        anyhow::Ok(outcome)
+    let mut links = load(app, id).await?;
+    if links.links.is_empty() || (skip_if_tip.is_some() && links.tip.as_deref() == skip_if_tip) {
+        return Ok(None);
     }
-    .await;
+    let before = links.clone();
+    let resolved = resolve(git, tip).await?;
+    let outcome = reconcile(git, rebase_dir, &mut links, &resolved, Some(base_ref)).await?;
+    if outcome != Reconciled::RebaseInProgress {
+        links.tip = Some(resolved);
+    }
+    if links != before {
+        save(app, id, &links).await?;
+    }
+    Ok(Some(outcome))
+}
+
+/// Says what a reconcile did in the colony's own log: nothing when nothing moved.
+async fn report(app: &App, id: &str, result: Result<Option<Reconciled>>) -> Option<Reconciled> {
     match result {
-        Ok(outcome @ Reconciled::Done { repointed, orphaned }) => {
+        Ok(Some(outcome @ Reconciled::Done { repointed, orphaned })) => {
             if repointed + orphaned > 0 {
                 app.session_log(
                     id,
@@ -391,7 +422,7 @@ pub async fn reconcile_session(app: &App, id: &str) -> Option<Reconciled> {
             }
             Some(outcome)
         }
-        Ok(outcome) => Some(outcome),
+        Ok(outcome) => outcome,
         Err(e) => {
             app.session_log(
                 id,
@@ -402,6 +433,188 @@ pub async fn reconcile_session(app: &App, id: &str) -> Option<Reconciled> {
             None
         }
     }
+}
+
+/// A branch name safe to splice into a fetch refspec: what `create_worktree` makes, never an
+/// option, a second refspec or a revision expression.
+fn plain_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && !branch.starts_with(['-', '/'])
+        && !branch.ends_with(['/', '.'])
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.ends_with(".lock")
+        && branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
+/// Where a colony's links live on the host: its session, its mirror, the remote-tracking ref of
+/// its branch and base, and the dir a rebase in progress would show up in.
+struct Place {
+    bare: std::path::PathBuf,
+    branch_ref: String,
+    base_ref: String,
+    branch: String,
+    rebase_dir: std::path::PathBuf,
+}
+
+async fn place(app: &App, id: &str) -> Option<Place> {
+    let s = app.session(id).await?;
+    if !plain_branch(&s.branch) {
+        return None;
+    }
+    let bare = app.bare_repo(&s.repo);
+    // The worktree's admin dir is where a rebase in progress shows; a cleaned-up colony has none,
+    // and nothing can be rebasing it then, so the mirror's own git dir stands in.
+    let rebase_dir = s
+        .git_admin_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| bare.clone());
+    Some(Place {
+        branch_ref: format!("refs/remotes/origin/{}", s.branch),
+        base_ref: format!("refs/remotes/origin/{}", s.base.as_deref().unwrap_or("main")),
+        branch: s.branch,
+        bare,
+        rebase_dir,
+    })
+}
+
+/// Whether a colony has any links on disk, without parsing them: the cheap filter every trigger
+/// runs first.
+fn has_links(app: &App, id: &str) -> bool {
+    app.session_dir(id).join(FILE).is_file()
+}
+
+/// The PR's head moved to `head` (issue #765, the watcher's or the merge train's reading): fetch
+/// the colony branch into the host mirror through the hardened host git, then re-point the links
+/// against it. `None` when there was nothing to do — no links, the head is the one already
+/// reconciled, or a fetch or git failure (said in the colony's log; the links stay untouched).
+pub async fn on_pr_head(app: &App, id: &str, head: &str) -> Option<Reconciled> {
+    if !has_links(app, id) {
+        return None;
+    }
+    let p = place(app, id).await?;
+    // Cheap first: the head already reconciled needs no fetch at all.
+    if load(app, id).await.ok()?.tip.as_deref() == Some(head) {
+        return None;
+    }
+    let refspec = format!("+refs/heads/{0}:refs/remotes/origin/{0}", p.branch);
+    let fetched = crate::util::exec_within(
+        GIT_LIMIT,
+        app.git(&p.bare)
+            .args([
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "origin",
+                "--end-of-options",
+            ])
+            .arg(&refspec),
+    )
+    .await;
+    if let Err(e) = fetched {
+        app.session_log(
+            id,
+            "warn",
+            format!(
+                "commit links: could not fetch {} after its head moved ({e:#}); links left untouched",
+                p.branch
+            ),
+        )
+        .await;
+        return None;
+    }
+    let git = || app.git(&p.bare);
+    let result = reconcile_locked(app, id, &git, &p.rebase_dir, &p.branch_ref, &p.base_ref, Some(head)).await;
+    report(app, id, result).await
+}
+
+/// The last head each colony's PR was seen at, so a head read again every tick costs nothing.
+static SEEN_HEADS: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+
+/// Whether `head` is news for colony `id`, remembering it either way.
+fn head_is_news(id: &str, head: &str) -> bool {
+    let mut seen = SEEN_HEADS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = seen.get_or_insert_with(HashMap::new);
+    map.insert(id.to_string(), head.to_string()).as_deref() != Some(head)
+}
+
+/// A reading of a colony PR's head (the PR watcher, the merge train). When it differs from the
+/// last one seen, and the colony has links, the fetch and reconcile run off the caller's tick.
+pub fn head_seen(app: &crate::Shared, id: &str, head: Option<&str>) {
+    let Some(head) = head.filter(|h| !h.is_empty()) else { return };
+    if !head_is_news(id, head) || !has_links(app, id) {
+        return;
+    }
+    let (app, id, head) = (app.clone(), id.to_string(), head.to_string());
+    tokio::spawn(async move {
+        on_pr_head(&app, &id, &head).await;
+    });
+}
+
+/// After `sync_repo` fetched `repo` into its mirror: every colony there with links whose
+/// remote-tracking branch moved past the tip last reconciled is re-pointed. One `rev-parse` per
+/// colony with links; merged and closed colonies are left alone (their branches are done), and a
+/// branch the fetch pruned is quietly skipped.
+pub async fn after_sync(app: &App, repo: &str) {
+    let sessions = app.sessions.read().await.clone();
+    for s in sessions.iter().filter(|s| {
+        s.repo == repo
+            && !matches!(
+                s.status,
+                crate::sessions::SessionStatus::Merged | crate::sessions::SessionStatus::Closed
+            )
+            && has_links(app, &s.id)
+    }) {
+        let Some(p) = place(app, &s.id).await else { continue };
+        let git = || app.git(&p.bare);
+        let Ok(tip) = resolve(&git, &p.branch_ref).await else {
+            continue;
+        };
+        let result = reconcile_locked(app, &s.id, &git, &p.rebase_dir, &tip, &p.base_ref, Some(&tip)).await;
+        report(app, &s.id, result).await;
+    }
+}
+
+/// One link as the API shows it: where it points, where it pointed, and whether it was kept
+/// without a match.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct CommitView {
+    pub sha: String,
+    pub previous: Vec<String>,
+    pub orphaned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<String>,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// `GET /api/sessions/{id}/commits` (issue #765): the colony's recorded commits, oldest first,
+/// with their rewrite history and the `orphaned` flag. An unknown colony is a 404; a colony that
+/// never published reads as an empty list.
+pub async fn api_commits(
+    axum::extract::State(app): axum::extract::State<crate::Shared>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, crate::AppError> {
+    if app.session(&id).await.is_none() {
+        return Err(crate::client_error(axum::http::StatusCode::NOT_FOUND, "no such session"));
+    }
+    let links = load(&app, &id).await?;
+    let commits: Vec<CommitView> = links
+        .links
+        .into_iter()
+        .map(|l| CommitView {
+            sha: l.sha,
+            previous: l.previous,
+            orphaned: l.orphaned,
+            agent_session: l.agent_session,
+            recorded_at: l.recorded_at,
+        })
+        .collect();
+    Ok(axum::Json(serde_json::json!({ "commits": commits })))
 }
 
 #[cfg(test)]
@@ -728,5 +941,183 @@ mod tests {
         assert_eq!(added, 1);
         assert_eq!(links.links.len(), 2);
         assert!(links.links.iter().all(|l| l.patch_id.is_some()));
+    }
+
+    // -- The triggers (issue #765): a PR head change, a sync_repo fetch, and the API.
+
+    const BRANCH: &str = "colonizer/issue-1-c1";
+
+    /// An App whose mirror of `acme/repo` is a bare clone of a local `origin` repository — never
+    /// GitHub — with colony `c1` on [`BRANCH`] and its one commit recorded, as a publish leaves it.
+    struct Mirror {
+        root: PathBuf,
+        app: crate::Shared,
+        origin: Repo,
+        first: String,
+    }
+
+    impl Drop for Mirror {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl Mirror {
+        async fn new(name: &str) -> Self {
+            let origin = Repo::new(name);
+            origin.git(&["checkout", "-q", "-b", BRANCH]);
+            let first = origin.commit("a.txt", "a\n", "add a");
+            let root = std::env::temp_dir().join(format!("colonizer-commit-links-app-{name}-{}", crate::util::short_id()));
+            let app = crate::tests::test_app(&root);
+            let bare = app.bare_repo("acme/repo");
+            std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+            let clone = std::process::Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["clone", "-q", "--bare"])
+                .arg(&origin.0)
+                .arg(&bare)
+                .status()
+                .unwrap();
+            assert!(clone.success());
+            let mirror = Self {
+                root,
+                app,
+                origin,
+                first,
+            };
+            mirror.bare_git(&["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+            mirror.bare_git(&["fetch", "-q", "origin"]);
+            let mut s = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::PrOpened);
+            s.id = "c1".into();
+            s.branch = BRANCH.into();
+            s.base = Some("main".into());
+            mirror.app.sessions.write().await.push(s);
+            // What a publish records: the commit, and the head it was pushed as.
+            let git = || mirror.app.git(&bare);
+            let mut links = CommitLinks::default();
+            let tip = format!("refs/remotes/origin/{BRANCH}");
+            record(&git, &bare, &mut links, &tip, "refs/remotes/origin/main", "c1", None)
+                .await
+                .unwrap();
+            links.tip = Some(mirror.first.clone());
+            save(&mirror.app, "c1", &links).await.unwrap();
+            mirror
+        }
+
+        fn bare_git(&self, args: &[&str]) {
+            let out = std::process::Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("--git-dir")
+                .arg(self.app.bare_repo("acme/repo"))
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        }
+
+        async fn links(&self) -> CommitLinks {
+            load(&self.app, "c1").await.unwrap()
+        }
+
+        /// A message-only amend on origin, force-pushed as far as the mirror can tell.
+        fn amend_on_origin(&self, message: &str) -> String {
+            self.origin.git(&["commit", "-q", "--amend", "-m", message]);
+            self.origin.git(&["rev-parse", "HEAD"])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pr_head_change_fetches_the_branch_and_repoints_an_amended_commit() {
+        let m = Mirror::new("headmove").await;
+        let amended = m.amend_on_origin("add a, reworded");
+        assert_ne!(amended, m.first);
+
+        let out = on_pr_head(&m.app, "c1", &amended).await;
+        assert_eq!(
+            out,
+            Some(Reconciled::Done {
+                repointed: 1,
+                orphaned: 0
+            })
+        );
+        let links = m.links().await;
+        assert_eq!(links.links[0].sha, amended, "re-pointed at the amended commit");
+        assert_eq!(links.links[0].previous, vec![m.first.clone()]);
+        assert!(!links.links[0].orphaned);
+        assert_eq!(links.tip.as_deref(), Some(amended.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_pr_head_is_a_no_op() {
+        let m = Mirror::new("headsame").await;
+        let before = std::fs::read(m.app.session_dir("c1").join(FILE)).unwrap();
+        // Origin moves, but the reading is still the head already reconciled: nothing is fetched
+        // or re-read, so the link is not even orphaned by the unseen rewrite.
+        m.origin.commit("a.txt", "changed\n", "unrelated");
+        assert_eq!(on_pr_head(&m.app, "c1", &m.first).await, None);
+        assert_eq!(std::fs::read(m.app.session_dir("c1").join(FILE)).unwrap(), before);
+        // And the in-memory dedup: the same head twice is news once.
+        assert!(head_is_news("dedup-c1", "abc"));
+        assert!(!head_is_news("dedup-c1", "abc"));
+        assert!(head_is_news("dedup-c1", "def"));
+    }
+
+    #[tokio::test]
+    async fn a_colony_without_links_is_never_fetched() {
+        let m = Mirror::new("nolinks").await;
+        std::fs::remove_file(m.app.session_dir("c1").join(FILE)).unwrap();
+        let amended = m.amend_on_origin("reworded");
+        assert_eq!(on_pr_head(&m.app, "c1", &amended).await, None);
+        assert!(!m.app.session_dir("c1").join(FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn a_sync_fetch_that_moved_the_branch_repoints_and_a_second_pass_is_a_no_op() {
+        let m = Mirror::new("sync").await;
+        let amended = m.amend_on_origin("reworded on sync");
+        m.bare_git(&["fetch", "-q", "--prune", "origin"]);
+        after_sync(&m.app, "acme/repo").await;
+        let links = m.links().await;
+        assert_eq!(links.links[0].sha, amended);
+        assert_eq!(links.tip.as_deref(), Some(amended.as_str()));
+        let before = std::fs::read(m.app.session_dir("c1").join(FILE)).unwrap();
+        after_sync(&m.app, "acme/repo").await;
+        assert_eq!(std::fs::read(m.app.session_dir("c1").join(FILE)).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn the_api_lists_the_links_with_their_history_and_the_orphaned_flag() {
+        use axum::extract::{Path as P, State};
+        let m = Mirror::new("api").await;
+        // A content amend: no commit carries the old patch-id any more, so the link is orphaned.
+        m.origin.commit("a.txt", "a, but different\n", "tmp");
+        m.origin.git(&["reset", "-q", "--soft", "HEAD~2"]);
+        m.origin.git(&["commit", "-q", "-m", "squashed"]);
+        let squashed = m.origin.git(&["rev-parse", "HEAD"]);
+        assert_eq!(
+            on_pr_head(&m.app, "c1", &squashed).await,
+            Some(Reconciled::Done {
+                repointed: 0,
+                orphaned: 1
+            })
+        );
+        let axum::Json(body) = api_commits(State(m.app.clone()), P("c1".into())).await.unwrap();
+        let commits = body["commits"].as_array().unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0]["sha"], m.first.as_str(), "kept, not guessed");
+        assert_eq!(commits[0]["orphaned"], true);
+        assert_eq!(commits[0]["previous"], serde_json::json!([]));
+        assert!(commits[0]["recorded_at"].is_string());
+
+        let missing = api_commits(State(m.app.clone()), P("nope".into())).await.unwrap_err();
+        assert_eq!(missing.0, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn only_plain_branch_names_reach_a_refspec() {
+        assert!(plain_branch("colonizer/issue-1-c1"));
+        for bad in ["", "-x", "a..b", "a:b", "a b", "a/", "/a", "a.lock", "a^", "a~1", "a*", "+a"] {
+            assert!(!plain_branch(bad), "{bad:?}");
+        }
     }
 }

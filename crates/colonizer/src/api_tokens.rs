@@ -466,7 +466,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "question" | "events" | "diff"] if get && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "question" | "events" | "diff" | "commits"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
         },
@@ -844,6 +844,7 @@ mod tests {
             "/api/sessions/abc/question",
             "/api/sessions/abc/events",
             "/api/sessions/abc/diff",
+            "/api/sessions/abc/commits",
             "/api/maps/acme/web",
             "/api/maps/acme/web/files",
             "/api/tokens/self",
