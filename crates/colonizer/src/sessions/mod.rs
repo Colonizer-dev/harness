@@ -89,3 +89,6 @@ pub(crate) const VM_STOPPED_EARLY: &str =
     "the microVM stopped (its max session length, or the host stopped it); press Resume to continue";
 /// Recorded for a colony that was mid-publish when the harness restarted.
 pub(crate) const PUBLISH_LOST_TO_RESTART: &str = "the harness restarted while publishing; the worktree is intact, publish again";
+/// Recorded when a publish refused to touch the worktree because the colony's microVM could not be
+/// confirmed removed from the host's sandbox list. Publishing again re-runs that check first.
+pub(crate) const PUBLISH_VM_UNCONFIRMED: &str = "the microVM could not be confirmed removed, so nothing was published; the worktree is intact, publish again to retry the removal first";

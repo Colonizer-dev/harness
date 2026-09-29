@@ -5,6 +5,7 @@
 //
 //   {
 //     "handshake": { "protocolVersion": 1 },       // the initialize result (optional)
+//     "sessionNew": { "error": {...} },            // a JSON-RPC error session/new replies with
 //     "models":    { "currentModelId": "m-1", ... },// merged into session/new and session/load when present
 //     "loadedSessionId": "sess-2",                  // session/load replies with a renamed session id
 //     "setModel":  { "bad-model": true },           // model ids session/set_model refuses
@@ -16,9 +17,10 @@
 //   }
 //
 // A step is { "updates": [session/update params], "asks": [{method, params}], "stopReason":
-// "end_turn", "die": 3, "dieAfter": 3 }: updates are emitted as notifications before the response,
-// asks are agent→client requests whose runner replies are recorded ({asked, params, response}),
-// "die" exits before the response and "dieAfter" shortly after it.
+// "end_turn", "error": {...}, "die": 3, "dieAfter": 3 }: updates are emitted as notifications
+// before the response, asks are agent→client requests whose runner replies are recorded
+// ({asked, params, response}), "error" is the JSON-RPC error the prompt fails with instead of a
+// result, "die" exits before the response and "dieAfter" shortly after it.
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
@@ -54,6 +56,7 @@ async function runTurn(step, requestId) {
     note({ asked: ask.method, params: ask.params, response: await call(ask.method, ask.params) });
   }
   if (step.die) process.exit(step.die === true ? 3 : step.die);
+  if (step.error) return replyError(requestId, step.error);
   reply(requestId, { stopReason: step.stopReason ?? 'end_turn' });
   if (step.dieAfter) setTimeout(() => process.exit(step.dieAfter === true ? 3 : step.dieAfter), 20).unref();
 }
@@ -75,6 +78,10 @@ lines.on('line', async (line) => {
       reply(message.id, script.handshake ?? { protocolVersion: 1, agentCapabilities: {}, authMethods: [] });
       break;
     case 'session/new':
+      if (script.sessionNew?.error) {
+        replyError(message.id, script.sessionNew.error);
+        break;
+      }
       remember(sessionId);
       reply(message.id, { sessionId, ...(script.models ? { models: script.models } : {}) });
       break;

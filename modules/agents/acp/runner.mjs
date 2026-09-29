@@ -4,13 +4,15 @@
 // docs/protocol.md §2 (JSON-line commands on stdin, protocol events on stdout). One long-lived ACP
 // agent process per colony: `initialize` + `session/new` at boot (a resume boot `session/load`s the
 // COLONIZER_RESUME_SESSION id instead, when the agent can reload it), every user_message one
-// `session/prompt` turn. First verified agent is Google's Gemini CLI (`gemini --experimental-acp`);
-// any other ACP agent runs through the custom-command setting (README).
+// `session/prompt` turn. Verified presets: Google's Gemini CLI (`gemini --experimental-acp`) and
+// xAI's Grok Build (`grok agent stdio`); any other ACP agent runs through the custom-command
+// setting (README).
 
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { mkdtempSync, realpathSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -20,10 +22,60 @@ import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
 export const CREDENTIAL_MISSING = 'ACP_CREDENTIAL_MISSING';
+export const AUTH_FAILED = 'ACP_AUTH_FAILED';
 export const AGENT_FAILED = 'ACP_AGENT_FAILED';
 
-// The known presets; `custom` takes its command line from the `command` setting instead.
-const PRESETS = { gemini: { command: 'gemini --experimental-acp', credential: 'GEMINI_API_KEY' } };
+// The known presets; `custom` takes its command line from the `command` setting instead. `env`
+// hardens the spawned agent the way the grok-build runner does (a fresh GROK_HOME is the nesting
+// lever: no host config, no cached login, an empty trust store). `opaqueAuthFailure` marks an agent
+// that answers a rejected credential with a bare JSON-RPC "Internal error" instead of naming
+// authentication, so the runner annotates the turn failure with the credential to check.
+const PRESETS = {
+  gemini: { command: 'gemini --experimental-acp', credential: 'GEMINI_API_KEY' },
+  grok: {
+    command: 'grok agent stdio',
+    credential: 'XAI_API_KEY',
+    opaqueAuthFailure: true,
+    env: (env) => ({
+      ...env,
+      BROWSER: '/bin/false', // nothing may open a browser: the colony never runs grok's OAuth login
+      GROK_HOME: mkdtempSync(join(tmpdir(), 'colonizer-acp-grok-')),
+      // The folder-trust gate forced on, as in grok-build: with a fresh GROK_HOME's empty trust
+      // store the workspace resolves untrusted, so project-scope .grok/ config is skipped.
+      GROK_FOLDER_TRUST: '1',
+      GROK_MEMORY: '0', // no cross-session memory, as in grok-build (05-configuration.md)
+      GROK_TELEMETRY_ENABLED: '0',
+      GROK_DISABLE_AUTOUPDATER: '1',
+    }),
+  },
+};
+
+/** The preset's spec, or null for `custom` and unknown names. */
+function presetSpec(preset) {
+  return preset === 'custom' ? null : (PRESETS[preset] ?? null);
+}
+
+/** The named problem behind an ACP error that is really the credential being refused (`session/new`
+ * answers `Authentication required` without naming what is wrong), or null for any other failure. */
+function authProblem(preset, err) {
+  const spec = presetSpec(preset);
+  if (spec?.credential && /authentication required/i.test(String(err?.message ?? err))) {
+    return { code: AUTH_FAILED, message: `the agent refused the credential: check ${spec.credential}` };
+  }
+  return null;
+}
+
+/** A `session/prompt` failure as the turn's result text. An `opaqueAuthFailure` preset answers a
+ * rejected credential with a bare "Internal error" (grok does not surface the API's "Incorrect API
+ * key provided"), so the credential is named as the likeliest fix. */
+function turnFailureText(preset, err) {
+  const message = `the turn failed: ${err?.message ?? err}`;
+  const spec = presetSpec(preset);
+  if (spec?.opaqueAuthFailure && /internal error/i.test(String(err?.message ?? err))) {
+    return `${message} — ${preset} reports a rejected ${spec.credential} this way; check the key first`;
+  }
+  return message;
+}
 
 /** The ACP agent argv: the preset's command, or COLONIZER_ACP_COMMAND for `custom`; null unknown. */
 function agentArgv(env) {
@@ -133,7 +185,7 @@ const NO_SUCH_METHOD = -32601;
 const BAD_REQUEST = -32602;
 // The agent→client methods this runner serves, by handler.
 const TERMINAL_METHODS = new Set(['terminal/create', 'terminal/output', 'terminal/wait_for_exit', 'terminal/kill', 'terminal/release']);
-const NO_COUNTERPART = new Set(['user_message_chunk', 'available_commands_update', 'current_mode_update']);
+const NO_COUNTERPART = new Set(['user_message_chunk', 'available_commands_update', 'current_mode_update', 'session_info_update']);
 
 /** The ACP side of the wire over the agent's stdio: `request` resolves with the agent's result or
  * rejects with its error; agent→client requests land on `onRequest` (with `reply`/`replyError`),
@@ -483,7 +535,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   };
 
   let acp = null;
-  if (!problem) acp = startAgent({ argv, env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
+  if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
   // The handshake: negotiate ACP, then the session — `session/load` for §1's COLONIZER_RESUME_SESSION
   // when the agent advertises loadSession, `session/new` otherwise and as the fallback on a failed
@@ -525,8 +577,14 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
       }
     } catch (err) {
       if (!dead) {
-        emit({ type: 'log', level: 'error', message: `${AGENT_FAILED}: the ACP handshake failed: ${err?.message ?? err}` });
-        emit({ type: 'status', state: 'error', detail: AGENT_FAILED });
+        const auth = authProblem(preset, err);
+        if (auth) {
+          emit({ type: 'log', level: 'error', message: `${auth.code}: ${auth.message}` });
+          emit({ type: 'status', state: 'error', detail: auth.code });
+        } else {
+          emit({ type: 'log', level: 'error', message: `${AGENT_FAILED}: the ACP handshake failed: ${err?.message ?? err}` });
+          emit({ type: 'status', state: 'error', detail: AGENT_FAILED });
+        }
       }
       return 1;
     }
@@ -560,7 +618,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
               emit({ type: 'turn_end', is_error: true, result: `the ACP agent died mid-turn: ${err?.message ?? err}`, cost_usd: null, duration_ms: Date.now() - startedAt });
               return;
             }
-            failureText = `the turn failed: ${err?.message ?? err}`;
+            failureText = turnFailureText(preset, err);
           }
           if (!failureText) {
             if (turn.thoughts.length) emit({ type: 'thinking', message_id: turn.messageId, block_index: 1, text: turn.thoughts.join('\n') });

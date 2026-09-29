@@ -40,6 +40,7 @@ mod exec_bits;
 mod execution;
 mod findings;
 mod fleet;
+mod fleet_export;
 mod gateway;
 mod gateway_audit;
 mod github;
