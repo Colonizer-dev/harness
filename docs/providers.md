@@ -101,6 +101,11 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
   The provider health check (`GET /api/providers/{id}/health`) then answers `quota: {remaining, error}`,
   and the provider card shows "N left in plan". A failed quota read never marks the connection
   unreachable. `quota` omitted on a `PUT` keeps the saved probe; an empty `url` clears it.
+- **Moving a connection.** The credential is sent wherever `base_url` points, so a `PUT` that moves a
+  keyed connection to a different origin — scheme, host or port — is refused unless the API key is
+  entered again (`api_key`) or removed (`""`) with the save. A path change on the same origin is the
+  same party and keeps the saved key, and a connection with no key stored moves freely. A saved
+  `quota` probe left on the old origin is refused the same way: move or clear it in the same save.
 - **Quota exhaustion.** When a provider answers `429` or `403` with a message that says the plan ran out
   (not a plain rate limit), the gateway records it as exhausted until the reset the message names, or
   for 15 minutes when it names none. With a `fallback_model`, the request is retried on that Claude

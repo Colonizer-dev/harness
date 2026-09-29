@@ -1769,7 +1769,7 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/providers` | `[{id, name, base_url, auth, wire: "anthropic"\|"openai", has_key, models: [string], preset}]` plus the provider fields and live figures of §6.5 (`timeout_secs`, `max_concurrent`, `queue_timeout_secs`, `context_tokens`, `fallback_model`, `trusted`, `pricing`, `quota`, `model_map`, `disabled_tools`, `normalize_cache_ttl`, `in_flight`, `queued`, `usage`, `health`, `used_by`, `quota_exhausted`). `preset` is the catalogue id it was added from (`deepseek`, `openai`, `zai`, `alibaba`, `local`, …) or `custom` |
-| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
@@ -2258,7 +2258,9 @@ plan: `{url, pointer}` — a `GET` the health check makes with the provider's ow
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
 else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
-clears it. Leaving `max_concurrent` unset really does mean unlimited: the
+clears it. The origin rule reaches the base URL itself: a save that moves a keyed provider to another
+origin is refused unless `api_key` brings the key again (`""` removes it), and a saved probe the move
+leaves behind is refused with it. Leaving `max_concurrent` unset really does mean unlimited: the
 provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
@@ -2581,17 +2583,18 @@ at all reads as `null`, never as free.
      "cost_usd": 12.47, "routed_cost_usd": 0.03,
      "tokens": {"input": 482001, "output": 123477, "cache_read": 900233, "cache_write": 4412},
      "models": [{"model": "claude-opus-5", "tokens": 932190, "cost_usd": 11.80}],
-     "launched": 2, "returned": 1}
+     "launched": 2, "returned": 1, "scoring_ms": 0}
   ]}
 ]}
 ```
 
 `days` is how far back to answer, default 30, clamped to 1–365. Days come back oldest first and only
 days the journal mentions appear; each day's orgs are sorted by org name. Per day, `orgs` entries
-carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting) and
+carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting),
 `returned` (colonies that crossed into a terminal state that day — pull request opened, merged or
-closed, nothing to push, or stopped/failed). A colony counts as returned once per run, on the
-transition, never on the later updates.
+closed, nothing to push, or stopped/failed) and `scoring_ms` (the bench's scoring time journaled
+that day, `0` where none). A colony counts as returned once per run, on the transition, never on
+the later updates.
 
 The journal behind it is `spend.jsonl` in the data dir, next to `sessions.json` and `routing.jsonl`:
 append-only, one JSON line per event, never rewritten. Colony cleanup and deletion do not touch it,
@@ -2608,13 +2611,21 @@ and rows from builds before those fields existed carry neither, and both still p
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "session": "clgay4wk", "agent": "claude-code", "cost_usd": 0.03}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched", "session": "clgay4wk", "agent": "claude-code"}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned", "session": "clgay4wk", "agent": "claude-code"}
+{"ts": "…", "day": "2026-09-20", "org": "bench", "kind": "scoring", "scoring_ms": 9320}
 ```
 
-Every row carries the four token fields, `0` where it has no tokens. `usage` rows are a turn's increment over the turn before it (the session record keeps the
+Every row carries the four token fields, `0` where it has no tokens; a `scoring` row carries none
+of them. `usage` rows are a turn's increment over the turn before it (the session record keeps the
 cumulative; the journal gets the deltas). A one-model turn files its cost on that model's row; a
 multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
 attribution rule. A failed append is reported through the app's sticky storage alert and leaves
 the run unchanged: a lost row is a lost measurement, not a failed run.
+
+A `scoring` row is the bench's ([bench.md](bench.md)): when a `scripts/bench.mjs run` finishes it
+files how long it spent scoring the run's pull requests under the `bench` org, the way chat files
+under its pseudo-org — no colony, no tokens and no dollar, since scoring makes no model calls and
+its only cost is time. The history sums those into the org entry's `scoring_ms` for the day, beside
+the colonies' spend.
 
 Which channel measured a row's `cost_usd` splits each colony's spend in two. A `usage` row's dollar
 is the agent's own turn-end estimate: first-party traffic never passes the gateway — microsandbox
