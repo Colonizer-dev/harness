@@ -1935,19 +1935,10 @@ mod tests {
 
     /// The smallest agent module, with `schema` as its settings schema.
     fn agent_module(id: &str, schema: Value) -> AgentModule {
-        AgentModule {
-            id: id.into(),
-            name: id.into(),
-            description: String::new(),
-            dir: PathBuf::from("/opt/colonizer/agent"),
-            entry: vec!["runner.mjs".into()],
-            needs_claude: false,
-            requires: Default::default(),
-            schema,
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        }
+        AgentModule::test(id)
+            .dir(PathBuf::from("/opt/colonizer/agent"))
+            .entry(vec!["runner.mjs".into()])
+            .schema(schema)
     }
 
     #[test]

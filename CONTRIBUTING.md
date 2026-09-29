@@ -86,6 +86,12 @@ in different places:
 
 [docs/architecture.md](docs/architecture.md#adding-a-module) has the details.
 
+## Tests
+
+Rust tests live in `#[cfg(test)]` modules beside the code. Build a shared struct through its
+test-only constructor, never a struct literal, so adding a field means one edit:
+`AgentModule::test("claude-code").needs_claude(true)` (crates/colonizer/src/modules.rs).
+
 ## Checks
 
 ```sh

@@ -8,6 +8,7 @@ mod pty;
 mod runner;
 mod seal;
 mod store;
+mod watch;
 
 use axum::{
     Json, Router,
@@ -36,11 +37,15 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
-                       [--seal-token] [--seccomp-profile] [--exec-hardened -- CMD [ARGS...]]
+                       [--path-policy FILE] [--seal-token] [--seccomp-profile]
+                       [--exec-hardened -- CMD [ARGS...]]
 
   --config PATH      session config            (default /colonizer/session.json)
   --token-file PATH  bearer token for the API  (default /colonizer/token)
   --state-dir DIR    event log directory       (default /var/lib/colonizer)
+  --path-policy FILE path policy bind list     (default /colonizer/path-policy; when present,
+                     masked and protected paths are bound inside nested checkouts as they
+                     appear — watch.rs, docs/path-policy.md)
   --seal-token       cover the token file with a read-only bind of /dev/null once it has been
                      read, so no other process in the VM can read it; fail closed (seal.rs)
   --seccomp-profile  print the runner hardening profile as JSON and exit
@@ -51,6 +56,7 @@ struct Args {
     config: PathBuf,
     token_file: PathBuf,
     state_dir: PathBuf,
+    path_policy: PathBuf,
     seal_token: bool,
     exec: Vec<String>,
 }
@@ -62,6 +68,7 @@ impl Args {
             config: "/colonizer/session.json".into(),
             token_file: "/colonizer/token".into(),
             state_dir: "/var/lib/colonizer".into(),
+            path_policy: "/colonizer/path-policy".into(),
             seal_token: false,
             exec: Vec::new(),
         };
@@ -100,7 +107,7 @@ impl Args {
                     }
                     break;
                 }
-                "--config" | "--token-file" | "--state-dir" => {
+                "--config" | "--token-file" | "--state-dir" | "--path-policy" => {
                     let value = match inline {
                         Some(value) => value,
                         None => iter.next().ok_or_else(|| format!("{flag} needs a value"))?,
@@ -108,6 +115,7 @@ impl Args {
                     let slot = match flag.as_str() {
                         "--config" => &mut args.config,
                         "--token-file" => &mut args.token_file,
+                        "--path-policy" => &mut args.path_policy,
                         _ => &mut args.state_dir,
                     };
                     *slot = PathBuf::from(value);
@@ -185,6 +193,11 @@ async fn run(args: Args) -> Result<(), BoxError> {
             config.listen, config.agent.module
         ),
     ));
+
+    // Path policy beyond boot (#648): masked and protected paths are bound inside nested
+    // checkouts as they appear, before the runner exists to act on them. Best effort — a miss is
+    // still reported at publish (watch.rs); it never stops the daemon.
+    watch::start(&config.workspace, &args.path_policy, store.clone());
 
     let runner = runner::start(&config, store.clone());
     let state = AppState {

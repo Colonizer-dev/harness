@@ -959,19 +959,13 @@ mod tests {
     }
 
     fn agent() -> AgentModule {
-        AgentModule {
-            id: "claude-code".into(),
-            name: "Claude Code".into(),
-            description: "Anthropic's coding agent".into(),
-            dir: PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"),
-            entry: vec!["runner.mjs".into()],
-            needs_claude: true,
-            requires: crate::modules::Requires::default(),
-            schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        }
+        AgentModule::test("claude-code")
+            .name("Claude Code")
+            .description("Anthropic's coding agent")
+            .dir(PathBuf::from("/home/me/.local/share/colonizer/modules/agents/claude-code"))
+            .entry(vec!["runner.mjs".into()])
+            .needs_claude(true)
+            .schema(json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}))
     }
 
     /// Every event name the batch carries, in order.
