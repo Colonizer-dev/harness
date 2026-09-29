@@ -1769,7 +1769,7 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/providers` | `[{id, name, base_url, auth, wire: "anthropic"\|"openai", has_key, models: [string], preset}]` plus the provider fields and live figures of §6.5 (`timeout_secs`, `max_concurrent`, `queue_timeout_secs`, `context_tokens`, `fallback_model`, `trusted`, `pricing`, `quota`, `model_map`, `disabled_tools`, `normalize_cache_ttl`, `in_flight`, `queued`, `usage`, `health`, `used_by`, `quota_exhausted`). `preset` is the catalogue id it was added from (`deepseek`, `openai`, `zai`, `alibaba`, `local`, …) or `custom` |
-| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
@@ -2258,7 +2258,9 @@ plan: `{url, pointer}` — a `GET` the health check makes with the provider's ow
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
 else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
-clears it. Leaving `max_concurrent` unset really does mean unlimited: the
+clears it. The origin rule reaches the base URL itself: a save that moves a keyed provider to another
+origin is refused unless `api_key` brings the key again (`""` removes it), and a saved probe the move
+leaves behind is refused with it. Leaving `max_concurrent` unset really does mean unlimited: the
 provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
