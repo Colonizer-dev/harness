@@ -490,7 +490,7 @@ fn collect_session_logs(data_dir: &Path, s: &Session, staged: &mut Vec<Staged>) 
                 staged.push(Staged {
                     path: format!("logs/{}/{}", s.id, name),
                     category: Category::Logs,
-                    bytes,
+                    bytes: crate::archive::redact_for_bundle(name, bytes),
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -499,6 +499,8 @@ fn collect_session_logs(data_dir: &Path, s: &Session, staged: &mut Vec<Staged>) 
     }
     let mut transcripts = Vec::new();
     walk_regular_files(&dir.join("transcripts"), "", &mut transcripts);
+    // The VM writes transcripts/, so a credential-looking file there is dropped like one anywhere.
+    transcripts.retain(|rel| !crate::archive::is_credential_file(&format!("transcripts/{rel}")));
     transcripts.sort();
     for rel in &transcripts {
         match std::fs::read(dir.join("transcripts").join(rel)) {
@@ -507,7 +509,7 @@ fn collect_session_logs(data_dir: &Path, s: &Session, staged: &mut Vec<Staged>) 
                 staged.push(Staged {
                     path: format!("logs/{}/transcripts/{}", s.id, rel),
                     category: Category::Logs,
-                    bytes,
+                    bytes: crate::archive::redact_for_bundle(rel, bytes),
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -565,7 +567,8 @@ fn archive_session_files(data_dir: &Path, s: &Session, missing: &[String], stage
         let Ok(name) = entry.path().map(|p| p.to_string_lossy().into_owned()) else {
             continue;
         };
-        if !missing.contains(&name) {
+        // A bundle archived before credentials were kept out may still hold them.
+        if !missing.contains(&name) || crate::archive::is_credential_file(&name) {
             continue;
         }
         let mut bytes = Vec::new();
@@ -573,7 +576,7 @@ fn archive_session_files(data_dir: &Path, s: &Session, missing: &[String], stage
             staged.push(Staged {
                 path: format!("logs/{}/{}", s.id, name),
                 category: Category::Logs,
-                bytes,
+                bytes: crate::archive::redact_for_bundle(&name, bytes),
             });
         }
     }

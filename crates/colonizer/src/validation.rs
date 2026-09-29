@@ -297,7 +297,8 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let path = app.session_dir(session_id).join("findings.jsonl");
     let appended = {
         let _guard = rt.findings_lock.lock().await;
-        append_line(&path, &line.to_string()).await
+        // #761: a finding's title or reason can quote what the agent saw, secrets included.
+        append_line(&path, &crate::redact::redact_line(&line.to_string())).await
     };
     if let Err(e) = appended {
         // The outcome is real in memory either way; what failed is the colony's record of it, and
@@ -925,6 +926,28 @@ mod tests {
         let stored = std::fs::read_to_string(&ledger).unwrap();
         assert!(stored.contains("\"state\":\"validated\""), "{stored}");
         assert!(stored.ends_with('\n'), "every line ends the file's append format");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_outcome_is_redacted_before_it_reaches_the_ledger() {
+        use crate::sessions::SessionStatus;
+        use crate::sessions::tests::app_with_colony;
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        record(
+            &app,
+            "abc",
+            &json!({"title": "leaked token", "state": "rejected", "reason": format!("saw {token}")}),
+        )
+        .await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("findings.jsonl")).unwrap();
+        assert!(!stored.contains(token), "{stored}");
+        assert!(stored.contains("[REDACTED:"), "{stored}");
+        assert!(
+            stored.contains("\"state\":\"rejected\""),
+            "the line stays valid JSON: {stored}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
