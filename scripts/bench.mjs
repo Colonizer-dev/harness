@@ -16,7 +16,7 @@
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
 // and opens real pull requests on that repository, and on nothing else.
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -24,6 +24,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { analyze, loadColonies, readJsonLines, TOKEN_CATEGORIES, totalCost } from './colony-report.mjs';
 import { auditSession } from './trajectory-monitor.mjs';
 import { DEFAULT_MAX_GAP, addCompanion, companionsFor, familyGaps, familyOf, formatGaps, gapVerdict, loadSet, lockSet, newSet, outsideRepo, recordDecisions, saveSet } from './bench/heldout.mjs';
+import { childEnv, detectStack, STACKS } from './bench/stacks.mjs';
+
+// What a scored child must not inherit — see scripts/bench/stacks.mjs; re-exported for evolve.mjs.
+export { childEnv };
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const MOTHERSHIP = process.env.COLONIZER_URL || 'http://127.0.0.1:7878';
@@ -171,14 +175,6 @@ async function runTask(task, repo, issue, options) {
 
 // ------------------------------------------------------------------------------------------------ score
 
-// A node --test started from inside another one inherits NODE_TEST_CONTEXT, skips its files and exits 0 —
-// every check would pass under the bench's own tests — and a colony sandbox exports GIT_DIR and friends
-// that would point scorer git at the wrong work tree. None of it rides into a scored child.
-export const childEnv = () => {
-  const { NODE_TEST_CONTEXT, NODE_OPTIONS, GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, ...env } = process.env;
-  return env;
-};
-
 /** The files a change touched that its task does not allow. */
 export const outsideTask = (task, changed) => changed.filter((file) => !(task.expect.changed_within ?? []).includes(file));
 
@@ -238,21 +234,39 @@ export function scoreBranch({ repo, branch, base = 'main', task, workdir, source
   return result;
 }
 
-/** Scores a held-out companion on its own fresh clone. Only the pass bit and the companion's id come
- *  back; the output is dropped, so held-out material never lands in anything the bench writes. */
+/** Scores a held-out companion on its own fresh clone. The clone's stack decides where the companion
+ *  lands and what runs it (scripts/bench/stacks.mjs). Only the pass bit and the companion's id come
+ *  back; the output is dropped, so held-out material never lands in anything the bench writes. The
+ *  clone is the colony's work, so its layout is untrusted: a branch can match no stack, or hold a
+ *  `tests` that is a symlink to somewhere on this host. Those score as a held-out fail — nothing is
+ *  written outside the clone, and the run goes on. */
 export function scoreHeldout({ repo, branch, source, heldoutDir, companion }) {
   const dir = mkdtempSync(join(tmpdir(), 'colonizer-bench-heldout-'));
   try {
     cloneBranch({ repo, branch, source, dir });
-    cpSync(join(heldoutDir, companion.file), join(dir, 'heldout-check.test.mjs'));
-    let heldout;
+    let heldout = false;
+    let check = null;
+    let placed = false;
     try {
-      execFileSync('node', ['--test', 'heldout-check.test.mjs'], { cwd: dir, encoding: 'utf8', env: childEnv() });
+      const stack = STACKS[detectStack(dir) ?? ''];
+      if (!stack) throw new Error(`${dir} matches no supported stack (Cargo.toml, go.mod, package.json); cannot place the held-out companion`);
+      check = stack.companion.path(dir);
+      // The companion is written through real directories only: a symlink in its path would land it
+      // outside the clone.
+      for (const part of [dirname(check), check]) {
+        if (lstatSync(part, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`${part} is a symlink; refusing to write the held-out companion through it`);
+      }
+      mkdirSync(dirname(check), { recursive: true });
+      cpSync(join(heldoutDir, companion.file), check);
+      placed = true;
+      stack.companion.run(dir, check);
       heldout = true;
     } catch {
       heldout = false;
     } finally {
-      rmSync(join(dir, 'heldout-check.test.mjs'), { force: true });
+      // Only what we placed is ours to remove — sweeping an untrusted path would follow a symlink out
+      // of the clone and delete something on the host.
+      if (placed) rmSync(check, { force: true });
     }
     return { companion: companion.id, heldout };
   } finally {
