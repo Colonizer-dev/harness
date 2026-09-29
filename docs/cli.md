@@ -250,6 +250,10 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/stop`, `/resume` |
 | `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
+A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
+for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts` and
+`POST /api/fleet/peer/leave`.
+
 Everything else is the owner's at any scope — token management itself, settings, secrets, and
 publishing. The enforcement is the same for every client of the API, the CLI included.
 

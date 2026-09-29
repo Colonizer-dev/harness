@@ -112,6 +112,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // The fleet pairing's two open doors (fleet_members.rs): their whole authentication is
+        // what the body carries — a single-use invite code, a pairing id plus the nonce only its
+        // joiner holds — so a request with no token is admitted to exactly those two.
+        if req.method() == Method::POST && (path == "/api/fleet/peer/redeem" || path.starts_with("/api/fleet/peer/pairings/")) {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
@@ -212,6 +219,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
+        .merge(crate::fleet_members::routes())
         .merge(crate::gateway::routes())
         .merge(crate::github::routes())
         .merge(crate::graft::routes())

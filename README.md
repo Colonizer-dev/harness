@@ -512,6 +512,8 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   &nbsp;·&nbsp;
   <a href="docs/protocol.md">Protocol</a>
   &nbsp;·&nbsp;
+  <a href="docs/fleet.md">Fleet</a>
+  &nbsp;·&nbsp;
   <a href="docs/updates.md">Updates</a>
   &nbsp;·&nbsp;
   <a href="docs/audit.md">Audit</a>

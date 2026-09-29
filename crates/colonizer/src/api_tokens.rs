@@ -1,7 +1,8 @@
 //! Scoped API tokens (issue #508): named, least-privilege keys the maintainer hands to CLIs and
 //! automations, so they can drive the mothership without holding the per-install owner token.
 //!
-//! A token carries an ordered scope — `read` < `operate` < `launch` — optional org and repo limits
+//! A token carries an ordered scope — `fleet` < `read` < `operate` < `launch` — optional org and
+//! repo limits
 //! (empty lists mean no limit), and optional launch caps: the most colonies it may keep unfinished,
 //! and the most model spend its colonies may run up per UTC day. The registry lives at
 //! `<config_dir>/api-tokens.json` and stores only a SHA-256 hash of each token: the plaintext is
@@ -30,11 +31,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-/// How much a token may do, ordered so `token.scope >= needed` reads as "may". `read` watches,
-/// `operate` drives colonies that exist (answer, stop, resume), `launch` starts colonies.
+/// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
+/// trust scope one machine in a fleet holds (issue #686): it reaches only the fleet's own routes,
+/// and nothing below `read` passes any other need. `read` watches, `operate` drives colonies that
+/// exist (answer, stop, resume), `launch` starts colonies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
+    Fleet,
     Read,
     Operate,
     Launch,
@@ -44,6 +48,7 @@ impl Scope {
     /// The wire spelling, shared by the registry file and the API answers.
     pub fn as_str(self) -> &'static str {
         match self {
+            Scope::Fleet => "fleet",
             Scope::Read => "read",
             Scope::Operate => "operate",
             Scope::Launch => "launch",
@@ -51,9 +56,12 @@ impl Scope {
     }
 
     /// Parses the scope a create request names. Manual, so a bad one is refused with the
-    /// vocabulary in the message rather than a deserialization error.
+    /// vocabulary in the message rather than a deserialization error. `fleet` parses — the fleet
+    /// module mints its tokens through [`Registry::create_fleet_token`] — but [`Registry::create`]
+    /// refuses it: it is never a scope the cockpit's token form hands out.
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
+            "fleet" => Some(Scope::Fleet),
             "read" => Some(Scope::Read),
             "operate" => Some(Scope::Operate),
             "launch" => Some(Scope::Launch),
@@ -269,6 +277,11 @@ impl Registry {
             return Err(format!("name is {} characters; keep it under {MAX_NAME}", name.len()));
         }
         let scope = Scope::parse(&req.scope).ok_or_else(|| "scope must be one of: read, operate, launch".to_string())?;
+        if scope == Scope::Fleet {
+            // Fleet scope is the pairing machinery's to mint, one token per joined machine; it is
+            // never a scope a token-holder asks for at the token form.
+            return Err("scope must be one of: read, operate, launch".to_string());
+        }
         let orgs = clean_orgs(&req.orgs)?;
         let repos = clean_repos(&req.repos)?;
         if req.max_concurrent.is_some_and(|max| max == 0) {
@@ -298,6 +311,36 @@ impl Registry {
         tokens.push(stored);
         self.save(&tokens).await;
         Ok(CreatedToken { token: plaintext, meta })
+    }
+
+    /// Mints the one fleet-scoped token a joined machine holds, named for it. Deliberately outside
+    /// [`Registry::create`], which refuses the scope: a fleet token is the pairing machinery's
+    /// artifact, handed to exactly one machine at approve time, so the token form can neither ask
+    /// for the scope nor mint one outside a pairing. Returns the plaintext once and its id, which
+    /// the member row keeps for the revocation that removal and leaving both run.
+    pub(crate) async fn create_fleet_token(&self, member_name: &str) -> Result<(String, String), String> {
+        let name = format!("fleet: {member_name}");
+        if name.len() > MAX_NAME {
+            return Err(format!("name is {} characters; keep it under {MAX_NAME}", name.len()));
+        }
+        let plaintext = format!("col_{}", crate::util::random_token());
+        let stored = Stored {
+            id: format!("tok_{}", short_id()),
+            name,
+            scope: Scope::Fleet,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+            created_at: Utc::now(),
+            last_used_at: None,
+            token_hash: hash_token(&plaintext),
+        };
+        let id = stored.id.clone();
+        let mut tokens = self.tokens.write().await;
+        tokens.push(stored);
+        self.save(&tokens).await;
+        Ok((plaintext, id))
     }
 
     /// Removes a token; `None` when no token carries the id. Presentations of the revoked token
@@ -389,6 +432,9 @@ enum Need<'a> {
     /// A launch route — starting a colony, or a loop mutation, each of which starts or reshapes
     /// colonies: the body (or the loop) is the handler's to check.
     Launch,
+    /// A fleet route (issue #686): watching the host list across the fleet, or leaving it. Only a
+    /// fleet-scoped token passes — the trust scope buys exactly these, nothing else.
+    Fleet,
     /// No scoped token: owner only.
     Owner,
 }
@@ -476,6 +522,10 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
+        // Fleet (issue #686): the host list is what a joined machine's token is for, and leaving
+        // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
+        ["api", "hosts"] if get => Need::Fleet,
+        ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
@@ -491,6 +541,7 @@ pub(crate) fn describe_need(method: &Method, path: &str) -> String {
         Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
         Need::Map { .. } => "map".to_string(),
         Need::Launch => "launch".to_string(),
+        Need::Fleet => "fleet".to_string(),
         Need::Owner => "owner".to_string(),
     }
 }
@@ -558,6 +609,10 @@ pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, p
         }
         Need::Launch if token.scope >= Scope::Launch => Ok(()),
         Need::Launch => Err(Deny::forbidden(token, method, path)),
+        // The fleet scope reaches only the fleet's own routes; being the lowest scope, it passes
+        // every other need's `>=` check already, so this is the one place it admits anything.
+        Need::Fleet if token.scope == Scope::Fleet => Ok(()),
+        Need::Fleet => Err(Deny::forbidden(token, method, path)),
         Need::Owner => Err(Deny::forbidden(token, method, path)),
     }
 }

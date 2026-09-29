@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use tokio::{
@@ -21,6 +22,9 @@ use tokio::{
 pub const COLONIZER_HOSTNAME: &str = "colonizer";
 const COLONIZER_USER: &str = "harness";
 const VMS_USER: &str = "vms";
+/// The headscale user fleet members' nodes join under (issue #686). The policy only lets them open
+/// connections to the harness node, and only while the fleet has members.
+const FLEET_USER: &str = "fleet";
 /// Caps every headscale and tailscale CLI call except `tailscale up`, so a wedged CLI cannot park
 /// them indefinitely — `Mesh::status`'s three calls (`backend_state`, `nodes`, `tailscale ip -4`),
 /// and the ones `ensure_started` makes while it holds the `running` lock, where a hang would stall
@@ -51,6 +55,10 @@ pub struct Mesh {
     runtime_dir: PathBuf,
     ports: Ports,
     running: Mutex<Option<Running>>,
+    /// Whether the fleet currently has members: [`policy_json`] adds the fleet's ACL rule for it,
+    /// and [`Self::ensure_started`], which rewrites the policy on every start, reads it here — so
+    /// the rule survives a headscale restart without the fleet module having to re-apply it.
+    fleet_acl: AtomicBool,
 }
 
 struct Running {
@@ -92,6 +100,7 @@ impl Mesh {
             runtime_dir: runtime_dir.to_path_buf(),
             ports,
             running: Mutex::new(None),
+            fleet_acl: AtomicBool::new(false),
         }
     }
 
@@ -176,6 +185,7 @@ impl Mesh {
         .context("headscale did not become ready (see mesh/headscale.log)")?;
         let harness_user = self.ensure_user(COLONIZER_USER).await?;
         let vms_user = self.ensure_user(VMS_USER).await?;
+        self.ensure_user(FLEET_USER).await?;
 
         let _ = std::fs::remove_file(self.tailscaled_socket());
         let node_state = self.state_dir.join("node");
@@ -296,11 +306,44 @@ taildrop:
             socket = q(self.headscale_socket()),
         );
         std::fs::write(self.headscale_config(), config)?;
-        // The harness may reach every VM; VMs cannot reach each other or start connections.
-        let policy =
-            json!({"acls": [{"action": "accept", "src": [format!("{COLONIZER_USER}@")], "dst": [format!("{VMS_USER}@:*")]}]});
+        let policy = policy_json(self.fleet_acl.load(Ordering::Relaxed));
         std::fs::write(dir.join("policy.json"), serde_json::to_vec_pretty(&policy)?)?;
         Ok(())
+    }
+
+    /// Records whether the fleet has members, without touching the policy file: [`Self::ensure_started`]
+    /// writes the policy from this flag, so a mothership restart re-arms the fleet rule from the
+    /// stored membership before headscale starts.
+    pub fn set_fleet_has_members(&self, members: bool) {
+        self.fleet_acl.store(members, Ordering::Relaxed);
+    }
+
+    /// Rewrites the policy for the fleet's current membership and, while headscale is running,
+    /// asks it to reload the file (SIGHUP; file-mode policy rereads it). Best effort and cheap to
+    /// repeat: an install whose mesh never started just has the file waiting for its next start,
+    /// and every `ensure_started` rewrites the policy from the stored flag anyway.
+    pub async fn set_fleet_acl(&self, members: bool) {
+        self.fleet_acl.store(members, Ordering::Relaxed);
+        let policy = match serde_json::to_vec_pretty(&policy_json(members)) {
+            Ok(policy) => policy,
+            Err(e) => {
+                eprintln!("mesh: could not serialize the fleet policy: {e}");
+                return;
+            }
+        };
+        let path = self.state_dir.join("headscale/policy.json");
+        if let Err(e) =
+            std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).and_then(|()| std::fs::write(&path, &policy))
+        {
+            eprintln!("mesh: could not write {}: {e}", path.display());
+            return;
+        }
+        let pid = self.running.lock().await.as_ref().and_then(|r| r.headscale.id());
+        if let Some(pid) = pid
+            && let Err(e) = std::process::Command::new("kill").args(["-HUP", &pid.to_string()]).status()
+        {
+            eprintln!("mesh: could not signal headscale ({pid}) to reload the policy: {e}");
+        }
     }
 
     async fn backend_state(&self) -> Result<String> {
@@ -489,6 +532,26 @@ taildrop:
     }
 }
 
+/// The headscale policy: the harness may reach every VM; VMs cannot reach each other or start
+/// connections. With fleet members, their user may also open connections to the harness node —
+/// the one thing a joined machine is for — and to nothing else, and the VMs stay out of its
+/// reach. Pure, so the two shapes are pinned by test.
+fn policy_json(fleet_has_members: bool) -> Value {
+    let mut acls = vec![json!({
+        "action": "accept",
+        "src": [format!("{COLONIZER_USER}@")],
+        "dst": [format!("{VMS_USER}@:*")],
+    })];
+    if fleet_has_members {
+        acls.push(json!({
+            "action": "accept",
+            "src": [format!("{FLEET_USER}@")],
+            "dst": [format!("{COLONIZER_USER}@:*")],
+        }));
+    }
+    json!({ "acls": acls })
+}
+
 /// Whether an address seen on `iface` may become an allow rule. Both parsers share it so the
 /// exclusions cannot drift apart between the two tools, and so anything unrecognisable is
 /// rejected in one place: a rule microsandbox cannot parse fails the colony boot outright,
@@ -664,7 +727,16 @@ pub(crate) async fn start_tasks(app: &crate::Shared) {
         tokio::spawn(async move {
             let mut delay = Duration::from_secs(2);
             for attempt in 1..=8 {
-                match async { mesh_app.mesh().await?.ensure_started().await }.await {
+                match async {
+                    let mesh = mesh_app.mesh().await?;
+                    // The policy is written from this flag on every start: carry the stored
+                    // membership over before the first attempt, or a restart drops the fleet rule
+                    // until the next membership change.
+                    mesh.set_fleet_has_members(mesh_app.fleet_members.has_members().await);
+                    mesh.ensure_started().await
+                }
+                .await
+                {
                     Ok(()) => {
                         if attempt > 1 {
                             println!("mesh: started on attempt {attempt}");
@@ -685,6 +757,21 @@ pub(crate) async fn start_tasks(app: &crate::Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The policy's two shapes: the harness-to-VM rule always, the fleet rule only while the fleet
+    /// has members — and never a VM-to-VM or fleet-to-VM rule.
+    #[test]
+    fn the_policy_lets_the_fleet_reach_the_harness_only_while_it_has_members() {
+        let without = policy_json(false);
+        assert_eq!(without["acls"].as_array().unwrap().len(), 1, "no fleet, one rule: {without}");
+        assert_eq!(without["acls"][0]["src"][0], "harness@");
+        assert_eq!(without["acls"][0]["dst"][0], "vms@:*");
+        let with = policy_json(true);
+        let acls = with["acls"].as_array().unwrap();
+        assert_eq!(acls.len(), 2, "the fleet rule is added: {with}");
+        assert_eq!(acls[1]["src"][0], "fleet@");
+        assert_eq!(acls[1]["dst"][0], "harness@:*");
+    }
 
     /// A check that never resolves — a wedged `headscale users list` — used to hold `wait_for`
     /// past its deadline for good; now the deadline cuts it off and the wait fails.

@@ -176,7 +176,14 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
 /// vanishes from the list just because a poll failed.
 pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     let mut hosts = vec![self_summary(app).await];
-    let peers = app.cfg.fleet_peers.clone();
+    // Configured peers first, then the fleet's own edges (fleet_members.rs): a member polls its
+    // owner, an owner polls every member that published its URL. Configured wins on a duplicate.
+    let mut peers = app.cfg.fleet_peers.clone();
+    for url in app.fleet_members.peer_urls().await {
+        if !peers.contains(&url) {
+            peers.push(url);
+        }
+    }
     if peers.is_empty() {
         return hosts;
     }

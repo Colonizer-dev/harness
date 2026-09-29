@@ -406,6 +406,85 @@ export interface FleetHost {
   health: FleetHostHealth;
 }
 
+// ---------------------------------------------------------------------------
+// Fleet pairing (issue #686): GET/POST /api/fleet… (docs/fleet.md). A mothership joins another's
+// fleet like phone pairing: the owner mints a single-use invite, the joiner redeems it, both
+// screens show the same six-digit confirmation code, and the owner approves what they see.
+// ---------------------------------------------------------------------------
+
+/** GET /api/fleet `role`: where this mothership stands — a fleet owner with members, a member of someone else's fleet, or in neither. */
+export type FleetRole = "owner" | "member" | "none";
+
+/** One open invite. The code itself is shown once at creation (POST /api/fleet/invites) and stored only as a hash. */
+export interface FleetInvite {
+  id: string;
+  /** RFC3339-ish; an invite lives 15 minutes. */
+  expires_at: string;
+}
+
+/** A machine that redeemed an invite and now waits for the owner's decision. */
+export interface FleetPending {
+  id: string;
+  /** The name the joiner gave itself. */
+  name: string;
+  /** The joiner's own URL, when it gave one; null when it did not. */
+  url: string | null;
+  /** The six digits both screens must show, "123 456". */
+  confirm_code: string;
+  expires_at: string;
+  status: "pending" | "approved" | "rejected";
+}
+
+/** A mothership that joined this one's fleet; it hosts colonies and sees the fleet view. */
+export interface FleetMember {
+  id: string;
+  name: string;
+  url: string | null;
+  joined_at: string;
+}
+
+/** GET /api/fleet `membership`: this mothership's place in the fleet it joined. */
+export interface FleetMembership {
+  owner_url: string;
+  member_id: string;
+  joined_at: string;
+}
+
+/** GET /api/fleet `joining`: a join this mothership started and has not finished; both screens show `confirm_code` until the owner decides. */
+export interface FleetJoining {
+  owner_url: string;
+  confirm_code: string;
+  started_at: string;
+}
+
+/** GET /api/fleet: everything the Fleet settings pane renders, in one view. */
+export interface FleetState {
+  role: FleetRole;
+  invites: FleetInvite[];
+  pending: FleetPending[];
+  members: FleetMember[];
+  membership: FleetMembership | null;
+  joining: FleetJoining | null;
+}
+
+/** POST /api/fleet/invites' answer: the invite code, shown exactly once — the registry keeps only its hash. */
+export interface CreatedFleetInvite {
+  id: string;
+  code: string;
+  expires_at: string;
+}
+
+/** POST /api/fleet/join: what the join form collects. `name` and `url` are optional labels for the owner's member list. */
+export interface FleetJoinRequest {
+  owner_url: string;
+  code: string;
+  name?: string;
+  url?: string;
+}
+
+/** POST /api/fleet/join/confirm's answer: `pending` until the owner decides, then `joined` — or the decision, bad news both other ways. */
+export type FleetJoinStatus = "joined" | "pending" | "rejected" | "expired";
+
 /** GET /api/status `storage`: whether the mothership can still write its own files (sessions.json, colony event logs). */
 export interface StorageHealth {
   /** False while writes are failing; true when every write was confirmed, or once one succeeds after a failure (then `recovered_at` is set). Always true for load damage. */
@@ -1807,8 +1886,11 @@ export interface RemotePairing {
 // (docs/cli.md, "Scoped API tokens")
 // ---------------------------------------------------------------------------
 
-/** How much a token may do, ordered so `read` < `operate` < `launch` — each adds to the last. */
-export type ApiTokenScope = "read" | "operate" | "launch";
+/** How much a token may do, ordered so `read` < `operate` < `launch` — each adds to the last.
+ * `fleet` sits outside that ladder: the lowest scope there is, admitted only on the fleet routes
+ * (`GET /api/hosts` and `POST /api/fleet/peer/leave`, docs/fleet.md), and minted by fleet pairing
+ * rather than created by hand. */
+export type ApiTokenScope = "fleet" | "read" | "operate" | "launch";
 
 /** One token's metadata, as GET /api/tokens answers: never the secret, never its hash. */
 export interface ApiTokenMeta {
