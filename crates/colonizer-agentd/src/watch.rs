@@ -15,10 +15,13 @@
 //! mid-session miss is still reported at publish. A read that races the watcher can see a
 //! just-created masked file.
 
-use std::{path::Path, path::PathBuf, sync::Arc, time::Duration};
+use std::{path::Path, path::PathBuf, sync::Arc};
 
+use crate::store::EventStore;
 #[cfg(target_os = "linux")]
-use crate::store::{EventStore, log_event};
+use crate::store::log_event;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::{
     collections::{HashMap, HashSet},
@@ -55,6 +58,8 @@ enum Kind {
     Protect,
 }
 
+// Only the Linux watcher reads these; macOS dev builds just parse the policy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl Pattern {
     fn new(kind: Kind, rel: impl Into<String>) -> Self {
         Self { kind, rel: rel.into() }
