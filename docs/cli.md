@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `open`, `login-item`, `telemetry`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -151,6 +151,36 @@ cadence. `loop list` shows the cadence in words with its times in your local tim
 (`enabled`, `paused`, `ended`) and when it runs next; an empty list prints a note to stderr, and
 `--json` prints the raw records everywhere.
 
+## Fleet export and import
+
+A machine's past can travel with it: `fleet export` writes this machine's session history, colony
+logs and spend/usage stats into one bundle, and `fleet import` reads a bundle back into a data
+dir. Both run locally off the data dir — no mothership needs to be running — and neither reads
+anything secret-bearing from the config dir (export touches only its `host_id`, the machine id
+the fleet already displays), so no API token, provider key or credential ever leaves the machine.
+The bundle format is
+[protocol.md, §6.11 Fleet export bundle](protocol.md#611-fleet-export-bundle-687).
+
+```sh
+colonizer fleet export                          # colonizer-export-<origin_name>-<YYYYMMDD>.tar.zst in cwd
+colonizer fleet export --out /tmp/acme.tar.zst  # a path of your own
+colonizer fleet export --no-logs --preview      # what would be written; writes nothing
+colonizer fleet import /tmp/acme.tar.zst        # backfill into fleet-imports/<origin_host>/
+colonizer fleet import /tmp/acme.tar.zst --preview
+```
+
+`export` prints the preview first — per category (`history`, `logs`, `stats`): how many
+sessions or files, the time range and the size — then writes the bundle, by default
+`colonizer-export-<origin_name>-<YYYYMMDD>.tar.zst` in the current directory. `--no-history`,
+`--no-logs` and `--no-stats` leave a category out; an excluded one still shows in the preview,
+marked not included. `--preview` prints the preview and writes nothing. `import` prints the same
+preview, read from the bundle's manifest, then imports under `fleet-imports/<origin_host>/` with
+progress; interrupting it is safe — what landed is kept, and re-running the same file resumes it
+and replaces sessions by id instead of duplicating them. With the global `--json` the previews
+print as the bundle's manifest. The fleet-join dialog (#686) drives the same format
+over the fleet connection, preview → confirm → transfer, so a machine that joins a fleet is
+backfilled the same way.
+
 ## `--json`
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
@@ -158,7 +188,8 @@ what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop
 the `token` and `loop` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
-stored map document — or, with `--find`, the search result — and `answer` echoes the answer body
+stored map document — or, with `--find`, the search result — `fleet export --preview` and
+`fleet import <file> --preview` the bundle's manifest, and `answer` echoes the answer body
 it sent. Scripts should prefer it to parsing the human columns.
 
 ## Exit codes

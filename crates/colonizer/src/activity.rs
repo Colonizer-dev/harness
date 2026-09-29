@@ -84,6 +84,7 @@ pub(crate) const KINDS: &[&str] = &[
     "chat.issue",
     "colonize.issue",
     "colonize.colony",
+    "publish.merge_train",
     "loop.create",
     "loop.update",
     "loop.pause",

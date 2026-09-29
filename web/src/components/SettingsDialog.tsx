@@ -57,6 +57,7 @@ import {
   IconPlus,
   IconX,
 } from "./icons";
+import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
 import { RemoteAccessPane } from "./RemoteAccessPane";
@@ -2257,6 +2258,7 @@ function ModulePane({
           <div className="divide-y divide-border border-t border-border px-4">{advanced.map(renderField)}</div>
         </details>
       )}
+      {module.kind === "publish" && <MergeTrainSection />}
       </div>
     </Pane>
   );

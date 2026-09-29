@@ -334,6 +334,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions/{id}/diff` | Everything the colony changed since it branched from `origin/<base>`: committed and uncommitted edits, plus untracked files as new-file diffs (at most 200 of them; binaries and symlinks skipped). `{id, repo, base, files: [{path, added, removed}], added, removed, diff, truncated}`, `diff` capped at 200 KB. Needs the worktree, not a live colony; `colonizer diff` and the MCP server read it. **409** when there is no worktree or no merge base, or git fails |
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
+| `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution. Read scope for API tokens |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow, block}, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md)). **404** for a colony booted before the record existed |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
@@ -364,7 +365,8 @@ routed together).
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
-  `GET /api/maps/…` reads, and `GET /api/tokens/self`. The terminal WebSocket is owner only.
+  `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
+  WebSocket is owner only.
 - `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
@@ -2876,6 +2878,161 @@ the process), only while the switch is on, and only when the Host header is exac
 own host; anything else naming a `Tunnelled` extension is answered **503**. Authentication is the
 cockpit's own, unchanged; the Origin fence for cookie writes accepts exactly `https://<host>`
 through the tunnel, where the LAN fence accepts any scheme.
+
+### 6.11 Fleet export bundle (#687)
+
+When a machine joins a fleet (#686) it brings its past with it: the colonies it has run, the logs
+behind them, and what they spent. The same format serves on its own as a backup. `colonizer fleet
+export` writes this machine's session history, colony logs and spend/usage stats into one bundle;
+`colonizer fleet import` reads a bundle back into a data dir. Both run locally off the data dir —
+no mothership needs to be running. The fleet-join flow (#686) drives the same format
+programmatically: a preview first, then — only once the joining member confirms — a chunked,
+resumable transfer.
+
+**The bundle.** A zstd-compressed tar (`.tar.zst`). `manifest.json` is the first entry; every
+other entry is a regular file — never a symlink:
+
+```
+manifest.json
+history/sessions.jsonl                one ImportedSession per line    (category history)
+logs/<original_id>/events.jsonl       a colony's event log            (category logs)
+logs/<original_id>/harness.jsonl      its harness lines
+logs/<original_id>/gateway.jsonl      its gateway lines
+logs/<original_id>/transcripts/…      its transcripts, relative paths kept
+stats/spend.jsonl                     the top-level journals          (category stats)
+stats/provider-usage.json
+stats/provider-quota.json
+stats/routing.jsonl
+stats/activity.jsonl
+stats/summary.json                    computed: sessions, by_status, cost_usd, routed_cost_usd,
+                                      model_usage, boot_ms_mean
+```
+
+Log entries are read from the live colony dir `sessions/<id>/` where it exists, and from the
+colony's latest archive revision (#496) when the live dir is gone — a finished colony's logs
+travel even after its session files have been folded into the archive.
+
+**manifest.json.** The bundle's first entry, and its table of contents:
+
+```json
+{
+  "format": "colonizer-fleet-export",
+  "version": 1,
+  "origin_host": "<host id>",
+  "origin_name": "<hostname>",
+  "created_at": "<RFC3339>",
+  "categories": {
+    "history": {"included": true, "count": 12, "from": "<RFC3339|null>", "to": "<RFC3339|null>", "bytes": 1234},
+    "logs":    {"included": true, "count": 30, "from": null, "to": null, "bytes": 99999},
+    "stats":   {"included": true, "count": 6,  "from": null, "to": null, "bytes": 4567}
+  },
+  "files": [{"path": "logs/abc/events.jsonl", "category": "logs", "bytes": 123, "sha256": "<hex>"}]
+}
+```
+
+- `count` is the number of sessions for `history`, the number of files for `logs` and `stats`.
+  `from`/`to` are the min `created_at` / max `updated_at` across the exported sessions, either
+  null when there is nothing to bound; `bytes` is the category's uncompressed size.
+- An excluded category (`--no-logs` and friends) appears with `"included": false` and zeros, so a
+  reader can tell "not asked for" from "empty".
+- `files` lists every other entry with its size and the sha256 of its raw bytes; the importer
+  verifies each before it applies it.
+- `origin_host` is the machine's persisted `<config_dir>/host_id` (created on first export) — the
+  same id fleet claims carry — and `origin_name` is the hostname.
+- The `categories` object is exactly the preview shown before anything is sent — `fleet export
+  --preview` prints it (the whole manifest, with `--json`), and so does the join flow's preview
+  step.
+
+**What is never in a bundle.** Secrets, of every kind. Export reads only an allowlist of data-dir
+paths — the ones above — and of the config dir only its `host_id`: no API token
+(`api-token`, `api-tokens.json`), no provider keys, no Claude credential, no colony secrets, no
+keychain, no settings (`providers.json`, `orgs.json`, `modules.json`, `claude-accounts.json`). A
+session record itself is exported as an allowlist projection, not whole (below).
+
+**ImportedSession.** One JSON object per line of `history/sessions.jsonl`:
+
+```json
+{"id": "host-a:c1c9215b", "origin_host": "host-a", "original_id": "c1c9215b",
+ "repo": "acme/web", "org": "acme", "issue": 3473, "issue_title": "Wire the method picker",
+ "status": "merged", "branch": "colonizer/issue-3473-…", "base": "main",
+ "pr_url": "https://github.com/acme/web/pull/12", "pr_opened_at": "<RFC3339|null>",
+ "merged_at": "<RFC3339|null>", "summary": "…", "error": null,
+ "cost_usd": 1.24, "routed_cost_usd": 0.97, "model_tier": "…",
+ "model_usage": {"…": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}},
+ "model_routing": {}, "agent": "claude-code", "boot_timing": {},
+ "created_at": "<RFC3339>", "updated_at": "<RFC3339>"}
+```
+
+- `id` is namespaced `<origin_host>:<original_id>`, so ids from many machines cannot collide in
+  one fleet's import; `origin_host` and `original_id` match `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`.
+- Only those three are required. Everything else — repo, org, issue, issue_title, status, branch,
+  base, pr_url, pr_opened_at, merged_at, summary, error, cost_usd, routed_cost_usd, model_tier,
+  model_usage, model_routing, agent, boot_timing, created_at, updated_at — is optional and
+  nullable; an exporter may leave out what its records never held.
+- The machine-readable shapes — the manifest at the top level, `imported_session`, `chunk` and
+  `import_cursor` under `$defs` — are in
+  [fleet-export.schema.json](fleet-export.schema.json) (draft 2020-12).
+
+**Import layout and idempotency.** `fleet import` (and the fleet applying a member's transfer)
+writes under `<data_dir>/fleet-imports/<origin_host>/`:
+
+```
+sessions.json          map of namespaced id → ImportedSession; re-import replaces by id
+logs/<original_id>/…   as bundled
+stats/…                as bundled
+manifest.json          the manifest of the import that produced this tree
+cursor.json            the ImportCursor, per file, for the resumable transfer
+```
+
+- Every entry path is validated before it touches the disk: not absolute, no `..`, and only under
+  `history/`, `logs/`, `stats/` or `manifest.json` itself — the same wall the session store's
+  file names have.
+- Each file's sha256 is verified against the manifest. `.json` snapshot files (`sessions.json`,
+  the `stats/*.json`) are replaced atomically, whole. `.jsonl` files resume by the cursor (below).
+  `history/sessions.jsonl` folds into `sessions.json` by id, so importing the same session twice
+  replaces the record and never duplicates it.
+- An import is cancellable, and a partial import is valid: the cursor keeps what landed, and the
+  next run of the same import resumes it.
+
+**Chunks.** The transfer moves one file as `Chunk` messages:
+
+```json
+{"path": "logs/abc/events.jsonl", "offset": 65536, "raw_len": 65536, "total": 200704,
+ "data": "<base64 of the zstd-compressed raw bytes>"}
+```
+
+`offset`, `raw_len` and `total` count raw (decompressed) bytes; `data` carries the chunk's raw
+bytes zstd-compressed. The receiver keeps one `ImportCursor` per member at
+`<data_dir>/fleet-imports/<origin_host>/cursor.json`:
+`{"origin_host": "<host id>", "updated_at": "<RFC3339|null>", "files": {"<path>": {"offset":
+<committed bytes>, "prefix_sha256": "<hex of those bytes>"}}}` — one `files` entry per path. Per
+chunk:
+
+- `offset` equals the committed offset: append, and advance the cursor.
+- The chunk lies wholly below the committed offset: a duplicate (a re-sent tail) — ignored.
+- `offset` is above the committed offset: a gap — error, write nothing.
+- A resumed transfer starts from the cursor's offset, not from zero.
+- If the first `offset` bytes of a re-sent file no longer hash to `prefix_sha256` — the source
+  rotated or rewrote the file mid-transfer — the file restarts from 0 under the new bytes.
+
+**The join hook.** The join dialog (#686) drives four calls, and nothing is sent before the
+member confirms:
+
+1. `preview(categories)` answers the manifest — its `categories` object carries the count, time
+   range and size per category (`preview_for` names the origin explicitly).
+2. The member reviews it and confirms, with per-category switches; history, logs and stats are on
+   by default.
+3. The member streams its files with `chunks_for`.
+4. The fleet applies each chunk with `apply_chunk`, keeping one cursor per member; a whole bundle
+   moves at once with `import_bundle`, which chunks internally through the same cursor.
+
+After the import, new colonies stream live, so the import is only the backfill of what happened
+before the join.
+
+**Versioning.** An importer rejects a `format` other than `colonizer-fleet-export`, and a
+`version` greater than it supports; version 1 is this document. Two additions are planned and
+deliberately *not* in version 1: optional categories (approved memory notes, loops and schedules,
+repo claims — off by default) and the cockpit's origin-host marking of imported colonies.
 
 ---
 
