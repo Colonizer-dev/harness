@@ -93,6 +93,56 @@ pub async fn answer(
     }
 }
 
+/// `POST /api/sessions/{id}/prewarm` (issue #701): the caller has a suspended colony's question
+/// open, so the queue may bring the colony back for the answer ahead of its timeout, and the answer
+/// lands in an already-running VM. Marking the record is all the route does — the queue applies the
+/// admission, the slot rules and the timeout on its own ticks — so a colony that is not a suspended
+/// one still waiting on its question (live, already holding an answer) reads **204**: a no-op, not
+/// an error. A marked or already-marked colony reads **202**; the queue never takes a slot ahead of
+/// a colony that holds an answer.
+pub async fn prewarm(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    via: Option<axum::Extension<crate::auth::Via>>,
+) -> Result<StatusCode, crate::AppError> {
+    let Some(s) = app.session(&id).await else {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
+    };
+    if !suspended_waiting(&s) || s.pending_answer.is_some() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    // Conditional on purpose: a restore or a stop that claimed the colony between the snapshot and
+    // this write must not hang a warm-up request on it. `false` here is an already-marked colony —
+    // idempotent, so still a 202.
+    let marked = app
+        .update_session(&id, |x| {
+            if !suspended_waiting(x) || x.pending_answer.is_some() || x.prewarm.is_some() {
+                return false;
+            }
+            x.prewarm = Some(Prewarm {
+                requested_at: Utc::now(),
+                started_at: None,
+                ready_at: None,
+            });
+            x.updated_at = Utc::now();
+            true
+        })
+        .await
+        .is_some_and(|(_, landed)| landed);
+    if marked {
+        app.session_log(
+            &id,
+            "info",
+            "question opened; the queue brings the colony back when a slot frees".into(),
+        )
+        .await;
+        if let Some(s) = app.session(&id).await {
+            crate::activity::record_prewarm(&app, &s, via.map(|axum::Extension(via)| via)).await;
+        }
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// A scoped API token's free text, prefixed with the external-input marker (issue #508): the agent
 /// reads it as a description of the task from outside, never as the operator's voice. Shared by
 /// the answer paths' `response` note and the socket's `user_message`. An empty note leaves the
@@ -731,6 +781,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}", routing::get(get))
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
+        .route("/api/sessions/{id}/prewarm", routing::post(prewarm))
         .route("/api/sessions/{id}/events", routing::get(events_ws))
         .route("/api/sessions/{id}/terminal", routing::get(terminal_ws))
 }

@@ -45,6 +45,24 @@ describe("statusLabel", () => {
     expect(statusLabel(session({ status: "waiting_for_answer", suspended }))).toBe("Suspended — resumes when you answer");
   });
 
+  it("reads a warm-up (issue #701) as warming while it boots and ready once the VM is up", () => {
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    expect(statusLabel(session({ status: "starting", suspended, prewarm: warming }))).toBe("Warming up…");
+    expect(statusLabel(session({ status: "running", suspended, prewarm: { ...warming, ready_at: "2026-09-26T10:07:00Z" } }))).toBe(
+      "Ready — waiting for your answer",
+    );
+  });
+
+  it("reads a warm-up that was only requested — no boot admitted yet — as still suspended", () => {
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: null, ready_at: null };
+    expect(statusLabel(session({ status: "waiting_for_answer", suspended, prewarm: warming }))).toBe("Suspended — resumes when you answer");
+  });
+
+  it("keeps the answered labels when an answer is held during a warm-up", () => {
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    expect(statusLabel(session({ status: "starting", suspended, pending_answer: answered(), prewarm: warming }))).toBe("Resuming with your answer");
+  });
+
   it("ignores a stale suspended flag once the colony is live again", () => {
     expect(statusLabel(session({ status: "running", suspended }))).toBe("Working");
   });
@@ -161,6 +179,14 @@ describe("occupiesSlot", () => {
     expect(occupiesSlot(session({ status: "waiting_for_answer", suspended }))).toBe(false);
     expect(occupiesSlot(session({ status: "stopped" }))).toBe(false);
     expect(occupiesSlot(session({ status: "queued" }))).toBe(false);
+  });
+
+  it("counts a warm-up once its boot is admitted, not while it still queues for a slot (issue #701)", () => {
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    expect(occupiesSlot(session({ status: "starting", suspended, prewarm: warming }))).toBe(true);
+    expect(occupiesSlot(session({ status: "waiting_for_answer", suspended, prewarm: { ...warming, started_at: null } }))).toBe(false);
+    // A stale warm-up on a colony that is not live holds nothing, whatever the record says.
+    expect(occupiesSlot(session({ status: "stopped", prewarm: warming }))).toBe(false);
   });
 });
 

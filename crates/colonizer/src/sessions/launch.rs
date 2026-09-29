@@ -623,6 +623,7 @@ pub async fn create(
         parked: None,
         agent_session: None,
         pending_answer: None,
+        prewarm: None,
         last_activity_at: None,
         boot_timing: None,
         boot_cpus: None,

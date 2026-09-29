@@ -161,16 +161,20 @@ export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
   return when ? `${reason} · resumes ${when}` : reason;
 }
 
-/** The label a colony's status reads as, suspension-aware (issues #562, #667): a
+/** The label a colony's status reads as, suspension-aware (issues #562, #667, #701): a
  *  `waiting_for_answer` colony whose microVM is stopped is suspended rather than working, one whose
- *  answer is stored and a boot is underway (queued or starting) says so, and one that answered while
- *  suspended is not asking for anything — it is queued for a slot. Everything else keeps the plain
- *  status label. */
-export function statusLabel(session: Pick<Session, "status" | "suspended" | "pending_answer">): string {
+ *  answer is stored and a boot is underway (queued or starting) says so, one that answered while
+ *  suspended is queued for a slot, and a suspended colony whose question was opened reads as
+ *  warming up until the VM is ready. Everything else keeps the plain status label. */
+export function statusLabel(
+  session: Pick<Session, "status" | "suspended" | "pending_answer" | "prewarm">,
+): string {
   if (session.pending_answer != null && (session.status === "queued" || session.status === "starting")) {
     return "Resuming with your answer";
   }
   if (isAnsweredWaiting(session)) return "Answered · resumes when a slot frees";
+  if (session.prewarm?.ready_at) return "Ready — waiting for your answer";
+  if (session.prewarm?.started_at) return "Warming up…";
   if (session.suspended != null && session.status === "waiting_for_answer") return "Suspended — resumes when you answer";
   return SESSION_STATUS[session.status]?.label ?? session.status;
 }
@@ -189,9 +193,12 @@ export function meshBroken(mesh: HarnessStatus["mesh"]): boolean {
 
 /** Deliberately not `isLive`: a colony mid-publish holds a parallelism slot though its microVM is gone,
  *  while a suspended colony holds none — its microVM was removed to free exactly that slot (issue #562).
+ *  A warm-up whose boot was admitted (issue #701) holds one again; one still queued does not.
  *  Mirrors `Session::holds_slot` in crates/colonizer/src/sessions.rs; keep the two in step. */
-export function occupiesSlot(session: Pick<Session, "status" | "suspended">): boolean {
-  return session.suspended == null && (isLive(session.status) || session.status === "publishing");
+export function occupiesSlot(session: Pick<Session, "status" | "suspended" | "prewarm">): boolean {
+  if (!isLive(session.status) && session.status !== "publishing") return false;
+  if (session.prewarm?.started_at) return true;
+  return session.suspended == null;
 }
 
 /** Statuses the publish endpoint accepts: live colonies, plus parked (issue #213), stopped, failed and no-changes ones whose worktree can still be finished. */
@@ -202,7 +209,7 @@ export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git
   return !session.cleaned_up && session.git_admin_dir != null && session.suspended == null && PUBLISHABLE.includes(session.status);
 }
 
-export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer"> }) {
+export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer" | "prewarm"> }) {
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone, live: false };
   // A suspended colony's microVM is stopped: the pulse would read as a machine burning while it is not.
   const animated = !isSuspended(session) && (session.status === "starting" || session.status === "running" || session.status === "publishing" || session.status === "waiting_for_answer");

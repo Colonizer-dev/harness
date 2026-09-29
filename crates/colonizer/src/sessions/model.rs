@@ -96,6 +96,12 @@ impl Session {
         self.attention.take()
     }
 
+    /// Whether this colony's pre-warm boot is under way (issue #701): the queue has claimed it for
+    /// the boot, whether or not the runner has linked yet.
+    pub fn prewarming(&self) -> bool {
+        self.prewarm.as_ref().is_some_and(|p| p.started_at.is_some())
+    }
+
     /// Whether this colony holds a microVM slot against the parallel limit — the predicate
     /// `queue::has_room` counts. Any live colony holds one, and so does a publish claimed from a
     /// live colony: the teardown inside the publish frees the microVM, but the slot stays claimed
@@ -104,8 +110,11 @@ impl Session {
     /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
     pub fn holds_slot(&self) -> bool {
         // A suspended colony's microVM is gone — that is the point (issue #562) — so it holds no
-        // slot and the queue can admit someone else until the answer restores it.
-        self.suspended.is_none()
+        // slot and the queue can admit someone else until the answer restores it. A colony whose
+        // question is being pre-warmed (issue #701) is the exception: its microVM is back, so it
+        // holds its slot again, but never ahead of a colony that already holds an answer — the
+        // queue admits those first.
+        (self.suspended.is_none() || self.prewarming())
             && (self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot))
     }
 }
@@ -198,6 +207,20 @@ pub struct PendingAnswer {
     pub prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_at: Option<DateTime<Utc>>,
+}
+
+/// A pre-warm request for a suspended colony's question (issue #701): the queue boots the colony
+/// through normal admission so the answer lands in an already-running VM. `requested_at` is when
+/// someone opened the question, what the queue lines candidates up by and what the timeout counts
+/// from once no boot followed; `started_at` is set when the queue claims the colony for the boot
+/// (None means the request is still waiting for a slot); `ready_at` is when the runner linked.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Prewarm {
+    pub requested_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<DateTime<Utc>>,
 }
 
 /// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
@@ -422,6 +445,11 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
+    /// question and the queue has not started (or has already given up on) the warm-up boot.
+    /// `None` unless a request is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<Prewarm>,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -521,6 +549,7 @@ impl Default for Session {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            prewarm: None,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,

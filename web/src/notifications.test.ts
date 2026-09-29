@@ -93,6 +93,16 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "waiting_for_answer", suspended }))).toBe(true);
   });
 
+  it("is true while a warm-up boots a suspended colony for its still-open question (issue #701)", () => {
+    const suspended = { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" };
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    // The status has moved on to booting, so the waiting_for_answer branch no longer reads it.
+    expect(needsYou(session({ status: "starting", suspended, prewarm: warming }))).toBe(true);
+    // Once the answer is held, the boot is no longer yours to act on.
+    const answered = { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:06:00Z" };
+    expect(needsYou(session({ status: "starting", suspended, pending_answer: answered, prewarm: warming }))).toBe(false);
+  });
+
   it("is true for any attention flag, whatever its reason", () => {
     for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
       expect(needsYou(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(true);

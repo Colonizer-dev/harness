@@ -947,6 +947,7 @@ mod tests {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            prewarm: None,
             last_activity_at: Some(now),
             boot_timing: None,
             boot_cpus: None,

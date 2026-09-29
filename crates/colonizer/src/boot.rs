@@ -172,10 +172,33 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
         app.session_log(&id, "error", format!("session failed to start: {message}"))
             .await;
         teardown_vm(&app, &s).await;
+        // A failed pre-warm boot (issue #701) is not a colony failure: the question is still open
+        // and answerable, so the colony goes back to exactly what the suspension left.
+        let mut attention = None;
+        let warmed = app
+            .update_session(&id, |s| {
+                if s.status != SessionStatus::Starting || !s.prewarming() || s.pending_answer.is_some() {
+                    return false;
+                }
+                s.status = SessionStatus::WaitingForAnswer;
+                s.prewarm = None;
+                s.error = None;
+                attention = s.clear_attention();
+                true
+            })
+            .await
+            .is_some_and(|(_, landed)| landed);
+        if warmed {
+            app.note_cleared_attention(&id, attention).await;
+            return;
+        }
         let mut attention = None;
         app.update_session(&id, |s| {
             s.status = SessionStatus::Failed;
             s.error = Some(truncate(&message, 2000));
+            // A warm-up this failed boot was still carrying dies with it; a held answer stays for
+            // a manual resume to deliver.
+            s.prewarm = None;
             attention = s.clear_attention();
         })
         .await;
@@ -791,8 +814,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // A colony coming back to deliver a held answer (issue #562) resumes the agent session it
     // reported, and the answer is the first thing the resumed runner is told (the `initial_prompt`
     // below). Without a session id — never reported, or the module stopped declaring resumability
-    // since — the answer still rides the prompt, so it is delivered either way.
-    if s.pending_answer.is_some()
+    // since — the answer still rides the prompt, so it is delivered either way. A pre-warm boot
+    // (issue #701) resumes too: no answer is riding it, but the transcript it continues is the one
+    // the question belongs to.
+    if (s.pending_answer.is_some() || s.prewarming())
         && let Some(session_id) = &s.agent_session
     {
         runner_env.insert("COLONIZER_RESUME_SESSION".into(), Value::String(session_id.clone()));
@@ -1010,11 +1035,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // What the runner is first told (issue #562): a resumed session that comes back to deliver a
     // held answer gets just the answer — its transcript already carries the task brief — and a
     // colony without a session id to resume gets the answer appended, so the answer never rides on
-    // the resume working.
-    let initial_prompt = match (&s.pending_answer, &s.agent_session) {
-        (Some(pa), Some(_)) => pa.prompt.clone(),
-        (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
-        (None, _) => prompt,
+    // the resume working. A pre-warm boot (issue #701) says nothing at all: an empty prompt starts
+    // no turn, and the answer is delivered as a user message once it arrives.
+    let initial_prompt = if s.prewarming() {
+        String::new()
+    } else {
+        match (&s.pending_answer, &s.agent_session) {
+            (Some(pa), Some(_)) => pa.prompt.clone(),
+            (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
+            (None, _) => prompt,
+        }
     };
     let session_json = json!({
         "session_id": id,
@@ -1286,6 +1316,21 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     ensure_starting(app, id).await?;
     start_link(app, id).await;
+    // A pre-warm boot (issue #701) has no answer riding it: once the runner is linked, this task
+    // holds the colony open for the answer instead of finishing a normal launch. An answer that
+    // lands is delivered on the spot; the timeout suspends the colony again and frees the slot.
+    if app.session(id).await.is_some_and(|s| s.prewarming()) {
+        app.update_session(id, |x| {
+            if let Some(p) = x.prewarm.as_mut() {
+                p.ready_at = Some(Utc::now());
+            }
+        })
+        .await;
+        app.session_log(id, "info", "pre-warm boot is up; holding the colony for the answer".into())
+            .await;
+        crate::queue::prewarm_wait(app, id).await;
+        return Ok(());
+    }
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
     // stays for the next resume; a stop cleared it under its own claim.

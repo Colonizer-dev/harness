@@ -149,6 +149,13 @@ export interface Session {
    * whole field.
    */
   pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
+  /**
+   * A warm-up of this suspended colony's question is under way (issue #701): the mothership is
+   * booting it ahead of your answer. `suspended` stays set while warming, so an answer still holds
+   * as for any suspended colony; all three fields clear once the answer is delivered. Older
+   * mothership builds omit the whole field.
+   */
+  prewarm?: { requested_at: string; started_at?: string | null; ready_at?: string | null } | null;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */

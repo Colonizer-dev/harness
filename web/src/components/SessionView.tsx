@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Api } from "../api";
 import { useBehind } from "../behind";
 import { errorMessage, useApi, useToast } from "../context";
@@ -89,6 +89,21 @@ export function SessionView({
   const { diagnosis } = useSessionDiagnosis(state.session ?? fallback);
 
   const session = state.session ?? fallback;
+
+  // Opening a suspended colony's question asks the mothership to warm the colony up (issue #701).
+  // Fires once per view — an expiry that clears `prewarm` while the view stays open must not
+  // re-trigger it; focusing the answer box re-arms it.
+  const prewarmed = useRef(false);
+  const maybePrewarm = useCallback(() => {
+    const s = state.session ?? fallback;
+    if (!s || s.status !== "waiting_for_answer" || s.suspended == null || s.pending_answer != null || s.prewarm != null) return;
+    prewarmed.current = true;
+    api.prewarmSession(s.id).catch(() => {});
+  }, [api, state.session, fallback]);
+  useEffect(() => {
+    if (!prewarmed.current) maybePrewarm();
+  }, [maybePrewarm]);
+
   if (!session) {
     return (
       <div className="grid h-full place-items-center text-muted">
@@ -445,7 +460,7 @@ export function SessionView({
               </PanelHeader>
             )}
             <div className="min-h-0 flex-1">
-              <ChatPanel stream={stream} state={state} live={live} onOpenMemory={onOpenMemory} />
+              <ChatPanel stream={stream} state={state} live={live} onOpenMemory={onOpenMemory} onAnswerFocus={maybePrewarm} />
             </div>
           </section>
         )}

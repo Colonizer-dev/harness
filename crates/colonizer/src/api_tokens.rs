@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use std::path::PathBuf;
 
 /// How much a token may do, ordered so `token.scope >= needed` reads as "may". `read` watches,
-/// `operate` drives colonies that exist (answer, stop, resume), `launch` starts colonies.
+/// `operate` drives colonies that exist (answer, stop, resume, prewarm), `launch` starts colonies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
@@ -415,7 +415,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             Need::Map { owner, name }
         }
         ["api", "tokens", "self"] if get => Need::Bare(Scope::Read),
-        // Colony-scoped: watch at read, drive (answer, stop, resume) at operate.
+        // Colony-scoped: watch at read, drive (answer, stop, resume, prewarm) at operate.
         ["api", "sessions", id] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
@@ -424,7 +424,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "answer" | "stop" | "resume" | "prewarm"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },
