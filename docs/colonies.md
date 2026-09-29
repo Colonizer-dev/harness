@@ -168,7 +168,8 @@ Two Sandbox settings control this. Both are mothership-wide, with no per-org ove
   ACP agents that advertise session loading. Any
   other agent keeps its microVM, and the colony log says so once.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
-  such as a dev server, are gone after the resume.
+  such as a dev server, are gone after the resume. Services the colony declares or registers come
+  back — see [Services that come back after a resume](#services-that-come-back-after-a-resume).
 - Stopping a suspended colony clears the suspension and any saved answer.
 
 A separate Sandbox setting, `hold_timeout_minutes` (default 30), parks a colony that autopilot
@@ -190,6 +191,56 @@ a VM snapshot, is in
 
 The mothership also stops colonies itself: when a budget or the host-disk quota is passed, and
 when a microVM dies on its own. In every case the worktree is kept, so Resume continues.
+
+## Services that come back after a resume
+
+A resume boots a fresh microVM: every process inside the old one is gone. A colony declares the
+long-lived processes it wants back in `.colonizer/services.toml` at the worktree root, and anything
+the agent starts during the run through `colonizer-svc` is recorded too; on a resume the mothership
+hands both to the guest, which relaunches them before the agent sees your answer or brief, waits on
+each one's readiness, and opens the resumed turn saying what came back. A fresh boot starts
+nothing; services come back on a resume only.
+
+> Restored from suspension. Restarted: `web` on :5173 (ready in 3.2 s). Lost: background
+> `cargo test`, rerun if needed.
+
+The manifest lists services, one `[[service]]` table each:
+
+```toml
+[[service]]
+name = "web"
+cmd = "npm run dev -- --port 5173"
+cwd = "web"             # optional
+ready = 5173            # optional: integer port or "http://localhost:5173/" URL string
+env = ["VITE_API_URL"]  # optional: names only
+timeout_secs = 30       # optional
+```
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | 1-64 characters of letters, digits, dots, underscores or dashes. Also the record's file name. |
+| `cmd` | string | yes | Shell command, run with `sh -c` from the worktree root (or `cwd`). |
+| `cwd` | string | no | Directory to run in, relative to the worktree root. Absolute paths and `..` are refused. |
+| `ready` | integer or string | no | TCP port or http(s) URL the resume waits on for readiness. |
+| `env` | array of strings | no | Environment variable **names** passed through from the colony env. A table like `env = { TOKEN = "abc" }` is refused — values are never stored on this road; pass them through the colony env. |
+| `timeout_secs` | integer | no | How long to wait for `ready` before the service counts as failed. Default 60. |
+
+Services started during the run are recorded with `colonizer-svc` — the agentd binary under another
+name, linked onto the guest's PATH at boot:
+
+```sh
+colonizer-svc start web --ready 5173 --cwd web --env VITE_API_URL -- npm run dev -- --port 5173
+colonizer-svc stop web
+```
+
+Claude Code background Bash tasks are recorded the same way, as background tasks. They are never
+relaunched — the mothership cannot judge whether a finished test run should run again — so a resume
+reports them lost, exactly once, and leaves rerunning them to the agent.
+
+The records live in the colony's session directory on the host, mounted into the VM at
+`/colonizer/services`, so they survive the suspension like the worktree and transcript do. A resume
+waits each service out to readiness or its `timeout_secs`, and reports one that never answers as
+not ready, naming the log it wrote to.
 
 ## Budgets and plan balance
 

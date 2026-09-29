@@ -29,6 +29,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/{caveman,headroom,jev-compaction}/`, `/opt/colonizer/bin/rtk` | ro | The token-saving payloads (Token savings, §4), each mounted only when its switch is on and the payload is installed |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
 | `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code: `/root/.claude/projects`, codex: `/root/.codex`, acp: `/root/.gemini`) |
+| `/colonizer/services` | rw | Service records the guest's writers keep ([colonies.md](colonies.md#services-that-come-back-after-a-resume)), one JSON file per service (`<name>.json`). A host directory (`<session dir>/services`) mounted writable, so they outlive the microVM like the transcripts above |
 | `/opt/node/bin/node` | ro | Vendored Node runtime for the agent runner, pinned in `vendor/node.lock` and fetched at install by `scripts/fetch-node-binary.sh`, mounted read-only beside agentd |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -55,6 +56,30 @@ suspended ([#562]): `COLONIZER_RESUME_SESSION` carries the `agent_session` id th
 last run, for it to continue that conversation (the Claude Code runner passes it to the SDK's
 `resume` option, codex to `codex exec … resume`, ACP to `session/load`); the held answer is the
 `initial_prompt`. Absent means a fresh conversation.
+
+`COLONIZER_SERVICES_DIR=/colonizer/services` reaches `agent.env` on every boot (#700): the
+directory the guest's service writers (`colonizer-svc`, a Claude Code background-Bash hook) record
+started services in, one JSON file per service. On a resume boot, `session.json` also gains a
+top-level `restore` key — absent on other boots, which is how the guest tells a restore from a
+fresh start:
+
+```json
+"restore": {
+  "suspended": true,
+  "services": [
+    { "name": "web", "cmd": "npm run dev -- --port 5173", "cwd": "web", "ready": "5173",
+      "env": ["VITE_API_URL"], "timeout_secs": 30, "restart": true, "source": "manifest" }
+  ]
+}
+```
+
+`suspended` says the colony was suspended when the resume claimed it. `services` lists the
+repository's `.colonizer/services.toml` declarations first, then the records the previous run left
+in `COLONIZER_SERVICES_DIR`; background records (`restart: false`) are listed once and deleted, so
+they are reported lost exactly once. `env` holds names only and every `cmd` is scrubbed of the
+colony's secret values before any of this is written. The guest relaunches each restartable
+service, waits it out to `ready` or `timeout_secs` (default 60), and opens the resumed turn saying
+what came back and what was lost.
 
 ### Where the agent runtime comes from
 
