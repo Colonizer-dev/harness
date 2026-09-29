@@ -150,7 +150,10 @@ impl Runtime {
                         .and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
                         .map(|ts| ts.with_timezone(&Utc));
                     let risk = QuestionRisk::from_wire(v.get("risk"));
-                    holds_tool_call = crate::protocol::question_holds_tool_call(v.get("kind").and_then(Value::as_str));
+                    holds_tool_call = crate::protocol::question_holds_tool_call(
+                        v.get("kind").and_then(Value::as_str),
+                        v.get("blocking").and_then(Value::as_bool),
+                    );
                     open_question = Some((id.to_string(), questions, asked, risk));
                 }
                 ("question_answered", Some(id)) if open_question.as_ref().is_some_and(|(open, ..)| open == id) => {
@@ -579,9 +582,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let exec = r#"{"seq":1,"type":"question","question_id":"toolu_bash","kind":"exec_policy","questions":[]}"#;
         let plain = r#"{"seq":2,"type":"question","question_id":"q2","questions":[]}"#;
+        let subagent = r#"{"seq":1,"type":"question","question_id":"toolu_sub","blocking":true,"questions":[]}"#;
         let answered = r#"{"seq":2,"type":"question_answered","question_id":"toolu_bash","answers":{}}"#;
         for (lines, expected, why) in [
             (vec![exec], true, "an open exec-policy ask"),
+            (vec![subagent], true, "an open subagent question"),
             (vec![plain], false, "an ordinary question"),
             (vec![exec, answered], false, "an answered exec-policy ask"),
             (vec![exec, plain], false, "a later ordinary question replaces it"),

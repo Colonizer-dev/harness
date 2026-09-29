@@ -334,6 +334,8 @@ test('a permission request becomes a question; allow selects the option, Cancel 
   assert.equal(question.question_id, 'call_p1');
   assert.equal(question.message_id, 'msg-1');
   assert.equal(question.risk, 'workspace_write', 'an execute kind is workspace_write');
+  assert.equal(question.blocking, true, 'a permission request holds its tool call in flight, so the colony is not suspended (#759)');
+  assert.equal(question.kind, undefined, 'no exec policy was involved');
   assert.deepEqual(question.questions[0].options.map((o) => o.label), ['Allow', 'Reject']);
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
   runner.send({ type: 'answer', question_id: 'call_p1', answers: { 'Run the tests?': 'Allow' }, response: null });
@@ -452,6 +454,7 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   const card = await ask.waitUntil(first('question'), 'the ask decision to surface');
   assert.match(card.questions[0].question, /exec policy rule `ask-net` \(install\): network fetches wait for a human/, 'the rule rides the card');
   assert.equal(card.kind, 'exec_policy', 'the card says it holds a tool call in flight, so the colony is not suspended (#759)');
+  assert.equal(card.blocking, true, 'and marks it blocking');
   ask.send({ type: 'answer', question_id: 'call_s1', answers: { [card.questions[0].question]: 'Allow' }, response: null });
   await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 1, 'the answered ask to be replied');
   assert.deepEqual(ask.asks('session/request_permission')[0].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } }, 'the usual answer flow picks the option');

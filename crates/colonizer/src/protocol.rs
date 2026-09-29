@@ -61,12 +61,14 @@ pub(crate) enum QuestionRisk {
 /// The question `kind` an exec-policy `ask` carries (issue #759; modules/agents/*/execpolicy.mjs).
 pub(crate) const EXEC_POLICY_QUESTION_KIND: &str = "exec_policy";
 
-/// Whether a question of this `kind` holds a tool call in flight inside the live agent (issue
-/// #759). Such a colony must keep its microVM while it waits: suspending it kills the call and the
-/// agent that made it, and a resumed transcript cannot pick the call back up. An absent or unknown
-/// kind is an ordinary question the agent asked, which a suspension resumes cleanly.
-pub(crate) fn question_holds_tool_call(kind: Option<&str>) -> bool {
-    kind == Some(EXEC_POLICY_QUESTION_KIND)
+/// Whether a question holds a tool call in flight inside the live agent (issue #759). Such a colony
+/// must keep its microVM while it waits: suspending it kills the call and the agent that made it,
+/// and a resumed transcript cannot pick the call back up. The runner says so with `blocking: true`
+/// — a subagent's AskUserQuestion, any ACP permission request, an exec-policy ask — and an
+/// exec-policy `kind` says so on its own, for runners from before the flag. Anything else is the
+/// lead's own question, which a suspension resumes cleanly.
+pub(crate) fn question_holds_tool_call(kind: Option<&str>, blocking: Option<bool>) -> bool {
+    blocking == Some(true) || kind == Some(EXEC_POLICY_QUESTION_KIND)
 }
 
 impl QuestionRisk {
@@ -235,6 +237,11 @@ pub(crate) enum AgentEvent {
         /// `exec_policy` is an exec-policy `ask`: a tool call is blocked in flight on the answer.
         #[serde(default)]
         kind: Option<String>,
+        /// Whether the answer is awaited by a tool call blocked in flight inside a live agent (issue
+        /// #759): a subagent's AskUserQuestion, an ACP permission request, an exec-policy ask. Absent
+        /// means the lead asked and a resumed session can take the answer as its next message.
+        #[serde(default)]
+        blocking: Option<bool>,
     },
     /// The user's answer travelled the four hops back (§2); the harness only closes the question.
     QuestionAnswered {
@@ -621,19 +628,16 @@ mod tests {
     /// question without a kind, or with one this build does not know, is an ordinary question.
     #[test]
     fn a_question_kind_says_whether_a_tool_call_is_in_flight() {
-        let kind = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
-            AgentEvent::Question { kind, .. } => kind,
+        let holds = |body: &str| match serde_json::from_str::<AgentEvent>(body).unwrap() {
+            AgentEvent::Question { kind, blocking, .. } => question_holds_tool_call(kind.as_deref(), blocking),
             other => panic!("a question, got {other:?}"),
         };
-        let exec = kind(r#"{"type":"question","question_id":"q","kind":"exec_policy"}"#);
-        assert_eq!(exec.as_deref(), Some(EXEC_POLICY_QUESTION_KIND));
-        assert!(question_holds_tool_call(exec.as_deref()));
-        assert!(!question_holds_tool_call(
-            kind(r#"{"type":"question","question_id":"q"}"#).as_deref()
-        ));
-        assert!(!question_holds_tool_call(
-            kind(r#"{"type":"question","question_id":"q","kind":"something_newer"}"#).as_deref()
-        ));
+        assert!(holds(r#"{"type":"question","question_id":"q","kind":"exec_policy"}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q"}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q","kind":"something_newer"}"#));
+        // A subagent's AskUserQuestion carries no kind, only the flag.
+        assert!(holds(r#"{"type":"question","question_id":"q","blocking":true}"#));
+        assert!(!holds(r#"{"type":"question","question_id":"q","blocking":false}"#));
     }
 
     #[test]

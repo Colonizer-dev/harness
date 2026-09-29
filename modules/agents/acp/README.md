@@ -62,7 +62,10 @@ never claimed). The `answer` command resolves the request: the option whose labe
 chosen answer is replied as `{outcome: {outcome: "selected", optionId}}`; an unmatched label or a
 free-text `response` replies `{outcome: {outcome: "cancelled"}}` — ACP has no free-text answer —
 and a `question_answered` event travels back like the Claude module's. An interrupt replies
-`cancelled` and answers nothing.
+`cancelled` and answers nothing. Every such question carries `blocking: true` (issue #759): the
+agent's tool call waits in flight on the reply, and a `session/load` after a suspension would have
+no request left to answer, so the mothership keeps the colony running while it waits, up to a
+two-hour cap.
 
 ## Workspace confinement
 

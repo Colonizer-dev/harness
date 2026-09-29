@@ -382,6 +382,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             questions,
             risk,
             kind,
+            blocking,
             ..
         } => {
             // The questions travel with the id: autonomous mode answers among the options the
@@ -391,7 +392,7 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
             // Before the question opens, so a suspension tick that sees it open reads its kind too.
             rt.question_holds_tool_call.store(
-                crate::protocol::question_holds_tool_call(kind.as_deref()),
+                crate::protocol::question_holds_tool_call(kind.as_deref(), blocking),
                 std::sync::atomic::Ordering::SeqCst,
             );
             *rt.open_question.lock().await = Some((question_id, questions, risk));

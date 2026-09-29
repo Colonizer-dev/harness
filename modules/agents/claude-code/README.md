@@ -136,6 +136,13 @@ never remembered, and a `deny` rule is refused before the memory is consulted. T
 only in the runner process, never on disk where the agent could write itself an approval, so a
 colony restarted in a fresh microVM asks again. The ACP runner does the same.
 
+A question the runner puts to the colony while a tool call is blocked on the answer inside a live
+agent also carries `blocking: true`: every exec-policy ask, and an `AskUserQuestion` asked by a
+**subagent** — named by canUseTool's `agentID`, or by the tool_use having arrived in a message with a
+`parent_tool_use_id`. The mothership does not suspend such a colony (up to a two-hour cap): the
+subagent is blocked in its Task call, and a resumed lead transcript would get an answer to a question
+it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly, so it still suspends.
+
 ```json
 { "rules": [ { "id": "no-deploys", "decision": "deny", "reason": "deploys go through CI",
                "script": ["\\bkubectl\\s", "\\bterraform\\s"] },

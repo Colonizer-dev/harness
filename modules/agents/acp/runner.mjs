@@ -415,8 +415,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
     emit({
       type: 'question', question_id: questionId, message_id: turn?.messageId ?? null, risk: riskForKind(call.kind),
-      // An exec-policy ask holds the agent's tool call in flight: the mothership must not suspend
-      // the colony while it waits (issue #759).
+      // Every permission request holds the agent's tool call in flight, blocked on this reply
+      // (issue #759): a session/load after a suspension has no request left to answer, so the
+      // mothership must not suspend the colony while it waits. An exec-policy ask also says why.
+      blocking: true,
       ...(hit ? { kind: EXEC_POLICY_QUESTION_KIND } : {}),
       questions: [{ question: text, header: 'Permission', multi_select: false, options: options.map((o) => ({ label: o.name, description: o.kind })) }],
     });

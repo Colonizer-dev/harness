@@ -321,6 +321,7 @@ test('an Allow is remembered for the colony: a respawned agent is not asked agai
     const asked = events.filter((event) => event.type === 'question');
     assert.deepEqual(asked.map((event) => event.question_id), ['toolu_first', 'toolu_other'], 'the respawn was not asked; the other command was');
     assert.ok(asked.every((event) => event.kind === 'exec_policy'), 'every exec-policy question says so, for the suspend decision');
+    assert.ok(asked.every((event) => event.blocking === true), 'and marks it blocking: its tool call waits in flight');
     const result = events.find((event) => event.type === 'turn_end').result;
     assert.equal(result, 'toolu_first:allow toolu_respawn:allow toolu_other:deny toolu_secret:deny');
     assert.equal(cache.size, 1, 'only the Allow is remembered');

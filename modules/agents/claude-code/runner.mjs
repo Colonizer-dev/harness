@@ -726,6 +726,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   const input = new AsyncQueue();
   const pending = new Map(); // question_id -> { resolve }
   const askIds = new Set(); // tool_use ids of AskUserQuestion calls
+  const subagentAsks = new Set(); // AskUserQuestion tool_use ids seen in a subagent's message
   const toolMessage = new Map(); // tool_use id -> message_id
   const streams = new Map(); // message_id -> Map<block index, { type, id, text, final }>
   const fallbackIndex = new Map(); // message_id -> next index when nothing was streamed
@@ -766,7 +767,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   };
 
   /** Puts one question to the colony and resolves with its answer (null when cancelled or shut down). */
-  const putQuestion = (questionId, questions, { signal, kind = null }) => {
+  const putQuestion = (questionId, questions, { signal, kind = null, blocking = false }) => {
     const reply = new Promise((resolve) => {
       pending.set(questionId, { resolve });
       if (signal?.aborted) resolve(null);
@@ -778,6 +779,9 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
       message_id: toolMessage.get(questionId) ?? null,
       risk: riskClass(questions),
       ...(kind ? { kind } : {}),
+      // A tool call is blocked in flight on this answer inside a live agent (issue #759), so the
+      // mothership must not suspend the colony: a resumed transcript cannot finish the call.
+      ...(blocking ? { blocking: true } : {}),
       questions,
     });
     settleStatus();
@@ -791,7 +795,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     settleStatus();
   };
 
-  const canUseTool = async (toolName, toolInput, { signal, toolUseID } = {}) => {
+  const canUseTool = async (toolName, toolInput, { signal, toolUseID, agentID } = {}) => {
     if (toolName !== ASK_TOOL) {
       // An exec-policy `ask` reaches canUseTool the same way an AskUserQuestion does: the SDK turns
       // the PreToolUse hook's ask decision into a permission request here. The hook has already
@@ -811,7 +815,13 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
 
     const questionId = toolUseID || `question-${askIds.size + 1}`;
     askIds.add(questionId);
-    const answer = await putQuestion(questionId, normalizeQuestions(toolInput), { signal });
+    // A subagent's question blocks its Task call in flight (issue #759): suspending the colony
+    // would kill the subagent, and a resumed lead transcript would get an answer to a question it
+    // never asked. The SDK names the subagent in `agentID`; the tool_use arriving in a subagent's
+    // message says the same when it does not. The lead's own question is left unmarked: its turn
+    // resumes cleanly with the answer as the next message, so suspending it saves a slot.
+    const blocking = Boolean(agentID) || subagentAsks.has(questionId);
+    const answer = await putQuestion(questionId, normalizeQuestions(toolInput), { signal, blocking });
     if (!answer) {
       settleAnswer(questionId, null);
       return { behavior: 'deny', message: 'The question was cancelled before the user answered.' };
@@ -838,7 +848,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     }
     const questionId = toolUseID || `exec-policy-${pending.size + 1}`;
     const questions = normalizeQuestions(execPolicyQuestion(hit, toolInput.command));
-    const answer = await putQuestion(questionId, questions, { signal, kind: EXEC_POLICY_QUESTION_KIND });
+    const answer = await putQuestion(questionId, questions, { signal, kind: EXEC_POLICY_QUESTION_KIND, blocking: true });
     settleAnswer(questionId, answer);
     const allowed = Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
     if (allowed) execAllowCache.remember(hit, toolInput.command);
@@ -945,8 +955,10 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
             description: input.description ? String(input.description) : null,
           });
         }
-        if (block.name === ASK_TOOL) askIds.add(block.id);
-        else {
+        if (block.name === ASK_TOOL) {
+          askIds.add(block.id);
+          if (parent) subagentAsks.add(block.id);
+        } else {
           jevPendingCalls.set(block.id, { tool: block.name, result: false });
           emit(
             withAgent(
