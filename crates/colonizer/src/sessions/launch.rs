@@ -1346,19 +1346,10 @@ mod tests {
         std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
         std::fs::create_dir_all(assets.join("bin")).unwrap();
         std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
-        let agent = AgentModule {
-            id: "claude-code".into(),
-            name: "Claude Code".into(),
-            description: String::new(),
-            dir,
-            entry: vec!["run".into()],
-            needs_claude: false,
-            requires: crate::modules::Requires::default(),
-            schema: json!({}),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        };
+        let agent = AgentModule::test("claude-code")
+            .name("Claude Code")
+            .dir(dir)
+            .entry(vec!["run".into()]);
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.
         *app.new_orgs.write().await =
