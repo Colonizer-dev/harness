@@ -527,6 +527,8 @@ pub(crate) async fn attempt_auto_rebase(
         Ok(_) => {
             app.session_log(session_id, "info", format!("auto-rebased onto {main_sha} and pushed"))
                 .await;
+            // Issue #765: the rebase rewrote every colony commit; re-point their links.
+            crate::commit_links::reconcile_session(app, session_id).await;
             app.update_session(session_id, |x| {
                 x.needs_rebase = false;
                 x.rebase_orphaned = false;

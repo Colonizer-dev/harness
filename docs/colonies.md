@@ -372,6 +372,23 @@ node scripts/colony-report.mjs --transcript <id> --origin autonomy,watchdog
 **Limits.** Lines written before this field existed have no `origin`. The vocabulary is in
 [protocol.md, Origins](protocol.md#origins).
 
+## Which commits a colony wrote
+
+When a publish pushes, the mothership records each commit the branch carries past its base in
+`<data>/sessions/<id>/commits.json`: the full sha, its `git patch-id --stable`, the colony and the
+agent session that wrote it. The patch-id names the change rather than the commit, so the link
+survives a rebase, a cherry-pick or a message-only amend.
+
+After the branch is rewritten, a reconcile re-points each link whose commit is no longer on the
+branch to the one commit there with the same patch-id, keeping the old shas in `previous`. It runs
+after the watcher's own auto-rebase pushes, and again at every publish.
+
+**Limits.** The reconcile never guesses. A squash, an amend that changed the content, or more than
+one matching commit leaves the link in place, flagged `orphaned`. A failing git call changes
+nothing, and while a rebase is in progress the reconcile does not run. A rewrite the mothership did
+not make itself (a force-push from elsewhere, the merge train's update) is picked up at the next
+publish or auto-rebase, not the moment it lands.
+
 ## The log archive
 
 When a colony ends, the mothership saves its session directory (event logs, the PR description,

@@ -29,6 +29,7 @@ mod cli;
 mod code;
 mod colonize;
 mod colony_secrets;
+mod commit_links;
 mod config;
 mod deja;
 mod deps;
