@@ -123,6 +123,17 @@ Pi do not — the harness refuses to launch a colony on one of them while a poli
 install's `exec_policy` setting, or a repo `.colonizer/exec-policy.json`), naming the module and
 where the policy came from, so a set policy is never silently ignored.
 
+## Path policy
+
+Every path-taking tool call (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`, `Glob`)
+meets the mounted bind list (`pathpolicy.mjs`, issue #647) after it is resolved through any
+symlink, the way the boot resolved its binds. A call that lands on a masked path — or writes to a
+masked or protected one — emits one `path_policy` event per distinct (access, path); reads of
+protected paths are allowed, so they are not attempts. Reporting only: the event carries no
+decision, the tool runs exactly as it would have, and the mount (docs/path-policy.md) is what
+enforces. The harness logs each attempt on the colony and in the History log. A masked path
+reached through `Bash` never gets here — that is the exec policy's `secret-paths` rule above.
+
 ## Waiting
 
 Every colony also gets `mcp__colonizer_wait__wait` from an in-process MCP server (`colonizer_wait`),
