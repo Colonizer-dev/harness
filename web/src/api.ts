@@ -2,6 +2,7 @@
 import type {
   ActivityPage,
   ActivityQuery,
+  ApiTokenMeta,
   Draft,
   EditsRequest,
   FileCommit,
@@ -23,6 +24,7 @@ import type {
   ChatPatch,
   ChatSendRequest,
   ChatStreamEvent,
+  CreatedApiToken,
   MapFileDetail,
   RepoPackages,
   BurnDownStatus,
@@ -54,6 +56,7 @@ import type {
   ModelOption,
   ModelProvider,
   ModuleInfo,
+  NewApiToken,
   NewNoteRequest,
   NewSessionRequest,
   OrgInfo,
@@ -248,6 +251,12 @@ export interface Api {
   rejectRemotePairing(code: string): Promise<{ github_login: string }>;
   /** DELETE /api/remote/owner: unbinds the owner and clears pending codes; the owner's relay sessions stop working. Local-only. */
   unbindRemoteOwner(): Promise<void>;
+  /** GET /api/tokens: every scoped API token's metadata, oldest first (docs/cli.md, "Scoped API tokens"). */
+  tokens(): Promise<ApiTokenMeta[]>;
+  /** POST /api/tokens: mints one. The plaintext in the answer is shown once and never again; 400 with the reason on bad input. */
+  createToken(body: NewApiToken): Promise<CreatedApiToken>;
+  /** DELETE /api/tokens/{id}: revokes at once; 404 when no token carries the id. */
+  revokeToken(id: string): Promise<void>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
@@ -586,6 +595,9 @@ export const httpApi: Api = {
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
   rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),
   unbindRemoteOwner: () => del("/api/remote/owner"),
+  tokens: () => request("/api/tokens"),
+  createToken: (body) => post("/api/tokens", body),
+  revokeToken: (id) => del(`/api/tokens/${enc(id)}`),
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

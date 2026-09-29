@@ -32,15 +32,23 @@ follows the same switches as the other modules: findings only under `COLONIZER_F
 memory only when `COLONIZER_MEMORY_DIR` is mounted, the loop tools only under `COLONIZER_LOOP=true`
 — `loop_next` additionally when `COLONIZER_LOOP_SELF_PACED=true` — and `wait` always.
 
+The first tool in the list follows no switch: **`ask_user`** is the question channel
+(docs/protocol.md §2). A call POSTs to the bridge, which emits the `question` event, moves the
+status to `waiting_for_answer`, and holds the HTTP response until the matching `answer` command
+resolves it with `{answers, response}` and the status settles back — the turn continues on the
+answer. A colonizer question is never also a `tool_call`/`tool_result`, and no `tool_timeout_sec`
+override is needed: grok's default (6000 s) outlives any human. An `answer` naming an unknown id is
+warned about, and an interrupt, a turn end or a shutdown cancels every open ask
+(`{cancelled: true}`).
+
 ## Headless, not ACP
 
 Grok also speaks ACP (`grok agent stdio`, bidirectional — tool approvals and questions). This slice
 uses headless mode instead: one process per turn, read-only stream, no SDK to vendor, and a mapping
-small enough to test against a stub CLI. The cost is that nothing interactive can cross the
-boundary: an `answer` command is logged and ignored (the agent cannot ask the user anything yet),
-and `interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an
-error, and the runner keeps serving turns. Question routing — via ACP (`session/request_permission`)
-or a colonizer MCP ask tool — is the follow-up.
+small enough to test against a stub CLI. Nothing interactive crosses the grok boundary itself:
+`interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an error,
+and the runner keeps serving turns. Questions still reach the user — through the colonizer MCP
+server's `ask_user` (above), which the `answer` command answers.
 
 ## Pinned binary
 
@@ -101,8 +109,9 @@ slice wants them off.
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv, env,
 TTY state and trust store it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the
-model against the registered colonizer MCP server, so findings, memory, the loop tools and wait are
-tested end to end (`mcp.mjs` itself is byte-identical to the codex module's and covered by its
+model against the registered colonizer MCP server, so findings, memory, the loop tools, wait and an
+ask-and-answer round trip are tested end to end (`mcp.mjs` itself is byte-identical to the codex
+module's and covered by its
 `test/mcp.test.mjs`). The happy path's events are checked against the required fields of
 `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
 
@@ -127,7 +136,6 @@ keyed on the same verdict the test asserts.
   colony does not depend on grok being preinstalled in the image. (The harness now refuses a launch
   or boot on a stock preset image, where grok is never present; a custom image is still only
   checked by the runner's in-VM preflight.)
-- Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
