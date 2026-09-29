@@ -2583,17 +2583,18 @@ at all reads as `null`, never as free.
      "cost_usd": 12.47, "routed_cost_usd": 0.03,
      "tokens": {"input": 482001, "output": 123477, "cache_read": 900233, "cache_write": 4412},
      "models": [{"model": "claude-opus-5", "tokens": 932190, "cost_usd": 11.80}],
-     "launched": 2, "returned": 1}
+     "launched": 2, "returned": 1, "scoring_ms": 0}
   ]}
 ]}
 ```
 
 `days` is how far back to answer, default 30, clamped to 1–365. Days come back oldest first and only
 days the journal mentions appear; each day's orgs are sorted by org name. Per day, `orgs` entries
-carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting) and
+carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting),
 `returned` (colonies that crossed into a terminal state that day — pull request opened, merged or
-closed, nothing to push, or stopped/failed). A colony counts as returned once per run, on the
-transition, never on the later updates.
+closed, nothing to push, or stopped/failed) and `scoring_ms` (the bench's scoring time journaled
+that day, `0` where none). A colony counts as returned once per run, on the transition, never on
+the later updates.
 
 The journal behind it is `spend.jsonl` in the data dir, next to `sessions.json` and `routing.jsonl`:
 append-only, one JSON line per event, never rewritten. Colony cleanup and deletion do not touch it,
@@ -2610,13 +2611,21 @@ and rows from builds before those fields existed carry neither, and both still p
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "session": "clgay4wk", "agent": "claude-code", "cost_usd": 0.03}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched", "session": "clgay4wk", "agent": "claude-code"}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned", "session": "clgay4wk", "agent": "claude-code"}
+{"ts": "…", "day": "2026-09-20", "org": "bench", "kind": "scoring", "scoring_ms": 9320}
 ```
 
-Every row carries the four token fields, `0` where it has no tokens. `usage` rows are a turn's increment over the turn before it (the session record keeps the
+Every row carries the four token fields, `0` where it has no tokens; a `scoring` row carries none
+of them. `usage` rows are a turn's increment over the turn before it (the session record keeps the
 cumulative; the journal gets the deltas). A one-model turn files its cost on that model's row; a
 multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
 attribution rule. A failed append is reported through the app's sticky storage alert and leaves
 the run unchanged: a lost row is a lost measurement, not a failed run.
+
+A `scoring` row is the bench's ([bench.md](bench.md)): when a `scripts/bench.mjs run` finishes it
+files how long it spent scoring the run's pull requests under the `bench` org, the way chat files
+under its pseudo-org — no colony, no tokens and no dollar, since scoring makes no model calls and
+its only cost is time. The history sums those into the org entry's `scoring_ms` for the day, beside
+the colonies' spend.
 
 Which channel measured a row's `cost_usd` splits each colony's spend in two. A `usage` row's dollar
 is the agent's own turn-end estimate: first-party traffic never passes the gateway — microsandbox
