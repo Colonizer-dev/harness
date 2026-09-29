@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://colonizer.dev/fleet-export.schema.json",
+  "title": "Colonizer fleet export bundle",
+  "description": "The fleet export contract of docs/protocol.md §6.11 (#687): the manifest.json that opens a `colonizer fleet export` bundle at the top level, and the shapes that travel with it or over the fleet-join transfer (#686) under $defs — the ImportedSession lines of history/sessions.jsonl, the Chunk of the resumable transfer, and the per-member ImportCursor the receiver keeps. A bundle is a zstd-compressed tar whose entries are regular files only (never symlinks); export reads an allowlist of the data dir and, of the config dir, only its host_id, so no API token, provider key, Claude credential or colony secret is ever in one, and a session record is exported as the allowlist projection imported_session defines. An importer rejects an unknown format and any version newer than it supports; unknown fields are ignored for forward compatibility, which is why additionalProperties is deliberately left open, as in docs/agent-events.schema.json.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "const": "colonizer-fleet-export",
+      "description": "An importer refuses any other value before it looks at anything else."
+    },
+    "version": {
+      "const": 1,
+      "description": "The bundle format's version. An importer rejects a version greater than it supports; version 1 is what docs/protocol.md §6.11 describes."
+    },
+    "origin_host": {
+      "$ref": "#/$defs/host_id",
+      "description": "The machine the bundle came from. Namespaces every id it carries: a session's id is \"<origin_host>:<original_id>\", and the import lands under <data_dir>/fleet-imports/<origin_host>/."
+    },
+    "origin_name": {
+      "type": "string",
+      "description": "The exporting machine's hostname, for display — the default export file name carries it too (colonizer-export-<origin_name>-<YYYYMMDD>.tar.zst)."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339, when the bundle was written."
+    },
+    "categories": {
+      "type": "object",
+      "description": "One entry per category, exactly the preview shown before anything is sent (fleet export --preview, and the join flow's preview step). An excluded category appears with included false and zeros — distinguishable from an empty one.",
+      "properties": {
+        "history": { "$ref": "#/$defs/category" },
+        "logs": { "$ref": "#/$defs/category" },
+        "stats": { "$ref": "#/$defs/category" }
+      },
+      "required": ["history", "logs", "stats"]
+    },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file_entry" },
+      "description": "Every non-manifest entry of the bundle, each with its size and sha256. The importer verifies every hash it applies."
+    }
+  },
+  "required": ["format", "version", "origin_host", "created_at", "categories", "files"],
+  "$defs": {
+    "host_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*$",
+      "description": "A host id or a colony id as exported: one plain component, no path separators."
+    },
+    "category": {
+      "type": "object",
+      "description": "One category of the bundle: history (sessions), logs (per-colony event, harness, gateway and transcript files) or stats (the journals and the computed summary).",
+      "properties": {
+        "included": {
+          "type": "boolean",
+          "description": "false when the category was left out (--no-history and friends): count, from, to and bytes are then all zero/null as zeros."
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sessions for history; files for logs and stats."
+        },
+        "from": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "The earliest created_at across the exported sessions; null when there is none."
+        },
+        "to": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "The latest updated_at across the exported sessions; null when there is none."
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The category's uncompressed size."
+        }
+      },
+      "required": ["included", "count", "from", "to", "bytes"]
+    },
+    "file_entry": {
+      "type": "object",
+      "description": "One file of the bundle, named relative to the bundle root.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Bundle-relative: history/, logs/<original_id>/… or stats/…; never absolute, never through ..."
+        },
+        "category": {
+          "enum": ["history", "logs", "stats"]
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Of the file's raw (decompressed) bytes; verified against it at import."
+        }
+      },
+      "required": ["path", "category", "bytes", "sha256"]
+    },
+    "imported_session": {
+      "type": "object",
+      "description": "One line of history/sessions.jsonl: the allowlist projection of a colony's session record, not the record whole. Only the three identity fields are required; everything else is optional and nullable, so an exporter may leave out what its records never held.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*:[A-Za-z0-9_-][A-Za-z0-9._-]*$",
+          "description": "Namespaced \"<origin_host>:<original_id>\", so ids from many machines cannot collide in one fleet's sessions.json. Re-import replaces by this id."
+        },
+        "origin_host": { "$ref": "#/$defs/host_id" },
+        "original_id": { "$ref": "#/$defs/host_id" },
+        "repo": { "type": ["string", "null"] },
+        "org": { "type": ["string", "null"] },
+        "issue": { "type": ["integer", "null"] },
+        "issue_title": { "type": ["string", "null"] },
+        "status": {
+          "type": ["string", "null"],
+          "description": "The session status as exported, e.g. pr_opened, merged, closed, no_changes, stopped, failed, waiting_for_answer."
+        },
+        "branch": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "pr_url": { "type": ["string", "null"] },
+        "pr_opened_at": { "type": ["string", "null"], "format": "date-time" },
+        "merged_at": { "type": ["string", "null"], "format": "date-time" },
+        "summary": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] },
+        "cost_usd": { "type": ["number", "null"] },
+        "routed_cost_usd": { "type": ["number", "null"] },
+        "model_tier": { "type": ["string", "null"] },
+        "model_usage": {
+          "type": ["object", "null"],
+          "description": "Cumulative tokens per model, as in the turn_end event (docs/agent-events.schema.json).",
+          "additionalProperties": { "$ref": "#/$defs/model_tokens" }
+        },
+        "model_routing": {
+          "type": ["object", "null"],
+          "description": "The routing record as exported; open, because it follows the routing journal's shape."
+        },
+        "agent": { "type": ["string", "null"] },
+        "boot_timing": {
+          "type": ["object", "null"],
+          "description": "The boot timings as exported; open."
+        },
+        "created_at": { "type": ["string", "null"], "format": "date-time" },
+        "updated_at": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "required": ["id", "origin_host", "original_id"]
+    },
+    "chunk": {
+      "type": "object",
+      "description": "One piece of one bundle file on the resumable transfer (the join flow's chunks_for → apply_chunk, docs/protocol.md §6.11). offset, raw_len and total count raw (decompressed) bytes; data carries the chunk's raw bytes zstd-compressed and base64-encoded.",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Bundle-relative, as in file_entry."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Raw byte offset of this chunk in the file. Equal to the receiver's committed offset: append. Wholly below it: a duplicate, ignored. Above it: a gap, refused."
+        },
+        "raw_len": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Raw bytes this chunk carries."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The file's whole raw size, so the receiver knows what is left."
+        },
+        "data": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "description": "The chunk's raw bytes, zstd-compressed, base64-encoded."
+        }
+      },
+      "required": ["path", "offset", "raw_len", "total", "data"]
+    },
+    "import_cursor": {
+      "type": "object",
+      "description": "The receiver's per-member progress, kept at <data_dir>/fleet-imports/<origin_host>/cursor.json: the member's origin_host, when the cursor was last touched, and one files entry per path in flight. A resumed transfer starts from the committed offset; if re-sending a file's first offset bytes no longer hashes to prefix_sha256 — the source rotated or rewrote the file mid-transfer — the file restarts from 0.",
+      "properties": {
+        "origin_host": {
+          "type": "string",
+          "description": "The member this cursor belongs to; empty while a caller drives apply_chunk directly, without a bundle's manifest."
+        },
+        "updated_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When a chunk last landed; null until the first one does."
+        },
+        "files": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Raw bytes committed for this file so far."
+              },
+              "prefix_sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": "Sha256 of those committed bytes, so a changed source is detected before more of it is appended."
+              }
+            },
+            "required": ["offset", "prefix_sha256"]
+          }
+        }
+      },
+      "required": ["origin_host", "updated_at", "files"]
+    },
+    "model_tokens": {
+      "type": "object",
+      "description": "Cumulative tokens one model spent, the same shape the turn_end event carries (docs/agent-events.schema.json).",
+      "properties": {
+        "input_tokens": { "type": "integer" },
+        "output_tokens": { "type": "integer" },
+        "cache_read_tokens": { "type": "integer" },
+        "cache_write_tokens": { "type": "integer" }
+      },
+      "required": ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"]
+    }
+  }
+}
