@@ -136,9 +136,12 @@ impl App {
     /// the token. Only `fetch`, `push`, `ls-remote` and `clone` may run this way — they move or
     /// list objects without checking any out, so no content filter could run, and nothing that
     /// reads worktree content may ever carry a credential.
+    ///
+    /// The host's own `url.<base>.insteadOf`/`pushInsteadOf` rewrites ride along
+    /// ([`host_url_rewrites_from`]) — nothing else from its config does — so a mirror, an SSH rewrite or
+    /// a local stand-in for github.com keeps working without buying back the rest of the config.
     pub fn git_remote(&self) -> Command {
-        let mut c = git_clean();
-        c.args(["-c", "credential.helper=!gh auth git-credential"]);
+        let mut c = git_network(std::env::vars_os().collect());
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -240,6 +243,55 @@ fn git_hardened(base: impl IntoIterator<Item = (OsString, OsString)>) -> Command
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GH_PROMPT_DISABLED", "1");
     c
+}
+
+/// The network half of [`App::git_remote`] over `base` (the mothership's environment in
+/// production, a hand-built one in tests): the hardened command, the host's URL rewrites and the
+/// gh credential helper. The token is the caller's to add.
+fn git_network(base: Vec<(OsString, OsString)>) -> Command {
+    let mut c = git_hardened(base.clone());
+    for rewrite in host_url_rewrites_from(base) {
+        c.arg("-c").arg(rewrite);
+    }
+    c.args(["-c", "credential.helper=!gh auth git-credential"]);
+    c
+}
+
+/// The host git config's URL rewrites — `url.<base>.insteadOf` and `url.<base>.pushInsteadOf`
+/// from the global and system configs the clean command pins out — as `key=value` pairs for `-c`.
+/// Only these keys are read: a rewrite changes where a network command connects and nothing else,
+/// so it cannot define a filter, a helper or a hook, and protocol policy (`ext::` stays refused)
+/// is the clean config's. Read with the same environment allowlist, from `/` so no repository's
+/// local config can join in. Any failure — no git, no config, no rewrites — means none.
+fn host_url_rewrites_from(base: impl IntoIterator<Item = (OsString, OsString)>) -> Vec<String> {
+    let mut c = std::process::Command::new("git");
+    c.env_clear();
+    for (key, value) in base {
+        let name = key.to_string_lossy();
+        if name == "GIT_CONFIG_GLOBAL"
+            || name == "GIT_CONFIG_NOSYSTEM"
+            || GIT_ENV_KEEP.iter().any(|kept| name.eq_ignore_ascii_case(kept))
+        {
+            c.env(key, value);
+        }
+    }
+    c.current_dir("/")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["config", "-z", "--get-regexp", r"^url\..*\.(push)?insteadof$"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let Ok(out) = c.output() else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter_map(|entry| {
+            let (key, value) = entry.split_once('\n')?;
+            // `-c` splits at the first `=`, so a key holding one cannot be passed through intact.
+            (!key.contains('=') && !value.is_empty()).then(|| format!("{key}={value}"))
+        })
+        .collect()
 }
 
 /// [`git_hardened`] over the mothership's own environment: the credential-free default.
@@ -351,6 +403,10 @@ pub enum Denial {
     NotVisible,
     /// The credential itself was refused.
     BadCredential,
+    /// git needed a credential and nothing answered with one: no gh login, no saved token. With
+    /// prompts off, git gives up at once — permanent until someone connects GitHub, so it must
+    /// fail the boot rather than be retried.
+    NoCredential,
 }
 
 /// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
@@ -359,8 +415,17 @@ pub fn classify(error: &str) -> Option<Denial> {
     let text = error.to_ascii_lowercase();
     if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
         Some(Denial::NotVisible)
-    } else if text.contains("http 401") || text.contains("http 403") || text.contains("bad credentials") {
+    } else if text.contains("http 401")
+        || text.contains("http 403")
+        || text.contains("bad credentials")
+        || text.contains("authentication failed")
+    {
         Some(Denial::BadCredential)
+    } else if text.contains("could not read username")
+        || text.contains("could not read password")
+        || text.contains("terminal prompts disabled")
+    {
+        Some(Denial::NoCredential)
     } else {
         None
     }
@@ -391,6 +456,11 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
         Denial::BadCredential => anyhow!(
             "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
              (GitHub said: {raw})"
+        ),
+        Denial::NoCredential => anyhow!(
+            "git asked for a GitHub credential to reach {repo} and none was available — no gh login or saved \
+             token answered. Connect GitHub in Settings → Connections, then resume. GitHub also asks this way for \
+             a repository that does not exist. (git said: {raw})"
         ),
     }
 }
@@ -2909,6 +2979,9 @@ mod tests {
             "GraphQL: Could not resolve to a Repository with the name 'o/r'.",
             "gh: Bad credentials (HTTP 401)",
             "gh: Resource not accessible (HTTP 403)",
+            // git over https with no credential to offer (issue #681's colony-e2e hang): permanent.
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+            "remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/o/r.git/'",
         ] {
             assert!(super::classify(permanent).is_some(), "{permanent}");
             assert!(!is_transient(permanent), "{permanent}");
@@ -4682,6 +4755,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The network variant keeps the host config's URL rewrites and nothing else from it — the
+    /// colony-e2e shape: a global config rewriting https://github.com/ onto a local bare repo,
+    /// and a stub `gh` that answers no credential. Before the rewrites rode along, the clone went
+    /// to the real github.com, asked the stub for a credential and failed with nothing a boot
+    /// recognised as permanent, so the boot retried it for the whole 20-minute budget. Now the
+    /// clone resolves locally without ever consulting the helper, the clean command still sees
+    /// none of the rewrite, and the missing-credential failure is classified as permanent.
+    #[test]
+    fn the_network_variant_keeps_host_url_rewrites_and_nothing_else() {
+        let root = std::env::temp_dir().join(format!("colonizer-git-rewrite-{}", short_id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let scratch = root.join("scratch");
+        let bin = root.join("bin");
+        std::fs::create_dir_all(scratch.join("o")).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .args(args)
+                .status()
+                .expect("git runs")
+                .success();
+            assert!(ok, "fixture git {args:?} failed");
+        };
+        let bare = scratch.join("o").join("r.git");
+        git(&["init", "-q", "--bare", bare.to_str().unwrap()]);
+        let gh_log = root.join("gh-calls.log");
+        let gh = bin.join("gh");
+        std::fs::write(&gh, format!("#!/bin/sh\necho \"$*\" >> '{}'\nexit 1\n", gh_log.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let gitconfig = root.join("gitconfig");
+        std::fs::write(
+            &gitconfig,
+            format!(
+                "[url \"file://{}/\"]\n\tinsteadOf = https://github.com/\n[filter \"sentinel\"]\n\tclean = false\n",
+                scratch.display()
+            ),
+        )
+        .unwrap();
+        let base: Vec<(OsString, OsString)> = vec![
+            (
+                OsString::from("PATH"),
+                OsString::from(format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default())),
+            ),
+            (OsString::from("HOME"), root.clone().into_os_string()),
+            (OsString::from("GIT_CONFIG_GLOBAL"), gitconfig.clone().into_os_string()),
+        ];
+
+        let rewrites = host_url_rewrites_from(base.clone());
+        assert_eq!(
+            rewrites,
+            vec![format!("url.file://{}/.insteadof=https://github.com/", scratch.display())],
+            "only the rewrite is carried, not the filter"
+        );
+
+        let clone = root.join("clone.git");
+        let started = std::time::Instant::now();
+        let out = git_network(base.clone())
+            .as_std_mut()
+            .args(["clone", "--bare", "--quiet", "https://github.com/o/r.git"])
+            .arg(&clone)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "the rewritten clone failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(started.elapsed() < Duration::from_secs(30), "the clone must not hang");
+        assert!(
+            !gh_log.exists(),
+            "a local remote needs no credential: {}",
+            std::fs::read_to_string(&gh_log).unwrap_or_default()
+        );
+
+        // The clean default never sees the rewrite: its config is still /dev/null.
+        let out = git_hardened(base)
+            .as_std_mut()
+            .args(["config", "--get-regexp", "^url\\."])
+            .output()
+            .expect("git runs");
+        assert!(out.stdout.is_empty(), "the clean command read the host config");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The production constructor runs against the real process environment, so this is the check
     /// that the scrub stays: whatever the process that launched the tests carries, the child's
     /// environment must be the [`GIT_ENV_KEEP`] allowlist and nothing else. The child dumps its own
@@ -4729,7 +4892,19 @@ mod tests {
             "GIT_TERMINAL_PROMPT",
             "GH_PROMPT_DISABLED",
         ];
-        let git_added = ["GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_EXEC_PATH", "GIT_PREFIX"];
+        // macOS's CoreFoundation sets `__CF_USER_TEXT_ENCODING` in every process it starts, so the
+        // alias shell carries it there even from an empty environment.
+        let git_added = [
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_DIR",
+            "GIT_EXEC_PATH",
+            "GIT_PREFIX",
+            if cfg!(target_os = "macos") {
+                "__CF_USER_TEXT_ENCODING"
+            } else {
+                "GIT_PREFIX"
+            },
+        ];
         for key in &keys {
             assert!(!key.starts_with("CARGO_"), "inherited {key} reached host git");
             assert!(

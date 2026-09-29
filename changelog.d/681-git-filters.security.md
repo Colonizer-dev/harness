@@ -6,4 +6,7 @@
   credential helper and token now ride only on an explicit authenticated variant used by `fetch`,
   `push`, `ls-remote` and `clone`, which read no worktree content; the mothership's own auto-rebase
   and the reclaim and catch-up paths get the same hardening, and a host-side rebase stamps its
-  commits with a fixed host identity since the global config no longer supplies one. ([#681])
+  commits with a fixed host identity since the global config no longer supplies one. The
+  authenticated variant keeps only the host's `url.*.insteadOf`/`pushInsteadOf` rewrites from its
+  config, and a git credential prompt nobody can answer now fails a boot at once with a clear
+  message instead of being retried for 20 minutes. ([#681])
