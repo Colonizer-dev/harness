@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { DENIAL_HINTS } from '../denials.mjs';
 import { createFindingsServer } from '../findings.mjs';
 import { createMemoryServer } from '../memory.mjs';
+import { parsePathPolicy } from '../pathpolicy.mjs';
 import {
   AsyncQueue,
   buildOptions as buildOptionsWithDefaults,
@@ -75,6 +76,9 @@ const askInput = {
   ],
 };
 
+// The bind list the turn's masked read is judged against (issue #647): `.env`, the default mask.
+const turnPathPolicy = parsePathPolicy('mask-file .env\n');
+
 /**
  * The colony's two in-process MCP servers, wired to one event stream, with the tool defs captured so
  * the fake turn can call them the way Claude Code would. Real zod, so the proposals and findings
@@ -131,6 +135,11 @@ async function* issueTurn(options, calls) {
       is_error: true,
     },
   ]);
+  // A masked read (issue #647): the mount hands back an empty file, and the runner reports the
+  // attempt itself as a `path_policy` event between the tool_call and the tool_result.
+  yield stream({ type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_read', name: 'Read' } });
+  yield assistant('msg_4', [{ type: 'tool_use', id: 'toolu_read', name: 'Read', input: { file_path: '.env' } }]);
+  yield user([{ type: 'tool_result', tool_use_id: 'toolu_read', content: [{ type: 'text', text: '' }] }]);
   // modelUsage is per model: `cost_usd` sums the Claude models only, `model_usage` reports the rest as tokens.
   yield {
     type: 'result',
@@ -160,7 +169,7 @@ test('maps a turn with a question to protocol events', async () => {
   };
   commands.push({ type: 'user_message', id: 'initial', text: 'Fix the issue' });
 
-  await runAgent({ query, commands, emit, options: { model: 'fake' }, graceMs: 100 });
+  await runAgent({ query, commands, emit, options: { model: 'fake' }, pathPolicy: turnPathPolicy, graceMs: 100 });
 
   const ofType = (type) => events.filter((e) => e.type === type);
   assert.deepEqual(events[0], { type: 'status', state: 'idle' });
@@ -207,9 +216,15 @@ test('maps a turn with a question to protocol events', async () => {
   assert.deepEqual(ofType('tool_call'), [
     { type: 'tool_call', message_id: 'msg_2', tool_call_id: 'toolu_bash', name: 'Bash', input: { command: 'echo hi > hello.txt' } },
     { type: 'tool_call', message_id: 'msg_3', tool_call_id: 'toolu_fetch', name: 'Bash', input: { command: 'git fetch origin' } },
+    { type: 'tool_call', message_id: 'msg_4', tool_call_id: 'toolu_read', name: 'Read', input: { file_path: '.env' } },
+  ]);
+  // The masked read is reported once, naming the tool, the access and the side of the policy; the
+  // mount, not this event, is what stops it (pathpolicy.mjs).
+  assert.deepEqual(ofType('path_policy'), [
+    { type: 'path_policy', access: 'read', policy: 'masked', path: '.env', tool: 'Read' },
   ]);
   const results = ofType('tool_result');
-  assert.equal(results.length, 2);
+  assert.equal(results.length, 3);
   assert.equal(results[0].tool_call_id, 'toolu_bash');
   assert.equal(results[0].is_error, false);
   assert.ok(results[0].output.length <= MAX_TOOL_OUTPUT);
@@ -267,7 +282,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
   };
   commands.push({ type: 'user_message', id: 'initial', text: 'Fix the issue' });
 
-  await runAgent({ query, commands, emit, options: { model: 'fake' }, graceMs: 100 });
+  await runAgent({ query, commands, emit, options: { model: 'fake' }, pathPolicy: turnPathPolicy, graceMs: 100 });
 
   const fixture = readFileSync(new URL('./fixtures/events.jsonl', import.meta.url), 'utf8')
     .trimEnd()
@@ -294,6 +309,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
     'model_changed',
     'memory_proposal',
     'finding',
+    'path_policy',
   ];
   const types = new Set(fixture.map((e) => e.type));
   for (const type of protocolTypes) assert.ok(types.has(type), `the fixture has no ${type} event`);

@@ -424,6 +424,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         AgentEvent::LoopStop { reason } => {
             crate::loops::on_stop(app, id, &reason).await;
         }
+        // The path policy's runtime report (issue #647): a log line and an activity entry per
+        // distinct (access, path), with the untrusted fields sanitised on this side (path_policy.rs).
+        AgentEvent::PathPolicy {
+            access,
+            policy,
+            path,
+            tool,
+        } => {
+            crate::path_policy::on_attempt(app, id, rt, &access, &policy, &path, &tool).await;
+        }
         // Shadow measurement (#475): the pass's decisions are logged to the jev_ladder ledger and
         // arm the reread watch, and nothing else changes. Pure telemetry — never read as acted on.
         AgentEvent::JevLadder { applied, decisions, .. } => {
@@ -1461,6 +1471,104 @@ mod tests {
         );
         assert_eq!(s.error, None, "so no agent-exited error painted over the suspension");
         assert!(s.suspended.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The path policy's runtime report (issue #647): the first attempt at a path lands as one
+    /// warn line in the colony log and one activity entry; a repeat of the same (access, path) is
+    /// silent; a path that could never be a bind, or a field outside the contract's two words, is
+    /// dropped outright rather than logged.
+    #[tokio::test]
+    async fn a_path_policy_attempt_is_logged_once_and_sanitised() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let entries = || async {
+            let text = std::fs::read_to_string(app.cfg.data_dir.join(crate::activity::FILE)).unwrap();
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<crate::activity::Entry>(line).ok())
+                .filter(|entry| entry.kind == "colony.path_policy")
+                .collect::<Vec<_>>()
+        };
+
+        let attempt = r#"{"seq":1,"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}"#;
+        handle_agent_event(&app, "abc", &rt, attempt).await;
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(logs.back().unwrap()["level"], "warn");
+            assert_eq!(
+                logs.back().unwrap()["message"],
+                "path policy: agent tried to read masked `.env` (Read)",
+                "the attempt, the side of the policy, and the tool, one line"
+            );
+        }
+        let logged = entries().await;
+        assert_eq!(logged.len(), 1, "one attempt, one activity entry");
+        assert_eq!(logged[0].actor, "colony");
+        assert_eq!(logged[0].colony.as_deref(), Some("abc"));
+        assert_eq!(logged[0].detail.as_deref(), Some("tried to read masked `.env` (Read)"));
+
+        handle_agent_event(&app, "abc", &rt, attempt).await;
+        assert_eq!(entries().await.len(), 1, "a repeated attempt is not a second entry");
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(
+                logs.back().unwrap()["message"],
+                "path policy: agent tried to read masked `.env` (Read)",
+                "the colony log did not repeat it either"
+            );
+        }
+
+        handle_agent_event(
+            &app,
+            "abc",
+            &rt,
+            r#"{"seq":2,"type":"path_policy","access":"write","policy":"protected","path":".git/config","tool":"Edit"}"#,
+        )
+        .await;
+        assert_eq!(entries().await.len(), 2, "a different (access, path) is its own report");
+
+        for junk in [
+            r#"{"seq":3,"type":"path_policy","access":"read","policy":"masked","path":"/abs/.env","tool":"Read"}"#,
+            r#"{"seq":4,"type":"path_policy","access":"read","policy":"masked","path":"../escape","tool":"Read"}"#,
+            r#"{"seq":5,"type":"path_policy","access":"peek","policy":"masked","path":".env"}"#,
+        ] {
+            handle_agent_event(&app, "abc", &rt, junk).await;
+        }
+        assert_eq!(entries().await.len(), 2, "nothing unbindable reached the log");
+
+        // The cap: once ATTEMPT_CAP distinct (access, path) pairs are carried, further attempts are
+        // dropped from both logs, and one notice says so — once, not per dropped attempt.
+        for i in 0..=crate::path_policy::ATTEMPT_CAP {
+            handle_agent_event(
+                &app,
+                "abc",
+                &rt,
+                &format!(
+                    r#"{{"seq":{},"type":"path_policy","access":"read","policy":"masked","path":"cap{i}","tool":"Read"}}"#,
+                    10 + i
+                ),
+            )
+            .await;
+        }
+        // Two were already carried, so the loop's ATTEMPT_CAP + 1 distinct paths fill the set to
+        // exactly the cap; the attempts beyond it reach neither log.
+        assert_eq!(
+            entries().await.len(),
+            crate::path_policy::ATTEMPT_CAP,
+            "the activity stops at the cap"
+        );
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(
+                logs.iter()
+                    .filter(|line| line["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("further attempts are not reported")))
+                    .count(),
+                1,
+                "the cap notice is logged exactly once"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

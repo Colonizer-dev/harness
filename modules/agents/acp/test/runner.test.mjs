@@ -143,6 +143,15 @@ test('acp/execpolicy.mjs is byte-identical to the claude-code original it is cop
   );
 });
 
+test('acp/pathpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'pathpolicy.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'pathpolicy.mjs'));
+  assert.ok(
+    copy.equals(original),
+    'modules/agents/acp/pathpolicy.mjs has drifted from modules/agents/claude-code/pathpolicy.mjs; the path policy is one file in two places — change both together',
+  );
+});
+
 test('handshake and prompt turns: initialize, session/new in the workspace, mapped events, queued messages', async (t) => {
   const runner = startRunner({
     script: { turns: { '*': { updates: [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } }] } } },
@@ -469,6 +478,44 @@ test('fs requests read and write inside the workspace, with line/limit and paren
   assert.deepEqual(runner.asks('fs/write_text_file')[0].response, { result: {} });
   assert.equal(readFileSync(join(runner.workspace, 'notes/b.txt'), 'utf8'), 'written');
   assert.equal(readFileSync(join(runner.workspace, 'new/deep/c.txt'), 'utf8'), 'nested', 'parents are created');
+  await stop(runner);
+});
+
+test('fs requests on masked or protected paths report one path_policy event each (issue #647)', async (t) => {
+  // The policy comes from the same bind list the boot mounts, via the override env the tests use.
+  const policyFile = join(mkdtempSync(join(tmpdir(), 'acp-policy-')), 'path-policy');
+  writeFileSync(policyFile, 'mask-file .env\nprotect .git/config\n');
+  const runner = startRunner({
+    env: { COLONIZER_PATH_POLICY: policyFile },
+    files: { '.env': 'SECRET=1\n', '.git/config': '[core]\n', 'notes/a.txt': 'l1\n' },
+    script: {
+      turns: {
+        fs: {
+          asks: [
+            { method: 'fs/read_text_file', params: { sessionId: 's', path: '.env' } },
+            { method: 'fs/read_text_file', params: { sessionId: 's', path: '.git/config' } },
+            { method: 'fs/read_text_file', params: { sessionId: 's', path: 'notes/a.txt' } },
+            { method: 'fs/write_text_file', params: { sessionId: 's', path: '.git/config', content: 'x' } },
+            { method: 'fs/read_text_file', params: { sessionId: 's', path: '.env' } },
+          ],
+        },
+      },
+    },
+  });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'fs' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  // A read of a protected path is allowed, an unmasked file is none of the policy's business, and
+  // a second attempt at the same path is not a second event. The replies are untouched either way.
+  assert.deepEqual(
+    runner.events.filter((e) => e.type === 'path_policy'),
+    [
+      { type: 'path_policy', access: 'read', policy: 'masked', path: '.env', tool: 'fs/read_text_file' },
+      { type: 'path_policy', access: 'write', policy: 'protected', path: '.git/config', tool: 'fs/write_text_file' },
+    ],
+  );
+  assert.equal(readFileSync(join(runner.workspace, '.env'), 'utf8'), 'SECRET=1\n', 'the mount empties masked files, not this runner');
   await stop(runner);
 });
 
