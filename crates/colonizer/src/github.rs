@@ -1991,8 +1991,9 @@ fn parse_ls_remote(out: &str, branch: &str) -> Option<String> {
 
 /// Commits the worktree on the host, pushes the branch and opens the pull request. Resumably: whatever a
 /// previous attempt already got done (commit, push, pull request) is detected against git and the remote
-/// and skipped, so retrying after a failure never duplicates work. The microVM must already be gone:
-/// everything it left behind is treated as untrusted data. `grant` is the publish approval minted
+/// and skipped, so retrying after a failure never duplicates work. The caller has confirmed the colony's
+/// microVM is gone (`publish_session` gates on the host's sandbox list before calling), and everything the
+/// microVM left behind is treated as untrusted data. `grant` is the publish approval minted
 /// where this run was approved — the operator's Create PR press or autopilot's confirmed verdict —
 /// and every external effect below checks itself against it (issue #98).
 pub async fn publish(
