@@ -38,6 +38,16 @@ Limits:
 Add `?mock=1` to the address to run the cockpit against a built-in fake backend. It needs no
 mothership and is useful for trying the UI.
 
+### Hosted demo
+
+The same mock also ships as a static bundle: `npm run build:demo` in `web/` writes `web/dist-demo/`,
+a cockpit build with the mock forced on (no `?mock=1` needed). It makes no `/api` calls, registers
+no service worker, and carries no install manifest, so it is a plain page. The website repo serves
+it at `https://colonizer.dev/demo`; the host needs one SPA rule — every `/demo/*` path that is not a
+file in the bundle serves `/demo/index.html` with a 200 — because the cockpit keeps its view in the
+page rather than in the address. The demo is not published yet, so do not expect the link to work
+until the website repo ships it.
+
 ## Layout
 
 The layout depends on the window width:
@@ -507,7 +517,8 @@ Notifications only name the repository and issue number. They never include the 
 question, or an error.
 
 Limits: Web Push needs a secure origin (localhost counts) and a browser with push support. On iPhone
-and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen.
+and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen; on an iOS device that
+isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead.
 
 ### Desktop
 
@@ -515,7 +526,9 @@ and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen.
 
 - **Install app** installs the cockpit as an app with its own window and Dock or taskbar icon. The
   button appears when the browser offers installation (Chrome, Edge). In Safari, use File → Add to
-  Dock. Same cockpit, same sign-in.
+  Dock; on an iPhone or iPad the pane shows the Add to Home Screen steps instead. Same cockpit, same
+  sign-in. When the mothership ships a new build, a **Colonizer updated** card in the corner offers
+  **Reload**; the running build keeps working until you do.
 - **Start Colonizer at login** installs a macOS LaunchAgent or a Linux systemd user unit that starts
   the mothership when you log in. Turning it off never stops a running mothership. The same switch
   is `colonizer login-item enable|disable|status`.

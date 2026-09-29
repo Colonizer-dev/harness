@@ -659,6 +659,7 @@ export function NewSession({
   onOpenSettings,
   autopilotDefault,
   sessions = [],
+  initialIssue = null,
   onOpenColony,
   onCreated,
 }: {
@@ -669,6 +670,8 @@ export function NewSession({
   autopilotDefault: boolean;
   /** The mothership's colony list, for the pre-submit duplicate check (`heldByFor`). */
   sessions?: Session[];
+  /** An issue a shared link named (issue #745): its repository preselected, its row open and picked. */
+  initialIssue?: { repo: string; number: number } | null;
   /** Opens a colony holding an issue, from that issue's inline warning. */
   onOpenColony?: (session: Session) => void;
   onCreated: (session: Session) => void;
@@ -678,13 +681,13 @@ export function NewSession({
   const [repos, setRepos] = useState<Repo[] | null>(null);
   const [reposError, setReposError] = useState<string | null>(null);
   const [repoQuery, setRepoQuery] = useState("");
-  const [repo, setRepo] = useState<string | null>(() => stored("colonizer.repo"));
-  const [picking, setPicking] = useState(() => !stored("colonizer.repo"));
+  const [repo, setRepo] = useState<string | null>(() => initialIssue?.repo ?? stored("colonizer.repo"));
+  const [picking, setPicking] = useState(() => initialIssue ? false : !stored("colonizer.repo"));
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [issuesError, setIssuesError] = useState<string | null>(null);
   const [issueQuery, setIssueQuery] = useState("");
-  const [openIssue, setOpenIssue] = useState<number | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [openIssue, setOpenIssue] = useState<number | null>(initialIssue?.number ?? null);
+  const [selected, setSelected] = useState<Set<number>>(() => new Set(initialIssue ? [initialIssue.number] : []));
   const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [queueBehind, setQueueBehind] = useState(false);
   const [blockedByDuplicate, setBlockedByDuplicate] = useState(false);
@@ -714,12 +717,16 @@ export function NewSession({
     };
   }, [api, githubConnected]);
 
+  // A batch selection belongs to one repository's list, so it clears when the repository changes —
+  // but not on the very first fetch, which a shared-issue prefill's selection must survive.
+  const prevRepo = useRef<string | null>(initialIssue?.repo ?? null);
   useEffect(() => {
     if (!activeRepo || !githubConnected) return;
     let cancelled = false;
     setIssues(null);
     setIssuesError(null);
-    setSelected(new Set());
+    if (prevRepo.current !== activeRepo) setSelected(new Set());
+    prevRepo.current = activeRepo;
     api
       .issues(activeRepo)
       .then((list) => !cancelled && setIssues(list))
@@ -728,6 +735,16 @@ export function NewSession({
       cancelled = true;
     };
   }, [api, activeRepo, githubConnected]);
+
+  // A shared issue the loaded list does not carry — closed, or a pull request's number: the row has
+  // nothing to open, so the filter names the number instead, the closest honest answer to "here is
+  // the thing that was shared". Once per issue, so the visitor can clear the filter and stay clear.
+  const prefillSeen = useRef(!initialIssue);
+  useEffect(() => {
+    if (!initialIssue || !issues || prefillSeen.current) return;
+    prefillSeen.current = true;
+    if (!issues.some((i) => i.number === initialIssue.number)) setIssueQuery(String(initialIssue.number));
+  }, [issues, initialIssue]);
 
   if (!statusKnown) {
     return (

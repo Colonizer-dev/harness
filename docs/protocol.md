@@ -28,7 +28,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/plugins/<name>/` | ro | Claude Code plugin directories, one per entry in `COLONIZER_PLUGIN_DIRS`. Absent when none are configured |
 | `/opt/colonizer/{caveman,headroom,jev-compaction}/`, `/opt/colonizer/bin/rtk` | ro | The token-saving payloads (Token savings, §4), each mounted only when its switch is on and the payload is installed |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
-| `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code module only) |
+| `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code: `/root/.claude/projects`, codex: `/root/.codex`, acp: `/root/.gemini`) |
 | `/opt/node/bin/node` | ro | Vendored Node runtime for the agent runner, pinned in `vendor/node.lock` and fetched at install by `scripts/fetch-node-binary.sh`, mounted read-only beside agentd |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -53,7 +53,8 @@ must be ignored (forward compatibility).
 One more variable reaches `agent.env` on a boot that delivers an answer held while the colony was
 suspended ([#562]): `COLONIZER_RESUME_SESSION` carries the `agent_session` id the runner reported
 last run, for it to continue that conversation (the Claude Code runner passes it to the SDK's
-`resume` option); the held answer is the `initial_prompt`. Absent means a fresh conversation.
+`resume` option, codex to `codex exec … resume`, ACP to `session/load`); the held answer is the
+`initial_prompt`. Absent means a fresh conversation.
 
 ### Where the agent runtime comes from
 
@@ -153,6 +154,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
   {"tool_call_id":"toolu_…","tool":"Bash","action":"keep|drop_result|drop_call","keep_call":0.98,"keep_result":0.87}]}  // Jev compaction's per-chunk decisions, shadow telemetry the harness grades into `jev_ladder.jsonl` (below); `applied:false` marks a fallback pass, which is not measured
 {"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}   // a self-paced loop's colony names its next run (Loops, below)
 {"type":"loop_stop","reason":"all flakes fixed"}                      // a loop's colony ends its loop
+{"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}  // the agent reached for a masked or write-protected path (docs/path-policy.md); reporting only — the mount enforced before this ran, and the harness logs it once per distinct (access, path)
 ```
 
 `memory_proposal` (§6.2) and `finding` (§6.6) are runner events too; they are described with the
@@ -187,8 +189,8 @@ Rules:
   outside the vocabulary counts as above every ceiling and is never answered automatically.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `agent_session` names the runner's own conversation id, so the harness can have it continued later
-  (§1's `COLONIZER_RESUME_SESSION`). Emit it when the SDK's init first names a session, the same
-  once-only rule `model_changed` follows for the model; an init re-reporting the known id emits
+  (§1's `COLONIZER_RESUME_SESSION`). Emit it as soon as the runner knows its conversation id, the
+  same once-only rule `model_changed` follows for the model; re-reporting the known id emits
   nothing. A runner that cannot resume a session never emits it.
 - `model_changed` names the orchestrator model. The runner emits it when Claude Code's init first
   names the model (`previous: null`), so a client always knows it, and after each `set_model` the
@@ -332,6 +334,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions/{id}/diff` | Everything the colony changed since it branched from `origin/<base>`: committed and uncommitted edits, plus untracked files as new-file diffs (at most 200 of them; binaries and symlinks skipped). `{id, repo, base, files: [{path, added, removed}], added, removed, diff, truncated}`, `diff` capped at 200 KB. Needs the worktree, not a live colony; `colonizer diff` and the MCP server read it. **409** when there is no worktree or no merge base, or git fails |
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
+| `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution. Read scope for API tokens |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow, block}, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md)). **404** for a colony booted before the record existed |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
@@ -361,8 +364,10 @@ routed together).
 
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
+  `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
-  `GET /api/maps/…` reads, and `GET /api/tokens/self`. The terminal WebSocket is owner only.
+  `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
+  WebSocket is owner only.
 - `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
@@ -1767,7 +1772,7 @@ pull requests small; they will adopt the red-team runs of
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/providers` | `[{id, name, base_url, auth, wire: "anthropic"\|"openai", has_key, models: [string], preset}]` plus the provider fields and live figures of §6.5 (`timeout_secs`, `max_concurrent`, `queue_timeout_secs`, `context_tokens`, `fallback_model`, `trusted`, `pricing`, `quota`, `model_map`, `disabled_tools`, `normalize_cache_ttl`, `in_flight`, `queued`, `usage`, `health`, `used_by`, `quota_exhausted`). `preset` is the catalogue id it was added from (`deepseek`, `openai`, `zai`, `alibaba`, `local`, …) or `custom` |
-| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
+| `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
@@ -2134,7 +2139,8 @@ route gets one extra allow rule for that port on top of its egress policy
 **Runner.**
 
 - Adds a route's `headers` to every request routed through it.
-- For routes referenced by `COLONIZER_MODEL`, `COLONIZER_SUBAGENT_MODEL` or `COLONIZER_BACKGROUND_MODEL`
+- For routes referenced by `COLONIZER_MODEL`, `COLONIZER_SUBAGENT_MODEL`, `COLONIZER_BACKGROUND_MODEL`
+  or, where the agent module has one, `COLONIZER_SMALL_MODEL`
   (the "used" routes), sets in Claude Code's environment:
   - when the largest `timeout_secs` is above 300: `CLAUDE_STREAM_IDLE_TIMEOUT_MS` = min(t·1000, 1800000),
     `API_TIMEOUT_MS` = t·1000 + 60000, `API_FORCE_IDLE_TIMEOUT` = `0`,
@@ -2146,9 +2152,18 @@ route gets one extra allow rule for that port on top of its egress policy
   `{"type":"log","level":"warn","message":"provider strix unavailable (queue_timeout); used claude-sonnet-5"}`. A gateway that can't be reached at all also falls back (reason `gateway unreachable`). `thinking: {type: "enabled"}` is rewritten to `{type: "adaptive"}`, which current Claude models require.
   Without `fallback_model`, return the gateway's response unchanged.
 
-**Gateway endpoint** `ANY /providers/{id}/{path}`:
+**Gateway endpoint** `POST /providers/{id}/v1/messages`, plus `POST
+/providers/{id}/v1/messages/count_tokens` on the `wire: anthropic` (the route is registered for any
+method and path so that a refusal is audited like real traffic; the handler answers `405` to a wrong
+method and `404` to any other path, and forwards a query string only if it stays within the path's
+character set plus `=` and `&`):
 
 - Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- What a token admits is recorded at boot, before the token is written: the providers and the
+  `<provider>/<model>` pairs the colony's model settings name. A colony with no recorded set reaches
+  nothing, and `403` `permission_error` is answered, before anything is sent upstream, when the
+  provider is not in the record or the body's `model` — matched on the requested name, before any
+  `model_map` renaming — is not.
 - A colony past its spend budget is refused `403` `permission_error` before it waits for a slot, with no
   `x-colonizer-fallback`: there is nothing to fall back to. The same check stops the colony on the host,
   worktree kept, so raising the budget and resuming continues it.
@@ -2157,14 +2172,19 @@ route gets one extra allow rule for that port on top of its egress policy
   forwards the client's `authorization` or `x-api-key`.
 - `max_concurrent`: waits up to `queue_timeout_secs` for a slot, then answers `503`
   `{"type":"error","error":{"type":"overloaded_error","message":"…"}}` with `x-colonizer-fallback: queue_timeout`.
+  A colony has at most 16 requests waiting for slots at once; past that a further request is refused
+  `429` `overloaded_error` on arrival instead of joining the queue (agents fan out through parallel
+  subagents, so bursts are routine, but a wait without bound is not).
+- A request that waited re-checks once it holds its slot and is refused `403` `permission_error`
+  without being sent — releasing what it held — if its token no longer matches that live colony or
+  the budget no longer admits it.
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
-  provider; `403` `permission_error` when the provider is not routed to this colony; `403`
-  `sensitivity_error` when the task's sensitivity class exceeds the provider's mark — `vetted` work
-  needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted` implies
-  `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md); `502`
-  `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend plus
-  in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body the
-  wire cannot carry.
+  provider; `403` `sensitivity_error` when the task's sensitivity class exceeds the provider's mark —
+  `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted`
+  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md);
+  `502` `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend
+  plus in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body
+  the wire cannot carry.
 - Connection or send failure: `502` `api_error` with `x-colonizer-fallback: unreachable`. No response headers within
   `timeout_secs`: `504` with `x-colonizer-fallback: timeout`. A response body silent for `timeout_secs`
   is ended.
@@ -2241,7 +2261,9 @@ plan: `{url, pointer}` — a `GET` the health check makes with the provider's ow
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
 else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
-clears it. Leaving `max_concurrent` unset really does mean unlimited: the
+clears it. The origin rule reaches the base URL itself: a save that moves a keyed provider to another
+origin is refused unless `api_key` brings the key again (`""` removes it), and a saved probe the move
+leaves behind is refused with it. Leaving `max_concurrent` unset really does mean unlimited: the
 provider gets asked for as many requests at once as are made of it. With `delegate = enforce` — the delegation
 default — every colony works through subagents, so the request rate arriving at a provider is roughly the number
 of running colonies times their subagents; on a server that handles one or two requests at a time, set the limit.
@@ -2564,17 +2586,18 @@ at all reads as `null`, never as free.
      "cost_usd": 12.47, "routed_cost_usd": 0.03,
      "tokens": {"input": 482001, "output": 123477, "cache_read": 900233, "cache_write": 4412},
      "models": [{"model": "claude-opus-5", "tokens": 932190, "cost_usd": 11.80}],
-     "launched": 2, "returned": 1}
+     "launched": 2, "returned": 1, "scoring_ms": 0}
   ]}
 ]}
 ```
 
 `days` is how far back to answer, default 30, clamped to 1–365. Days come back oldest first and only
 days the journal mentions appear; each day's orgs are sorted by org name. Per day, `orgs` entries
-carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting) and
+carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting),
 `returned` (colonies that crossed into a terminal state that day — pull request opened, merged or
-closed, nothing to push, or stopped/failed). A colony counts as returned once per run, on the
-transition, never on the later updates.
+closed, nothing to push, or stopped/failed) and `scoring_ms` (the bench's scoring time journaled
+that day, `0` where none). A colony counts as returned once per run, on the transition, never on
+the later updates.
 
 The journal behind it is `spend.jsonl` in the data dir, next to `sessions.json` and `routing.jsonl`:
 append-only, one JSON line per event, never rewritten. Colony cleanup and deletion do not touch it,
@@ -2591,13 +2614,21 @@ and rows from builds before those fields existed carry neither, and both still p
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "routed", "session": "clgay4wk", "agent": "claude-code", "cost_usd": 0.03}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "launched", "session": "clgay4wk", "agent": "claude-code"}
 {"ts": "…", "day": "2026-09-20", "org": "acme", "kind": "returned", "session": "clgay4wk", "agent": "claude-code"}
+{"ts": "…", "day": "2026-09-20", "org": "bench", "kind": "scoring", "scoring_ms": 9320}
 ```
 
-Every row carries the four token fields, `0` where it has no tokens. `usage` rows are a turn's increment over the turn before it (the session record keeps the
+Every row carries the four token fields, `0` where it has no tokens; a `scoring` row carries none
+of them. `usage` rows are a turn's increment over the turn before it (the session record keeps the
 cumulative; the journal gets the deltas). A one-model turn files its cost on that model's row; a
 multi-model turn files per-model token rows and its cost on an un-modeled row, mirroring the
 attribution rule. A failed append is reported through the app's sticky storage alert and leaves
 the run unchanged: a lost row is a lost measurement, not a failed run.
+
+A `scoring` row is the bench's ([bench.md](bench.md)): when a `scripts/bench.mjs run` finishes it
+files how long it spent scoring the run's pull requests under the `bench` org, the way chat files
+under its pseudo-org — no colony, no tokens and no dollar, since scoring makes no model calls and
+its only cost is time. The history sums those into the org entry's `scoring_ms` for the day, beside
+the colonies' spend.
 
 Which channel measured a row's `cost_usd` splits each colony's spend in two. A `usage` row's dollar
 is the agent's own turn-end estimate: first-party traffic never passes the gateway — microsandbox
@@ -2849,6 +2880,161 @@ own host; anything else naming a `Tunnelled` extension is answered **503**. Auth
 cockpit's own, unchanged; the Origin fence for cookie writes accepts exactly `https://<host>`
 through the tunnel, where the LAN fence accepts any scheme.
 
+### 6.11 Fleet export bundle (#687)
+
+When a machine joins a fleet (#686) it brings its past with it: the colonies it has run, the logs
+behind them, and what they spent. The same format serves on its own as a backup. `colonizer fleet
+export` writes this machine's session history, colony logs and spend/usage stats into one bundle;
+`colonizer fleet import` reads a bundle back into a data dir. Both run locally off the data dir —
+no mothership needs to be running. The fleet-join flow (#686) drives the same format
+programmatically: a preview first, then — only once the joining member confirms — a chunked,
+resumable transfer.
+
+**The bundle.** A zstd-compressed tar (`.tar.zst`). `manifest.json` is the first entry; every
+other entry is a regular file — never a symlink:
+
+```
+manifest.json
+history/sessions.jsonl                one ImportedSession per line    (category history)
+logs/<original_id>/events.jsonl       a colony's event log            (category logs)
+logs/<original_id>/harness.jsonl      its harness lines
+logs/<original_id>/gateway.jsonl      its gateway lines
+logs/<original_id>/transcripts/…      its transcripts, relative paths kept
+stats/spend.jsonl                     the top-level journals          (category stats)
+stats/provider-usage.json
+stats/provider-quota.json
+stats/routing.jsonl
+stats/activity.jsonl
+stats/summary.json                    computed: sessions, by_status, cost_usd, routed_cost_usd,
+                                      model_usage, boot_ms_mean
+```
+
+Log entries are read from the live colony dir `sessions/<id>/` where it exists, and from the
+colony's latest archive revision (#496) when the live dir is gone — a finished colony's logs
+travel even after its session files have been folded into the archive.
+
+**manifest.json.** The bundle's first entry, and its table of contents:
+
+```json
+{
+  "format": "colonizer-fleet-export",
+  "version": 1,
+  "origin_host": "<host id>",
+  "origin_name": "<hostname>",
+  "created_at": "<RFC3339>",
+  "categories": {
+    "history": {"included": true, "count": 12, "from": "<RFC3339|null>", "to": "<RFC3339|null>", "bytes": 1234},
+    "logs":    {"included": true, "count": 30, "from": null, "to": null, "bytes": 99999},
+    "stats":   {"included": true, "count": 6,  "from": null, "to": null, "bytes": 4567}
+  },
+  "files": [{"path": "logs/abc/events.jsonl", "category": "logs", "bytes": 123, "sha256": "<hex>"}]
+}
+```
+
+- `count` is the number of sessions for `history`, the number of files for `logs` and `stats`.
+  `from`/`to` are the min `created_at` / max `updated_at` across the exported sessions, either
+  null when there is nothing to bound; `bytes` is the category's uncompressed size.
+- An excluded category (`--no-logs` and friends) appears with `"included": false` and zeros, so a
+  reader can tell "not asked for" from "empty".
+- `files` lists every other entry with its size and the sha256 of its raw bytes; the importer
+  verifies each before it applies it.
+- `origin_host` is the machine's persisted `<config_dir>/host_id` (created on first export) — the
+  same id fleet claims carry — and `origin_name` is the hostname.
+- The `categories` object is exactly the preview shown before anything is sent — `fleet export
+  --preview` prints it (the whole manifest, with `--json`), and so does the join flow's preview
+  step.
+
+**What is never in a bundle.** Secrets, of every kind. Export reads only an allowlist of data-dir
+paths — the ones above — and of the config dir only its `host_id`: no API token
+(`api-token`, `api-tokens.json`), no provider keys, no Claude credential, no colony secrets, no
+keychain, no settings (`providers.json`, `orgs.json`, `modules.json`, `claude-accounts.json`). A
+session record itself is exported as an allowlist projection, not whole (below).
+
+**ImportedSession.** One JSON object per line of `history/sessions.jsonl`:
+
+```json
+{"id": "host-a:c1c9215b", "origin_host": "host-a", "original_id": "c1c9215b",
+ "repo": "acme/web", "org": "acme", "issue": 3473, "issue_title": "Wire the method picker",
+ "status": "merged", "branch": "colonizer/issue-3473-…", "base": "main",
+ "pr_url": "https://github.com/acme/web/pull/12", "pr_opened_at": "<RFC3339|null>",
+ "merged_at": "<RFC3339|null>", "summary": "…", "error": null,
+ "cost_usd": 1.24, "routed_cost_usd": 0.97, "model_tier": "…",
+ "model_usage": {"…": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}},
+ "model_routing": {}, "agent": "claude-code", "boot_timing": {},
+ "created_at": "<RFC3339>", "updated_at": "<RFC3339>"}
+```
+
+- `id` is namespaced `<origin_host>:<original_id>`, so ids from many machines cannot collide in
+  one fleet's import; `origin_host` and `original_id` match `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`.
+- Only those three are required. Everything else — repo, org, issue, issue_title, status, branch,
+  base, pr_url, pr_opened_at, merged_at, summary, error, cost_usd, routed_cost_usd, model_tier,
+  model_usage, model_routing, agent, boot_timing, created_at, updated_at — is optional and
+  nullable; an exporter may leave out what its records never held.
+- The machine-readable shapes — the manifest at the top level, `imported_session`, `chunk` and
+  `import_cursor` under `$defs` — are in
+  [fleet-export.schema.json](fleet-export.schema.json) (draft 2020-12).
+
+**Import layout and idempotency.** `fleet import` (and the fleet applying a member's transfer)
+writes under `<data_dir>/fleet-imports/<origin_host>/`:
+
+```
+sessions.json          map of namespaced id → ImportedSession; re-import replaces by id
+logs/<original_id>/…   as bundled
+stats/…                as bundled
+manifest.json          the manifest of the import that produced this tree
+cursor.json            the ImportCursor, per file, for the resumable transfer
+```
+
+- Every entry path is validated before it touches the disk: not absolute, no `..`, and only under
+  `history/`, `logs/`, `stats/` or `manifest.json` itself — the same wall the session store's
+  file names have.
+- Each file's sha256 is verified against the manifest. `.json` snapshot files (`sessions.json`,
+  the `stats/*.json`) are replaced atomically, whole. `.jsonl` files resume by the cursor (below).
+  `history/sessions.jsonl` folds into `sessions.json` by id, so importing the same session twice
+  replaces the record and never duplicates it.
+- An import is cancellable, and a partial import is valid: the cursor keeps what landed, and the
+  next run of the same import resumes it.
+
+**Chunks.** The transfer moves one file as `Chunk` messages:
+
+```json
+{"path": "logs/abc/events.jsonl", "offset": 65536, "raw_len": 65536, "total": 200704,
+ "data": "<base64 of the zstd-compressed raw bytes>"}
+```
+
+`offset`, `raw_len` and `total` count raw (decompressed) bytes; `data` carries the chunk's raw
+bytes zstd-compressed. The receiver keeps one `ImportCursor` per member at
+`<data_dir>/fleet-imports/<origin_host>/cursor.json`:
+`{"origin_host": "<host id>", "updated_at": "<RFC3339|null>", "files": {"<path>": {"offset":
+<committed bytes>, "prefix_sha256": "<hex of those bytes>"}}}` — one `files` entry per path. Per
+chunk:
+
+- `offset` equals the committed offset: append, and advance the cursor.
+- The chunk lies wholly below the committed offset: a duplicate (a re-sent tail) — ignored.
+- `offset` is above the committed offset: a gap — error, write nothing.
+- A resumed transfer starts from the cursor's offset, not from zero.
+- If the first `offset` bytes of a re-sent file no longer hash to `prefix_sha256` — the source
+  rotated or rewrote the file mid-transfer — the file restarts from 0 under the new bytes.
+
+**The join hook.** The join dialog (#686) drives four calls, and nothing is sent before the
+member confirms:
+
+1. `preview(categories)` answers the manifest — its `categories` object carries the count, time
+   range and size per category (`preview_for` names the origin explicitly).
+2. The member reviews it and confirms, with per-category switches; history, logs and stats are on
+   by default.
+3. The member streams its files with `chunks_for`.
+4. The fleet applies each chunk with `apply_chunk`, keeping one cursor per member; a whole bundle
+   moves at once with `import_bundle`, which chunks internally through the same cursor.
+
+After the import, new colonies stream live, so the import is only the backfill of what happened
+before the join.
+
+**Versioning.** An importer rejects a `format` other than `colonizer-fleet-export`, and a
+`version` greater than it supports; version 1 is this document. Two additions are planned and
+deliberately *not* in version 1: optional categories (approved memory notes, loops and schedules,
+repo claims — off by default) and the cockpit's origin-host marking of imported colonies.
+
 ---
 
 ## 7. Standard names (UHP)
@@ -2858,9 +3044,12 @@ to the [Unified Harness Protocol](https://unifiedharnessprotocol.org/) (UHP,
 version `2026-09-12`, draft), which extends the OpenAI Responses API, so that
 Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 
-**Status: proposed.** These tables are the contract to review before any code;
-each one is implemented in its own change afterwards. Until then nothing on the
-wire changes, and the *Colonizer today* column is what works; how that as-is
+**Status: partly implemented.** These tables are the contract to review before
+any code; each one is implemented in its own change afterwards. #651 landed the
+first pieces — the §7.1 surface rules (`/uhp` routes with `UHP-Version` and the
+§7.7 error envelope) and §7.5's artifact reads — and the rest is still proposed:
+until a table lands, nothing on the wire changes for it. The *Colonizer today*
+column is what works; how that as-is
 surface measures against the UHP conformance suite is in
 [docs/conformance.md](conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the

@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "acp",
   "name": "ACP",
-  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Google's Gemini CLI (`gemini --experimental-acp`) is the preset, its handshake verified; other ACP agents run through a custom command. Nothing stages the gemini binary into the colony image yet. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
+  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Presets: Google's Gemini CLI (`gemini --experimental-acp`), handshake verified, and xAI's Grok Build (`grok agent stdio`), handshake verified against grok 1.0.34 but not yet driven through a turn with a real XAI_API_KEY; other ACP agents run through a custom command. Nothing stages the gemini or grok binary into the colony image yet. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
   "protocol": "colonizer-runner/1",
   "entry": [
     "node",
@@ -22,6 +22,10 @@
       }
     }
   },
+  "session_resume": {
+    "dir": "/root/.gemini",
+    "description": "The gemini preset keeps its sessions under ~/.gemini and the runner reloads one with session/load, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact; a custom agent resumes only if it keeps its sessions there too."
+  },
   "secrets": [
     {
       "env": [
@@ -30,10 +34,18 @@
       "hosts": [
         "generativelanguage.googleapis.com"
       ]
+    },
+    {
+      "env": [
+        "XAI_API_KEY"
+      ],
+      "hosts": [
+        "api.x.ai"
+      ]
     }
   ],
   "egress": {
-    "api": ["generativelanguage.googleapis.com"],
+    "api": ["generativelanguage.googleapis.com", "api.x.ai"],
     "auth": [],
     "telemetry": [],
     "extra": []
@@ -44,15 +56,15 @@
       "agent": {
         "type": "string",
         "title": "ACP agent",
-        "enum": ["gemini", "custom"],
-        "description": "Which ACP agent to launch. `gemini` is the verified one: Google's Gemini CLI in its ACP mode (`gemini --experimental-acp`), authenticated with the GEMINI_API_KEY secret for generativelanguage.googleapis.com. `custom` launches any other ACP agent through the command below — declare its API hosts and credential in your deployment, since this manifest only declares Gemini's.",
+        "enum": ["gemini", "grok", "custom"],
+        "description": "Which ACP agent to launch. `gemini` is the verified one: Google's Gemini CLI in its ACP mode (`gemini --experimental-acp`), authenticated with the GEMINI_API_KEY secret for generativelanguage.googleapis.com. `grok` is xAI's Grok Build in its ACP mode (`grok agent stdio`), authenticated with the XAI_API_KEY secret for api.x.ai: verified at the handshake (initialize, session/new with model selection) against grok 1.0.34, but a turn with a real XAI_API_KEY has not been run. `custom` launches any other ACP agent through the command below — declare its API hosts and credential in your deployment, since this manifest only declares Gemini's and grok's.",
         "default": "gemini",
         "env": "COLONIZER_ACP_AGENT"
       },
       "command": {
         "type": "string",
         "title": "Custom command",
-        "description": "Used when the ACP agent is `custom`: the full command line including arguments, e.g. `grok agent stdio` (unverified) or `node /opt/acp-agent/main.js --stdio`. Quote spans with single or double quotes to keep arguments with spaces whole.",
+        "description": "Used when the ACP agent is `custom`: the full command line including arguments, e.g. `node /opt/acp-agent/main.js --stdio`. Quote spans with single or double quotes to keep arguments with spaces whole.",
         "default": "",
         "env": "COLONIZER_ACP_COMMAND"
       },

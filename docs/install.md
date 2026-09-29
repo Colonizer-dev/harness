@@ -181,16 +181,28 @@ If the three mesh binaries are absent, colonies fall back to a loopback port, as
 taskbar icon, the same sign-in.
 
 - **Chrome or Edge:** use the install icon in the address bar, or **Settings → Desktop → Install
-  app**.
+  app**. On Android, Chrome offers the same install from the address-bar banner or the menu's
+  **Add to Home screen**.
 - **Safari:** **File → Add to Dock**.
+- **iPhone or iPad:** open the cockpit in Safari and pick **Add to Home Screen** from the share
+  sheet. When the device isn't installed yet, **Settings → Notifications** and **Settings →
+  Desktop** show those steps in the app itself, next to the web push they unlock.
 
-A small service worker makes that work. It caches the build's hashed `/assets` files and the GitHub
-avatars the mothership proxies, answers a short list of read-only views (repository details and
-package listings) from their last answer while it fetches a fresh one, shows the mothership's
+The installed app carries a few shortcuts — **Inbox**, **Colonize**, **Nest** — from the icon's
+long-press menu (right-click on the taskbar/Dock icon). Sharing a GitHub issue or pull request link
+to Colonizer (Android's share sheet) opens the colony holding it, or Colonize with that issue
+prefilled; a pull request only ever matches a colony that recorded it as its own pull request.
+
+A small service worker makes that work. It caches each build's hashed `/assets` files into a cache
+named for that build — the previous build's stays one build longer, so a tab that hasn't reloaded
+yet keeps working after an update — and caches the GitHub avatars the mothership proxies, answers
+a short list of read-only views (repository details and package listings) from their last answer
+while it fetches a fresh one, shows the mothership's
 [Web Push](https://developer.mozilla.org/docs/Web/API/Push_API) notifications, and shows an offline
 page when the mothership isn't running. It never caches pages, writes, the sign-in link or any other
-`/api` call. The manifest, service worker, offline page and icons load before sign-in; they contain
-nothing private.
+`/api` call. When a new build has installed and is waiting, a **Colonizer updated** card offers
+**Reload**; the running build keeps working until you do. The manifest, service worker, offline page
+and icons load before sign-in; they contain nothing private.
 
 **Start at login.**
 
@@ -289,6 +301,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/share/mise/installs/claude/latest/claude`, `~/.local/bin/claude`, `~/.claude/local/claude` | The native Claude Code binary to mount into colonies |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | The provider gateway; colonies reach it through `host.microsandbox.internal`. Must be an IP and port: a hostname such as `localhost:41750` refuses startup |
 | `COLONIZER_FLEET_PEERS` | – | Base URLs of other motherships, comma separated, polled for the fleet view (`GET /api/hosts`). Nothing is exposed by setting it |
+| `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
 | `COLONIZER_NO_EXTERNAL_EFFECTS`, `COLONIZER_NO_WRITE` | – | A kill switch: set either to anything but `0`, `false`, `off` or `no`, and every write that leaves the harness (commits, pushes, pull requests, merges, comments, filed issues) refuses to run |
@@ -309,6 +322,18 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_TELEMETRY_ENDPOINT` | – (nothing is sent) | The collector URL usage data is posted to, at most once a day. No default: unset, no [usage data](usage-data.md) is ever sent, whatever the switch says |
 | `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
+
+### Upgrading across the microsandbox 0.7 pin
+
+Since [#639](https://github.com/Colonizer-dev/harness/issues/639) the vendored `msb` is 0.7.x.
+Microsandbox's home (`MSB_HOME`, default `~/.microsandbox`) is version-locked: the first 0.7
+command migrates a 0.6-era home in place, and the migrated home still lists and removes microVMs a
+0.6 `msb` created. The migration is one-way: after it, a 0.6 `msb` fails every command against the
+home (`database schema is newer than this msb binary`). If you have to roll the harness itself back
+to a 0.6-era release, downgrade the home first, with the 0.7 binary: `msb self downgrade 0.6.18
+--yes`. It refuses while sandboxes are active (stop them first), backs the database up
+(`db/msb.db.bak-…`), purges the image cache (re-downloaded on the next boot) and installs the
+0.6.18 binaries, after which the old `msb` works again.
 
 ### Credentials read from the environment
 

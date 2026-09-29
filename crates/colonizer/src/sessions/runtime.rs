@@ -58,6 +58,11 @@ pub struct Runtime {
     /// tree — does not repeat every line (issue #300). In memory on purpose: a restart warning
     /// again is a minor repeat, a leak-free set is the point.
     pub(crate) path_policy_warned: Mutex<HashSet<String>>,
+    /// Path-policy attempts already reported this run (issue #647), keyed `access\0path`, so one
+    /// attempt is one colony log line however many turns repeat it. Capped, with the cap's notice
+    /// warned once: a colony circling against the policy must not grow the set without bound. In
+    /// memory like `path_policy_warned` — a restart reporting an attempt again is a minor repeat.
+    pub(crate) path_policy_seen: Mutex<HashSet<String>>,
     pub(crate) events_path: PathBuf,
     pub(crate) logs_path: PathBuf,
     pub activity: Mutex<Activity>,
@@ -201,6 +206,7 @@ impl Runtime {
             findings_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             path_policy_warned: Mutex::new(HashSet::new()),
+            path_policy_seen: Mutex::new(HashSet::new()),
             events_path,
             logs_path,
             activity: Mutex::new({
@@ -219,6 +225,22 @@ impl Runtime {
     pub(crate) async fn warn_path_policy_once(&self, message: &str) -> bool {
         let mut seen = self.path_policy_warned.lock().await;
         seen.insert(message.to_string())
+    }
+
+    /// Records a path-policy attempt (`access\0path`, issue #647) and says what to do with it:
+    /// `Some(true)` for the first of its kind — log it — `Some(false)` for one already reported,
+    /// and `None` once [`crate::path_policy::ATTEMPT_CAP`] distinct paths are carried, when the
+    /// attempt is dropped and the caller owes the log its one cap notice.
+    pub(crate) async fn note_path_policy(&self, key: &str) -> Option<bool> {
+        let mut seen = self.path_policy_seen.lock().await;
+        if seen.contains(key) {
+            return Some(false);
+        }
+        if seen.len() >= crate::path_policy::ATTEMPT_CAP {
+            return None;
+        }
+        seen.insert(key.to_string());
+        Some(true)
     }
 
     pub(crate) fn broadcast(&self, seq: Option<u64>, json: String) {

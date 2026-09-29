@@ -45,6 +45,13 @@ bug before reporting it, report with the findings tool, and **never open, merge 
 autofix anything**. Autopilot stays off. With autofix on, the brief instead expects the
 fix itself, and autopilot runs.
 
+When the operator points the mothership at a bench pool (`COLONIZER_BENCH_POOL=<dir>`), the brief
+also carries that pool's raid leads for the raided repository: injected bugs the bench admitted but
+its own tests caught unreliably, dealt out round-robin so no lead is handed to two hunters — a set
+longer than the swarm can carry at the 20-per-brief cap waits for a later run. The brief names them
+the hunter's own and says to chase them first, even where they fall outside the focus assignment —
+the one exception to it ([docs/bench.md](bench.md#the-raid-set)).
+
 ## Findings and the tally
 
 Each hunter writes `findings.jsonl` in its session directory (protocol §6.6), one line

@@ -34,6 +34,7 @@ function renderCockpit(view: CockpitView): string {
     <ApiContext.Provider value={createMockApi()}>
       <Cockpit
         sessions={[session()]}
+        sessionsLoaded
         orgs={[]}
         selectedOrg="acme"
         onSelectOrg={noop}

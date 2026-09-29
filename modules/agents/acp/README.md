@@ -3,14 +3,20 @@
 Drives any [Agent Client Protocol](https://agentclientprotocol.com) agent (Zed's ACP: JSON-RPC 2.0
 over stdio, newline-delimited) as a Colonizer agent module on the `colonizer-runner/1` protocol.
 **Status: PLANNED — the runner is in-tree and verified against the real Gemini CLI handshake
-([#509](https://github.com/Colonizer-dev/harness/issues/509)); nothing stages the `gemini` binary
-into the colony image yet, and no end-to-end colony run has happened.**
+([#509](https://github.com/Colonizer-dev/harness/issues/509)); nothing stages the `gemini` or
+`grok` binary into the colony image yet, and no end-to-end colony run has happened.**
 
 The runner is `runner.mjs`: one long-lived ACP agent process per colony. At boot it negotiates
 `initialize` (protocolVersion 1, clientCapabilities `fs.readTextFile`/`fs.writeTextFile` and
 `terminal`) and opens one `session/new` in the workspace; every `user_message` becomes one
-`session/prompt` turn, queued when one is already running. There is no `session/load`: the runner
-cannot resume a session, so it never emits `agent_session` (§2 rules).
+`session/prompt` turn, queued when one is already running. When the agent advertises
+`agentCapabilities.loadSession` at `initialize`, the runner announces its session id as
+`agent_session`, and a resume boot (`COLONIZER_RESUME_SESSION`: the harness continuing a colony
+that waited on its user) reloads that session with `session/load` instead — the `session/update`s
+the agent replays of the old conversation are history the harness already logged, never new
+events. A load that fails, or an agent without `loadSession`, falls back to a fresh `session/new`;
+that fresh session starts from the held answer alone, because the harness sends no task brief on a
+resumed boot, trusting the transcript to carry it ([boot.rs](../../../crates/colonizer/src/boot.rs)).
 
 ## Mapping
 
@@ -22,7 +28,7 @@ cannot resume a session, so it never emits `agent_session` (§2 rules).
 | `tool_call_update` `completed`/`failed` | `tool_result` (`is_error` on `failed`; content blocks and `rawOutput` flattened to text) |
 | `plan` | a `thinking` checklist (`Plan:\n- [x] …`) — the runner protocol has no plan event |
 | `session/request_permission` | a `question` (below), `status waiting_for_answer` |
-| `user_message_chunk`, `available_commands_update`, `current_mode_update` | ignored (no counterpart) |
+| `user_message_chunk`, `available_commands_update`, `current_mode_update`, `session_info_update` | ignored (no counterpart; grok sends `session_info_update` every turn) |
 | unknown update type | a `warn` log naming it, never fatal |
 | `session/prompt` response `stopReason` | `turn_end`: `refusal` and `cancelled` (an interrupt) end the turn as an error; `end_turn`/`max_tokens`/`max_turn_requests` do not |
 | `fs/read_text_file`, `fs/write_text_file` | served from the workspace (below) |
@@ -31,16 +37,20 @@ cannot resume a session, so it never emits `agent_session` (§2 rules).
 
 Interrupt sends `session/cancel` and answers every open permission request `cancelled`, so the turn
 ends as `interrupted by the user` and the runner keeps serving turns. `set_model` rides
-`session/set_model` — but only when the agent advertised model selection at `session/new`
-(`models.currentModelId`, which is also announced once as `model_changed`); otherwise it is a
-warning. On `shutdown` or stdin EOF the agent gets a `session/cancel` if a turn is running, then
+`session/set_model` — but only when the agent advertised model selection at `session/new`, or at
+`session/load` on a resumed boot (`models.currentModelId`, which is also announced once as
+`model_changed`); otherwise it is a warning. On `shutdown` or stdin EOF the agent gets a
+`session/cancel` if a turn is running, then
 SIGTERM (SIGKILL after 2 s), `status exited`, exit 0. An agent that dies on its own is a named
 `ACP_AGENT_FAILED` log plus `status error`, the turn in flight ends as an error, and the runner
 exits 1.
 
 Before the first turn, the runner checks its setup and names what is wrong: `ACP_AGENT_UNKNOWN`
 (an `agent` that is not a preset, or `custom` with an empty command) or `ACP_CREDENTIAL_MISSING`
-(the Gemini preset without `GEMINI_API_KEY`). Every turn then ends as an error carrying that name.
+(a preset without its credential: `GEMINI_API_KEY` for gemini, `XAI_API_KEY` for grok). A credential
+the agent itself refuses at the handshake (`session/new` answers `Authentication required`) is named
+`ACP_AUTH_FAILED` instead, pointing at the env var to check. Every turn then ends as an error
+carrying that name.
 
 ## Questions
 
@@ -69,7 +79,7 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 
 | Setting | Env | What it does |
 | :--- | :--- | :--- |
-| `agent` | `COLONIZER_ACP_AGENT` | `gemini` (the verified preset: `gemini --experimental-acp`) or `custom` |
+| `agent` | `COLONIZER_ACP_AGENT` | `gemini` (`gemini --experimental-acp`), `grok` (`grok agent stdio`) or `custom` |
 | `command` | `COLONIZER_ACP_COMMAND` | With `custom`: the full command line including arguments, quotes respected |
 | `model` | `COLONIZER_MODEL` | Meant to pick the model with `session/set_model` at boot, but **not applied yet**: the runner never reads `COLONIZER_MODEL`, so the agent runs on its own default. Switching the model from the cockpit (a `set_model` command) does work, when the agent advertises models |
 | `exec_policy` | `COLONIZER_EXEC_POLICY` | The layered exec policy rules ([below](#exec-policy)) |
@@ -90,6 +100,15 @@ and its reason on the card, answered like any other.
 The fence only sees commands the agent asks permission for: calls the agent runs without asking are
 not checked, so the policy is guidance, and the microVM is the boundary.
 
+## Path policy
+
+The two file requests this runner serves, `fs/read_text_file` and `fs/write_text_file`, meet the
+mounted bind list (docs/path-policy.md, issue #647) once `confine` has resolved the path: one
+`path_policy` event per distinct (access, path) that lands on a masked path — or writes to a masked
+or protected one — with the reply untouched. Reporting only; the mount enforces.
+`pathpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test, and a masked
+path reached any other way is the exec policy's or the mount's to stop, not this runner's.
+
 ## Verified and planned agents
 
 - **Gemini CLI (`gemini --experimental-acp`) — handshake verified.** The real CLI 0.61.0 completed
@@ -104,17 +123,36 @@ not checked, so the policy is guidance, and the microVM is the boundary.
   `GEMINI_API_KEY=…`, run `node runner.mjs`, and send
   `{"type":"user_message","id":"initial","text":"hello"}` on stdin — see the handshake the tests
   assert for what comes back.
-- **Grok Build (`grok agent stdio`) — planned.** Grok speaks ACP too (see the grok-build module's
-  README), but its ACP mode is unverified here; before listing it as a preset, its hosts belong in
-  `egress` and its credential in `secrets`.
+- **Grok Build (`grok agent stdio`) — handshake verified.** Verified against the real grok 1.0.34:
+  `initialize` (protocolVersion 1), `session/new` in the workspace (it advertises models, so
+  `model_changed` at boot and `set_model` work), and both auth failure paths. **A successful turn
+  with a real `XAI_API_KEY` has not been run**, and neither has the permission flow live. The
+  version comes from the grok-build module's pin (grok **1.0.34**; install with
+  `curl -fsSL https://x.ai/cli/install.sh | bash -s 1.0.34`). The colony authenticates with an
+  `XAI_API_KEY` secret for `api.x.ai` (declared in `secrets`/`egress`; add the value in the
+  cockpit's Secrets view, as a colony secret for that host) — the runner refuses to boot the preset
+  without it (`ACP_CREDENTIAL_MISSING`). The runner hardens the child the way the grok-build runner
+  does: a fresh `GROK_HOME`, `GROK_FOLDER_TRUST=1` (the workspace resolves untrusted, so
+  project-scope `.grok/` config is skipped), `GROK_TELEMETRY_ENABLED=0`,
+  does: a fresh `GROK_HOME`, `GROK_FOLDER_TRUST=1` (the workspace resolves untrusted, so
+  project-scope `.grok/` config is skipped), `GROK_MEMORY=0`, `GROK_TELEMETRY_ENABLED=0`,
+  `GROK_DISABLE_AUTOUPDATER=1` and `BROWSER=/bin/false`. That last one matters because the key is
+  the only credential a colony can use: grok's ACP advertises one auth method, browser OAuth
+  (`grok.com`), which the colony never runs. Auth failures are easy to misread — `session/new`
+  answers `Authentication required` (named `ACP_AUTH_FAILED`), and a turn with a key the API
+  rejects comes back as a bare JSON-RPC "Internal error", which the runner annotates with the
+  credential to check first. Boot also fetches `https://api.x.ai/v1/models` (blocking, with retries).
 - **Any other ACP agent — by configuration.** Pick `agent: custom`, set the command line, and give
   the deployment the egress hosts and secret env the agent needs: this manifest only declares
-  Gemini's, so a custom agent's network access is exactly what you declare for it.
+  Gemini's and grok's, so a custom agent's network access is exactly what you declare for it.
 
 ## Limits
 
 - No `plan` event type in colonizer-runner/1: plans render as a `thinking` checklist.
-- No resume: a stopped colony starts a fresh ACP session (no `agent_session`, no `session/load`).
+- Resume rides the module's `session_resume` dir: the harness persists `/root/.gemini` outside the
+  VM, so the gemini preset keeps its conversation across a suspended colony's stop and
+  continuation (`session/load`, [above](#mapping)). A custom agent resumes only if it keeps its
+  sessions there too; otherwise the resumed boot starts a fresh session.
 - ACP names no token or cost figures, so `turn_end.cost_usd` is always null.
 
 ## Tests

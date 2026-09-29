@@ -670,7 +670,6 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.error(format!("could not save the routing decision: {e:#}")).await;
     }
     let gateway_token = random_token();
-    write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     let routing = providers::colony_routes(app, &gateway_token);
     if !routing.routes.is_empty() {
         runner_env.insert(
@@ -691,11 +690,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     let used = routing.used(&runner_env);
     // Recorded on the session because the gateway needs it long after boot: every proxied call is
-    // checked against this set (issue #409), so a colony's token opens only these providers.
+    // checked against these sets (issue #409), so a colony's token opens only the providers — and
+    // only the models — its model settings route to. Before the token is written (issue #681): the
+    // record is what the token's access is derived from, so no token can exist ahead of it.
     app.update_session(id, |x| {
-        x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect())
+        x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect());
+        x.allowed_models = Some(routing.used_models(&runner_env));
     })
     .await;
+    write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
     // The tool policy the colony is being launched under, recorded for the colony report (#295): the
     // connection level per used provider, then the harness level the agent module configured.
     for line in providers::connection_disabled_tool_lines(&used) {
@@ -1164,8 +1167,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // BEFORE creating anything: a crash in between would leave an empty file git could stage with
     // no record that it was ours (issue #300 review). Publish later removes the still-empty ones,
     // so nothing placeholder-shaped lands in a pull request. All before the VM starts, on purpose:
-    // the guest enforces the policy as it boots, before the agent can run a command.
-    let policy = crate::path_policy::from_settings(&sandbox_settings, &sandbox_schema);
+    // the guest enforces the policy as it boots, before the agent can run a command. The org's
+    // overrides (#649) join the module's lists, tightening them; the written policy file records
+    // the whole effective list.
+    let org_path_policy = org_settings.path_policy.clone().unwrap_or_default();
+    let policy = crate::path_policy::from_settings(&sandbox_settings, &sandbox_schema, &org_path_policy);
     let previous = crate::path_policy::read_list(
         &std::fs::read_to_string(vm_dir.join(crate::path_policy::PLACEHOLDERS_FILE)).unwrap_or_default(),
     );

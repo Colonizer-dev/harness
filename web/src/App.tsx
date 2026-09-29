@@ -9,6 +9,8 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
 import { Cockpit } from "./cockpit/Cockpit";
+import { DemoBanner } from "./components/DemoBanner";
+import { DEMO } from "./demo";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
@@ -36,6 +38,8 @@ import {
 } from "./liveStream";
 import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
+import { UpdatePrompt } from "./components/UpdatePrompt";
+import { useAppUpdate } from "./installApp";
 import { useImagePull } from "./useImagePull";
 import { usePollTick } from "./usePollTick";
 import type {
@@ -118,6 +122,9 @@ export function App() {
   const [liveStorage, setLiveStorage] = useState<StorageSummary | null>(null);
   // One image-pull poller for the whole app; Setup, Settings and the sidebar all read it.
   const pull = useImagePull(true);
+  // A new build installed and waiting (the mothership shipped an update): the card in the fixed
+  // column asks, and the reload happens only from there.
+  const appUpdate = useAppUpdate();
 
   const loadStatus = useCallback(async (fresh?: boolean) => {
     try {
@@ -699,7 +706,9 @@ export function App() {
 
   return (
     <SecretsNavContext.Provider value={openSecrets}>
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      {DEMO && <DemoBanner />}
+      <div className="flex min-h-0 flex-1">
       {narrow ? (
         <>
           {sidebarOpen && (
@@ -723,6 +732,7 @@ export function App() {
           <div className="min-h-0 flex-1">
             <Cockpit
               sessions={sessions}
+              sessionsLoaded={sessionsLoaded}
               orgs={orgs}
               redRuns={redRuns}
               selectedOrg={selectedOrg}
@@ -787,8 +797,8 @@ export function App() {
         onSetupShown={() => setSetupShown(true)}
         onSetupDismissed={dismissSetup}
       />
-      {(storageAlert || liveMapPrompt) && (
-        // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.
+      {(storageAlert || liveMapPrompt || appUpdate.ready) && (
+        // The fixed cards live in the same corner; the shared column keeps them stacked and clickable.
         <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
           {storageAlert && (
             <StorageAlert
@@ -805,6 +815,7 @@ export function App() {
               }}
             />
           )}
+          {appUpdate.ready && <UpdatePrompt />}
         </div>
       )}
       <OrgSettingsDialog
@@ -813,6 +824,7 @@ export function App() {
         onClose={() => setOrgSettingsFor(null)}
         onSaved={saveOrgInfo}
       />
+      </div>
     </div>
     </SecretsNavContext.Provider>
   );

@@ -61,7 +61,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `mesh` | `headscale` (or `none`) | Private Tailscale-compatible network between harness and VMs |
 | `agent` | `claude-code` (default), `codex`, `acp`, `opencode`, `pi`, `hermes`, `grok-build` | Runner that speaks the Colonizer agent protocol inside the VM. Each one is discovered from `modules/agents/<id>/module.json`, and an org can pick its own. Not every runner can ask questions: `pi` cannot yet. Each module's `description` in Settings → Modules says what it lacks; the checklist a new one passes is [runner-authoring.md](runner-authoring.md) |
 | `interfaces` | `default` | Panels in the session view; `chat` and `terminal` are its settings |
-| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done |
+| `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done; its optional merge train squash-merges open colony pull requests afterward (see [Merge train](#merge-train)) |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
@@ -77,11 +77,13 @@ Two settings layers sit next to the modules:
   `<provider>/<model>`. The Claude Code runner starts a router inside
   the colony that sends those requests to the mothership's provider gateway
   (`host.microsandbox.internal:41750`). The gateway reaches loopback, LAN and tailnet providers, adds the
-  key, queues requests per provider (`max_concurrent`), applies long timeouts, and marks the colony busy
+  key, queues requests per provider (`max_concurrent`) and per colony (at most 16 waiting), applies long
+  timeouts, and marks the colony busy
   for the watchdog; the runner falls back to a Claude model when the gateway reports the provider
   unreachable, timed out or full.
 - **Org workspaces** (`orgs.json`, `known-orgs.json`): per-GitHub-org overrides for agent models, the parallel limit, the
-  per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog, notifications and the sensitivity
+  per-colony budget and host-disk quota, the sandbox stack, the egress fence, the path policy's masked and protected
+  lists, memory, the watchdog, notifications and the sensitivity
   provider marks, plus an on/off
   switch per org. `known-orgs.json` records the orgs seen on the signed-in GitHub account, so an org that appears for
   the first time asks instead of being adopted silently. A colony belongs to its repository
@@ -93,8 +95,10 @@ Every authenticated gateway request appends one line to the colony's `gateway.js
 method and path, the requested and upstream model (each admitted only through the model-id
 validator), status, failure code, whether the answer licensed the Claude fallback, queue and total
 duration, request and response bytes, and token counts. The failure codes: `unknown_provider` (no
-such provider), `not_routed` (not this colony's), `restricted` (untrusted provider for a restricted
-task), `missing_key`, `budget`, `bad_request` (path or body the wire cannot serve), `queue_full`,
+such provider), `not_routed` (not this colony's provider or model), `restricted` (untrusted provider
+for a restricted task), `missing_key`, `budget`, `colony_inactive` (the colony or its token went
+away while the request waited for a slot), `bad_request` (path, method or body the wire cannot
+serve), `queue_full`,
 `unreachable`, `timeout`, `upstream_error` (a 4xx/5xx that is not quota), `quota_exhausted`,
 `body_read_failed` (the response broke after its headers). The record is a fixed struct and nothing
 else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
@@ -311,20 +315,27 @@ in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
-microsandbox 0.6.18 cannot snapshot a running VM's memory: `msb snapshot create` is disk-only and wants a stopped
-sandbox, and `--resumable` answers `unsupported: resumable snapshots require VM pause/resume restore support`, so
-`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. microsandbox
-0.7.x can (`msb snapshot create --full`, `msb restore`, `msb pause/resume`); measured on a nested-KVM host, a full
-checkpoint of a running 512 MiB VM took 0.46 s (the VM pauses during capture) and 304 MB on disk, an incremental
-re-checkpoint +24 MB at 0.22 s, and a restore to usable 0.3 s. Adopting it wants a vendor pin bump, and
-`MSB_HOME` is version-locked — an older msb against a newer home fails every command — so it is follow-up work.
+microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
+checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
+`--guest-flush required` — but its restore cannot bring a colony back, measured on the pinned binaries. A
+sandbox that has ever carried a `--secret` fails its restore outright (`restore virtio device virtio_fs1 …
+No such file or directory`), whether or not the source sandbox still runs — and every colony carries one: its
+credential. `msb snapshot restore` accepts no `--secret` or `-e` that could restate the credential and
+environment on the restored sandbox, re-creates no volume bindings (the worktree and transcript mounts have to
+be passed again with `-v`), and has no per-direction network default — its `--net-default` is one value for
+both directions, so the deny-egress/allow-ingress fence every colony boots with cannot be restated. So
+`sandbox::supports_memory_snapshot()` is false and every suspension records `path: "session_resume"`. The
+function is the seam; what unblocks the switch is an upstream fix to the restore of secret-carrying sandboxes,
+plus a restore-time way to restate secrets, environment and the egress fence.
 Resuming a transcript whose `AskUserQuestion` tool_use was left unresolved is valid, too — verified with the
 SDK's bundled Claude Code CLI 2.1.270, which inserts the missing `tool_result` itself (`is_error`,
 "[Request interrupted by user for tool use]"), so the held answer arrives as the next user message.
 
 Disk-wise nothing new is kept: there is no snapshot file in this path. What a suspension keeps is the worktree
 and the transcript directory under the colony's session dir, which already count against the per-colony
-host-disk checks and are deleted with the colony.
+host-disk checks and are deleted with the colony. The same would hold for a snapshot artifact: the natural home
+is `<session dir>/snapshots/`, so it would be counted and cleaned up with the colony, with `msb snapshot remove`
+run before the directory goes away.
 
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
@@ -332,6 +343,47 @@ whose contract — atomic replaces, at-least-once appends that readers deduplica
 is what will let the per-session files under `data/sessions/<id>/` move onto other backends in follow-ups. That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
+
+### Merge train
+
+The publish module's optional merge train takes over after a pull request opens: a background tick, about
+every two minutes, walks every colony whose pull request is still open and squash-merges it — per
+repository, at most one merge per tick. It is off by default and separate from the `automerge` setting,
+which merges a fix colony's pull request after a review passes.
+
+Five `publish` settings drive it (all off/empty by default, shown in the cockpit's Settings form):
+
+- `merge_train` — `off` (the install default) or `on`.
+- `merge_train_overrides` — comma-separated `owner=on|off` or `owner/repo=on|off`; a repo entry beats an
+  org entry beats `merge_train`.
+- `merge_train_deny_orgs` — comma-separated orgs the train never merges in, whatever the overrides say —
+  how a production organisation stays out.
+- `merge_train_authors` — comma-separated GitHub logins or emails allowed as commit authors; empty means
+  the identity Colonizer publishes as. A pull request with any commit by another author is refused.
+- `merge_train_forbid` — comma-separated case-insensitive substrings; a pull request whose commit messages
+  contain one — a forbidden attribution such as `Co-Authored-By: …`, for instance — is refused.
+
+A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
+no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
+branch's own CI is green. The merge is a squash with `--match-head-commit` that deletes the branch — never
+a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
+to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
+for exactly those readings. The one case the watcher never sees — a pull request whose head does not
+contain the current base tip even when GitHub reports CLEAN (it does when the repository does not require
+up-to-date branches and the pull request's CI ran on an older main) — the train brings up to date itself
+through the same path, once per base commit under the repository's worktree lock, and it merges on a later
+tick once the fresh CI is green. After a merge the train
+re-reads the other pull requests' mergeability until GitHub stops reporting UNKNOWN, so the next tick sees
+the tree as it now is. Stacked pull requests work: the parent merges without deleting its branch (deleting
+it would close the child for good), the publish watcher retargets the child to the base branch, and the
+child merges on a later tick. Every merge and every skip — with its reason, logged when the reason
+changes — lands in the colony's session log and the activity feed, and the whole train honours the
+external-writes kill switch.
+
+`GET /api/merge-train` (read scope for API tokens; §4 in [protocol.md](protocol.md)) reports the train per
+repository — state, base branch and its CI verdict, the last merge, and each open pull request as
+`next`, `waiting_ci`, `needs_rebase`, `waiting`, `skipped` (with the reason) or `merged`. The cockpit shows
+one Merge-train row per repository: next up, waiting on CI, needs rebase, skipped and why.
 
 ## Per-colony limits
 
@@ -554,8 +606,8 @@ The microVM is the boundary; this is the layer inside it, for the case the wall 
 is root in the guest, and root can still reach kernel interfaces, another process's memory and the
 human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
 
-Guest kernel baseline, measured 2026-09-25 on the pinned stack (microsandbox 0.6.18 per
-`vendor/vendor.lock`, libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+Guest kernel baseline, measured 2026-09-25 on the stack as pinned then (microsandbox 0.6.18 per
+`vendor/vendor.lock`; the pin is 0.7.3 since issue #639, same libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
 `capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the

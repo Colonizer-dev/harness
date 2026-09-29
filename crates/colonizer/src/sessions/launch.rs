@@ -611,6 +611,7 @@ pub async fn create(
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
         allowed_providers: None,
+        allowed_models: None,
         sensitivity: None,
         routed_cost_usd: None,
         routed_tokens: None,
@@ -1314,7 +1315,7 @@ mod tests {
     #[tokio::test]
     async fn colonies_of_a_switched_off_org_stay_listed_and_resume() {
         let (app, root) = app_with_org_switched_off("kept", SessionStatus::Stopped).await;
-        let listed = list(State(app.clone()), None).await.0;
+        let listed = list_bare(State(app.clone()), None).await.0;
         let kept = listed.iter().find(|s| s.id == "kept").unwrap();
         assert_eq!(kept.org, "acme", "the colony is still in the list");
         // The real resume path, not just its gate: the org's switch does not make `resume` refuse
@@ -1345,19 +1346,10 @@ mod tests {
         std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
         std::fs::create_dir_all(assets.join("bin")).unwrap();
         std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
-        let agent = AgentModule {
-            id: "claude-code".into(),
-            name: "Claude Code".into(),
-            description: String::new(),
-            dir,
-            entry: vec!["run".into()],
-            needs_claude: false,
-            requires: crate::modules::Requires::default(),
-            schema: json!({}),
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        };
+        let agent = AgentModule::test("claude-code")
+            .name("Claude Code")
+            .dir(dir)
+            .entry(vec!["run".into()]);
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.
         *app.new_orgs.write().await =
