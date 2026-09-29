@@ -274,6 +274,12 @@ fn tls_edge_hosts(secrets: &[sandbox::Secret]) -> Vec<String> {
     secrets.iter().flat_map(|secret| secret.hosts.iter().cloned()).collect()
 }
 
+/// The most a resume's service readiness waits may extend the boot health-wait by (issue #700): a
+/// manifest may name an absurd `timeout_secs`, and the boot must neither hang on it nor overflow
+/// the deadline arithmetic. The guest honours the spec's timeout either way; this only bounds the
+/// mothership's patience with it.
+const MAX_RESTORE_WAIT_SECS: u64 = 600;
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -865,6 +871,23 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             read_only: false,
         });
     }
+    // Services that come back after a resume (issue #700): the guest's writers (`colonizer-svc`,
+    // a Claude Code background-Bash hook) record every service they start as one JSON file in this
+    // directory, which lives in the host session dir — so the records outlive the microVM exactly
+    // like the transcripts above — and is mounted back writable at the path the env var names.
+    // Created on every boot, so the writers always have it; read on a resume, when the `restore`
+    // key of session.json below is built from it.
+    let services_dir = dir.join(crate::services::DIR_NAME);
+    std::fs::create_dir_all(&services_dir)?;
+    runner_env.insert(
+        crate::services::ENV_VAR.into(),
+        Value::String(crate::services::GUEST_DIR.into()),
+    );
+    mounts.push(Mount {
+        source: services_dir.clone(),
+        target: crate::services::GUEST_DIR.into(),
+        read_only: false,
+    });
     // Claude Code plugin directories, mounted read-only from the mothership.
     //
     // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
@@ -1016,13 +1039,43 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
         (None, _) => prompt,
     };
-    let session_json = json!({
+    // What a resume brings back (issue #700): the manifest's declared services plus the records
+    // the previous run registered, scrubbed of the colony's secret values before any of it reaches
+    // session.json. The guest relaunches the restartable ones, waits each out to readiness or its
+    // timeout, and opens the resumed turn saying what came back and what was lost. Warnings are
+    // logged, never a failed boot; only a resume boot carries the key.
+    let mut restore = None;
+    // The guest starts no runner — and serves no HTTP — until every restartable service answered
+    // or timed out (issue #700), so the health wait below must outlast the longest readiness wait
+    // it was handed: a manifest timeout beyond the base deadline would otherwise fail the boot
+    // while the guest was still waiting a service out. Only specs with a probe wait anything, and
+    // one without `timeout_secs` gets the guest's default. The cap keeps a manifest naming an
+    // absurd `timeout_secs` from hanging the boot — or overflowing the deadline arithmetic below.
+    let mut restore_wait = Duration::ZERO;
+    if resume {
+        let secrets: Vec<String> = colony_secrets.iter().map(|(_, value)| value.clone()).collect();
+        let (specs, warnings) = crate::services::resume_specs(&wt, &services_dir, &secrets);
+        for warning in warnings {
+            log.warn(format!("services: {warning}")).await;
+        }
+        restore_wait = specs
+            .iter()
+            .filter(|spec| spec.restart && spec.ready.is_some())
+            .map(|spec| spec.timeout_secs.unwrap_or(crate::services::DEFAULT_TIMEOUT_SECS))
+            .max()
+            .map_or(Duration::ZERO, |secs| Duration::from_secs(secs.min(MAX_RESTORE_WAIT_SECS)));
+        restore = Some(crate::services::restore_json(s.was_suspended, &specs));
+    }
+    let mut session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
         "listen": format!("0.0.0.0:{AGENTD_PORT}"),
         "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
         "initial_prompt": initial_prompt,
     });
+    if let Some(restore) = restore {
+        session_json["restore"] = restore;
+    }
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
@@ -1272,7 +1325,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     mark_phase(app, id, &mut timing, "mesh-join").await;
 
     let s = ensure_starting(app, id).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // The base covers the guest's own start plus one health attempt left in flight when agentd
+    // starts serving; a resume's readiness waits ride on top of it (issue #700, `restore_wait`).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90) + restore_wait;
     loop {
         match agentd_http(app, &s, "GET", "/v1/health").await {
             Ok((200, _)) => break,
@@ -1335,7 +1390,7 @@ set -u
 mkdir -p /var/lib/colonizer
 # Git metadata is mounted read-only; give git a private, writable index.
 if [ -f "${GIT_DIR:-}/index" ]; then cp "$GIT_DIR/index" "$GIT_INDEX_FILE"; fi
-export PATH="/opt/node/bin:/opt/claude/bin:$PATH"
+export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH"
 if [ -f /colonizer/mesh-authkey ]; then
   mkdir -p /var/lib/tailscale
   /opt/colonizer/tailscale/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscaled.sock \
@@ -1405,6 +1460,9 @@ mount --bind /proc/sys /proc/sys 2>/dev/null \
   && mount -o remount,bind,ro /proc/sys 2>/dev/null \
   || echo "colonizer: /proc/sys stays writable" >&2
 mount -o remount,ro /sys 2>/dev/null || echo "colonizer: /sys stays writable" >&2
+# The agent-facing service registry (issue #700) is the agentd binary under its argv0 name. Only
+# the binary's own bind is read-only; the directory is the VM's filesystem, so the symlink sticks.
+ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --seal-token --state-dir /var/lib/colonizer
 "#;
 
@@ -1656,8 +1714,25 @@ mod tests {
     #[test]
     fn boot_script_puts_node_first() {
         assert!(
-            BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:$PATH""#),
+            BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
             "node first, claude entry unchanged"
+        );
+    }
+
+    /// The guest's service CLI is the agentd binary under its argv0 name (issue #700): linked onto
+    /// the exported PATH before the agent runs, so the runner's first shell already has it.
+    #[test]
+    fn boot_script_puts_the_service_cli_on_the_path() {
+        let link = BOOT_SCRIPT
+            .find("ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc")
+            .expect("the colonizer-svc symlink");
+        let path = BOOT_SCRIPT.find(r#"export PATH="#).expect("the PATH export");
+        let exec = BOOT_SCRIPT
+            .find("exec /opt/colonizer/bin/colonizer-agentd")
+            .expect("the exec of agentd");
+        assert!(
+            path < link && link < exec,
+            "the link sits between the PATH export ({path}) and the exec ({exec})"
         );
     }
 

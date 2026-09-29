@@ -89,6 +89,7 @@ mod screen;
 mod secrets;
 mod sensitivity;
 mod server;
+mod services;
 mod sessions;
 mod spend;
 mod stack;
