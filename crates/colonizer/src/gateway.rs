@@ -1373,10 +1373,16 @@ async fn proxy(
     // before any `model_map` renaming — and before the spend reservation, so a refused request
     // reserves nothing. Guests send the bare canonical name (the runner strips the `<provider>/`
     // prefix), which is the form boot recorded.
-    let routed = model
-        .as_deref()
-        .map(|m| format!("{id}/{m}"))
-        .is_some_and(|pair| session.allowed_models.as_ref().is_some_and(|allowed| allowed.contains(&pair)));
+    // A colony booted before model scoping (#727) has a recorded provider set but no model set.
+    // Refusing it every model stranded running colonies at the upgrade (every subagent 403'd), so
+    // such a colony keeps the pre-#727 scope, its recorded providers, until it next boots and
+    // records its models. A colony with neither set is still refused at the provider check above.
+    let legacy = session.allowed_models.is_none() && session.allowed_providers.is_some();
+    let routed = legacy
+        || model
+            .as_deref()
+            .map(|m| format!("{id}/{m}"))
+            .is_some_and(|pair| session.allowed_models.as_ref().is_some_and(|allowed| allowed.contains(&pair)));
     if !routed {
         audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::NotRouted);
         let named = model.unwrap_or_else(|| "none".into());
@@ -2542,6 +2548,59 @@ mod tests {
 
     /// A request whose body names a model the colony's agent settings never routed to is refused
     /// before any upstream call, like a provider outside the routing is (issue #681).
+    /// A colony booted before model scoping (#727) has providers on record but no models. It keeps
+    /// the provider-level scope it booted with, instead of every request being refused mid-run
+    /// (every subagent 403'd on the upgrade), and a provider outside its record is still refused.
+    #[tokio::test]
+    async fn a_colony_booted_before_model_scoping_keeps_its_provider_scope() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-legacy-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &[],
+            json!([
+                {"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none"},
+                {"id": "other", "name": "Other", "base_url": base, "auth": "none"}
+            ]),
+        )
+        .await;
+        app.sessions.write().await.iter_mut().for_each(|s| s.allowed_models = None);
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"any-model-on-deepseek","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a legacy colony's recorded provider still serves it"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the request reached the provider");
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "other",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a provider outside the record is still refused"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn a_model_outside_the_colonys_routing_is_refused_before_any_upstream_call() {
         let hits = Arc::new(AtomicU64::new(0));
