@@ -183,6 +183,8 @@ impl App {
 
     /// [`App::session_log`] with the `origin` the line is stamped with (docs/protocol.md §3).
     pub(crate) async fn session_log_as(&self, origin: Origin, id: &str, level: &str, message: String) {
+        // #761: a message quoting a command line, an error body or a URL can carry a credential.
+        let message = crate::redact::redact_text(&message).into_owned();
         let entry =
             json!({"type": "harness_log", "origin": origin.as_str(), "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;

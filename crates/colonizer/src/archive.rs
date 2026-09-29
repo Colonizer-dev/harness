@@ -134,9 +134,15 @@ async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(Stri
     let store = crate::store::LocalDirStore::new(data_dir);
     let (mut files, mut total, mut newest) = (Vec::new(), 0u64, 0u64);
     for name in store.list_files(id).await? {
-        let Some(bytes) = store.read_file(id, &name).await? else {
+        let Some(mut bytes) = store.read_file(id, &name).await? else {
             continue;
         };
+        // #761: a log written before redaction existed is redacted on its way into the bundle.
+        if (name.ends_with(".jsonl") || name.ends_with(".log"))
+            && let std::borrow::Cow::Owned(redacted) = crate::redact::redact_jsonl(&bytes)
+        {
+            bytes = redacted;
+        }
         let mtime = tokio::fs::metadata(dir.join(&name))
             .await
             .ok()

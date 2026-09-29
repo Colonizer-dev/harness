@@ -267,6 +267,7 @@ pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value)
         }
         .max(file_cursor + 1);
         event["seq"] = json!(seq);
+        crate::redact::redact_value(&mut event); // #761: nothing secret reaches events.jsonl
         // Reserved even when the append fails, as before: the next line must stamp past a rank a
         // browser may have just seen broadcast, or that broadcast and a later line could share a seq.
         rt.last_seq.store(seq, Ordering::SeqCst);
