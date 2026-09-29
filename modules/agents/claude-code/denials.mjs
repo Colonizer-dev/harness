@@ -7,7 +7,8 @@
  * never grant anything, and removing this layer changes nothing about what the agent can do — it
  * only renames refusals that already happened. Matching is deliberately conservative: only clear
  * sandbox/colony refusal signatures classify, so ordinary tool failures stay unannotated. (A
- * masked-path empty read is not detectable from text and is deliberately not attempted here.)
+ * masked-path empty read says so only by its emptiness; the runner reports the attempt itself as
+ * a `path_policy` event before the tool runs — pathpolicy.mjs, issue #647.)
  */
 
 /** The closed vocabulary of denial classes (docs/agent-events.schema.json `tool_result.denial`). */

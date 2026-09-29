@@ -10,11 +10,12 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
@@ -276,6 +277,9 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // before the agent can run anything. Warnings ride stderr; agentd turns those into `log` events.
   const execPolicy = loadExecPolicy(env, { cwd: workspace });
   for (const warning of execPolicy.warnings) process.stderr.write(`${warning}\n`);
+  // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
+  // the runtime reports against. Absent (an older harness) means the feature is off, silently.
+  const pathPolicy = loadPathPolicy(env).policy;
   let sessionId = null, currentModel = null, modelSupported = false;
   let turn = null; // { messageId, text, thoughts } while a session/prompt is in flight
   let replaying = false; // a session/load in flight: its updates replay history the harness logged
@@ -368,9 +372,25 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   };
 
   const refuse = (replyError, path, why) => replyError(BAD_REQUEST, `refused: ${JSON.stringify(path ?? '')} ${why}`);
+  // The path policy's runtime report (issue #647): a file request that lands on a masked or
+  // protected path emits one `path_policy` event per (access, path) per run. Reporting only — the
+  // reply is never touched; the mount enforced before this ran. `path` is already confined to the
+  // workspace by `confine`, so the relative form is the worktree-relative path the policy names.
+  const pathPolicySeen = new Set();
+  const reportPathPolicy = (access, tool, path) => {
+    if (!pathPolicy) return;
+    const rel = relative(workspace, path).split(sep).join('/');
+    const rule = matchPathPolicy(pathPolicy, rel);
+    if (!rule || (access === 'read' && rule === 'protected')) return;
+    const key = `${access}\u0000${rel}`;
+    if (pathPolicySeen.has(key)) return;
+    pathPolicySeen.add(key);
+    emit({ type: 'path_policy', access, policy: rule, path: rel, tool });
+  };
   const readTextFile = async (params, reply, replyError) => {
     const path = confine(workspace, params.path);
     if (!path) return refuse(replyError, params.path, 'is outside the workspace');
+    reportPathPolicy('read', 'fs/read_text_file', path);
     const info = await stat(path).catch(() => null);
     if (info && info.size > READ_CAP) return refuse(replyError, params.path, `is ${info.size} bytes, over the ${READ_CAP / (1024 * 1024)} MiB read cap`);
     let content;
@@ -388,6 +408,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   const writeTextFile = async (params, reply, replyError) => {
     const path = confine(workspace, params.path);
     if (!path) return refuse(replyError, params.path, 'is outside the workspace');
+    reportPathPolicy('write', 'fs/write_text_file', path);
     try {
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, String(params.content ?? ''), 'utf8');
