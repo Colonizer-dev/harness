@@ -16,6 +16,7 @@ export function LaunchView({
   autopilotDefault,
   maxParallel,
   sessions,
+  prefill = null,
   onOpenColony,
   onCreated,
   onOpenSettings,
@@ -27,6 +28,8 @@ export function LaunchView({
   maxParallel: number | null;
   /** The mothership's colony list, for the launch form's pre-submit duplicate check. */
   sessions: Session[];
+  /** An issue a shared link named (issue #745): the repository preselected, the issue open. */
+  prefill?: { repo: string; number: number } | null;
   /** Opens a colony holding an issue, from that issue's inline warning. */
   onOpenColony: (session: Session) => void;
   onCreated: (session: Session) => void;
@@ -50,6 +53,7 @@ export function LaunchView({
           statusKnown={statusKnown}
           autopilotDefault={autopilotDefault}
           sessions={sessions}
+          initialIssue={prefill}
           onOpenColony={onOpenColony}
           onCreated={onCreated}
           onOpenSettings={onOpenSettings}

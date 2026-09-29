@@ -3,7 +3,7 @@
 //  - "network": left alone. Every other /api call, every write, the ?token= sign-in, a ?refresh=
 //               the operator asked for, anything cross-origin.
 //  - "asset":   /assets/* — Vite's content-hashed files, which never change under one name — served
-//               from the cache first and cached on the way in.
+//               from whichever build's cache has them (this build's first) and cached on the way in.
 //  - "image":   /api/img — GitHub avatars through the mothership's own week-long cache — served from
 //               the cache first.
 //  - "swr":     a short allowlist of read-only GET JSON (repository meta, packages, lines of code):

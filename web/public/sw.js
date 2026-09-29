@@ -1,31 +1,80 @@
 // The cockpit's service worker: just enough to make the cockpit an installable app and quick to
-// reopen. It caches Vite's hashed /assets and the proxied avatars, answers a few read-only views
-// from their last answer while it revalidates them, shows an offline page when the mothership is
-// not running, shows the mothership's web pushes and opens the colony they name when tapped, and
-// never touches writes, sign-in or any other /api call (see sw-routes.js).
+// reopen. It precaches each build's hashed /assets into a cache named for that build and answers
+// asset requests from whichever build's cache has them, caches the proxied avatars, answers a few
+// read-only views from their last answer while it revalidates them, shows an offline page when the
+// mothership is not running, shows the mothership's web pushes and opens the colony they name when
+// tapped, and never touches writes, sign-in or any other /api call (see sw-routes.js).
 importScripts("/sw-routes.js");
 
 // Bumped whenever the routing or the caches change: the activate step drops every other cache.
-const VERSION = "v3";
-const ASSETS = `colonizer-assets-${VERSION}`;
+const VERSION = "v4";
 const SHELL = `colonizer-shell-${VERSION}`;
 const IMAGES = `colonizer-img-${VERSION}`;
 const API = `colonizer-api-${VERSION}`;
-const LIMITS = { [ASSETS]: 150, [IMAGES]: 300, [API]: 200 };
+const LIMITS = { [IMAGES]: 300, [API]: 200 };
+
+// One cache per build, named for the build's hash. Install precaches this build's /assets into it;
+// the previous build's cache is kept one build longer, because a tab that has not reloaded yet
+// still asks for the old build's chunks and the mothership serves only the current build — after a
+// swap it 404s the old ones (the lazy-chunk 404 that used to break open tabs).
+const BUILD_PREFIX = "colonizer-build-";
+const buildCache = (hash) => BUILD_PREFIX + hash;
+// The line the build rewrites (vite.config.ts, src/swBuild.ts): "dev" and no assets only outside a
+// real build, where the worker is never registered.
+const BUILD = { hash: "dev", assets: [] };
+// The record of which build was current before this one, kept as a cache-only entry in the shell
+// cache: activate reads it to know which older build cache to keep. Never fetched.
+const HISTORY = "/__colonizer-build";
+
+/** The build's assets, fail-soft: one missing or failing file must not fail the whole install — the
+ *  asset route below falls back to the network for whatever did not land. Only ok answers are kept. */
+async function precacheBuild(cache, urls) {
+  await Promise.allSettled(
+    urls.map(async (url) => {
+      const response = await fetch(url);
+      if (response.ok) await cache.put(url, response);
+    }),
+  );
+}
 
 self.addEventListener("install", (event) => {
-  // A new worker takes over at once: a stale one must not linger after an update.
-  event.waitUntil(caches.open(SHELL).then((c) => c.addAll(["/offline.html", "/icons/mark.svg"])).then(() => self.skipWaiting()));
+  // No skipWaiting: an update waits until a tab asks for it (the Reload of the update prompt,
+  // installApp.ts) or every tab of the old build has closed, so no open tab is ever swapped. A
+  // first install — nothing controlled yet — activates at once without asking.
+  event.waitUntil(
+    (async () => {
+      // The shell files are few and load-bearing (the offline page), so they stay all-or-nothing;
+      // the build's ~hundred hashed chunks are not.
+      await (await caches.open(SHELL)).addAll(["/offline.html", "/icons/mark.svg"]);
+      await precacheBuild(await caches.open(buildCache(BUILD.hash)), BUILD.assets);
+    })(),
+  );
 });
 
 self.addEventListener("activate", (event) => {
-  const keep = [ASSETS, SHELL, IMAGES, API];
   event.waitUntil(
-    caches
-      .keys()
-      .then((keys) => Promise.all(keys.filter((k) => !keep.includes(k)).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim()),
+    (async () => {
+      const shell = await caches.open(SHELL);
+      // The build before this one stays cached, for the tabs still running it (see buildCache).
+      // With no record — the first run after a VERSION bump — every build cache is kept: there are
+      // at most two, and this build's next activate prunes them.
+      const known = await shell.match(HISTORY);
+      const keepBuilds = known ? new Set([buildCache(BUILD.hash), buildCache((await known.text()).trim())]) : null;
+      const drop = (name) => (name.startsWith(BUILD_PREFIX) ? keepBuilds !== null && !keepBuilds.has(name) : true);
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => ![SHELL, IMAGES, API].includes(k) && drop(k)).map((k) => caches.delete(k)));
+      await shell.put(HISTORY, new Response(BUILD.hash));
+      // Take over every tab: their asset requests now reach this worker, which answers from the
+      // previous build's cache too (asset below), so the takeover is not itself the break.
+      await self.clients.claim();
+    })(),
   );
+});
+
+// The update prompt's Reload: the waiting worker takes over at once, activate's clients.claim
+// brings the asking tab under it, and that tab reloads itself on the controllerchange.
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "colonizer:skip-waiting") event.waitUntil(self.skipWaiting());
 });
 
 async function trim(name, cache) {
@@ -45,6 +94,22 @@ function cacheFirst(name, request) {
     }
     return response;
   });
+}
+
+/** An asset from whichever build cache has it — this build's first, then the older ones a tab that
+ *  has not reloaded yet may still be running. Not in any of them: from the network, cached into
+ *  this build's cache on the way in. */
+async function asset(request) {
+  const current = buildCache(BUILD.hash);
+  const names = (await caches.keys()).filter((k) => k.startsWith(BUILD_PREFIX));
+  names.sort((a, b) => Number(b === current) - Number(a === current));
+  for (const name of names) {
+    const hit = await (await caches.open(name)).match(request);
+    if (hit) return hit;
+  }
+  const response = await fetch(request);
+  if (response.ok) await (await caches.open(current)).put(request, response.clone());
+  return response;
 }
 
 /** The cached answer at once when there is one, refreshed from the network behind it; only a
@@ -72,7 +137,7 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   const route = self.colonizerRoute(new URL(request.url), request.method, request.mode, self.location.origin);
   if (route === "asset") {
-    event.respondWith(cacheFirst(ASSETS, request));
+    event.respondWith(asset(request));
   } else if (route === "image") {
     event.respondWith(cacheFirst(IMAGES, request));
   } else if (route === "swr") {
