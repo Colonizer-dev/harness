@@ -928,6 +928,14 @@ pub async fn resume(
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
+    // Issue #673: a superseded colony does not come back until it is kept — a merge covered its
+    // work, and resuming would redo it. The keep route is the way out.
+    if let Some(superseded) = s.superseded.as_ref().filter(|superseded| !superseded.kept) {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            &crate::supersede::blocked_message(superseded),
+        ));
+    }
     // A parked colony whose park kept its microVM running comes back warm when it can (issue #213):
     // prompted to continue in the machine it never left, no boot, no rotation. `None` here — no kept
     // microVM, no live agent link, the microVM gone from `msb ls`, the discard setting back on, or
@@ -981,9 +989,13 @@ pub async fn resume(
             let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
                 return Ok(None);
             };
-            // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
+            // Re-checked under the lock: the colony must still be resumable — and not superseded
+            // unkept (issue #673) — when the slot is claimed.
+            if let Some(superseded) = x.superseded.as_ref().filter(|superseded| !superseded.kept) {
+                return Err(crate::supersede::blocked_message(superseded));
+            }
             if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
-                return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
+                return Err(RESUME_CONFLICT.to_string()); // another resume won the race between the handler and the lock
             }
             x.status = if room {
                 SessionStatus::Starting
@@ -1011,7 +1023,7 @@ pub async fn resume(
     let (s, admitted, waiting) = match claimed {
         Ok(Some(claimed)) => claimed,
         Ok(None) => return Err(client_error(StatusCode::NOT_FOUND, "no such session")),
-        Err(message) => return Err(client_error(StatusCode::CONFLICT, message)),
+        Err(message) => return Err(client_error(StatusCode::CONFLICT, &message)),
     };
     app.persist_and_broadcast(&s).await;
     // The colony is ours: only now is the old agent link dropped and the event log rotated.
@@ -1106,6 +1118,32 @@ pub async fn resume(
         .await;
     }
     Ok(Json(s))
+}
+
+/// `POST /api/sessions/{id}/keep` (issue #673): the operator read the supersession and wants this
+/// colony to run anyway — `superseded.kept` goes true and the queue starts it. The marker itself
+/// stays, so the history still says what covered this work. A colony that is not superseded has
+/// nothing to keep (409); an unknown one is a 404. Stopping the colony instead uses the stop route.
+pub async fn keep(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+    let (session, kept) = app
+        .update_session(&id, |x| {
+            x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
+        })
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if !kept {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this colony is not superseded; there is nothing to keep",
+        ));
+    }
+    app.session_log(
+        &id,
+        "info",
+        "kept: this colony will start even though a merged pull request covered its work".into(),
+    )
+    .await;
+    Ok(Json(session))
 }
 
 /// The warm half of resume (issue #213): a parked colony whose park kept its microVM running
@@ -1547,6 +1585,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/sessions/{id}", routing::delete(delete))
         .route("/api/sessions/{id}/resume", routing::post(resume))
+        .route("/api/sessions/{id}/keep", routing::post(keep))
         .route("/api/sessions/{id}/stop", routing::post(stop))
         .route("/api/sessions/{id}/cleanup", routing::post(cleanup))
 }

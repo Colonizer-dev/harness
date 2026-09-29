@@ -40,6 +40,11 @@ pub struct NewSession {
     /// mothership holds is still refused either way.
     #[serde(default)]
     pub queue_behind_holder: bool,
+    /// The supply-chain target this colony is for (issue #673): a package and the advisory it was
+    /// launched to fix. A live colony for the same target refuses a second one, like an issue hold;
+    /// `allow_duplicate` overrides.
+    #[serde(default)]
+    pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
     /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
     /// routing rule picks for the task.
     #[serde(default)]
@@ -210,6 +215,15 @@ fn try_claim_session(
         queued_for_holder = true;
         session.claim_wait = true;
         session.queued_behind = Some(held.id);
+    }
+    // Issue #673: the supply-chain hold, re-checked beside the issue hold under the same lock — the
+    // pre-check below reads under a read lock, so two launches for one target can both pass it.
+    // `allow_duplicate` overrides, and the holder is handed back for the 409 like an issue's is.
+    if !allow_duplicate
+        && let Some(target) = session.supply_chain.as_ref()
+        && let Some(held) = crate::supersede::supply_chain_held_by(sessions, repo, target)
+    {
+        return Err(held.clone());
     }
     // A colony still waiting for its parent's branch queues even when a slot is free: booting now
     // would branch from the default branch, which is exactly what stacking exists to avoid. A
@@ -415,6 +429,20 @@ pub async fn create(
     };
     let model_override = launch_model(&app, req.model_override.as_deref(), "model")?;
     let subagent_model_override = launch_model(&app, req.subagent_model_override.as_deref(), "subagent model")?;
+    // A supply-chain target with a side missing would hold against other half-named targets it was
+    // never really for: refused here, normalized (trimmed, lowercased) into the record.
+    let supply_chain = match req.supply_chain.as_ref() {
+        None => None,
+        Some(target) => {
+            if target.package.trim().is_empty() || target.advisory.trim().is_empty() {
+                return Err(client_error(
+                    StatusCode::BAD_REQUEST,
+                    "a supply-chain target names both a package and an advisory",
+                ));
+            }
+            Some(crate::supersede::SupplyChainTarget::new(&target.package, &target.advisory))
+        }
+    };
     // Relating to the parent (`after`): by default the colony queues until the parent's pull request
     // merges and then starts from the fresh default branch; `stack: true` branches from the parent's
     // branch as soon as it is pushed instead. Whitespace is refused rather than read as nothing — an
@@ -485,6 +513,15 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
         }
         queue_behind_holder = true;
+    }
+    // Issue #673: a second live colony for the same supply-chain target is refused the way a second
+    // colony on one issue is, with the same way out. The authoritative re-check runs in the
+    // admission lock (`try_claim_session`), beside the issue re-check.
+    if let Some(target) = req.supply_chain.as_ref() {
+        let sessions = app.sessions.read().await;
+        if let Some(message) = crate::supersede::launch_refusal(&sessions, &repo, target, req.allow_duplicate) {
+            return Err(client_error(StatusCode::CONFLICT, &message));
+        }
     }
     // A second mothership shares no memory with this one, so the local guard above cannot see its
     // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
@@ -623,6 +660,8 @@ pub async fn create(
         parked: None,
         agent_session: None,
         pending_answer: None,
+        supply_chain,
+        superseded: None,
         last_activity_at: None,
         boot_timing: None,
         boot_cpus: None,
@@ -678,8 +717,15 @@ pub async fn create(
                 // The colony directories created above belong to a colony that never was; take them
                 // back out, best effort, before refusing.
                 let _ = tokio::fs::remove_dir_all(&dir).await;
-                let issue = req.issue.unwrap_or_default();
-                return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
+                // The claim refuses for an issue's holder or, issue #673, a supply-chain target's;
+                // whichever the holder is, the 409 says so in that hold's own words.
+                let message = match (&req.supply_chain, &held.supply_chain) {
+                    (Some(target), Some(held_target)) if held_target == target && holds_issue(&held) => {
+                        crate::supersede::refusal_message(&held, target)
+                    }
+                    _ => duplicate_message(&held, req.issue.unwrap_or_default()),
+                };
+                return Err(client_error(StatusCode::CONFLICT, &message));
             }
         },
         Admission::Capped(reason) => {
@@ -904,6 +950,7 @@ mod tests {
             allow_duplicate: false,
             allow_epic: false,
             queue_behind_holder: false,
+            supply_chain: None,
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -1070,6 +1117,65 @@ mod tests {
         }
     }
 
+    /// Issue #673: a second live colony for one supply-chain target is refused at launch the way a
+    /// second colony on one issue is — `allow_duplicate` overrides it, and a finished holder blocks
+    /// nothing.
+    #[tokio::test]
+    async fn a_second_colony_for_one_supply_chain_target_is_refused_until_allow_duplicate() {
+        let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+        let app = app_that_can_create(&root);
+        let mut holder = colony("acme", SessionStatus::Running);
+        holder.id = "holder".into();
+        holder.repo = "acme/app".into();
+        holder.supply_chain = Some(crate::supersede::SupplyChainTarget::new("lodash", "ghsa-1"));
+        app.sessions.write().await.push(holder);
+        let request = |allow_duplicate: bool| {
+            Json(NewSession {
+                supply_chain: Some(crate::supersede::SupplyChainTarget::new("Lodash", "GHSA-1")),
+                allow_duplicate,
+                ..stack_request("acme/app", None, false).0
+            })
+        };
+
+        let err = create(State(app.clone()), None, request(false)).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT, "a live holder refuses the launch");
+        let message = err.1.to_string();
+        assert!(message.contains("holder") && message.contains("lodash / ghsa-1"), "{message}");
+        assert!(message.contains("allow_duplicate"), "{message}");
+        assert_eq!(app.sessions.read().await.len(), 1, "the refusal created nothing");
+
+        // A target with a side missing is refused before anything is checked against it.
+        let err = create(
+            State(app.clone()),
+            None,
+            Json(NewSession {
+                supply_chain: Some(crate::supersede::SupplyChainTarget::new("lodash", "  ")),
+                ..request(false).0
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            err.0,
+            StatusCode::BAD_REQUEST,
+            "a target names both a package and an advisory"
+        );
+        assert_eq!(app.sessions.read().await.len(), 1);
+
+        let created = create(State(app.clone()), None, request(true))
+            .await
+            .unwrap_or_else(|e| panic!("allow_duplicate starts a second colony anyway: {:#}", e.1));
+        assert_eq!(
+            created
+                .supply_chain
+                .as_ref()
+                .map(|t| (t.package.as_str(), t.advisory.as_str())),
+            Some(("lodash", "ghsa-1")),
+            "the target is normalized onto the record"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn allow_duplicate_bypasses_the_hold_that_blocks_a_second_claim() {
         // The holder here is still live, unlike the finished colonies above: without
@@ -1096,6 +1202,37 @@ mod tests {
             "allow_duplicate lets a second colony start on an issue another still holds"
         );
         assert_eq!(sessions.len(), 2, "the admitted duplicate is inserted alongside the holder");
+    }
+
+    /// Issue #673, the authoritative in-lock form: the supply-chain hold is re-checked beside the
+    /// issue hold, refuses a second colony for one target, and admits with `allow_duplicate`.
+    #[test]
+    fn the_in_lock_claim_refuses_a_second_colony_for_one_target_and_admits_with_allow_duplicate() {
+        let mut holder = colony("acme", SessionStatus::Running);
+        holder.id = "holder".into();
+        holder.repo = "acme/repo".into();
+        holder.supply_chain = Some(crate::supersede::SupplyChainTarget::new("lodash", "ghsa-1"));
+        let mut sessions = vec![holder];
+        let mut second = colony("acme", SessionStatus::Starting);
+        second.id = "second".into();
+        second.repo = "acme/repo".into();
+        second.supply_chain = Some(crate::supersede::SupplyChainTarget::new("lodash", "ghsa-1"));
+        assert!(
+            crate::supersede::supply_chain_held_by(&sessions, "acme/repo", second.supply_chain.as_ref().unwrap()).is_some(),
+            "the same hold the pre-check read holds under the lock"
+        );
+        assert!(
+            matches!(
+                try_claim_session(&mut sessions, true, second.clone(), "acme/repo", None, false, false, false),
+                Err(held) if held.id == "holder"
+            ),
+            "a launch that did not ask to duplicate is refused with the holder"
+        );
+        assert_eq!(sessions.len(), 1, "the refused claim inserted nothing");
+        let (admitted, _, _) = try_claim_session(&mut sessions, true, second, "acme/repo", None, true, false, false)
+            .expect("allow_duplicate is admitted");
+        assert_eq!(admitted.status, SessionStatus::Starting);
+        assert_eq!(sessions.len(), 2, "the admitted duplicate sits beside the holder");
     }
 
     /// A `claim_wait` waiter for issue 7, queued behind `holder`, created `ago_secs` ago so the
@@ -1289,6 +1426,7 @@ mod tests {
                 allow_duplicate: false,
                 allow_epic: false,
                 queue_behind_holder: false,
+                supply_chain: None,
                 model_tier: None,
                 model_override: None,
                 subagent_model_override: None,
@@ -1370,6 +1508,7 @@ mod tests {
                 allow_duplicate: false,
                 allow_epic: false,
                 queue_behind_holder: false,
+                supply_chain: None,
                 model_tier: None,
                 model_override: None,
                 subagent_model_override: None,
@@ -1411,6 +1550,7 @@ mod tests {
             allow_duplicate: false,
             allow_epic: false,
             queue_behind_holder: false,
+            supply_chain: None,
             model_tier: None,
             model_override: None,
             subagent_model_override: None,

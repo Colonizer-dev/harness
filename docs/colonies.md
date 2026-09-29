@@ -11,6 +11,7 @@ read by the mothership when it starts.
 
 - [Launching a colony](#launching-a-colony)
 - [Claims: one colony per issue](#claims-one-colony-per-issue)
+- [When a merge supersedes a colony](#when-a-merge-supersedes-a-colony)
 - [Epics are refused](#epics-are-refused)
 - [Questions, and who answers them](#questions-and-who-answers-them)
 - [Suspending a colony that waits for you](#suspending-a-colony-that-waits-for-you)
@@ -81,6 +82,33 @@ left behind for colonies that are gone.
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
 seen only through the GitHub label and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
+[protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
+
+## When a merge supersedes a colony
+
+When one colony's pull request merges, other colonies of the same repository whose work it covered
+are marked **superseded**. One covers another when the two carry the same supply-chain target (the
+package and advisory a colony was launched to fix), are on the same issue, or changed largely the
+same files — at least three files in common (lockfiles don't count, so two dependency bumps sharing
+a manifest and its lockfile stay two pieces of work), making up at least 80% of the smaller side's
+changed-file list. A colony waiting for another to release its issue, and one stacked on the merging
+colony, are left alone: that merge is what releases them.
+
+A superseded colony is not deleted. One that is queued, parked or suspended is held exactly where it
+is: it does not start — a quota-parked colony stays parked even when its provider recovers — and
+Resume refuses, until you keep it. A running colony is told in its chat that the changes are now in
+main, and it rebases and continues — or finishes with no changes if main already covers the task. A
+superseded colony with an open pull request has that pull request closed with a note, but only for
+repositories listed in the org's **Close superseded PRs** workspace setting; otherwise it is left
+open for you — and the publish module's merge train skips it until you keep it.
+
+In the cockpit a superseded colony wears a "Superseded by #N" badge, and while it is held a banner
+offers **Keep** (run it anyway), with **Stop** beside it for a live or queued colony. Launching a
+second colony for a supply-chain target one already holds is refused, not queued behind the holder,
+unless the launch passes `allow_duplicate`.
+
+**Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
+at 500 paths. The API shapes are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
 
 ## Epics are refused

@@ -326,7 +326,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/chat/{id}/title` | Asks the summaries' cheap model (never the subscription login) for a title from the first exchange and stores it |
 | `GET /api/chat/{id}/export` | The conversation as `text/markdown`, a download; its images are linked as `/api/chat/attachments/{sha}`. `?format=zip` answers `application/zip` instead: `chat-<id>.md` with the images beside it under `images/<sha>.<ext>`, linked relatively |
 | `POST /api/chat/{id}/issue` | `{repo, title (one line, ≤ 256), body (≤ 60 KB)}`: files a GitHub issue with the Mothership's `gh`, with the Source include labels (above); answers `{url, labels, labels_skipped}`. The cockpit confirms with the operator first |
-| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, verify?, allow_duplicate?, allow_epic?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, claude_account?, after?, stack?, serialize?, origin?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6); `verify` overrides its `verify` setting (§6.3, Done-verification); `claude_account` runs the colony on that Claude account (Connections, below; **400** for a malformed id); `after` names a parent colony: the new one queues until the parent's pull request merges, or with `stack: true` branches from the parent's branch once it is pushed and targets its pull request at it (**404** for an unknown parent, **409** for one in another repository); `serialize: true` queues behind a live colony in the same repository whose changed files overlap instead of starting beside it; `origin` labels who launched it (below)). **400** also when the org's workspace is switched off, the repository name is invalid, or the agent module or Claude login is missing. Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set and skips the GitHub check too; without it a remote conflict (below) is a **409**. **409** when the issue is an epic (sub-issues, an `epic` label, or a title marking one), listing its open sub-issues; `allow_epic: true` starts one anyway (*Epics*, below) |
+| `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, verify?, allow_duplicate?, allow_epic?, queue_behind_holder?, supply_chain?, model_tier?, model_override?, subagent_model_override?, claude_account?, after?, stack?, serialize?, origin?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6); `verify` overrides its `verify` setting (§6.3, Done-verification); `claude_account` runs the colony on that Claude account (Connections, below; **400** for a malformed id); `after` names a parent colony: the new one queues until the parent's pull request merges, or with `stack: true` branches from the parent's branch once it is pushed and targets its pull request at it (**404** for an unknown parent, **409** for one in another repository); `serialize: true` queues behind a live colony in the same repository whose changed files overlap instead of starting beside it; `origin` labels who launched it (below)). **400** also when the org's workspace is switched off, the repository name is invalid, or the agent module or Claude login is missing. Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set and skips the GitHub check too; without it a remote conflict (below) is a **409**. **409** when the issue is an epic (sub-issues, an `epic` label, or a title marking one), listing its open sub-issues; `allow_epic: true` starts one anyway (*Epics*, below). **409** when `supply_chain` is set and another colony of the same repository already holds the same target — `{package, advisory}`, compared trimmed and case-insensitively, held by the same statuses that hold an issue — naming the holder; `allow_duplicate: true` starts a second one anyway (*Superseded colony work*, below) |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
 | `POST /api/sessions/{id}/answer` | `{question_id, answers, response?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads. A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
@@ -334,14 +334,15 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
-| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed`/`parked` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees |
+| `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed`/`parked` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees. A superseded colony that is not kept is a **409** until it is kept (*Superseded colony work*, below) |
+| `POST /api/sessions/{id}/keep` | Marks a superseded colony as kept (issue #673; *Superseded colony work*, below): `superseded.kept` goes true and the queue starts it as slots free. The supersession record itself stays, so the history still says what covered this work. **409** for a colony that is not superseded, or was kept already; **404** for an unknown colony |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch. **409** while the colony is live, queued or publishing. Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `DELETE /api/sessions/{id}` | Forgets a colony that is not live and not publishing. Its logs are archived first (`<data>/archive/`, see [colonies.md](colonies.md#the-log-archive)); if archiving fails, nothing is deleted. Then the worktree, local branch and record go. `?purge_logs=true` also removes the colony's archive bundles. Answers `{deleted, leftover, archived, purged_bundles, purge_error}`. **404** for an unknown id; **409** `stop the colony first` while it is live or publishing |
 | `GET /api/sessions/{id}/diff` | Everything the colony changed since it branched from `origin/<base>`: committed and uncommitted edits, plus untracked files as new-file diffs (at most 200 of them; binaries and symlinks skipped). `{id, repo, base, files: [{path, added, removed}], added, removed, diff, truncated}`, `diff` capped at 200 KB. Needs the worktree, not a live colony; `colonizer diff` and the MCP server read it. **409** when there is no worktree or no merge base, or git fails |
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
-| `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution. Read scope for API tokens |
+| `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution, a colony superseded by another merge and not kept (issue #673). Read scope for API tokens |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow, block}, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md)). **404** for a colony booted before the record existed |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
@@ -509,6 +510,49 @@ crashes leaving its marks until its next boot; one that never returns leaves the
 removes the label. GitLab, Linear and Jira should follow the same claim shape when those forges
 land. Contested-claim detection after launch, and label repair, are not implemented yet.
 
+**Superseded colony work.** When a colony's pull request merges, every other colony of the same org
+and repository whose work it covered is marked `superseded` (issue #673). One covers another when
+the first of these holds:
+
+- both carry the same `supply_chain` target (compared trimmed and case-insensitively);
+- both are on the same issue;
+- their changed files overlap enough: at least three files in common — lockfiles (`Cargo.lock`,
+  `package-lock.json`, `go.sum`, …, matched by name) don't count, so two dependency bumps sharing a
+  manifest and its lockfile are two pieces of work — making up at least 80% of the smaller side's
+  list. The files are read off the pull requests and capped at 500 paths, and a colony whose pull
+  request listed none cannot be covered this way.
+
+Colonies that are already finished (`merged`, `closed`, `no_changes`, `stopped`, `failed`) are never
+marked, and neither is a `claim_wait` waiter (the queue retires those itself when the holder merges)
+nor a stacked child whose parent is the merging colony — that merge is what releases it; a
+`pr_opened` colony counts, since its pull request is exactly what may need closing. The marking runs
+at the merge edge itself, before any queue tick could start a covered colony, and a second pass runs
+once the merged pull request's final file list has been read back — a file overlap only shows itself
+there, and the first pass's markings are skipped. An existing `superseded` record gives way only to
+a kept one from a different merge: an unkept hold is never traded away, the same merge never marks
+twice, and a colony you kept can be marked again by a later merge. The record is
+`{by, pr_url, pr?, title, reason, at, kept}`, with `by` naming the colony whose pull request merged.
+What happens to a newly marked colony, by its state:
+
+- `queued`, parked or suspended: it is not started. The queue leaves a queued colony in place (it is
+  not retired), a quota-parked colony stays `parked` instead of re-queueing when its provider
+  recovers, and `POST /api/sessions/{id}/resume` answers **409** naming the covering pull request,
+  until the operator keeps it.
+- live (not starting): the runner is told, as a user message, that the changes just merged to main
+  and overlap this colony's work — it can fetch, rebase onto main and continue, or finish with no
+  changes if main already covers the task.
+- `pr_opened`: its pull request is closed with a note — but only when the org's
+  `close_superseded_prs` setting lists the repository (§6.3) and external writes are not blocked
+  (§6.3); otherwise it is left open for a person.
+
+`POST /api/sessions/{id}/keep` sets `kept: true`: the hold lifts and the queue starts the colony as
+slots free, while the record stays for the history. Launch-time dedupe mirrors the issue hold: a
+second live colony for one supply-chain target of the same repository is a **409** naming the holder
+and its state (or its open pull request) — a target is refused, not queued behind its holder, and
+there is no `queue_behind_holder` for one — and `allow_duplicate: true` starts one anyway. The check
+runs as a fast pre-check plus an authoritative re-check under the admission write lock, and a
+finished holder leaves its target free to try again.
+
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 
 ```json
@@ -542,6 +586,7 @@ missing values mean the `default`.
   "pr_url": null, "publish_stage": "committed|pushed|pr_opened", "error": null,
   "merged_at": "…", "pr_opened_at": "…", "ci_state": "success|failure|pending|no_checks",
   "changed_paths": ["apps/pwa/src/main.ts"], "summary": "Fix the login redirect loop on expired sessions",
+  "supply_chain": {"package": "lodash", "advisory": "ghsa-…"}, "superseded": null,
   "cost_usd": 0.42, "routed_cost_usd": null, "routed_tokens": null, "host_disk_bytes": null, "cleaned_up": false,
   "model_routing": {…}, "verification": {…}, "attention": null, "last_activity_at": "…",
   "boot_cpus": 4, "boot_memory": "8g",
@@ -562,6 +607,11 @@ of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspe
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
 (§6.1b), `verification` (§6.3) and `attention` (§6.3, Watchdog).
+
+`supply_chain` is the `{package, advisory}` target the colony was launched to fix (§4 `POST /api/sessions`),
+and `superseded` is set when a same-repository colony's pull request merged over this one's work
+(*Superseded colony work*, below): `{by, pr_url, pr?, title, reason: "supply_chain"|"issue"|"files", at, kept}`.
+Both are left out entirely on a colony they do not apply to.
 
 `origin` names what launched the colony: `burn_down` (§6.2c), `redteam` (§6.7), `map` or
 `map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), or `chat` / `colonize` for a
@@ -1877,6 +1927,14 @@ gateway half).
 shadowing the sandbox module's `preset` (`auto`, which reads each repository's stack at boot, unless
 something is pinned above it). `null` inherits.
 
+`close_superseded_prs` (issue #673) is not inherited either: a list of this org's repositories, full
+`owner/name`, whose superseded colonies' pull requests Colonizer may close on GitHub when another
+colony's pull request merges over them (*Duplicate-colony prevention*, *Superseded colony work*).
+Empty — the default, and what inheriting resolves to, since no module setting sits behind it — only
+marks the colonies superseded and leaves their pull requests open for a person. Each entry is
+validated as a repository name; the compare against a colony's repository is case-insensitive, and
+the close is skipped while external writes are blocked (§6.3).
+
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
 allow list or add blocks but never remove a global block ([sandbox-network.md](sandbox-network.md)).
@@ -1897,6 +1955,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
             "background_model": null, "skillsets": {"ecc": false, "google-skills": true}},
   "max_parallel": 2,
   "repo_max_parallel": 1,
+  "close_superseded_prs": ["acme/api"],
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",

@@ -149,6 +149,22 @@ export interface Session {
    * whole field.
    */
   pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
+  /** The supply-chain target this colony was launched to fix (issue #673); absent for a colony launched against none. */
+  supply_chain?: { package: string; advisory: string } | null;
+  /**
+   * Set when a same-repository colony's pull request merged over this one's work (issue #673).
+   * While it stands unkept the queue and the resume route hold the colony; absent for a colony no
+   * merge covered, and `pr` is omitted when the merged pull request's URL carries no number.
+   */
+  superseded?: {
+    by: string;
+    pr_url: string;
+    pr?: number;
+    title: string;
+    reason: "supply_chain" | "issue" | "files";
+    at: string;
+    kept: boolean;
+  } | null;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
@@ -1001,6 +1017,12 @@ export interface OrgSettings {
   max_parallel?: number | null;
   /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
   repo_max_parallel?: number | null;
+  /**
+   * Repositories of this org (full `owner/name`) whose superseded colonies' pull requests Colonizer
+   * may close on GitHub when another colony's pull request merges over them (issue #673). Empty —
+   * the default — only marks the colonies superseded and leaves their pull requests open.
+   */
+  close_superseded_prs?: string[];
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -1359,6 +1381,8 @@ export interface NewSessionRequest {
   automerge?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
+  /** The supply-chain target this colony fixes, `{package, advisory}` (issue #673): a second live colony of the same repository for one target is a 409 naming the holder unless `allow_duplicate` is set. */
+  supply_chain?: { package: string; advisory: string };
   /** Start a colony on an epic anyway; the mothership answers 409 without it, listing the epic's open sub-issues. */
   allow_epic?: boolean;
   /** Queue the colony for an issue another colony already holds instead of refusing: it comes back `queued` (`claim_wait`, `queued_behind` naming the holder) and starts when the holder releases. `allow_duplicate` wins if both are set; a remote conflict still answers 409. */

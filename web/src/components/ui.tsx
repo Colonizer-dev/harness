@@ -113,12 +113,16 @@ export function answeredAt(session: Pick<Session, "suspended" | "pending_answer"
  *  ahead of fresh launches, so only answered-waiting colonies count as being in line. null when this
  *  colony is not in that state (or is missing from the list). */
 export function restorePlace(
-  session: Pick<Session, "id" | "status" | "suspended" | "pending_answer">,
-  sessions: readonly Pick<Session, "id" | "status" | "suspended" | "pending_answer">[],
+  session: Pick<Session, "id" | "status" | "suspended" | "pending_answer" | "superseded">,
+  sessions: readonly Pick<Session, "id" | "status" | "suspended" | "pending_answer" | "superseded">[],
 ): number | null {
-  if (!isAnsweredWaiting(session)) return null;
+  // A colony a merge superseded is out of the line until it is kept (issue #673): the server's
+  // restore pass skips it, and nobody behind it waits on it.
+  const inRestoreLine = (s: Pick<Session, "status" | "suspended" | "pending_answer" | "superseded">) =>
+    isAnsweredWaiting(s) && !supersededHeld(s);
+  if (!inRestoreLine(session)) return null;
   const inLine = sessions
-    .filter(isAnsweredWaiting)
+    .filter(inRestoreLine)
     .sort(
       (a, b) =>
         (answeredAt(a) ?? Infinity) - (answeredAt(b) ?? Infinity) ||
@@ -161,16 +165,37 @@ export function parkedLabel(parked: Pick<Session, "parked">["parked"]): string {
   return when ? `${reason} · resumes ${when}` : reason;
 }
 
+/** The overlap reasons a merge supersedes a colony by (issue #673), in human words. */
+const SUPERSEDE_REASONS: Record<NonNullable<Session["superseded"]>["reason"], string> = {
+  supply_chain: "same supply-chain target",
+  issue: "same issue",
+  files: "overlapping files",
+};
+
+/** Whether a merge superseded this colony and the operator has not kept it (issue #673): the queue,
+ *  the restore pass and the resume route all hold it until Keep. Mirrors `supersede::blocks_start`. */
+export function supersededHeld(session: Pick<Session, "superseded">): boolean {
+  return session.superseded != null && !session.superseded.kept;
+}
+
+/** What a supersession says in its badge tooltip: "same issue — covered by "Fix the login""
+ *  (issue #673). An unknown reason shows with its underscores spelled out. */
+export function supersededTitle(superseded: NonNullable<Session["superseded"]>): string {
+  const reason = SUPERSEDE_REASONS[superseded.reason] ?? superseded.reason.replace(/_/g, " ");
+  return `${reason} — covered by "${superseded.title}"`;
+}
+
 /** The label a colony's status reads as, suspension-aware (issues #562, #667): a
  *  `waiting_for_answer` colony whose microVM is stopped is suspended rather than working, one whose
  *  answer is stored and a boot is underway (queued or starting) says so, and one that answered while
  *  suspended is not asking for anything — it is queued for a slot. Everything else keeps the plain
  *  status label. */
-export function statusLabel(session: Pick<Session, "status" | "suspended" | "pending_answer">): string {
+export function statusLabel(session: Pick<Session, "status" | "suspended" | "pending_answer" | "superseded">): string {
   if (session.pending_answer != null && (session.status === "queued" || session.status === "starting")) {
     return "Resuming with your answer";
   }
-  if (isAnsweredWaiting(session)) return "Answered · resumes when a slot frees";
+  // Issue #673: a superseded answered colony does not resume when a slot frees — it waits for Keep.
+  if (isAnsweredWaiting(session)) return supersededHeld(session) ? "Answered · held until kept" : "Answered · resumes when a slot frees";
   if (session.suspended != null && session.status === "waiting_for_answer") return "Suspended — resumes when you answer";
   return SESSION_STATUS[session.status]?.label ?? session.status;
 }
@@ -202,7 +227,7 @@ export function canPublish(session: Pick<Session, "status" | "cleaned_up" | "git
   return !session.cleaned_up && session.git_admin_dir != null && session.suspended == null && PUBLISHABLE.includes(session.status);
 }
 
-export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer"> }) {
+export function StatusBadge({ session }: { session: Pick<Session, "status" | "suspended" | "pending_answer" | "superseded"> }) {
   const meta = SESSION_STATUS[session.status] ?? { label: session.status, tone: "neutral" as Tone, live: false };
   // A suspended colony's microVM is stopped: the pulse would read as a machine burning while it is not.
   const animated = !isSuspended(session) && (session.status === "starting" || session.status === "running" || session.status === "publishing" || session.status === "waiting_for_answer");

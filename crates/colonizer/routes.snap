@@ -157,6 +157,7 @@
 /api/sessions/{id}/files/archive                     GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/files/{name}/content              GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/keep                              POST   unauth=401    token=session>=operate activity=colony.keep
 /api/sessions/{id}/publish                           POST   unauth=401    token=owner            activity=colony.publish
 /api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/resume                            POST   unauth=401    token=session>=operate activity=colony.resume
