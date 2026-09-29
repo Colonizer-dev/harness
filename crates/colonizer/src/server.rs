@@ -98,6 +98,10 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         && let Some(scoped) = app.api_tokens.authenticate(&token).await
     {
         if let Err(deny) = api_tokens::authorize(&app, &scoped, req.method(), req.uri().path()).await {
+            // On the UHP surface the same verdicts wear the §7.7 envelope (issue #650).
+            if crate::uhp::is_uhp(req.uri().path()) {
+                return crate::uhp::denied(deny);
+            }
             return deny.into_response();
         }
         req.extensions_mut().insert(auth::Authenticated(true));
@@ -107,6 +111,17 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
+    // The UHP surface answers its own refusals as envelopes, not pages (issue #650). Discovery is
+    // how a client finds out this is a UHP server at all, so it is served before any credential
+    // check; every other `/uhp` path gets the envelope's authentication error.
+    if crate::uhp::is_uhp(&path) {
+        // `HEAD` too, because axum's `get` serves it and a client may probe before it reads.
+        if matches!(*req.method(), Method::GET | Method::HEAD) && path == crate::uhp::DISCOVERY_PATH {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
+        return crate::uhp::unauthenticated();
+    }
     if path == "/api" || path.starts_with("/api/") {
         if req.method() == Method::GET && path == "/api/status" {
             req.extensions_mut().insert(auth::Authenticated(false));
@@ -191,8 +206,8 @@ async fn api_not_found(req: Request, next: Next) -> Response {
     let unmatched = req.extensions().get::<MatchedPath>().is_none();
     if (path == "/api" || path.starts_with("/api/")) && unmatched {
         client_error(StatusCode::NOT_FOUND, "no such API route").into_response()
-    } else if (path == "/uhp" || path.starts_with("/uhp/")) && unmatched {
-        crate::uhp::unknown_route()
+    } else if crate::uhp::is_uhp(path) && unmatched {
+        crate::uhp::unmatched(path)
     } else {
         next.run(req).await
     }
@@ -252,6 +267,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::status::routes())
         .merge(crate::stream::routes())
         .merge(crate::telemetry::routes())
+        .merge(crate::uhp::routes())
         .merge(crate::update::routes())
         .merge(crate::upload::routes())
         .merge(crate::usage::routes())
@@ -928,13 +944,16 @@ mod tests {
         let body: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(body["error"]["code"], "session_not_found", "GET {uri}: {body}");
 
-        // Without a token the /uhp surface sits behind sign-in like every other route — the 401
-        // wall, not the page and not a JSON answer a client could read as a protocol reply.
+        // Without a token the /uhp surface sits behind sign-in like every other route but
+        // discovery — a 401, in the envelope a protocol client can read (issue #650), never the page.
         let res = router
             .oneshot(guarded(Method::GET, "/uhp/does-not-exist", vec![]))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        let text = body_text(res).await;
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["type"], "authentication_error", "{text}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -493,6 +493,16 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
         // container reads as an unknown colony (404), never as a forbidden one.
         ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        // The read-side core (§7, issue #650): the same need as the `/api` reads over the same
+        // data. Discovery needs no credential at all — `host_guard` admits it before this runs —
+        // but is listed anyway, so a scoped token is not refused on a public route. The single
+        // colony hides behind its org/repo limits like `/api/sessions/{id}`.
+        ["uhp", "v1", "uhp" | "harnesses" | "models"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "harnesses", id] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         ["uhp", "v1", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,

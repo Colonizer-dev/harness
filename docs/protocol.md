@@ -3089,9 +3089,18 @@ Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 **Status: partly implemented.** These tables are the contract to review before
 any code; each one is implemented in its own change afterwards. #651 landed the
 first pieces — the §7.1 surface rules (`/uhp` routes with `UHP-Version` and the
-§7.7 error envelope) and §7.5's artifact reads — and the rest is still proposed:
-until a table lands, nothing on the wire changes for it. The *Colonizer today*
-column is what works; how that as-is
+§7.7 error envelope), the session page and §7.5's artifact reads — and #650 the
+read-side core (`crates/colonizer/src/uhp.rs`): `GET /uhp/v1/uhp` (discovery,
+served without a credential), `GET /uhp/v1/harnesses` and
+`/uhp/v1/harnesses/{id}`, `GET /uhp/v1/models` and `GET /uhp/v1/sessions/{id}`,
+with version negotiation on every served `/uhp` route (any `UHP-Version` other
+than `2026-09-12` is **400** `unsupported_protocol_version`) and the envelope on
+every `/uhp` refusal, the credential ones included (**401**
+`authentication_error`, **403** `permission_error`). Scoped API tokens are held
+to the same scope and org/repo limits there as on `/api`. The rest is still
+proposed — creating and continuing responses (§7.3), SSE streaming (§7.4), input
+files (§7.5) and cancellation (§7.6): until a table lands, nothing on the wire
+changes for it. The *Colonizer today* column is what works; how the served
 surface measures against the UHP conformance suite is in
 [docs/conformance.md](conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the
