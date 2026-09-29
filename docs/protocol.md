@@ -154,6 +154,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
   {"tool_call_id":"toolu_…","tool":"Bash","action":"keep|drop_result|drop_call","keep_call":0.98,"keep_result":0.87}]}  // Jev compaction's per-chunk decisions, shadow telemetry the harness grades into `jev_ladder.jsonl` (below); `applied:false` marks a fallback pass, which is not measured
 {"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}   // a self-paced loop's colony names its next run (Loops, below)
 {"type":"loop_stop","reason":"all flakes fixed"}                      // a loop's colony ends its loop
+{"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}  // the agent reached for a masked or write-protected path (docs/path-policy.md); reporting only — the mount enforced before this ran, and the harness logs it once per distinct (access, path)
 ```
 
 `memory_proposal` (§6.2) and `finding` (§6.6) are runner events too; they are described with the
