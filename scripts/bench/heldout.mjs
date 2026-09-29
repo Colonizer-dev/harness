@@ -5,7 +5,7 @@
 // (`heldout.json`) with a versioned history: companions retire after RETIRE_AFTER scoring decisions, the
 // number the synth pool uses. docs/bench.md says the rest.
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RETIRE_AFTER } from './synth.mjs';
@@ -141,7 +141,13 @@ export function addCompanion(set, { family, check, now = new Date().toISOString(
   if (active) throw new Error(`${family} already has an active companion (${active.id}); it rotates out after ${RETIRE_AFTER} scoring decisions`);
   const source = resolve(check);
   if (!existsSync(source)) throw new Error(`no check file at ${source}`);
-  const entry = { id: `${family}.${set.checks.length + 1}`, family, file: `${family}.${set.checks.length + 1}.test.mjs`, decisions: 0, retired: false, added: now };
+  if (!/\.(mjs|js|cjs|rs|go)$/.test(source)) throw new Error(`${source}: not a check file a bench stack can run; use .mjs, .js, .cjs, .rs or .go`);
+  // The copy keeps the check's extension, so a `.rs` or `.go` companion stays one wherever it is scored.
+  const ext = extname(source);
+  const file = ext === '.mjs' || ext === '.js' || ext === '.cjs'
+    ? `${family}.${set.checks.length + 1}.test${ext}`
+    : `${family}.${set.checks.length + 1}${ext}`;
+  const entry = { id: `${family}.${set.checks.length + 1}`, family, file, decisions: 0, retired: false, added: now };
   cpSync(source, companionFile(set, entry));
   set.checks.push(entry);
   set.version++;
