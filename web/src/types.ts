@@ -23,6 +23,79 @@ export interface Attention {
   reason: AttentionReason;
   since: string;
   nudges: number;
+  /** `provider_quota_exhausted` (issue #767): the provider the colony is blocked or parked on. */
+  provider?: string;
+  /** `provider_quota_exhausted` parked from its card: `"wait"`, with the scheduled resume. */
+  action?: "wait";
+  resume_unix?: number | null;
+  reset_at?: string | null;
+}
+
+/** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */
+export interface QuotaAlternative {
+  /** A Claude alias/id, or `<provider>/<model>`. */
+  id: string;
+  label: string;
+  /** `anthropic` for Claude's own models. */
+  provider: string;
+  failure_pct: number;
+  rated: boolean;
+  degraded: boolean;
+  healthy: boolean;
+}
+
+/** One colony on a "Provider out of quota" card. */
+export interface QuotaCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  /** Quota answers in a row since its last success; null for a colony only parked on the provider. */
+  hits: number | null;
+  /** Parked on the provider (by the card's Wait, or on its own). */
+  waiting: boolean;
+  /** When a Wait scheduled it back; null otherwise. */
+  resume_unix: number | null;
+}
+
+/** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
+export interface QuotaCard {
+  provider: string;
+  provider_name: string;
+  /** The provider's models the colonies run, most used first. */
+  models: string[];
+  /** e.g. "bailian · qwen3.8-max is out of quota". */
+  title: string;
+  reset_at: string | null;
+  reset_unix: number | null;
+  colonies: QuotaCardColony[];
+  orgs: string[];
+  /** How many of the colonies wait for the reset, and the earliest scheduled resume. */
+  waiting: number;
+  resume_unix: number | null;
+  fallback_model: string | null;
+  alternatives: QuotaAlternative[];
+}
+
+/** POST /api/providers/{id}/quota-action. */
+export interface QuotaActionRequest {
+  action: "switch" | "wait" | "stop";
+  model?: string;
+  /** `colonies` (default) or `org` (their orgs' model settings too). */
+  scope?: "colonies" | "org";
+  colonies?: string[];
+  org?: string;
+  /** Save the model as the provider's `fallback_model` (a Claude model only). */
+  remember?: boolean;
+}
+
+export interface QuotaActionReply {
+  action: string;
+  provider: string;
+  colonies: string[];
+  failed: { id: string; ok: false; error: string }[];
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
@@ -281,6 +354,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
+  quota_cards?: QuotaCard[];
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */

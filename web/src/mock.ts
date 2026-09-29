@@ -3210,6 +3210,12 @@ export function createMockApi(): Api {
       providers.splice(index, 1);
       return { ok: true };
     },
+    // The mock never runs a provider dry, so it has no out-of-quota cards to answer (issue #767).
+    attention: async () => ({ quota_cards: [] }),
+    quotaAction: async (provider, body) => {
+      if (!providers.some((p) => p.id === provider)) throw new ApiError("no such provider", 404);
+      return { action: body.action, provider, colonies: [], failed: [] };
+    },
     providerHealth: async (id) => {
       const provider = providers.find((p) => p.id === id);
       if (!provider) throw new ApiError("no such provider", 404);

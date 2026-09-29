@@ -34,6 +34,7 @@ import type {
   ProviderPreset,
   ProviderPricing,
   ProviderWire,
+  QuotaCard,
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
@@ -60,6 +61,7 @@ import {
 import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
+import { ProviderQuotaCard, runQuotaAction } from "../cockpit/ProviderQuotaCard";
 import { RemoteAccessPane } from "./RemoteAccessPane";
 import { TokensPane } from "./TokensPane";
 import { FleetPane } from "./FleetPane";
@@ -2898,6 +2900,7 @@ function ProvidersPane({
       }
     >
       <div className="space-y-3">
+        <ProviderQuotaCards reloadProviders={reload} />
         <div className="space-y-2">
           <ClaudeRow claude={claude} models={models} onOpenConnections={onOpenConnections} />
           {error && <p className="text-[13px] text-err">{error}</p>}
@@ -3012,6 +3015,45 @@ function ProvidersPane({
         </p>
       </div>
     </Pane>
+  );
+}
+
+/**
+ * The "Provider out of quota" cards (issue #767) at the top of the providers pane: the same cards
+ * the inbox shows, answered here the same way. Refreshed on the pane's own 5 s rhythm.
+ */
+function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promise<void> }) {
+  const api = useApi();
+  const toast = useToast();
+  const [cards, setCards] = useState<QuotaCard[]>([]);
+  const load = useCallback(async () => {
+    try {
+      setCards((await api.attention()).quota_cards ?? []);
+    } catch {
+      // An older mothership has no /api/attention: no cards, nothing to say.
+    }
+  }, [api]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+  if (cards.length === 0) return null;
+  return (
+    <div className="space-y-2">
+      {cards.map((card) => (
+        <ProviderQuotaCard
+          key={card.provider}
+          card={card}
+          onAction={async (provider, body) => {
+            await runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body);
+            await Promise.all([load(), reloadProviders()]);
+          }}
+        />
+      ))}
+    </div>
   );
 }
 

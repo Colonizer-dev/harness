@@ -366,6 +366,17 @@ pub struct QuotaState {
 /// a restart like any provider record.
 pub const ACCOUNT_QUOTA_ID: &str = "claude-account";
 
+/// A colony whose requests to one provider keep coming back quota-exhausted with no Claude
+/// fallback offered (issues #760, #767): the provider, how many such answers in a row, and when the
+/// first one landed. In memory only — the provider's own record in `provider-quota.json` is what
+/// survives a restart; this only ties colonies to it. Any upstream success for the colony clears it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColonyQuotaHit {
+    pub provider: String,
+    pub hits: u64,
+    pub since: DateTime<Utc>,
+}
+
 pub struct Gateway {
     client: reqwest::Client,
     stats: Mutex<HashMap<String, Arc<ProviderStats>>>,
@@ -385,6 +396,8 @@ pub struct Gateway {
     /// Quota-exhausted providers by id; entries with a passed `reset_unix` read as recovered.
     quota: Mutex<HashMap<String, QuotaState>>,
     quota_file: PathBuf,
+    /// Colonies blocked on an exhausted provider, by colony id (see [`ColonyQuotaHit`]).
+    colony_quota: Mutex<HashMap<String, ColonyQuotaHit>>,
 }
 
 impl Gateway {
@@ -426,6 +439,7 @@ impl Gateway {
             usage_file,
             quota: Mutex::new(quota),
             quota_file,
+            colony_quota: Default::default(),
         })
     }
 
@@ -596,6 +610,43 @@ impl Gateway {
         if quota.remove(provider).is_some() {
             self.write_quota(&quota);
         }
+    }
+
+    /// Notes that `colony`'s request to `provider` came back quota-exhausted with no fallback: the
+    /// colony is blocked on that provider until a request of its own succeeds. A hit on another
+    /// provider replaces the record — the colony is blocked on whichever answered last.
+    pub fn note_colony_quota(&self, colony: &str, provider: &str) {
+        let mut map = self.colony_quota.lock().unwrap();
+        match map.get_mut(colony) {
+            Some(hit) if hit.provider == provider => hit.hits += 1,
+            _ => {
+                map.insert(
+                    colony.to_string(),
+                    ColonyQuotaHit {
+                        provider: provider.to_string(),
+                        hits: 1,
+                        since: Utc::now(),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Forgets a colony's quota block: one of its requests succeeded, or it was switched, stopped
+    /// or parked by a quota action.
+    pub fn clear_colony_quota(&self, colony: &str) {
+        self.colony_quota.lock().unwrap().remove(colony);
+    }
+
+    /// The provider `colony` is blocked on, if every request it made since its last success came
+    /// back quota-exhausted.
+    pub fn colony_quota(&self, colony: &str) -> Option<ColonyQuotaHit> {
+        self.colony_quota.lock().unwrap().get(colony).cloned()
+    }
+
+    /// Every blocked colony, by id.
+    pub fn colony_quota_all(&self) -> HashMap<String, ColonyQuotaHit> {
+        self.colony_quota.lock().unwrap().clone()
     }
 
     /// `COLONIZER_QUOTA_FALLBACK=0` (or `false`) opts every role out of quota failover at once;
@@ -1078,6 +1129,8 @@ pub(crate) async fn flag_model_error(app: &Shared, colony: &str) {
 /// Without this a colony that recovered from one failed call stayed on the needs-you list for good,
 /// and one whose calls alternate between failing and succeeding flickered on and off it.
 pub(crate) async fn clear_model_error(app: &Shared, colony: &str) {
+    // Every success path lands here, so it is also where a colony's quota block lifts (#760).
+    app.gateway.clear_colony_quota(colony);
     let flagged = app
         .session(colony)
         .await
@@ -1744,6 +1797,10 @@ async fn anthropic_error(
     }
     let fallback =
         quota.is_some() && provider.fallback_model.as_deref().is_some_and(|m| !m.is_empty()) && Gateway::quota_fallback_enabled();
+    if quota.is_some() && !fallback {
+        // No Claude retry is coming, so the colony is blocked on this provider (#760, #767).
+        app.gateway.note_colony_quota(colony, &provider.id);
+    }
     if quota.is_some() {
         audit.fail_with(status.as_u16(), GatewayFailure::QuotaExhausted, fallback);
         if fallback {
@@ -1902,6 +1959,9 @@ async fn openai_response(
         match provider_quota::classify_quota_exhaustion(upstream_status, code, &message) {
             Some(hit) => {
                 gateway.mark_quota_exhausted(id, hit.reset_at.clone(), hit.reset_unix);
+                if !quota_fallback && let Some((_, colony)) = attention {
+                    gateway.note_colony_quota(colony, id);
+                }
                 if let Some(audit) = &audit {
                     audit.fail_with(status.as_u16(), GatewayFailure::QuotaExhausted, quota_fallback);
                 }
@@ -2382,6 +2442,84 @@ mod tests {
             lines[0]["model"], "deepseek-chat",
             "the line names the model the body asked for"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider answering 429 quota_exhausted to three colonies raises exactly one
+    /// "Provider out of quota" card listing all three (issue #767), with the reset the error named;
+    /// a later success for one colony takes it off the card.
+    #[tokio::test]
+    async fn a_quota_exhausted_provider_raises_one_card_for_every_blocked_colony() {
+        let router = Router::new().route(
+            "/v1/messages",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(json!({"type": "error", "error": {"type": "rate_limit_error",
+                        "message": "quota_exhausted: the token plan quota has been exhausted, resets 2099-10-01T16:00:00Z"}})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-quota-card-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_string(&[json!({
+                "id": "bailian", "name": "Bailian", "base_url": format!("http://{addr}"), "auth": "none",
+                "models": ["qwen3.8-max"],
+            })])
+            .unwrap(),
+        )
+        .unwrap();
+        let mut tokens = Vec::new();
+        for i in 0..3 {
+            let id = format!("c{i}");
+            let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+            colony.id = id.clone();
+            colony.allowed_providers = Some(vec!["bailian".into()]);
+            colony.allowed_models = Some(vec!["bailian/qwen3.8-max".into()]);
+            app.sessions.write().await.push(colony);
+            let token = format!("{i}").repeat(40);
+            std::fs::create_dir_all(app.session_dir(&id)).unwrap();
+            std::fs::write(app.gateway_token_file(&id), &token).unwrap();
+            tokens.push(token);
+        }
+        for token in &tokens {
+            for _ in 0..2 {
+                let response = post_to_gateway(
+                    &app,
+                    token,
+                    "bailian",
+                    HeaderMap::new(),
+                    Bytes::from_static(br#"{"model":"qwen3.8-max","max_tokens":8,"messages":[]}"#),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            }
+        }
+        let cards = crate::quota_cards::cards(&app).await;
+        assert_eq!(cards.len(), 1, "one card for the provider: {cards:?}");
+        let card = &cards[0];
+        assert_eq!(card["provider"], "bailian");
+        assert_eq!(card["title"], "bailian · qwen3.8-max is out of quota");
+        assert_eq!(card["reset_at"], "2099-10-01T16:00:00Z");
+        let listed: Vec<&str> = card["colonies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(listed, vec!["c0", "c1", "c2"]);
+        assert_eq!(card["colonies"][0]["hits"], 2);
+        // A success for c1 (the success paths all clear the colony's block) takes it off the card.
+        clear_model_error(&app, "c1").await;
+        let cards = crate::quota_cards::cards(&app).await;
+        assert_eq!(cards[0]["colonies"].as_array().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
 

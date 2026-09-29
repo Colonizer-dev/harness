@@ -75,6 +75,7 @@ mod providers;
 mod publish;
 mod push;
 mod queue;
+mod quota_cards;
 mod rebase;
 mod reclaim;
 mod redteam;

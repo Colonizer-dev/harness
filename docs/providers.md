@@ -112,6 +112,15 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
   model. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
   connection the colonies route to is exhausted, the queue pauses, and a colony whose turn died on the
   plan is stopped with its worktree kept until the provider recovers.
+- **Out-of-quota card.** Colonies blocked on an exhausted connection (every request since their last
+  success answered with the quota error, and no `fallback_model` retry) show on one "Provider out of
+  quota" card per connection — in the inbox's "Needs you" list and at the top of Settings →
+  Providers — with the model, the reset and a countdown. **Switch model** moves those colonies (or,
+  with "this org", their orgs' model settings too) to a healthy model from the picker, which shows
+  each model's failure rate, and restarts them on it; "remember" saves a Claude pick as the
+  connection's `fallback_model`, so the next exhaustion retries on it by itself. **Wait until reset**
+  parks them and resumes them at the reset. **Stop** stops them. The API is
+  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
   and the colony log says why.

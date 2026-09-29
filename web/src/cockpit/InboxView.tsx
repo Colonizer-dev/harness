@@ -9,7 +9,8 @@ import { Page } from "./Page";
 
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { Session } from "../types";
+import type { QuotaActionRequest, QuotaCard, Session } from "../types";
+import { ProviderQuotaCard, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { feedEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
@@ -32,16 +33,25 @@ export function InboxView({
   sessions,
   onOpenColony,
   onOpenNotificationSettings,
+  quotaCards = [],
+  onQuotaAction,
 }: {
   /** Every colony in the workspace, filtered by the caller. */
   sessions: Session[];
   onOpenColony: (id: string) => void;
   onOpenNotificationSettings: () => void;
+  /** "Provider out of quota" cards (issue #767), shown first: one per provider, not one per colony. */
+  quotaCards?: QuotaCard[];
+  onQuotaAction?: (provider: string, body: QuotaActionRequest) => Promise<unknown>;
 }): ReactElement {
   // Nothing server-side records a read; this is a local high-water mark, so "read" is per browser.
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
 
-  const waiting = sessions.filter(needsYou);
+  // A colony a quota card covers is answered on the card, not listed again as a question.
+  const onCards = quotaCardColonyIds(quotaCards);
+  const needing = sessions.filter(needsYou);
+  const waiting = needing.filter((session) => !onCards.has(session.id));
+  const needCount = new Set([...needing.map((session) => session.id), ...onCards]).size;
   const questions = useOpenQuestions(sessions);
   const entries = feedEntries(sessions);
 
@@ -57,7 +67,7 @@ export function InboxView({
         <div>
           <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Inbox</h1>
           <div className="mt-2 text-[14px] text-muted">
-            <span className={waiting.length > 0 ? "text-warn" : undefined}>{waiting.length} need you</span> · every workspace
+            <span className={needCount > 0 ? "text-warn" : undefined}>{needCount} need you</span> · every workspace
           </div>
         </div>
         <button
@@ -73,7 +83,16 @@ export function InboxView({
         <section aria-label="Needs you" className="flex min-w-0 flex-col gap-4">
           <h2 className="m-0 text-[14px] font-medium">Needs you</h2>
 
-          {waiting.length === 0 ? (
+          {quotaCards.map((card) => (
+            <ProviderQuotaCard
+              key={card.provider}
+              card={card}
+              onOpenColony={onOpenColony}
+              onAction={onQuotaAction ?? (async () => undefined)}
+            />
+          ))}
+
+          {waiting.length === 0 && quotaCards.length > 0 ? null : waiting.length === 0 ? (
             <div className="flex items-center gap-3 border-y border-border py-3.5 text-[13px] text-muted">
               <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" className="text-ok">
                 <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />

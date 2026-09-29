@@ -363,7 +363,7 @@ pub fn apply_connection_policy(body: &[u8], provider: &Provider) -> Option<Vec<u
 }
 
 /// Models served by Anthropic with the Claude login, offered as suggestions in model pickers.
-const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+pub(crate) const ANTHROPIC_MODELS: &[(&str, &str)] = &[
     ("opus", "Claude Opus (latest)"),
     ("sonnet", "Claude Sonnet (latest)"),
     ("haiku", "Claude Haiku (latest)"),
@@ -413,7 +413,7 @@ const SETTING_NAMES: [&str; 6] = [
 ];
 
 impl App {
-    fn providers_file(&self) -> PathBuf {
+    pub(crate) fn providers_file(&self) -> PathBuf {
         self.cfg.config_dir.join("providers.json")
     }
 
@@ -467,7 +467,7 @@ impl App {
         });
     }
 
-    async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
+    pub(crate) async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
         crate::util::write_atomic(&self.providers_file(), &serde_json::to_vec_pretty(providers)?).await
     }
@@ -587,7 +587,7 @@ pub struct ColonyRoutes {
 /// and a non-empty canonical. `deepseek/` names no model, so it routes nothing on either side of
 /// the record — [`ColonyRoutes::used`] admits no provider for it and [`ColonyRoutes::used_models`]
 /// records no pair.
-fn names_model_on(value: &str, provider_id: &str) -> bool {
+pub(crate) fn names_model_on(value: &str, provider_id: &str) -> bool {
     value
         .strip_prefix(provider_id)
         .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)

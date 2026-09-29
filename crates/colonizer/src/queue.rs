@@ -782,6 +782,36 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
     }
 }
 
+/// The resume scheduler's verdict for one colony at `now` (unix seconds): quota-parked, with a
+/// worktree to resume into, and due — its provider recovered, or the reset a card's "wait" scheduled
+/// it for has come ([`crate::quota_cards::park_due`]). The provider is the one the flag names (a
+/// card's wait records it), else the one the park's error names; with neither, any exhaustion
+/// anywhere holds it. Pure over `exhausted`, so the schedule is tested with a fake clock.
+pub(crate) fn quota_resume_due(
+    s: &Session,
+    provider_ids: &[String],
+    exhausted: &dyn Fn(&str) -> bool,
+    any_exhausted: bool,
+    now: i64,
+) -> bool {
+    let Some(attention) = s
+        .attention
+        .as_ref()
+        .filter(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+    else {
+        return false;
+    };
+    if s.cleaned_up || s.git_admin_dir.is_none() {
+        return false;
+    }
+    let provider = crate::quota_cards::flagged_provider(s, provider_ids);
+    let out = match provider.as_deref() {
+        Some(pid) => exhausted(pid),
+        None => any_exhausted,
+    };
+    crate::quota_cards::park_due(attention, out, now)
+}
+
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
 /// worktree never left, so the normal admission loop resumes them like any operator resume. Both
 /// park shapes qualify: the pre-#213 `Stopped` stand-in and a real `Parked` whose park discarded
@@ -800,17 +830,8 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
         let any_exhausted = !app.gateway.quota_exhausted().is_empty();
-        let recovered = |s: &Session| {
-            s.attention
-                .as_ref()
-                .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
-                && !s.cleaned_up
-                && s.git_admin_dir.is_some()
-                && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
-                    Some(pid) => !app.gateway.is_quota_exhausted(&pid),
-                    None => !any_exhausted,
-                }
-        };
+        let now = Utc::now().timestamp();
+        let recovered = |s: &Session| quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any_exhausted, now);
         let mut cold: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for s in sessions

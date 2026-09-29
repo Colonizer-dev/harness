@@ -1817,6 +1817,8 @@ pull requests small; they will adopt the red-team runs of
 | `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
+| `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
+| `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
@@ -1974,7 +1976,10 @@ gains `last_activity_at` and `attention`:
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
-`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
+`nudges_exhausted` — the flag is written with the log line that says the colony needs you, and
+gateway traffic alone (a request in flight) does not clear it again; only agent progress does. A
+colony blocked on an exhausted provider is flagged `provider_quota_exhausted` instead of being nudged
+(§6.5, Provider out of quota cards). A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
@@ -2421,6 +2426,65 @@ resumes parked colonies whose provider recovered — reset passed, or the provid
 ones whose park discarded the microVM and routing a kept-VM park through the resume endpoint, which
 resumes it warm when it can and falls back to cold otherwise. Colonies whose provider is still
 exhausted stay parked.
+
+**Provider out of quota cards** ([#767]). The maintainer answers an exhausted provider on one
+dedicated card per provider, not on a free-form question from an agent. The gateway ties colonies to
+the exhaustion: a colony whose request came back quota-exhausted with no `fallback_model` retry on
+offer is *blocked* on that provider until one of its own requests succeeds (in memory; the provider's
+record above is what survives a restart). A card lists every colony in play (live, queued or parked,
+not cleaned up) that is blocked on the provider, or parked with `attention.reason`
+`provider_quota_exhausted` naming it (in `attention.provider`, or in the park's `error`). Only a
+provider with an active record and at least one such colony gets a card; the Claude account's own cap
+keeps its banner (`quota.kind: "account"`).
+
+`GET /api/attention` answers `{"quota_cards": [card]}`, and `GET /api/status` carries the same list as
+`quota_cards`, so the cockpit needs no second poll:
+
+```json
+{"provider": "bailian", "provider_name": "Bailian", "models": ["qwen3.8-max"],
+ "title": "bailian · qwen3.8-max is out of quota", "reset_at": "Oct 1, 16:00 UTC", "reset_unix": 1790870400,
+ "colonies": [{"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "issue_title": "…",
+               "status": "running", "hits": 3, "waiting": false, "resume_unix": null}],
+ "orgs": ["acme"], "waiting": 0, "resume_unix": null, "fallback_model": null,
+ "alternatives": [{"id": "sonnet", "label": "Claude Sonnet (latest)", "provider": "anthropic",
+                   "failure_pct": 0.0, "rated": false, "degraded": false, "healthy": true}]}
+```
+
+`models` are the provider's models the colonies run, most used first; `hits` is a colony's quota
+answers in a row; `waiting`/`resume_unix` count the colonies parked for the reset and the earliest
+scheduled resume. `alternatives` is every model `/api/models` offers that is not on an exhausted
+provider, with its provider's usage health (Claude's models read degraded only while the account's
+own cap holds), healthy ones first.
+
+`POST /api/providers/{id}/quota-action` answers the card with
+`{action: "switch"|"wait"|"stop", model?, scope?: "colonies"|"org", colonies?: [id], org?, remember?}`
+and replies `{action, provider, colonies: [id], failed: [{id, ok: false, error}]}`. `colonies` limits
+the action to some of the card's colonies (an id not on the card is a `400`); `org` limits it to one
+org.
+
+- `switch` needs `model`, one of the card's `alternatives` (a model on the exhausted provider, or one
+  not on offer, is a `400`). Each colony's role on the provider moves: `model_override` when its
+  orchestrator model is there (or no role visibly is — a tier or background model), and
+  `subagent_model_override` when its subagent model is. The colony is then restarted — a live or
+  parked one stopped and resumed cold, a stopped one resumed, a queued one simply boots with it — so
+  boot re-derives `allowed_providers`/`allowed_models` from the new settings. `scope: "org"` also
+  moves the colonies' orgs' `model`, `subagent_model` and `background_model` overrides that route to
+  the provider, so the orgs' next colonies start on the new model. `remember: true` saves `model` as
+  the provider's `fallback_model`, which must be a Claude model (`400` otherwise). Every-role
+  switching across the install's own module settings is not built yet (`scope` anything else is a
+  `400`).
+- `wait` parks every live colony (`status` `parked`, the worktree kept — suspended, not failed) and
+  re-stamps an already-parked one: `attention` gains `provider`, `action: "wait"`, `reset_at` and
+  `resume_unix` (the provider's `reset_unix`). The queue's 5 s resume pass requeues it once
+  `resume_unix` has passed or the provider recovered, whichever is first; a reset-less record resumes
+  it when the record's TTL lapses. A queued colony is reported under `failed`: the queue already holds it.
+- `stop` stops every colony as `POST /api/sessions/{id}/stop` does; a pre-#213 `stopped` park loses its
+  quota flag, so it is not resumed later.
+
+A blocked colony that is live — `starting` included, when its agent never got a turn out — is
+flagged by the watchdog's minute tick with `attention.reason` `provider_quota_exhausted`,
+`attention.provider` and the reset, and a log line saying it needs the maintainer; the watchdog does
+not nudge it, since another request cannot be answered until the plan resets ([#760]).
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
