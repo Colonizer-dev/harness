@@ -364,6 +364,7 @@ routed together).
 
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
+  `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
   `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
@@ -3043,9 +3044,12 @@ to the [Unified Harness Protocol](https://unifiedharnessprotocol.org/) (UHP,
 version `2026-09-12`, draft), which extends the OpenAI Responses API, so that
 Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 
-**Status: proposed.** These tables are the contract to review before any code;
-each one is implemented in its own change afterwards. Until then nothing on the
-wire changes, and the *Colonizer today* column is what works; how that as-is
+**Status: partly implemented.** These tables are the contract to review before
+any code; each one is implemented in its own change afterwards. #651 landed the
+first pieces — the §7.1 surface rules (`/uhp` routes with `UHP-Version` and the
+§7.7 error envelope) and §7.5's artifact reads — and the rest is still proposed:
+until a table lands, nothing on the wire changes for it. The *Colonizer today*
+column is what works; how that as-is
 surface measures against the UHP conformance suite is in
 [docs/conformance.md](conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the

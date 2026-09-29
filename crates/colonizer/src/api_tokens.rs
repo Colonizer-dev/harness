@@ -424,9 +424,44 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
+        // Artifacts (§7.5, issue #651): a colony's `out/` files read at watch scope, like the
+        // colony itself — the listing, the archive and the per-file download are one read.
+        ["api", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["api", "sessions", id, "files", "archive"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["api", "sessions", id, "files", name, "content"] if get && !id.is_empty() && !name.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
+        },
+        // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
+        // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
+        // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
+        // container reads as an unknown colony (404), never as a forbidden one.
+        ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "sessions", id, "files", "archive"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "sessions", id, "files", name, "content"] if get && !id.is_empty() && !name.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "containers", cid, "files", fid, "content"] if get && !cid.is_empty() && !fid.is_empty() => Need::Session {
+            id: cid.strip_prefix("cntr_").unwrap_or(cid),
+            at_least: Scope::Read,
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
