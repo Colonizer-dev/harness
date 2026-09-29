@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<!-- Source for docs/media/social-preview.png, the 1280x640 card GitHub shows when the repository is
+     linked. Colours, type and the mesh art follow the README hero and the crate banners, so the
+     three read as one brand. Self-contained on purpose: no remote fonts or images, so it renders
+     the same offline and keeps its look wherever GitHub crops it. Regenerate the PNG with
+     `node docs/media/record-demo.mjs --only social`. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .card {
+    position: relative; width: 1280px; height: 640px; overflow: hidden;
+    background: linear-gradient(180deg, #0A0D14 0%, #05070B 100%);
+    color: #EDEBE6; font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .glow { position: absolute; inset: 0;
+    background: radial-gradient(45% 60% at 76% 55%, rgba(255, 107, 53, .20), rgba(255, 107, 53, .05) 55%, transparent 100%); }
+  .dots { position: absolute; inset: 0; background-image: radial-gradient(rgba(237, 235, 230, .35) 1px, transparent 1.2px);
+    background-size: 26px 26px; -webkit-mask-image: radial-gradient(ellipse 34% 70% at 78% 50%, #000, transparent 100%); }
+  .art { position: absolute; right: 40px; top: 40px; }
+  .rule { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; background: #FF6B35; }
+  .content { position: absolute; inset: 0; padding: 64px 72px 56px; display: flex; flex-direction: column; }
+  .wordmark { display: flex; align-items: center; gap: 18px; }
+  .wordmark span { font-size: 34px; font-weight: 700; letter-spacing: .22em; }
+  .pitch { margin-top: 96px; max-width: 800px; }
+  .pitch h1 { margin: 0; font-size: 62px; line-height: 1.14; font-weight: 700; letter-spacing: -.015em; }
+  .pitch h1 em { font-style: normal; color: #FF6B35; }
+  .meta { margin-top: auto; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 22px; letter-spacing: .18em; color: #8A8A8E; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="dots"></div>
+  <div class="glow"></div>
+
+  <svg class="art" width="430" height="560" viewBox="0 0 430 560" aria-hidden="true">
+    <g stroke="#FF6B35" stroke-width="1.5" stroke-dasharray="5 6" opacity="0.5">
+      <line x1="215" y1="280" x2="90" y2="150"/>
+      <line x1="215" y1="280" x2="345" y2="130"/>
+      <line x1="215" y1="280" x2="385" y2="330"/>
+      <line x1="215" y1="280" x2="75" y2="370"/>
+      <line x1="215" y1="280" x2="215" y2="480"/>
+    </g>
+    <g fill="#0E121A" stroke="#EDEBE6" stroke-width="1.5" stroke-opacity="0.7">
+      <polygon points="90,135 104.4,143 104.4,159 90,167 75.6,159 75.6,143"/>
+      <polygon points="345,115 359.4,123 359.4,139 345,147 330.6,139 330.6,123"/>
+      <polygon points="385,315 398.9,323 398.9,339 385,347 371.1,339 371.1,323"/>
+      <polygon points="75,355 88.9,363 88.9,379 75,387 61.1,379 61.1,363"/>
+      <polygon points="215,465 226.5,471.5 226.5,484.5 215,491 203.5,484.5 203.5,471.5"/>
+    </g>
+    <g fill="#EDEBE6" opacity="0.8">
+      <circle cx="90" cy="151" r="3"/>
+      <circle cx="345" cy="131" r="3"/>
+      <circle cx="385" cy="331" r="3"/>
+      <circle cx="75" cy="371" r="3"/>
+      <circle cx="215" cy="478" r="2.5"/>
+    </g>
+    <polygon points="215,241 246.4,259 246.4,295 215,313 183.6,295 183.6,259" fill="#141821" stroke="#FF6B35" stroke-width="3"/>
+    <circle cx="215" cy="277" r="7.5" fill="#FF6B35"/>
+  </svg>
+
+  <div class="content">
+    <div class="wordmark">
+      <svg width="46" height="50" viewBox="0 0 46 50" aria-hidden="true">
+        <polygon points="23,3 42,14 42,36 23,47 4,36 4,14" fill="none" stroke="#FF6B35" stroke-width="4"/>
+        <circle cx="23" cy="25" r="6" fill="#FF6B35"/>
+      </svg>
+      <span>Colonizer</span>
+    </div>
+    <div class="pitch">
+      <h1>Every task runs in its own microVM,<br><em>and your secrets stay on the host.</em></h1>
+    </div>
+    <div class="meta">colonizer.dev &middot; open source &middot; MIT</div>
+  </div>
+
+  <div class="rule"></div>
+</div>
+</body>
+</html>

@@ -1,19 +1,38 @@
+<h1 align="center">Colonizer</h1>
+
 <p align="center">
-  <img src="assets/readme-banner.svg" alt="Colonizer Harness. The open-source core. One microVM per task, a private mesh home, and a pull request at the end." width="100%">
+  <b>Every task runs in its own microVM, and your secrets stay on the host.</b><br>
+  The open-source core: the agent asks you with choices, and your machine opens the pull request.
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/STATUS-ALPHA-FF6B35?style=flat-square&labelColor=0A0A0B" alt="Status: alpha">
   <img src="https://img.shields.io/badge/LANGUAGE-RUST-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Language: Rust">
   <img src="https://img.shields.io/badge/SANDBOX-KVM%20MICROVMS-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Sandbox: KVM microVMs">
-  <img src="https://img.shields.io/badge/MESH-HEADSCALE%20%C2%B7%20WIREGUARD-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Mesh: Headscale and WireGuard">
-  <img src="https://img.shields.io/badge/AGENT-CLAUDE%20CODE%20%C2%B7%20PI-EDEBE6?style=flat-square&labelColor=0A0A0B" alt="Agent: Claude Code and Pi">
   <img src="https://img.shields.io/badge/LICENSE-MIT-FF6B35?style=flat-square&labelColor=0A0A0B" alt="License: MIT">
 </p>
 
+```sh
+curl -fsSL https://colonizer.dev/install.sh | sh
+```
+
 <p align="center">
-  <b>colonizer.dev</b> · HARNESS · the open-source core
+  <a href="#development">Try the mock cockpit locally</a>
+  &nbsp;·&nbsp;
+  <a href="docs/install.md">Docs</a>
+  &nbsp;·&nbsp;
+  <a href="docs/architecture.md">Architecture</a>
+  &nbsp;·&nbsp;
+  <a href="docs/audit.md">Audit</a>
 </p>
+
+<p align="center">
+  <img src="docs/media/demo.gif" alt="The cockpit in motion: the dashboard of running colonies, one colony's chat, a question the agent asks with answer choices, and the pull request it opened." width="100%">
+</p>
+
+> **Not ready for unattended work on sensitive repositories.** An external audit of v0.1.3 found four
+> ways past the wall that keeps secrets on the host, and they are not fixed yet
+> ([docs/audit.md](docs/audit.md)).
 
 ---
 
@@ -31,14 +50,10 @@ When the work is done, your machine, the **mothership**, commits it and opens th
 This repository is the open-source core, MIT, and it runs on one machine today: Linux with KVM, or an
 Apple Silicon Mac. [colonizer.dev](https://colonizer.dev) is the name for everything around it. The
 domain serves a page about the project, the docs, the installer and the live map. The hosted Colonizer
-is not built yet, and nothing in this README pretends otherwise.
-
-> **Colonies only ever hold placeholders.**
-> The GitHub token never enters a colony. The agent's API credential is swapped in by the sandbox's
-> host-side TLS proxy, for one host, on the way out. A colony that goes rogue can wreck its own
-> worktree, and that's all. That is the design, not yet the measured truth: an external audit of
-> v0.1.3 found four ways past that wall, and they are not fixed yet
-> ([docs/audit.md](docs/audit.md)).
+is not built yet, and nothing in this README pretends otherwise. Colonies only ever hold placeholders:
+the GitHub token never enters a colony, and the agent's API credential is swapped in by the sandbox's
+host-side TLS proxy, for one host, on the way out — what that promise is worth today is the audit line
+at the top, and the [trust model](#trust-model) below.
 
 The design is in [docs/architecture.md](docs/architecture.md). The wire format between agent, microVM,
 mothership and browser is in [docs/protocol.md](docs/protocol.md). How that wire measures against the
@@ -59,15 +74,11 @@ is in [docs/hosted.md](docs/hosted.md).
 
 ## Run it
 
-On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git` and `gh`:
-
-```sh
-curl -fsSL https://colonizer.dev/install.sh | sh
-colonizer               # prints a sign-in link and opens it (`colonizer open` reprints it)
-```
-
-That installs the latest [release](https://github.com/Colonizer-dev/harness/releases). To build from
-source instead, you also need Node.js 20+ and Rust 1.88+:
+On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git` and `gh`. The install command at the top
+of this page installs the latest
+[release](https://github.com/Colonizer-dev/harness/releases); run `colonizer` and it prints a sign-in
+link and opens it (`colonizer open` reprints it). To build from source instead, you also need Node.js
+20+ and Rust 1.88+:
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness
