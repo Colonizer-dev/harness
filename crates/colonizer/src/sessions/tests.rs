@@ -54,6 +54,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         claude_account: None,
         model_routing: None,
         allowed_providers: None,
+        allowed_models: None,
         sensitivity: None,
         routed_cost_usd: None,
         routed_tokens: None,

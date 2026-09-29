@@ -310,6 +310,18 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
 
+### Upgrading across the microsandbox 0.7 pin
+
+Since [#639](https://github.com/Colonizer-dev/harness/issues/639) the vendored `msb` is 0.7.x.
+Microsandbox's home (`MSB_HOME`, default `~/.microsandbox`) is version-locked: the first 0.7
+command migrates a 0.6-era home in place, and the migrated home still lists and removes microVMs a
+0.6 `msb` created. The migration is one-way: after it, a 0.6 `msb` fails every command against the
+home (`database schema is newer than this msb binary`). If you have to roll the harness itself back
+to a 0.6-era release, downgrade the home first, with the 0.7 binary: `msb self downgrade 0.6.18
+--yes`. It refuses while sandboxes are active (stop them first), backs the database up
+(`db/msb.db.bak-…`), purges the image cache (re-downloaded on the next boot) and installs the
+0.6.18 binaries, after which the old `msb` works again.
+
 ### Credentials read from the environment
 
 Each of these is used only when nothing is saved for it in Settings. A saved value wins.
