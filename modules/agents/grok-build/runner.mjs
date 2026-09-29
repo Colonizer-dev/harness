@@ -2,8 +2,10 @@
 // Colonizer agent runner for xAI's Grok Build CLI (`grok`), headless: the runner contract of
 // docs/protocol.md §2 (JSON-line commands on stdin, JSON-line protocol events on stdout). One
 // `grok` child per turn; the first turn's `end` event carries the grok sessionId and every later
-// turn resumes it with `-r`, so a colony is one continuous grok session. The pin lives in
-// module.json; every flag and event field is cited from the upstream user guide in the README.
+// turn resumes it with `-r`, so a colony is one continuous grok session. Questions go through the
+// colonizer MCP server's ask_user tool (mcp.mjs, registered in the fresh GROK_HOME's config.toml)
+// and a loopback bridge below. The pin lives in module.json; every flag and event field is cited
+// from the upstream user guide in the README.
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -125,9 +127,15 @@ export function resolveModel(spec) {
   return { model: slash > 0 ? value.slice(slash + 1) : value };
 }
 
-/** Loopback bridge to mcp.mjs: finding_file and memory_propose arrive here and leave the colony as
- * protocol events (docs/protocol.md §6.6, §6.2), the way the opencode module's bridge does. */
-export async function createBridge({ emit, findings = false, token = randomBytes(16).toString('hex') }) {
+/** Loopback bridge to mcp.mjs: finding_file, memory_propose, loop_next and loop_stop arrive here
+ * and leave the colony as protocol events (docs/protocol.md §6.6, §6.2), the way the opencode
+ * module's bridge does. An ask_user call parks here instead: the HTTP response is held until the
+ * matching `answer` command resolves it with {answers, response}, the question card having gone
+ * out as a `question` event (§2). The loop delay was clamped in mcp.mjs; the bridge only validates
+ * the shape it must not emit malformed (§2's delay_minutes is an integer). */
+export async function createBridge({ emit, findings = false, setStatus = () => {}, isWorking = () => false, token = randomBytes(16).toString('hex') }) {
+  let count = 0;
+  const pending = new Map();
   const server = createServer((req, res) => {
     const reply = (status, payload) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); } };
     if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
@@ -136,7 +144,13 @@ export async function createBridge({ emit, findings = false, token = randomBytes
     req.on('end', () => {
       let msg = null;
       try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
-      if (req.url === '/finding') {
+      if (req.url === '/ask') {
+        const questionId = `q-${++count}`;
+        pending.set(questionId, (answers) => reply(200, answers ?? { cancelled: true }));
+        const qs = Array.isArray(msg.questions) ? msg.questions : [];
+        emit({ type: 'question', question_id: questionId, message_id: typeof msg.message_id === 'string' ? msg.message_id : null, questions: qs.map((q) => ({ question: String(q?.question ?? ''), header: String(q?.header ?? q?.question ?? ''), multi_select: Boolean(q?.multiSelect), options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? ''), preview: null })) })) });
+        setStatus('waiting_for_answer');
+      } else if (req.url === '/finding') {
         const missing = ['title', 'body', 'evidence'].filter((k) => typeof msg[k] !== 'string' || !msg[k].trim());
         if (missing.length) reply(200, { error: `finding_file needs ${missing.join(', ')}` });
         else {
@@ -151,12 +165,37 @@ export async function createBridge({ emit, findings = false, token = randomBytes
           emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
           reply(200, { ok: true });
         }
+      } else if (req.url === '/loop_next') {
+        const minutes = Number(msg.delay_minutes);
+        if (!Number.isFinite(minutes) || minutes < 1) reply(200, { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+        else if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_next needs a reason: what the next run should find or do' });
+        else {
+          emit({ type: 'loop_next', delay_minutes: Math.round(minutes), reason: msg.reason });
+          reply(200, { ok: true });
+        }
+      } else if (req.url === '/loop_stop') {
+        if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_stop needs a reason: why the loop should stop' });
+        else {
+          emit({ type: 'loop_stop', reason: msg.reason });
+          reply(200, { ok: true });
+        }
       } else reply(404, {});
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return {
-    url: `http://127.0.0.1:${server.address().port}`, token,
+    url: `http://127.0.0.1:${server.address().port}`, token, pending: () => pending.size,
+    answer(questionId, answers, response) {
+      const resolve = pending.get(questionId);
+      if (!resolve) return false;
+      pending.delete(questionId);
+      emit({ type: 'question_answered', question_id: questionId, answers, response });
+      if (pending.size) setStatus('waiting_for_answer');
+      else setStatus(isWorking() ? 'working' : 'idle');
+      resolve({ answers, response });
+      return true;
+    },
+    cancelAll() { for (const resolve of pending.values()) resolve(null); pending.clear(); },
     close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
   };
 }
@@ -165,14 +204,16 @@ export async function createBridge({ emit, findings = false, token = randomBytes
  * upstream table is `mcp_servers.<id>` with `command`, `args` and `env` (26-config-reference.md), and
  * `--always-approve` auto-approves its tool calls. The values ride as JSON, which is valid TOML for
  * the strings, the array and the inline table; a `tool_timeout_sec` override is unneeded (the 6000 s
- * default covers a wait's 1800 s cap). Findings and memory ride through so mcp.mjs can gate its tool
- * list the way the mothership gated the runner env. */
+ * default covers a wait's 1800 s cap). Findings, memory and the loop switches ride through so
+ * mcp.mjs can gate its tool list the way the mothership gated the runner env. */
 export function configToml({ url, token, env }) {
   const envEntries = Object.entries({
     COLONIZER_BRIDGE_URL: url,
     COLONIZER_BRIDGE_TOKEN: token,
     COLONIZER_FINDINGS: env.COLONIZER_FINDINGS, // undefined drops out of the inline table
     COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR,
+    COLONIZER_LOOP: env.COLONIZER_LOOP, // a loop colony's pacing tools; SELF_PACED gates loop_next
+    COLONIZER_LOOP_SELF_PACED: env.COLONIZER_LOOP_SELF_PACED,
   }).filter(([, value]) => value !== undefined);
   const json = JSON.stringify;
   return [
@@ -293,6 +334,10 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
     let endEvent = null;
     let errorEvent = null;
     const thoughts = [];
+    // colonizer__ask_user calls are question traffic, not work: §2 says a question is never also a
+    // tool_call/tool_result, so the call ids are remembered only to drop their updates. The
+    // colonizer server's other tools (findings, memory, the loop tools) still stream.
+    const askCalls = new Set();
     child = spawnFn(grokBin(env), turnArgs({ promptFile, model, sessionId, disabledTools }), { env: childEnv(env, home), stdio: ['ignore', 'pipe', 'pipe'] });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => (stderrTail = (stderrTail + chunk).slice(-2000)));
@@ -317,10 +362,17 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
         case 'thought':
           if (typeof event.data === 'string' && event.data) thoughts.push(event.data);
           break;
-        case 'tool_call':
-          emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.toolCallId ?? ''), name: String(event.toolName ?? event.kind ?? 'unknown'), input: plainObject(event.rawInput) });
+        case 'tool_call': {
+          const name = String(event.toolName ?? event.kind ?? 'unknown');
+          if (name === 'colonizer__ask_user') {
+            if (event.toolCallId != null) askCalls.add(String(event.toolCallId));
+            break; // its outcome is the question/question_answered flow
+          }
+          emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.toolCallId ?? ''), name, input: plainObject(event.rawInput) });
           break;
+        }
         case 'tool_call_update': {
+          if (askCalls.has(String(event.toolCallId ?? ''))) break; // a question is never a tool_result
           if (PROGRESS.has(String(event.status ?? ''))) break; // progress only; the result follows
           emit({ type: 'tool_result', tool_call_id: String(event.toolCallId ?? ''), output: clip(toolOutput(event)), is_error: /fail|error|denied|cancel/i.test(String(event.status ?? '')) });
           break;
@@ -408,12 +460,15 @@ class AsyncQueue {
 /** The command loop: turns run one at a time (one prompt per grok process); a user_message that
  * arrives mid-turn is queued for the next slot, while interrupt, set_model and answer apply at once. */
 export async function run({ commands, emit, env, spawnFn = spawn }) {
-  emit({ type: 'status', state: 'idle' });
+  let status = null;
+  // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
+  const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
+  setStatus('idle');
   const problem = await preflight({ env, spawnFn });
   const home = mkdtempSync(join(tmpdir(), 'colonizer-grok-'));
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
-    emit({ type: 'status', state: 'error', detail: problem.code });
+    setStatus('error', problem.code);
   }
 
   let modelSpec = String(env.COLONIZER_MODEL ?? '');
@@ -433,8 +488,10 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     .filter(Boolean);
 
   // One bridge for the runner's life; the colonizer MCP server grok spawns points at it through the
-  // config.toml the runner wrote into its fresh GROK_HOME (the address is fixed, so one write).
-  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true' });
+  // config.toml the runner wrote into its fresh GROK_HOME (the address is fixed, so one write). An
+  // ask_user call parks on it (createBridge), so question routing needs nothing beyond the
+  // registration that was already unconditional: ask_user is on whenever the runner is.
+  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true', setStatus, isWorking: () => turn !== null });
   await writeFile(join(home, 'config.toml'), configToml({ url: bridge.url, token: bridge.token, env }), 'utf8');
 
   const pump = async () => {
@@ -443,12 +500,13 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     try {
       while (pending.length) {
         const message = pending.shift();
-        emit({ type: 'status', state: 'working' });
+        setStatus('working');
         const resolved = resolveModel(modelSpec);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: problem ? 'error' : 'idle', ...(problem ? { detail: problem.code } : {}) });
+          if (problem) setStatus('error', problem.code);
+          else setStatus('idle');
           continue;
         }
         if (currentModel === null && resolved.model) {
@@ -464,13 +522,15 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           // A turn that throws (a prompt file that cannot be written, say) must still end as an
           // error turn, or the colony's turn never terminates.
           turn = null;
+          bridge.cancelAll(); // a dead turn cannot answer its open asks any more
           emit({ type: 'log', level: 'error', message: `the turn crashed: ${err?.message ?? err}` });
           emit({ type: 'turn_end', is_error: true, result: `the turn crashed: ${err?.message ?? err}`, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: 'error', detail: 'turn crashed' });
+          setStatus('error', 'turn crashed');
           break;
         }
         turn = null;
-        emit({ type: 'status', state: 'idle' });
+        bridge.cancelAll(); // a turn that merely ended leaves its open asks stale too
+        setStatus('idle');
       }
     } finally {
       pumping = false;
@@ -492,6 +552,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         break;
       }
       case 'interrupt':
+        bridge.cancelAll(); // the interrupted turn cannot answer its open asks any more
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
@@ -509,21 +570,25 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         currentModel = resolved.model; // applied from the next turn on: one grok process per turn
         break;
       }
-      case 'answer':
-        // Headless grok has no question path (README, "Ask"); question routing is a follow-up.
-        emit({ type: 'log', level: 'info', message: 'ignored an answer: headless grok cannot ask questions yet' });
+      case 'answer': {
+        // The model asked through ask_user and the bridge parked its HTTP response on this id.
+        const answers = command.answers && typeof command.answers === 'object' && !Array.isArray(command.answers) ? command.answers : {};
+        const response = typeof command.response === 'string' && command.response.trim() ? command.response : null;
+        if (!bridge.answer(command.question_id, answers, response)) emit({ type: 'log', level: 'warn', message: `no open question with id ${command.question_id}` });
         break;
+      }
       default:
         break; // unknown commands are ignored (protocol forward compatibility)
     }
   }
 
+  bridge.cancelAll(); // a parked ask is released with the runner above; the orphaned mcp.mjs drains
   if (turn) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
   await bridge.close();
-  emit({ type: 'status', state: 'exited' });
+  setStatus('exited');
 }
 
 async function main() {

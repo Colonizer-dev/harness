@@ -386,20 +386,31 @@ fn valid_preset(preset: &str) -> bool {
 }
 
 /// The model env vars a colony can be pointed at, matched against the configured providers. The
-/// first three reach the runner as is; the two tier models are the mothership's per-task routing and
-/// are stripped from the runner env before launch, so only `used_by` reads them — counting the tier
-/// settings in the module's configured env, while a colony booted onto a tier meets the tier's
-/// provider through the substituted `COLONIZER_MODEL`. Order matches the settings array in [`used_by`].
-const MODEL_VARS: [&str; 5] = [
+/// first four reach the runner as is (OpenCode's small model among them, which registers its own
+/// gateway route); the two tier models are the mothership's per-task routing and are stripped from
+/// the runner env before launch, so only `used_by` reads them — counting the tier settings in the
+/// module's configured env, while a colony booted onto a tier meets the tier's provider through the
+/// substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent on purpose: the mothership
+/// serves summaries itself, straight to Anthropic, never through the gateway. Order matches the
+/// settings array in [`used_by`].
+const MODEL_VARS: [&str; 6] = [
     "COLONIZER_MODEL",
     "COLONIZER_SUBAGENT_MODEL",
     "COLONIZER_BACKGROUND_MODEL",
+    "COLONIZER_SMALL_MODEL",
     "COLONIZER_MODEL_LOW",
     "COLONIZER_MODEL_HIGH",
 ];
 
 /// The model settings behind [`MODEL_VARS`], same order: the names a boot refusal can point a fix at.
-const SETTING_NAMES: [&str; 5] = ["model", "subagent_model", "background_model", "model_low", "model_high"];
+const SETTING_NAMES: [&str; 6] = [
+    "model",
+    "subagent_model",
+    "background_model",
+    "small_model",
+    "model_low",
+    "model_high",
+];
 
 impl App {
     fn providers_file(&self) -> PathBuf {
@@ -572,19 +583,50 @@ pub struct ColonyRoutes {
     pub providers: Vec<Provider>,
 }
 
+/// Whether a model setting's value points at `provider_id`: named with that `<provider>/` prefix
+/// and a non-empty canonical. `deepseek/` names no model, so it routes nothing on either side of
+/// the record — [`ColonyRoutes::used`] admits no provider for it and [`ColonyRoutes::used_models`]
+/// records no pair.
+fn names_model_on(value: &str, provider_id: &str) -> bool {
+    value
+        .strip_prefix(provider_id)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
 impl ColonyRoutes {
     /// Providers the colony's model settings actually point at.
     pub fn used(&self, runner_env: &Map<String, Value>) -> Vec<Provider> {
         let models: Vec<&str> = MODEL_VARS.iter().filter_map(|var| runner_env.get(*var)?.as_str()).collect();
         self.providers
             .iter()
-            .filter(|p| {
-                models
-                    .iter()
-                    .any(|m| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/')))
-            })
+            .filter(|p| models.iter().any(|m| names_model_on(m, &p.id)))
             .cloned()
             .collect()
+    }
+
+    /// The `<provider>/<model>` pairs those same settings name, deduplicated in first-appearance
+    /// order (issue #681): what the gateway checks a request body's model against, next to
+    /// [`Self::used`]'s providers. The same walk, so a pair is always on record for every provider
+    /// `used` admits — and for nothing else. An empty canonical (`deepseek/`) is skipped here and
+    /// admits nothing in [`Self::used`], per [`names_model_on`].
+    pub fn used_models(&self, runner_env: &Map<String, Value>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for value in MODEL_VARS
+            .iter()
+            .filter_map(|var| runner_env.get(*var))
+            .filter_map(Value::as_str)
+        {
+            let Some(prefix) = provider_prefix(value) else { continue };
+            let canonical = &value[prefix.len() + 1..];
+            if canonical.is_empty() {
+                continue;
+            }
+            let pair = format!("{prefix}/{canonical}");
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        out
     }
 
     /// The first model setting whose connection cannot serve this colony, as the boot-refusal message
@@ -627,7 +669,7 @@ pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, run
     let value = MODEL_VARS
         .iter()
         .filter_map(|var| runner_env.get(*var).and_then(Value::as_str))
-        .find(|m| m.strip_prefix(provider.id.as_str()).is_some_and(|rest| rest.starts_with('/')))?;
+        .find(|m| names_model_on(m, &provider.id))?;
     let error = health.get("error").and_then(Value::as_str).unwrap_or("unknown error");
     Some(format!(
         "backend '{backend}' has no provider for model '{value}': the endpoint {} is unreachable ({error}); \
@@ -718,7 +760,8 @@ pub fn harness_disabled_tool_lines(agent: &AgentModule, runner_env: &Map<String,
     Ok(lines)
 }
 
-/// The model settings (`model`, `subagent_model`, `background_model`, `model_low`, `model_high`)
+/// The model settings (`model`, `subagent_model`, `background_model`, `small_model`, `model_low`,
+/// `model_high`)
 /// whose resolved value — schema default, global setting or org override — routes to this provider as
 /// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
 /// points at it. A bare alias or a partial id prefix is Claude's or another provider's model, so it
@@ -730,7 +773,7 @@ fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> 
             let points_here = env
                 .get(*var)
                 .and_then(Value::as_str)
-                .is_some_and(|m| m.strip_prefix(provider_id).is_some_and(|rest| rest.starts_with('/')));
+                .is_some_and(|m| names_model_on(m, provider_id));
             if points_here && !used.contains(&setting) {
                 used.push(setting);
             }
@@ -1522,6 +1565,32 @@ mod tests {
     }
 
     #[test]
+    fn used_models_records_the_pairs_the_settings_name() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("deepseek")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("opus"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_SMALL_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("deepseek/deepseek-chat"));
+        // Bare aliases and an empty canonical name nothing; the same pair named by two settings is
+        // recorded once.
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("deepseek/"));
+        env.insert("COLONIZER_MODEL_HIGH".into(), json!("sonnet"));
+        assert_eq!(
+            routes.used_models(&env),
+            vec!["strix/deepseek-v4-flash".to_string(), "deepseek/deepseek-chat".to_string()]
+        );
+        // And the empty canonical admits no provider either side: `used` skips it like `used_models`.
+        env.clear();
+        env.insert("COLONIZER_MODEL".into(), json!("deepseek/"));
+        assert!(routes.used(&env).is_empty());
+        assert!(routes.used_models(&env).is_empty());
+    }
+
+    #[test]
     fn an_unconfigured_provider_prefix_refuses_the_launch_naming_the_fix() {
         let routes = ColonyRoutes {
             routes: vec![],
@@ -1840,6 +1909,7 @@ mod tests {
             schema,
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 

@@ -145,10 +145,15 @@ a grace period, the mothership suspends it.
   colonies can start.
 - **What is kept:** the worktree, and the agent's own session transcript. The status stays
   `waiting_for_answer`, and the question stays open everywhere you can answer it.
-- **How it resumes:** answer the question as usual. The answer is saved on the colony first. On
-  the next queue tick a fresh microVM boots, ahead of new launches, and the agent continues its
-  own session with your answer as the next message. Pressing Resume also delivers a saved
-  answer. If the boot fails or the mothership restarts, the answer is not lost.
+- **After you answer:** the answer is saved on the colony first, with the time it arrived
+  (`pending_answer.answered_at`). If no slot is free yet, the colony stays `waiting_for_answer`
+  with `suspended` and `pending_answer` both set — that pair means "answered, waiting for a slot",
+  and the cockpit shows "Answered · resumes when a slot frees" with the colony's place in line.
+  The colony log says the same at answer time.
+- **How it resumes:** on the next queue tick with a free slot, a fresh microVM boots — answered
+  colonies come back in answer order, ahead of new launches — and the agent continues its own
+  session with your answer as the next message. Pressing Resume also delivers a saved answer. If
+  the boot fails or the mothership restarts, the answer is not lost.
 
 Two Sandbox settings control this. Both are mothership-wide, with no per-org override:
 
@@ -159,7 +164,8 @@ Two Sandbox settings control this. Both are mothership-wide, with no per-org ove
 
 **Limits.**
 
-- Only an agent that can resume its own session is suspended. Today that is Claude Code. Any
+- Only an agent that can resume its own session is suspended. Today that is Claude Code, Codex and
+  ACP agents that advertise session loading. Any
   other agent keeps its microVM, and the colony log says so once.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
   such as a dev server, are gone after the resume.

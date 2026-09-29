@@ -938,6 +938,7 @@ mod tests {
             claude_account: None,
             model_routing: None,
             allowed_providers: None,
+            allowed_models: None,
             sensitivity: None,
             cleaned_up: false,
             keep_worktree: false,
@@ -968,6 +969,7 @@ mod tests {
             schema: json!({"type": "object", "properties": {"model": {"type": "string", "default": "sonnet"}}}),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         }
     }
 

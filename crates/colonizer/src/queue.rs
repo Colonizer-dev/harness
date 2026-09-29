@@ -610,13 +610,69 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
     }
 }
 
+/// When this colony's turn in the restore line comes (issue #667): the moment its answer arrived,
+/// falling back to the suspension's own for records saved before answers kept a time, then to the
+/// last update — the order the restore pass ran by before then.
+fn restore_key(s: &Session) -> DateTime<Utc> {
+    s.pending_answer
+        .as_ref()
+        .and_then(|a| a.answered_at)
+        .or_else(|| s.suspended.as_ref().map(|x| x.at))
+        .unwrap_or(s.updated_at)
+}
+
+/// How many other answered colonies stand ahead of this one in the restore line: the suspended,
+/// answered, still-waiting colonies ordered in front of it, by the same key and id tie-break the
+/// restore pass itself sorts by.
+fn answered_ahead(sessions: &[Session], s: &Session) -> usize {
+    let key = (restore_key(s), s.id.as_str());
+    sessions
+        .iter()
+        .filter(|other| {
+            other.suspended.is_some()
+                && other.pending_answer.is_some()
+                && other.status == SessionStatus::WaitingForAnswer
+                && (restore_key(other), other.id.as_str()) < key
+        })
+        .count()
+}
+
+/// The part of a held answer's log line that says where the colony stands in the restore line
+/// (issue #667): whether the next tick can bring it back at once, or how many answered colonies
+/// are ahead of it. `has_room` against the same snapshot and limits the restore pass itself
+/// answers to decides whether a slot is free right now, and `paused` — the tick's own admission
+/// hold, which stops the restore pass with everything else — keeps the note from promising a
+/// next-tick resume the tick cannot make.
+pub(crate) fn restore_line_note(
+    sessions: &[Session],
+    s: &Session,
+    max_parallel: usize,
+    org_limit: Option<u64>,
+    repo_limit: u64,
+    paused: bool,
+) -> String {
+    let ahead = answered_ahead(sessions, s);
+    let room = has_room(sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit);
+    match (ahead, room, paused) {
+        (0, true, false) => "a slot is free, so it resumes on the next queue tick".into(),
+        (0, _, true) => "launches are paused; it is next in line once the pause lifts".into(),
+        (0, false, false) => "it is next in line when a slot frees".into(),
+        (n, true, _) => format!("{n} answered colon{} ahead of it", if n == 1 { "y is" } else { "ies are" }),
+        (n, false, _) => format!(
+            "all slots are busy and {n} answered colon{} ahead of it",
+            if n == 1 { "y is" } else { "ies are" }
+        ),
+    }
+}
+
 /// Restores suspended colonies that hold an undelivered answer, ahead of the fresh launches in the
-/// admission loop (issue #562): the answer is what the user has been waiting for. Each restore
-/// claims a slot through the same admission every launch answers to; the claim clears the
-/// suspension — so `holds_slot` is true for the boot — but keeps the answer, which the boot itself
-/// delivers once the runner is up, so a failed boot leaves it on the record. The link drop and the
-/// event-log rotation are the resume handler's, for the same reason: the fresh microVM's agentd
-/// numbers events from 1, and a stale log would swallow them.
+/// admission loop (issue #562): the answer is what the user has been waiting for. They come back in
+/// answer order (issue #667), not suspension order. Each restore claims a slot through the same
+/// admission every launch answers to; the claim clears the suspension — so `holds_slot` is true for
+/// the boot — but keeps the answer, which the boot itself delivers once the runner is up, so a
+/// failed boot leaves it on the record. The link drop and the event-log rotation are the resume
+/// handler's, for the same reason: the fresh microVM's agentd numbers events from 1, and a stale
+/// log would swallow them.
 pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::ModulesConfig) {
     let mut candidates: Vec<(DateTime<Utc>, String)> = {
         app.sessions
@@ -624,7 +680,7 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .await
             .iter()
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
-            .map(|s| (s.suspended.as_ref().map(|x| x.at).unwrap_or(s.updated_at), s.id.clone()))
+            .map(|s| (restore_key(s), s.id.clone()))
             .collect()
     };
     candidates.sort();
@@ -1751,6 +1807,7 @@ mod tests {
             schema: json!({}),
             egress: None,
             resume_dir: resume_dir.map(String::from),
+            loop_tools: false,
         }
     }
 
@@ -1933,6 +1990,7 @@ mod tests {
         answered.pending_answer = Some(PendingAnswer {
             question_id: "q1".into(),
             prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
         });
         let mut second = answered.clone();
         second.id = "second".into();
@@ -1973,5 +2031,161 @@ mod tests {
             "no room left: the second answered suspension stays suspended with its answer"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #667: the restore line runs in answer order, not suspension order. A was suspended
+    /// first but answered last; with one slot free it is B, the earlier answer, that comes back,
+    /// and A keeps its suspension and its answer for a later tick.
+    #[tokio::test]
+    async fn the_restore_line_runs_in_answer_order_not_suspension_order() {
+        let root = std::env::temp_dir().join(format!("colonizer-restore-order-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        let answered = |id: &str, suspended_at: DateTime<Utc>, answered_at: DateTime<Utc>| {
+            let mut s = waiting_colony(id, "claude-code", Some("s1"));
+            s.suspended = Some(Suspension {
+                at: suspended_at,
+                snapshot: None,
+                reason: WAITING_FOR_ANSWER.into(),
+                path: SESSION_RESUME.into(),
+            });
+            s.pending_answer = Some(PendingAnswer {
+                question_id: "q1".into(),
+                prompt: "Q: Ship it?\nA: yes".into(),
+                answered_at: Some(answered_at),
+            });
+            s
+        };
+        // Suspended ten minutes ago, answered ten seconds ago: suspension time would put it first.
+        let mut a = answered(
+            "suspended-first",
+            Utc::now() - chrono::Duration::minutes(10),
+            Utc::now() - chrono::Duration::seconds(10),
+        );
+        a.pending_answer.as_mut().unwrap().prompt = "A's answer".into();
+        // Suspended later, answered a minute ago: the answer is what puts it in front.
+        let b = answered(
+            "answered-first",
+            Utc::now() - chrono::Duration::minutes(5),
+            Utc::now() - chrono::Duration::minutes(1),
+        );
+        *app.sessions.write().await = vec![a, b];
+        std::fs::create_dir_all(app.session_dir("suspended-first")).unwrap();
+        std::fs::create_dir_all(app.session_dir("answered-first")).unwrap();
+
+        restore_suspended(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            by_id("answered-first").status,
+            SessionStatus::Starting,
+            "the earlier answer is the one the slot went to"
+        );
+        let kept = by_id("suspended-first");
+        assert!(
+            kept.suspended.is_some() && kept.pending_answer.is_some() && kept.status == SessionStatus::WaitingForAnswer,
+            "stays suspended with its answer, one step back in the line"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The note a held answer's log line ends with (issue #667), pure over the snapshot: whether a
+    /// slot is free, or who it waits behind — the tick's admission pause keeps the note from
+    /// promising the next tick — and an old record that carries no answer time falls back to its
+    /// suspension's own for the order.
+    #[test]
+    fn the_restore_line_note_says_what_the_next_ticks_will_do() {
+        let now = Utc::now();
+        let answered = |id: &str, answered_at: DateTime<Utc>| {
+            let mut s = waiting_colony(id, "claude-code", Some("s1"));
+            s.suspended = Some(Suspension {
+                at: now - chrono::Duration::minutes(30),
+                snapshot: None,
+                reason: WAITING_FOR_ANSWER.into(),
+                path: SESSION_RESUME.into(),
+            });
+            s.pending_answer = Some(PendingAnswer {
+                question_id: "q1".into(),
+                prompt: "Q: Ship it?\nA: yes".into(),
+                answered_at: Some(answered_at),
+            });
+            s
+        };
+        let slot = colony("acme", SessionStatus::Running);
+        let (max_parallel, org_limit, repo_limit) = (1, None, 1);
+        let ours = answered("ours", now);
+
+        assert_eq!(
+            restore_line_note(&[], &ours, max_parallel, org_limit, repo_limit, false),
+            "a slot is free, so it resumes on the next queue tick",
+            "nothing busy, nobody ahead: the next tick brings it back"
+        );
+        let busy = vec![slot.clone(), ours.clone()];
+        assert_eq!(
+            restore_line_note(&busy, &ours, max_parallel, org_limit, repo_limit, false),
+            "it is next in line when a slot frees",
+            "the slot is taken, but nobody answered first"
+        );
+        // Paused, the tick restores nobody: even a free slot gets no next-tick promise.
+        assert_eq!(
+            restore_line_note(&[], &ours, max_parallel, org_limit, repo_limit, true),
+            "launches are paused; it is next in line once the pause lifts",
+        );
+        assert_eq!(
+            restore_line_note(&busy, &ours, max_parallel, org_limit, repo_limit, true),
+            "launches are paused; it is next in line once the pause lifts",
+        );
+        let earlier = answered("earlier", now - chrono::Duration::minutes(1));
+        let busy_line = vec![slot.clone(), earlier.clone(), ours.clone()];
+        assert_eq!(
+            restore_line_note(&busy_line, &ours, max_parallel, org_limit, repo_limit, false),
+            "all slots are busy and 1 answered colony is ahead of it",
+        );
+        // The ahead wordings promise no tick, so they stand unchanged while paused.
+        assert_eq!(
+            restore_line_note(&busy_line, &ours, max_parallel, org_limit, repo_limit, true),
+            "all slots are busy and 1 answered colony is ahead of it",
+        );
+        let second_earlier = answered("second-earlier", now - chrono::Duration::minutes(2));
+        let busier_line = vec![slot, earlier.clone(), second_earlier, ours.clone()];
+        assert_eq!(
+            restore_line_note(&busier_line, &ours, max_parallel, org_limit, repo_limit, false),
+            "all slots are busy and 2 answered colonies are ahead of it",
+        );
+        // A slot free despite the company: the ones ahead of it still go first, tick by tick.
+        assert_eq!(
+            restore_line_note(&[earlier, ours.clone()], &ours, 2, org_limit, repo_limit, false),
+            "1 answered colony is ahead of it",
+        );
+        // Ties break by id, the order the restore pass itself sorts by: the same answer time, the
+        // smaller id stands in front.
+        let ahead_tie = answered("aaa-tie", now);
+        let behind_tie = answered("zzz-tie", now);
+        assert_eq!(
+            answered_ahead(&[ahead_tie.clone(), behind_tie, ours.clone()], &ours),
+            1,
+            "same answer time, the smaller id stands ahead and the larger one behind"
+        );
+        assert_eq!(
+            answered_ahead(std::slice::from_ref(&ours), &ahead_tie),
+            0,
+            "same answer time, ours is the larger id: nobody stands ahead of it"
+        );
+        // A record saved before answers kept a time restores by its suspension's own.
+        let mut old = answered("old", now - chrono::Duration::minutes(40));
+        old.pending_answer.as_mut().unwrap().answered_at = None;
+        assert_eq!(
+            answered_ahead(&[old, ours.clone()], &ours),
+            1,
+            "the old record stands ahead by its suspension time"
+        );
     }
 }

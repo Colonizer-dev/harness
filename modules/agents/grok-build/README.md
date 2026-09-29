@@ -25,20 +25,30 @@ overlays cannot add MCP servers): `mcp.mjs`, a dependency-free stdio server that
 a loopback HTTP bridge held for the colony's life. `wait` (block instead of polling; grok's default
 `tool_timeout_sec` of 6000 s covers a wait's 1800 s cap) and `memory_search` run inside the server;
 `finding_file` and `memory_propose` cross the bridge and leave the colony as `finding` and
-`memory_proposal` events. The model sees the tools as `colonizer__<tool>`, and `--always-approve`
-auto-approves their calls. The tool list follows the same switches as the other modules: findings
-only under `COLONIZER_FINDINGS=true`, memory only when `COLONIZER_MEMORY_DIR` is mounted, `wait`
-always.
+`memory_proposal` events, and so do a loop colony's pacing tools: `loop_next` (the next run's delay
+in minutes, clamped to 15–1440 like the mothership clamps it) and `loop_stop`. The model sees the
+tools as `colonizer__<tool>`, and `--always-approve` auto-approves their calls. The tool list
+follows the same switches as the other modules: findings only under `COLONIZER_FINDINGS=true`,
+memory only when `COLONIZER_MEMORY_DIR` is mounted, the loop tools only under `COLONIZER_LOOP=true`
+— `loop_next` additionally when `COLONIZER_LOOP_SELF_PACED=true` — and `wait` always.
+
+The first tool in the list follows no switch: **`ask_user`** is the question channel
+(docs/protocol.md §2). A call POSTs to the bridge, which emits the `question` event, moves the
+status to `waiting_for_answer`, and holds the HTTP response until the matching `answer` command
+resolves it with `{answers, response}` and the status settles back — the turn continues on the
+answer. A colonizer question is never also a `tool_call`/`tool_result`, and no `tool_timeout_sec`
+override is needed: grok's default (6000 s) outlives any human. An `answer` naming an unknown id is
+warned about, and an interrupt, a turn end or a shutdown cancels every open ask
+(`{cancelled: true}`).
 
 ## Headless, not ACP
 
 Grok also speaks ACP (`grok agent stdio`, bidirectional — tool approvals and questions). This slice
 uses headless mode instead: one process per turn, read-only stream, no SDK to vendor, and a mapping
-small enough to test against a stub CLI. The cost is that nothing interactive can cross the
-boundary: an `answer` command is logged and ignored (the agent cannot ask the user anything yet),
-and `interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an
-error, and the runner keeps serving turns. Question routing — via ACP (`session/request_permission`)
-or a colonizer MCP ask tool — is the follow-up.
+small enough to test against a stub CLI. Nothing interactive crosses the grok boundary itself:
+`interrupt` SIGINTs the child (grok saves session state and exits 130), ends the turn as an error,
+and the runner keeps serving turns. Questions still reach the user — through the colonizer MCP
+server's `ask_user` (above), which the `answer` command answers.
 
 ## Pinned binary
 
@@ -88,7 +98,7 @@ The microVM is the boundary. Inside it:
 | Telemetry | **off** | `GROK_TELEMETRY_ENABLED=0` (05-configuration.md) |
 | Auto-update | **off** | `--no-auto-update` + `GROK_DISABLE_AUTOUPDATER=1` |
 | Host config / OAuth token / hooks / plugins / skills (user scope) | **off in practice** | a fresh, empty `GROK_HOME`: these live under it (14-headless-mode.md "File Locations") |
-| Colonizer MCP tools | **on** | the runner-written `$GROK_HOME/config.toml` registers `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module (above, "The colonizer MCP server") |
+| Colonizer MCP tools | **on** | the runner-written `$GROK_HOME/config.toml` registers `node mcp.mjs`; gated on `COLONIZER_FINDINGS` and `COLONIZER_MEMORY_DIR` like every module, the loop tools on `COLONIZER_LOOP`/`COLONIZER_LOOP_SELF_PACED` (above, "The colonizer MCP server") |
 | Hooks / plugins / MCP / skills (project scope) | **enforced off** | the folder-trust gate forced on with `GROK_FOLDER_TRUST=1` (env beats a `[folder_trust] enabled` kill-switch in any config), and the fresh `GROK_HOME` has an empty trust store: a headless run (no TTY, no `--trust`) resolves the workspace untrusted, and grok then skips project `.grok/` MCP servers, plugins, hooks and skills, plus project LSP and instructions (AGENTS.md) — the repo must be re-briefed through the prompt. Release-stamped binaries only: a self-built, unstamped grok never gates (the pinned install.sh build is stamped). Verified live by the contract test behind `COLONIZER_GROK_LIVE_BIN` ("Tests") |
 
 Subagents and plan mode are left at grok's defaults; `--no-subagents`/`--no-plan` exist if a later
@@ -99,8 +109,10 @@ slice wants them off.
 `npm test` (no dependencies; the module's `package.json` has none on purpose) boots the real
 `runner.mjs` over stdio against `test/fake-grok.mjs`, a stub grok CLI that records the argv, env,
 TTY state and trust store it received, and — when a test scripts `GROK_FAKE_MCP_CALLS` — plays the
-model against the registered colonizer MCP server, so findings, memory and wait are tested end to
-end. The happy path's events are checked against the required fields of
+model against the registered colonizer MCP server, so findings, memory, the loop tools, wait and an
+ask-and-answer round trip are tested end to end (`mcp.mjs` itself is byte-identical to the codex
+module's and covered by its
+`test/mcp.test.mjs`). The happy path's events are checked against the required fields of
 `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
 
 One contract test is live: with `COLONIZER_GROK_LIVE_BIN` pointing at the pinned binary it drives
@@ -124,7 +136,6 @@ keyed on the same verdict the test asserts.
   colony does not depend on grok being preinstalled in the image. (The harness now refuses a launch
   or boot on a stock preset image, where grok is never present; a custom image is still only
   checked by the runner's in-VM preflight.)
-- Question routing via ACP or a colonizer MCP ask tool; `answer` is ignored today.
 - A manual end-to-end run on a real colony with a real key. (The module already has its row in the
   README's module table and in [docs/providers.md](../../../docs/providers.md).)
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to

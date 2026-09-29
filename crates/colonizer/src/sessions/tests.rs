@@ -54,6 +54,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         claude_account: None,
         model_routing: None,
         allowed_providers: None,
+        allowed_models: None,
         sensitivity: None,
         routed_cost_usd: None,
         routed_tokens: None,
@@ -187,6 +188,7 @@ pub(crate) fn app_that_can_create_needing(root: &std::path::Path, needs_claude: 
         schema: json!({}),
         egress: None,
         resume_dir: None,
+        loop_tools: false,
     };
     crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
 }

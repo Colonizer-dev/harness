@@ -7,7 +7,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
-import { SESSION_STATUS, isLive, statusLabel, store, stored, timeAgo } from "../components/ui";
+import { SESSION_STATUS, isAnsweredWaiting, isLive, statusLabel, store, stored, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
 import type { Loop, NewLoop, RepoMap, Session } from "../types";
 import { describeLoopCadence } from "./loops";
@@ -60,6 +60,13 @@ export interface Place {
 /** A colony that is live but not working right now: its ants stand still in the chamber. */
 export function isBlocked(s: Session): boolean {
   return s.status === "waiting_for_answer" || s.status === "idle";
+}
+
+/** What a still ant's colony is doing. One that answered while suspended (issue #667) is not
+ *  waiting on anyone — its answer is stored and it is queued for a parallelism slot. */
+export function blockedDoing(s: Session): string {
+  if (isAnsweredWaiting(s)) return "resumes when a slot frees";
+  return s.status === "waiting_for_answer" ? "waiting for you" : "idle";
 }
 
 /**
@@ -548,7 +555,7 @@ export function NestMapView({
                   // Readers scout faster and further apart than the ants carrying changes.
                   // A slow walk: a round trip takes the better part of a minute, readers a little quicker.
                   const seconds = (mode === "reading" ? 34 : 46) + ((k * 7 + id.length * 3) % 14);
-                  const doing = blocked ? (session.status === "waiting_for_answer" ? "waiting for you" : "idle") : mode === "reading" ? "reading here" : "changing files here";
+                  const doing = blocked ? blockedDoing(session) : mode === "reading" ? "reading here" : "changing files here";
                   return (
                     <div
                       key={`${session.id}-${id}`}
@@ -575,7 +582,7 @@ export function NestMapView({
                         )}
                         {blocked && (
                           <span aria-hidden="true" className="absolute -right-2 -top-2 grid size-4 place-items-center rounded-full bg-warn text-[10px] font-bold text-bg">
-                            {session.status === "waiting_for_answer" ? "?" : "‖"}
+                            {session.status === "waiting_for_answer" && !isAnsweredWaiting(session) ? "?" : "‖"}
                           </span>
                         )}
                       </button>
@@ -583,7 +590,7 @@ export function NestMapView({
                       {k === 0 && chamberIndex < MAX_ANT_BUBBLES && (
                         <span className="pointer-events-none absolute bottom-full left-1/2 mb-3 -translate-x-1/2">
                           <AntBubble
-                            text={mapBubble(mode, blocked, session.status, hereFiles)}
+                            text={mapBubble(mode, blocked, session, hereFiles)}
                             title={`${taskLine(session, session.id)} · ${doing}`}
                             tone={blocked ? "var(--warn)" : mode === "reading" ? BUBBLE_TONE.thinking : BUBBLE_TONE.working}
                           />
@@ -600,7 +607,7 @@ export function NestMapView({
                   key={`wait-${s.id}`}
                   type="button"
                   onClick={() => onSelect(s.id)}
-                  title={`${taskLine(s, s.id)} · ${isBlocked(s) ? (s.status === "waiting_for_answer" ? "waiting for you" : "idle") : "starting — nothing read or changed yet"}`}
+                  title={`${taskLine(s, s.id)} · ${isBlocked(s) ? blockedDoing(s) : "starting — nothing read or changed yet"}`}
                   aria-label={`colony ${s.issue_title || s.id}, nothing read or changed yet`}
                   className="absolute z-[3] -translate-x-1/2 -translate-y-full cursor-pointer"
                   style={{ left: layout.mouth.x + (layout.mouth.x > box.width / 2 ? -1 : 1) * (34 + i * 22), top: SURFACE_Y }}
@@ -896,8 +903,8 @@ function RawMapDialog({ value, onClose }: { value: NonNullable<RepoMap["map"]>; 
 }
 
 /** A map ant's bubble: what its colony does in this chamber, named by the file it is on. */
-export function mapBubble(mode: PlaceMode, blocked: boolean, status: string, files: readonly string[]): string {
-  if (blocked) return status === "waiting_for_answer" ? "waiting for you" : "idle";
+export function mapBubble(mode: PlaceMode, blocked: boolean, session: Session, files: readonly string[]): string {
+  if (blocked) return blockedDoing(session);
   const file = files[0]?.split("/").pop();
   if (!file) return mode === "reading" ? "reading…" : "changing files…";
   return mode === "reading" ? `reading ${file}` : `editing ${file}`;

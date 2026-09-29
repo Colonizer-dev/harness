@@ -2,8 +2,9 @@
   "kind": "agent",
   "id": "codex",
   "name": "Codex",
-  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It cannot ask the user questions yet, and nothing stages the codex binary into the colony image.",
+  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It can ask the user questions through the colonizer MCP server, and nothing stages the codex binary into the colony image.",
   "protocol": "colonizer-runner/1",
+  "loop_tools": true,
   "entry": [
     "node",
     "runner.mjs"
@@ -19,6 +20,10 @@
         "source_rev": "81e8e29b2956dfe9b092c63953a9ed282781e77c"
       }
     }
+  },
+  "session_resume": {
+    "dir": "/root/.codex",
+    "description": "Codex keeps every session rollout under CODEX_HOME and can resume any thread given its id, so a colony waiting on the user can be suspended (its microVM stopped) and continued with the conversation intact; the runner strips the mounted dir back to the rollout store on every boot."
   },
   "secrets": [
     {
