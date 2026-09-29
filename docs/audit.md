@@ -81,6 +81,19 @@ limits.
   `gateway.jsonl`: provider, wire, method, path, requested and sent model, status, a typed failure
   code, durations, bytes and token counts. The record is a fixed struct, so keys, tokens and
   request bodies never reach it (`crates/colonizer/src/gateway_audit.rs`).
+- **Log redaction** (#761). A credential that reaches a colony's logs anyway (an agent echoing
+  a token, a tool printing a connection string, a request path with a key in its query string) is
+  replaced with `[REDACTED:<kind>]` before the line is written to `events.jsonl`, `harness.jsonl`
+  or `gateway.jsonl`, and before the line is broadcast to the cockpit. The detectors are layered:
+  provider token prefixes (GitHub, Anthropic, OpenAI, AWS, Stripe, Slack), a corpus of other
+  credential shapes (PEM private keys, JWTs, `Bearer` values, webhook URLs, more token prefixes),
+  passwords in `scheme://user:pass@host` and in database and broker connection strings, values of
+  `KEY=value` pairs and JSON fields whose name says secret, and, last, long high-entropy strings.
+  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. JSON lines are redacted
+  field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
+  bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
+  second line behind keeping secrets out of the colony, not a replacement
+  (`crates/colonizer/src/redact.rs`).
 - **Inside the colony.** Credential files in the worktree are masked and agent config is pinned
   read-only ([path-policy.md](path-policy.md), #545); every colony boots behind an egress policy
   with a deny set no setting can reopen ([sandbox-network.md](sandbox-network.md#egress-policy-303),

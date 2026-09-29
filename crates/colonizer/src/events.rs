@@ -226,6 +226,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         event["origin"] = json!(origin.as_str());
     }
+    // A credential the agent echoed or a tool printed is redacted field by field before the line is
+    // persisted or broadcast (#761): the disk, an archive and a fleet export only ever see the mark.
+    crate::redact::redact_value(&mut event);
     let (persisted, file_seq, file_line) = {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.agent_seq.load(Ordering::SeqCst) {
@@ -1301,6 +1304,35 @@ mod tests {
         app.session_log("abc", "info", "a note".into()).await;
         let logged = rt.logs.lock().await.back().unwrap().clone();
         assert_eq!(logged["origin"], "system", "the harness log defaults to system");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A secret echoed into an event line is persisted, broadcast and logged only as its mark (#761),
+    /// and the line on disk is still one valid JSON object.
+    #[tokio::test]
+    async fn a_secret_echoed_into_an_event_is_persisted_only_redacted() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let mut live = rt.events.subscribe();
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let line = json!({"seq": 1, "type": "text", "text": format!("$ echo {token}\n{token}")}).to_string();
+        handle_agent_event(&app, "abc", &rt, &line).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        assert!(!stored.contains(token), "the token never reaches the disk: {stored}");
+        let event: Value = serde_json::from_str(stored.trim()).expect("still one JSON line");
+        assert_eq!(event["text"], "$ echo [REDACTED:github_token]\n[REDACTED:github_token]");
+        while let Ok(frame) = live.try_recv() {
+            assert!(!frame.json.contains(token), "nor the broadcast: {}", frame.json);
+        }
+        app.session_log(
+            "abc",
+            "error",
+            format!("git push https://x-access-token:{token}@github.com/o/r failed"),
+        )
+        .await;
+        let harness = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(!harness.contains(token), "nor the harness log: {harness}");
+        assert!(harness.contains("[REDACTED:"), "{harness}");
         let _ = std::fs::remove_dir_all(root);
     }
 

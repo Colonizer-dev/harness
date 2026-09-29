@@ -77,6 +77,7 @@ mod push;
 mod queue;
 mod rebase;
 mod reclaim;
+mod redact;
 mod redteam;
 mod remote;
 mod repo_meta;
