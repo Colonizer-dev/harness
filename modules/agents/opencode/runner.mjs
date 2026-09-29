@@ -17,6 +17,8 @@ import { fileURLToPath } from 'node:url';
 export const OPENCODE_VERSION = '1.18.32';
 export const MAX_TOOL_OUTPUT = 20_000;
 export const FIRST_OUTPUT_MS = 120_000; // a stalled first run is SIGINTed and retried once
+export const NEXT_MIN_MINUTES = 15; // loop_next's delay bounds, clamped like the Claude module's (docs/protocol.md, Loops)
+export const NEXT_MAX_MINUTES = 24 * 60;
 const SHUTDOWN_GRACE_MS = 8000;
 const MCP_TIMEOUT_MS = 3_600_000; // MCP requests default to 5 s; asks wait on a human for minutes
 const DEFAULT_CONTEXT_TOKENS = 128_000;
@@ -90,6 +92,14 @@ export function opencodeConfig({ routes, model, smallModel, mcp, disabledTools =
   }
   const permission = disabledTools.length ? { '*': 'allow', ...Object.fromEntries(disabledTools.map((id) => [id, 'deny'])) } : 'allow';
   return { provider, model, small_model: small, permission, autoupdate: false, share: 'disabled', ...(mcp ? { mcp } : {}) };
+}
+
+/** COLONIZER_LOOP* gate the MCP server's loop tools, so they flow into its `environment` — but
+ * only when the mothership set them, for a loop colony (docs/protocol.md, Loops). */
+export function loopEnv(env = process.env) {
+  const out = {};
+  for (const key of ['COLONIZER_LOOP', 'COLONIZER_LOOP_SELF_PACED']) if (env[key] !== undefined) out[key] = env[key];
+  return out;
 }
 
 // What the model needs that the config cannot say. Memory files are read, never written.
@@ -213,6 +223,23 @@ export async function createBridge({ emit, setStatus, isWorking, findings = fals
           // re-checks the origin before it touches a store.
           emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
           reply(200, { ok: true });
+        }
+      } else if (req.url === '/loop_next') {
+        // A self-paced loop names its next run; the delay is clamped to 15 min–24 h here, as the
+        // Claude module's tool does, and the mothership clamps it again (docs/protocol.md, Loops).
+        const asked = Number(msg.delay_minutes);
+        if (!Number.isFinite(asked)) reply(200, { error: 'loop_next needs delay_minutes: whole minutes from now' });
+        else if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_next needs reason: why then' });
+        else {
+          const minutes = Math.min(NEXT_MAX_MINUTES, Math.max(NEXT_MIN_MINUTES, Math.round(asked)));
+          emit({ type: 'loop_next', delay_minutes: minutes, reason: msg.reason });
+          reply(200, `Next run scheduled in ${minutes} minutes.`);
+        }
+      } else if (req.url === '/loop_stop') {
+        if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_stop needs reason: why the loop should stop' });
+        else {
+          emit({ type: 'loop_stop', reason: msg.reason });
+          reply(200, 'The loop is stopped; this is its last run.');
         }
       } else reply(404, {});
     });
@@ -363,7 +390,7 @@ async function main() {
   writeFileSync(instrPath, `${INSTRUCTIONS}\n`);
   const makeEnv = (bridge, current = model) => ({
     ...env,
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, disabledTools, mcp: { colonizer: { type: 'local', command: [process.execPath, join(moduleDir, 'mcp.mjs')], environment: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token }, timeout: MCP_TIMEOUT_MS } } }), instructions: [instrPath] }),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...opencodeConfig({ routes, model: current, smallModel: smallExplicit || current, disabledTools, mcp: { colonizer: { type: 'local', command: [process.execPath, join(moduleDir, 'mcp.mjs')], environment: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token, ...loopEnv(env) }, timeout: MCP_TIMEOUT_MS } } }), instructions: [instrPath] }),
     OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLE_AUTOUPDATE: '1', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
   });
 

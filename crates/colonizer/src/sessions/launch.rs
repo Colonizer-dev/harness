@@ -611,6 +611,7 @@ pub async fn create(
         model_routing: None,
         // Filled in at boot, once the colony's model settings resolve to actual providers.
         allowed_providers: None,
+        allowed_models: None,
         sensitivity: None,
         routed_cost_usd: None,
         routed_tokens: None,
@@ -1356,6 +1357,7 @@ mod tests {
             schema: json!({}),
             egress: None,
             resume_dir: None,
+            loop_tools: false,
         };
         let app = crate::tests::test_app_with_agents(&root, vec![agent], |cfg| cfg.assets = Some(assets));
         // The org is still awaiting an answer when the colony starts, sighting and avatar both.

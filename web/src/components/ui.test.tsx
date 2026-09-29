@@ -1,13 +1,14 @@
 // The status label and badge are the one place every colony reads its state from, so the
 // suspended labels (issue #562) are pinned here: a colony whose microVM is stopped while its
-// question is out reads as suspended, and one whose answer is already stored reads as resuming.
+// question is out reads as suspended, one whose answer is already stored reads as resuming, and
+// one that answered while suspended reads as queued for a slot (issue #667).
 // Rendered through react-dom/server, because this codebase keeps tests off jsdom.
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Session } from "../types";
-import { StatusBadge, occupiesSlot, parkedLabel, statusLabel } from "./ui";
+import { StatusBadge, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -15,6 +16,8 @@ const suspended = {
   reason: "waiting_for_answer",
   path: "session_resume",
 };
+
+const answered = (answered_at?: string) => ({ question_id: "q1", prompt: "ship it?", answered_at });
 
 describe("statusLabel", () => {
   it("keeps the plain status label when the colony is not suspended", () => {
@@ -28,18 +31,93 @@ describe("statusLabel", () => {
 
   it("reads a colony whose answer is already stored and a boot underway as resuming", () => {
     for (const status of ["queued", "starting"] as const) {
-      const resuming = session({ status, pending_answer: { text: "ship it" } });
+      const resuming = session({ status, pending_answer: answered() });
       expect(statusLabel(resuming)).toBe("Resuming with your answer");
     }
   });
 
-  it("keeps the suspended label while the colony still waits with its answer stored", () => {
-    const held = session({ status: "waiting_for_answer", suspended, pending_answer: { text: "ship it" } });
-    expect(statusLabel(held)).toBe("Suspended — resumes when you answer");
+  it("reads a colony that answered while suspended as queued for a slot, not as waiting on you", () => {
+    const held = session({ status: "waiting_for_answer", suspended, pending_answer: answered("2026-09-26T10:05:00Z") });
+    expect(statusLabel(held)).toBe("Answered · resumes when a slot frees");
+  });
+
+  it("keeps the suspended label while a colony without a stored answer still waits", () => {
+    expect(statusLabel(session({ status: "waiting_for_answer", suspended }))).toBe("Suspended — resumes when you answer");
   });
 
   it("ignores a stale suspended flag once the colony is live again", () => {
     expect(statusLabel(session({ status: "running", suspended }))).toBe("Working");
+  });
+});
+
+describe("isAnsweredWaiting", () => {
+  it("is the derived state alone: suspended, answer stored, still waiting_for_answer", () => {
+    expect(isAnsweredWaiting(session({ status: "waiting_for_answer", suspended, pending_answer: answered() }))).toBe(true);
+  });
+
+  it("is false without any leg of the state", () => {
+    expect(isAnsweredWaiting(session({ status: "waiting_for_answer" }))).toBe(false);
+    expect(isAnsweredWaiting(session({ status: "waiting_for_answer", suspended }))).toBe(false);
+    expect(isAnsweredWaiting(session({ status: "waiting_for_answer", pending_answer: answered() }))).toBe(false);
+  });
+
+  it("is false once the colony left the state", () => {
+    expect(isAnsweredWaiting(session({ status: "queued", suspended, pending_answer: answered() }))).toBe(false);
+    expect(isAnsweredWaiting(session({ status: "running", suspended, pending_answer: answered() }))).toBe(false);
+  });
+});
+
+describe("restorePlace", () => {
+  // A list in answer order; `answered_at` is what the queue reads.
+  const waiting = (id: string, at: string, answered_at?: string) =>
+    session({ id, status: "waiting_for_answer", suspended: { ...suspended, at }, pending_answer: answered(answered_at) });
+
+  it("ranks the answered by answered_at, oldest first", () => {
+    const sessions = [
+      waiting("late", "2026-09-26T11:00:00Z", "2026-09-26T11:00:00Z"),
+      waiting("early", "2026-09-26T10:00:00Z", "2026-09-26T10:00:00Z"),
+      waiting("mid", "2026-09-26T12:00:00Z", "2026-09-26T10:30:00Z"),
+    ];
+    expect(restorePlace(sessions[1], sessions)).toBe(1);
+    expect(restorePlace(sessions[2], sessions)).toBe(2);
+    expect(restorePlace(sessions[0], sessions)).toBe(3);
+  });
+
+  it("falls back to suspended.at when the answer carries no answered_at yet", () => {
+    const sessions = [waiting("b", "2026-09-26T11:00:00Z"), waiting("a", "2026-09-26T10:00:00Z")];
+    expect(restorePlace(sessions[0], sessions)).toBe(2);
+    expect(restorePlace(sessions[1], sessions)).toBe(1);
+  });
+
+  it("counts only answered-waiting colonies: fresh launches and plain suspensions stay out of line", () => {
+    const me = waiting("me", "2026-09-26T11:00:00Z", "2026-09-26T11:00:00Z");
+    const sessions = [
+      session({ id: "unanswered", status: "waiting_for_answer", suspended: { ...suspended, at: "2026-09-26T09:00:00Z" } }),
+      session({ id: "fresh", status: "queued", created_at: "2026-09-26T09:30:00Z" }),
+      me,
+    ];
+    expect(restorePlace(me, sessions)).toBe(1);
+  });
+
+  it("is null outside the derived state", () => {
+    expect(restorePlace(session({ status: "waiting_for_answer", suspended }), [session({ status: "queued" })])).toBe(null);
+    expect(restorePlace(session({ status: "queued", pending_answer: answered() }), [])).toBe(null);
+  });
+});
+
+describe("ordinal", () => {
+  it("suffixes 1st, 2nd and 3rd, then th", () => {
+    expect([1, 2, 3, 4, 9, 10, 14, 20].map(ordinal)).toEqual(["1st", "2nd", "3rd", "4th", "9th", "10th", "14th", "20th"]);
+  });
+
+  it("leaves 11th through 13th alone, wherever they appear", () => {
+    expect([11, 12, 13, 111, 112, 113, 211, 212, 213].map(ordinal)).toEqual([
+      "11th", "12th", "13th", "111th", "112th", "113th", "211th", "212th", "213th",
+    ]);
+  });
+
+  it("keeps the teens' suffix past twenty", () => {
+    expect([21, 22, 23, 101].map(ordinal)).toEqual(["21st", "22nd", "23rd", "101st"]);
   });
 });
 
@@ -99,5 +177,12 @@ describe("StatusBadge", () => {
     const out = badge({ status: "waiting_for_answer" });
     expect(out).toContain("Needs your answer");
     expect(out).toContain("pulse-soft");
+  });
+
+  it("drops the needs-you accent once the colony has answered and is queued for a slot", () => {
+    const out = badge({ status: "waiting_for_answer", suspended, pending_answer: answered("2026-09-26T10:05:00Z") });
+    expect(out).toContain("Answered · resumes when a slot frees");
+    expect(out).not.toContain("bg-accent-soft");
+    expect(out).not.toContain("pulse-soft");
   });
 });

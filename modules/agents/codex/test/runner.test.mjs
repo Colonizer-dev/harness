@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { createBridge, mcpArgs, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -285,13 +285,13 @@ test('shutdown mid-turn exits cleanly with code 0', async (t) => {
   assert.equal(await runner.waitExit(), 0);
 });
 
-test('an answer is logged and ignored (no question path); stdin EOF exits like shutdown', async (t) => {
+test('an answer without an open question warns; stdin EOF exits like shutdown', async (t) => {
   const runner = startRunner();
   t.after(() => runner.child.kill('SIGKILL'));
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'the runner to come up');
   runner.send({ type: 'answer', question_id: 'q-1', answers: {}, response: 'yes' });
-  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.message.includes('answer')), 'the answer to be logged');
-  assert.equal(logged.level, 'info');
+  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && /no open question/.test(e.message)), 'the answer to be warned about');
+  assert.equal(logged.level, 'warn');
   runner.child.stdin.end();
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
   assert.equal(await runner.waitExit(), 0);
@@ -410,7 +410,7 @@ test('the colonizer MCP tools work end to end: findings, memory and wait', async
   assertSchema(runner.events);
 
   const { mcp } = runner.turns()[0];
-  assert.deepEqual(mcp.tools, ['finding_file', 'memory_search', 'memory_propose', 'wait']);
+  assert.deepEqual(mcp.tools, ['ask_user', 'finding_file', 'memory_search', 'memory_propose', 'wait']);
   assert.deepEqual(mcp.calls[0], { name: 'finding_file', isError: false, text: '{"filed":true}', error: null });
   assert.deepEqual(mcp.calls[1], { name: 'memory_propose', isError: false, text: '{"ok":true}', error: null });
   assert.equal(mcp.calls[2].isError, false);
@@ -430,7 +430,161 @@ test('finding_file and the memory tools are only offered when the mothership swi
 
   runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
-  assert.deepEqual(runner.turns()[0].mcp.tools, ['wait'], 'no findings switch and no memory dir leave only wait');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'wait'], 'no findings switch and no memory dir leave ask_user and wait');
+
+  await stop(runner);
+});
+
+test('ask_user asks the user over the bridge, and the answer finishes the turn', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Which color?', header: 'Paint', options: [{ label: 'Blue' }, { label: 'Red' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick a paint color' });
+  const question = await runner.waitUntil(first('question'), 'the question event');
+  assert.deepEqual(question, {
+    type: 'question',
+    question_id: 'q-1',
+    message_id: null,
+    questions: [{ question: 'Which color?', header: 'Paint', multi_select: false, options: [{ label: 'Blue', description: '', preview: null }, { label: 'Red', description: '', preview: null }] }],
+  });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'the waiting-for-answer status');
+
+  runner.send({ type: 'answer', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const answered = await runner.waitUntil(first('question_answered'), 'the question_answered event');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.equal(turnEnd.is_error, false);
+
+  const { mcp } = runner.turns()[0];
+  assert.equal(mcp.tools[0], 'ask_user', 'ask_user rides the colonizer registration every turn already carries');
+  assert.deepEqual(mcp.calls[0], { name: 'ask_user', isError: false, text: JSON.stringify({ answers: { Paint: 'Blue' }, response: 'blue, please' }), error: null });
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'a question is never also a tool_call (§2)');
+  assert.equal(runner.events.some((e) => e.type === 'tool_result' && String(e.tool_call_id ?? '').startsWith('item_mcp_')), false);
+  assertSchema(runner.events);
+
+  await stop(runner);
+});
+
+test('an interrupt during a parked ask cancels it: no answer, and the interrupted turn ends', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Proceed?', options: [{ label: 'Yes' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls), CODEX_FAKE_SLEEP_MS: 30000, CODEX_FAKE_SLEEP_FIRST: '1' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'ask away' });
+  await runner.waitUntil(first('question'), 'the question event');
+  runner.send({ type: 'interrupt' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the interrupted turn to end');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /interrupted/);
+  assert.equal(runner.events.some((e) => e.type === 'question_answered'), false, 'a cancelled ask is never an answer');
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'the ask never became a tool_call');
+
+  await stop(runner);
+});
+
+/** The `env` table mcpArgs hands the colonizer server, pulled back out of its `-c` JSON. */
+const mcpServerEnv = (args) =>
+  JSON.parse(args.find((arg) => arg.startsWith('mcp_servers.colonizer.env=')).slice('mcp_servers.colonizer.env='.length));
+
+test('mcpArgs forwards the loop switches into the colonizer server env; undefined drops out', () => {
+  const on = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' } }));
+  assert.equal(on.COLONIZER_LOOP, 'true');
+  assert.equal(on.COLONIZER_LOOP_SELF_PACED, 'true');
+  // The end-to-end loop test below inherits the runner's env anyway, so this unit check is what
+  // pins the forwarding: without the switches in the table, mcp.mjs never offers the loop tools.
+  const off = mcpServerEnv(mcpArgs({ url: 'http://127.0.0.1:9', token: 't', env: {} }));
+  assert.ok(!('COLONIZER_LOOP' in off) && !('COLONIZER_LOOP_SELF_PACED' in off));
+});
+
+test('the bridge turns /loop_next and /loop_stop into protocol events and refuses malformed ones', async () => {
+  const events = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event) });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 90, reason: 'review comments are due' }), { ok: true });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 3.5, reason: 'soon' }), { ok: true }, 'a fractional delay is rounded to the protocol\'s integer');
+    assert.deepEqual(await post('/loop_next', {}), { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+    assert.deepEqual(await post('/loop_next', { delay_minutes: 30 }), { error: 'loop_next needs a reason: what the next run should find or do' });
+    assert.deepEqual(await post('/loop_stop', { reason: 'the goal is met' }), { ok: true });
+    assert.deepEqual(await post('/loop_stop', { reason: '  ' }), { error: 'loop_stop needs a reason: why the loop should stop' });
+    assert.deepEqual(events, [
+      { type: 'loop_next', delay_minutes: 90, reason: 'review comments are due' },
+      { type: 'loop_next', delay_minutes: 4, reason: 'soon' },
+      { type: 'loop_stop', reason: 'the goal is met' },
+    ]);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('the bridge parks /ask until answer, and cancelAll releases a parked ask as cancelled', async () => {
+  const events = [];
+  const states = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event), setStatus: (state) => states.push(state), isWorking: () => true });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    const parked = post('/ask', { questions: [{ question: 'Which color?', header: 'Paint', multiSelect: true, options: [{ label: 'Blue', description: 'the calm one' }] }] });
+    assert.equal(await Promise.race([parked.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked', 'the ask holds until an answer or a cancel');
+    assert.deepEqual(events[0], {
+      type: 'question',
+      question_id: 'q-1',
+      message_id: null,
+      questions: [{ question: 'Which color?', header: 'Paint', multi_select: true, options: [{ label: 'Blue', description: 'the calm one', preview: null }] }],
+    });
+    assert.equal(bridge.pending(), 1);
+    assert.deepEqual(states, ['waiting_for_answer']);
+    assert.ok(bridge.answer('q-1', { Paint: 'Blue' }, 'blue, please'));
+    assert.deepEqual(await parked, { answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(events[1], { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(states, ['waiting_for_answer', 'working'], 'the answer hands the status back to the running turn');
+    assert.equal(bridge.answer('q-9', {}, ''), false, 'an unknown question id is not an answer');
+
+    const second = post('/ask', { questions: [{ question: 'Still there?' }] });
+    assert.equal(await Promise.race([second.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked');
+    assert.equal(bridge.pending(), 1);
+    bridge.cancelAll();
+    assert.deepEqual(await second, { cancelled: true }, 'cancelAll releases the parked HTTP response');
+    assert.equal(bridge.pending(), 0);
+  } finally {
+    await bridge.close();
+  }
+});
+
+test('a loop colony reports its pacing: loop_next with a clamped delay, and loop_stop', async (t) => {
+  const calls = [
+    { name: 'loop_next', arguments: { delay_minutes: 5, reason: 'review comments are due' } },
+    { name: 'loop_stop', arguments: { reason: 'the goal is met' } },
+  ];
+  const runner = startRunner({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true', CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'wrap up this run' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+
+  // Both calls crossed the bridge and left the colony as protocol events, the delay clamped to the
+  // mothership's 15-minute floor.
+  assert.deepEqual(first('loop_next')(runner.events), { type: 'loop_next', delay_minutes: 15, reason: 'review comments are due' });
+  assert.deepEqual(first('loop_stop')(runner.events), { type: 'loop_stop', reason: 'the goal is met' });
+  assertSchema(runner.events);
+
+  const { mcp } = runner.turns()[0];
+  assert.deepEqual(mcp.tools, ['ask_user', 'loop_next', 'loop_stop', 'wait']);
+  assert.deepEqual(mcp.calls[0], { name: 'loop_next', isError: false, text: 'Next run scheduled in 15 minutes.', error: null });
+  assert.deepEqual(mcp.calls[1], { name: 'loop_stop', isError: false, text: 'The loop is stopped; this is its last run.', error: null });
+
+  await stop(runner);
+});
+
+test('a loop colony on a fixed schedule gets loop_stop but no loop_next', async (t) => {
+  const runner = startRunner({ COLONIZER_LOOP: 'true', CODEX_FAKE_MCP_CALLS: '[]' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'loop_stop', 'wait'], 'only a self-paced loop schedules its next run');
 
   await stop(runner);
 });

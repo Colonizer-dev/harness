@@ -2,7 +2,7 @@
 // mothership stores, a cadence back in words, the Composer's `/loop <interval> <prompt>` shorthand,
 // the map loops that keep architecture maps fresh, and the prompt templates the "New loop" dialog
 // offers. Kept apart from the view so it is testable.
-import type { Loop, LoopCadence, NewLoop } from "../types";
+import type { Loop, LoopCadence, ModuleInfo, ModuleProviderInfo, NewLoop, OrgInfo } from "../types";
 import { WEEKDAYS, describeCadence, toUtcCadence } from "./redTeamPlan";
 
 export type LoopChoice =
@@ -163,6 +163,25 @@ export function describeLoop(l: Pick<Loop, "kind" | "repo" | "cadence">): string
   if ((l.kind ?? "colony") !== "map") return describeLoopCadence(l.cadence);
   const what = l.repo.endsWith("/*") ? `Refreshes the maps of every repository in ${l.repo.slice(0, -2)}` : `Refreshes the map of ${l.repo}`;
   return `${what} · ${describeLoopCadence(l.cadence)}`;
+}
+
+/** The agent module row one org's colonies launch on: the org's pick, else the mothership's. */
+export function effectiveAgentModule(org: string, orgs: readonly OrgInfo[], modules: readonly ModuleInfo[]): ModuleProviderInfo | undefined {
+  const pick = orgs.find((o) => o.org.toLowerCase() === org.toLowerCase())?.settings.agent?.module?.trim();
+  const agent = modules.find((m) => m.kind === "agent");
+  const id = pick || agent?.provider;
+  return agent?.providers.find((p) => p.id === id);
+}
+
+/**
+ * Why the loop form warns about a self-paced cadence: the org's agent module serves neither loop
+ * tool (issue #643), so its colonies cannot pace or stop the loop. Null when the module serves
+ * them, or when the modules have not loaded (say nothing rather than the wrong thing).
+ */
+export function selfPacedWarning(org: string, orgs: readonly OrgInfo[], modules: readonly ModuleInfo[]): string | null {
+  const m = effectiveAgentModule(org, orgs, modules);
+  if (!m || m.loop_tools) return null;
+  return `This org's agent module (${m.name}) can't pace its own loop: self-paced runs every 24 hours, and its colonies can't stop the loop.`;
 }
 
 /** A default name for a map loop, from its scope. */

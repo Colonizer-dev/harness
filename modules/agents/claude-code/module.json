@@ -4,6 +4,7 @@
   "name": "Claude Code",
   "description": "Anthropic's Claude Code agent via the Claude Agent SDK. Questions to the user are always multiple choice.",
   "protocol": "colonizer-runner/1",
+  "loop_tools": true,
   "entry": [
     "node",
     "runner.mjs"

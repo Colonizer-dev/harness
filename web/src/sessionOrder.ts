@@ -1,4 +1,5 @@
 // Sidebar ordering: what the colony wants from you first, then recency inside each group.
+import { isAnsweredWaiting } from "./components/ui";
 import { needsYou } from "./notifications";
 import type { Session, SessionStatus } from "./types";
 
@@ -24,9 +25,10 @@ const RANK: Record<SessionStatus, number> = {
   failed: 4,
 };
 
-/** A colony that needs a person joins the unanswered at the top, whatever its status — same predicate the notifications read. */
+/** A colony that needs a person joins the unanswered at the top, whatever its status — same predicate the notifications read. One that answered while suspended (issue #667) needs nobody: it waits for a slot, so it sorts with the queue. */
 export function sessionRank(session: Session): number {
-  return needsYou(session) ? 0 : RANK[session.status];
+  if (needsYou(session)) return 0;
+  return isAnsweredWaiting(session) ? RANK.queued : RANK[session.status];
 }
 
 /** Newest first inside a group; ties fall through to `id` so the order holds between polls. */
