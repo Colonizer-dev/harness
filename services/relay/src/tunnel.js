@@ -29,11 +29,13 @@ const textResponse = (status, text, headers = {}) =>
   new Response(`${text}\n`, { status, headers: { 'content-type': 'text/plain; charset=utf-8', ...headers } });
 
 export class InstallTunnel {
-  // opts shortens the timers in tests only; production uses the DEFAULTS above.
+  // opts shortens the timers and (in tests only) supplies the onEstablish seam; production uses the
+  // DEFAULTS above.
   constructor(state, env, opts = {}) {
     this.state = state; // deliberately never touched: no storage, bodies stay in memory
     this.env = env;
     this.o = { ...DEFAULTS, ...opts };
+    this.onEstablish = opts.onEstablish ?? null; // fired with the socket once a hello verifies
     const rate = { ...DEFAULTS.rate, ...opts.rate };
     this.rate = { ...rate, tokens: rate.capacity, at: Date.now() };
     this.tunnel = null; // the verified mothership socket: { ws, installId }
@@ -119,6 +121,7 @@ export class InstallTunnel {
     });
     this.pingTimer = setInterval(() => this.#send({ t: 'ping' }), this.o.pingMs);
     this.#resetIdle();
+    this.onEstablish?.(ws, installId);
   }
 
   // Drop the tunnel and everything riding on it. code 4000 = replaced, 1006 = socket closed, 1000 = idle.

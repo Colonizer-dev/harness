@@ -69,7 +69,9 @@ export function within(promise, label = 'timed out', ms = 2000) {
 
 /**
  * A fresh DO with a state object that records every property touch (tests assert storage stays untouched)
- * and test-scale timers. A leftover tunnel dies of idleness after 4s, so node --test always exits.
+ * and test-scale timers. A leftover tunnel dies of idleness after 4s, so node --test always exits. The
+ * onEstablish seam feeds verified(): establishment is announced on the mothership's own socket, so a
+ * connect() awaits an event, never a polling window.
  */
 export function makeDo(opts = {}) {
   const touched = [];
@@ -97,9 +99,26 @@ export function makeDo(opts = {}) {
       pingMs: 60000,
       ...opts,
       rate: { capacity: 120, perSecond: 20, ...opts.rate },
+      // The DO's end of the pair is ws; its peer is the socket the mothership dialed from.
+      onEstablish: (ws) => {
+        ws.peer.established = true;
+        ws.peer.emit('established');
+      },
     },
   );
   return { relay, state, touched };
+}
+
+/** Resolves with `socket` once the relay establishes it, rejecting if that socket closes first: a bad
+ * hello or the 1008 hello timeout means verification can never happen, so waiting longer is wrong. A
+ * socket established and then closed (a replaced tunnel) still counts as verified. */
+export function verified(socket) {
+  if (socket.established) return Promise.resolve(socket);
+  if (socket.closeEvent) return Promise.reject(new Error('hello was never verified'));
+  return new Promise((resolve, reject) => {
+    socket.addEventListener('close', () => reject(new Error('hello was never verified')));
+    socket.addEventListener('established', () => resolve(socket));
+  });
 }
 
 /** The browser request the worker would forward after owner sign-in: proxy kind, install tagged. */
@@ -162,8 +181,7 @@ export class FakeMothership {
   async connect(relay, installId = INSTALL) {
     const { socket, nonce } = await this.dial(relay, installId);
     await this.hello(installId, nonce);
-    for (let tries = 500; relay.tunnel?.ws?.peer !== socket && tries > 0; tries--) await new Promise((r) => setImmediate(r));
-    if (relay.tunnel?.ws?.peer !== socket) throw new Error('hello was never verified');
+    await verified(socket);
     return socket;
   }
 
