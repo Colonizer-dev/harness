@@ -224,9 +224,10 @@ pub(crate) fn spend_json(spend: &OrgSpend) -> Value {
 
 /// One journal row: an event's spend shape, as written and read back. `kind` says what the event
 /// was — `usage` (a turn's model tokens and cost), `routed` (a gateway response's priced cost),
-/// `launched` or `returned` (a colony's run edges). Token fields default to 0 and `model` and
-/// `cost_usd` are omitted while unknown, so a row from a build that disagrees about a field still
-/// parses (`#[serde(default)]`), and a line that is not a row at all is skipped by the reader.
+/// `launched` or `returned` (a colony's run edges), `scoring` (how long the bench took to score a
+/// run, written by `scripts/bench.mjs`). Token fields default to 0 and `model` and `cost_usd` are
+/// omitted while unknown, so a row from a build that disagrees about a field still parses
+/// (`#[serde(default)]`), and a line that is not a row at all is skipped by the reader.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct SpendRow {
@@ -250,6 +251,10 @@ struct SpendRow {
     cache_write_tokens: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     cost_usd: Option<f64>,
+    /// How long scoring took, in milliseconds — the bench's `scoring` rows only (issue #654), the
+    /// one cost scoring has, since it makes no model calls. Omitted on every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scoring_ms: Option<u64>,
 }
 
 fn spend_file(data_dir: &Path) -> PathBuf {
@@ -491,12 +496,14 @@ fn read_journal(data_dir: &Path, floor: &str, today: &str) -> Vec<SpendRow> {
         .collect()
 }
 
-/// One org's row in one day of the history: its spend plus how many colonies ran that day.
+/// One org's row in one day of the history: its spend plus how many colonies ran that day and how
+/// long the bench spent scoring there.
 #[derive(Clone, Debug, Default)]
 struct DayOrg {
     spend: OrgSpend,
     launched: u64,
     returned: u64,
+    scoring_ms: u64,
 }
 
 /// Sums the journal like the live org list would, plus the day's `launched` and `returned` counts,
@@ -536,6 +543,7 @@ fn aggregate(rows: &[SpendRow], today: NaiveDate, days: u32) -> Vec<(String, Vec
             "routed" => spend.add_routed_from(row.cost_usd),
             "launched" => org.launched += 1,
             "returned" => org.returned += 1,
+            "scoring" => org.scoring_ms = org.scoring_ms.saturating_add(row.scoring_ms.unwrap_or(0)),
             _ => {}
         }
     }
@@ -565,6 +573,7 @@ fn history_json(days: Vec<(String, Vec<(String, DayOrg)>)>) -> Value {
                 entry["org"] = Value::String(org);
                 entry["launched"] = json!(row.launched);
                 entry["returned"] = json!(row.returned);
+                entry["scoring_ms"] = json!(row.scoring_ms);
                 entry
             })
             .collect::<Vec<Value>>();
@@ -1015,6 +1024,60 @@ mod tests {
         assert_eq!(acme.spend.output_tokens, 10);
         assert_eq!(acme.launched, 1);
         assert_eq!(acme.spend.models.get("claude-opus-5").unwrap().tokens, 110);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_scoring_row_journals_the_benchs_scoring_time_without_touching_the_totals() {
+        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let day = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+
+        // The line scripts/bench.mjs appends after a run, a scoring row a build before the field
+        // wrote, and a usage row beside them: the kinds must not disturb each other's totals.
+        std::fs::write(
+            spend_file(&app.cfg.data_dir),
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"ts": Utc::now().to_rfc3339(), "day": day, "org": "bench", "kind": "scoring", "scoring_ms": 1500}),
+                json!({"ts": Utc::now().to_rfc3339(), "day": day, "org": "bench", "kind": "scoring"}),
+                json!({"ts": Utc::now().to_rfc3339(), "day": day, "org": "acme", "kind": "usage", "model": "claude-opus-5", "input_tokens": 100, "cost_usd": 1.0}),
+            ),
+        )
+        .unwrap();
+
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day);
+        assert_eq!(rows.len(), 3);
+        let scored = rows.iter().find(|r| r.org == "bench" && r.scoring_ms.is_some()).unwrap();
+        assert_eq!(scored.scoring_ms, Some(1500));
+        assert_eq!(scored.cost_usd, None, "scoring's only cost is time");
+        assert_eq!(scored.session, None, "a bench row is nobody's colony");
+
+        // On the wire the field rides only the rows that have it, the way session and agent do.
+        let mut row = base_row("scoring", "bench");
+        row.scoring_ms = Some(1500);
+        let line = serde_json::to_string(&row).unwrap();
+        assert!(line.contains("\"scoring_ms\":1500"), "{line}");
+        let plain = serde_json::to_string(&base_row("launched", "acme")).unwrap();
+        assert!(!plain.contains("scoring_ms"), "{plain}");
+
+        // The history sums the scoring time under the bench org and leaves the colony spend alone;
+        // the row without the field reads as none, not as an error.
+        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30);
+        assert_eq!(days.len(), 1);
+        let (_, orgs) = &days[0];
+        let (_, bench) = orgs.iter().find(|(org, _)| org == "bench").unwrap();
+        assert_eq!(bench.scoring_ms, 1500);
+        assert_eq!(bench.spend.cost_usd, None);
+        let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
+        assert_eq!(acme.scoring_ms, 0);
+        assert_eq!(acme.spend.cost_usd, Some(1.0));
+        assert_eq!(acme.spend.input_tokens, 100);
+
+        let Json(out) = history(State(app.clone()), Query(HistoryQuery { days: None })).await;
+        let orgs = out["days"][0]["orgs"].as_array().unwrap();
+        assert_eq!(orgs.iter().find(|o| o["org"] == "bench").unwrap()["scoring_ms"], json!(1500));
 
         let _ = std::fs::remove_dir_all(root);
     }

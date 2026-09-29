@@ -41,8 +41,8 @@
   ],
   "egress": {
     "api": ["api.anthropic.com"],
-    "auth": ["claude.ai", "console.anthropic.com"],
-    "telemetry": ["statsig.anthropic.com", "*.sentry.io"],
+    "auth": ["platform.claude.com"],
+    "telemetry": ["http-intake.logs.us5.datadoghq.com", "*.sentry.io"],
     "extra": ["api.typesafe.ai"]
   },
   "settings": {

@@ -58,8 +58,9 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    - Drop hosts the task's providers already cover: model traffic goes through the provider
      gateway, so a host only reached through a `<provider>/` route needs no entry.
 
-   The claude-code declaration came from the CLI's documented requirements and the manifest's
-   secret hosts, not yet from a live capture; replace it when a capture runs.
+   The claude-code declaration comes from a live capture of the pinned CLI (2026-09-28, Claude Code
+   2.1.280 — [modules/agents/claude-code/README.md](../modules/agents/claude-code/README.md#egress));
+   a credentialed model turn is still unobserved, so re-check it when the pin moves.
 3. **Denial-hint hooks.** Classify errored tool results and attach `denial: {class, hint}` to the
    `tool_result` event — classes `egress`, `read_only`, `tool_disabled`, following
    `modules/agents/claude-code/denials.mjs`. Deliver the hint twice: on the event for the record,
@@ -69,8 +70,10 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    verdict. Never change `is_error`, the content or any return code. Ship a strip test — with the
    layer off, every event is identical apart from the `denial` field. Known limits: masked-path
    empty reads are not detectable from text, and tools the agent spawns through `sh` never reach
-   your classifier — they rely on the runner-level hints. Only the claude-code runner implements
-   this layer today (`modules/agents/claude-code/runner.mjs`, the `PostToolUseFailure` hook).
+   your classifier — they rely on the runner-level hints. (The masked-path *attempt* itself is
+   reported separately, as the `path_policy` event of issue #647 — `pathpolicy.mjs`.) Only the
+   claude-code runner implements this layer today (`modules/agents/claude-code/runner.mjs`, the
+   `PostToolUseFailure` hook).
 4. **Preflight, naming the error.** Check the agent binary and everything it needs before the
    first turn, and refuse with a message naming the missing thing and the way out: the codex
    runner's `preflight` (`modules/agents/codex/runner.mjs:55-84`) refuses a missing credential, a

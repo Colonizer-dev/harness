@@ -451,6 +451,7 @@ mod tests {
             gateway_bind: "127.0.0.1:0".parse().unwrap(),
             allowed_hosts: vec![],
             fleet_peers: vec![],
+            bench_pool: None,
         }
     }
 

@@ -163,6 +163,12 @@ host-side git (`HOST_GIT_NO_EXEC` in `crates/colonizer/src/github.rs`), so a bra
 gc and maintenance never execute here; and only the pass bit, read from the exit code, and the companion's
 id are kept — the output is dropped, so held-out material never lands in anything the bench writes.
 
+The companion lands where its stack expects it, the stack read from the fresh clone's root marker:
+`heldout-check.test.mjs` at the clone root for Node, `tests/heldout_check.rs` for Rust (an integration
+test over the crate's public API) and `heldout_check_test.go` at the clone root for Go (declaring the
+root package) — the full table is in [Synthetic tasks → Stacks](#stacks). `heldout add` keeps the check
+file's extension, so a `.rs` or `.go` companion stays one wherever it is scored.
+
 A companion retires after `RETIRE_AFTER` (3) scoring decisions — the number the synth pool retires on — and
 each retirement or addition bumps the version and enters the history. The report is per family's **gap**:
 the visible pass rate minus the held-out pass rate, worst first, a task that never opened a pull request
@@ -174,25 +180,53 @@ scored against, `next_version` appears when recording the run's decisions left t
 rotation.
 
 Scoring makes no model calls, so its only cost is time: each result records
-`scoring: { visible_ms, heldout_ms }` and the run summary sums `scoring_ms` (not yet journaled into the
-mothership's spend.jsonl, #296).
+`scoring: { visible_ms, heldout_ms }` and the run summary sums `scoring_ms`, which `run` journals into
+the mothership's spend.jsonl once it finishes — one `scoring` row under the `bench` org, carrying the
+run's total ([protocol.md, §6.8 Spend](protocol.md#68-spend-per-org-and-per-day)), so the spend
+history shows it beside the colonies' spend. A failed write only warns: a lost row is not a failed
+run.
 
 ## Synthetic tasks
 
 Four hand-written tasks is a thin sample. `scripts/bench/synth.mjs` grows the set the SWE-smith way: inject
 a bug into real source, keep only the mutants that break the repository's own tests, and admit them through
-a gate. Stage one is procedural and Node-only — no model in the loop, so an accepted task costs $0 to make.
+a gate. Stage one is procedural — no model in the loop, so an accepted task costs $0 to make — and works on
+three stacks: Node, Rust and Go.
+
+### Stacks
+
+The stack is read from the repository's root marker, most specific first: `Cargo.toml` is Rust, `go.mod` is
+Go, `package.json` is Node — so a napi-style Rust crate that also ships a `package.json` generates as Rust,
+its tests being cargo's. `generate --stack node|rust|go` overrides the detection. What each stack means,
+from `scripts/bench/stacks.mjs`:
+
+| | Node | Rust | Go |
+| :--- | :--- | :--- | :--- |
+| Source files | `*.js`/`*.mjs`/`*.cjs` outside `tests?/` | `*.rs` outside `tests/` and `benches/` | `*.go` that is not `*_test.go` |
+| Test files | `*.test.*`, `*.spec.*`, files under `tests?/` | files under `tests/` or `benches/` | `*_test.go` |
+| Left out of a copy | `node_modules`, `.git` | `target`, `.git` | `.git` |
+| Syntax gate | `node --check <file>` | `cargo test --no-run` | `go test -count=1 -run '^$' ./...` |
+| Tests, run twice | `node --test --test-reporter=tap` | `cargo test` | `go test -count=1 -json ./...` |
+| Held-out companion | `heldout-check.test.mjs`, `node --test` | `tests/heldout_check.rs`, `cargo test --test heldout_check` | `heldout_check_test.go`, `go test -count=1 .` |
+
+The mutation scanner lexes per language. Rust and Go swap `==`↔`!=` where JavaScript swaps `===`↔`!==`;
+the rest of the table — `&&`↔`||`, `<`↔`<=`, `>`↔`>=`, `+`↔`-`, `*`↔`/`, an integer n → n+1,
+`true`↔`false` — is shared. Each lexer skips its language's dead zones: strings and comments (which nest
+in Rust and do not in Go), Rust's raw strings (`r"…"`, `r#"…"#`) and lifetimes (`'a` is a lifetime, not an
+unterminated char), Go's runes and backtick strings, and regex literals, which only JavaScript has. A Rust
+source file stops scanning at a test-only `#[cfg(…)]` — bare or wrapped in `all()`/`any()`: its inline
+test module is part of the gate, not of the mutation surface. Generic brackets around a lifetime (`<'a>`)
+do yield sites, but the mutants do not compile anywhere, so the gate discards them.
 
 ### What the generator does
 
-A token-level scanner — deliberately not an AST — walks JavaScript source, skipping comments, strings,
-template literals (interpolations included) and regexes, including a `/` after a keyword such as `return`
-or `typeof`, where division is impossible. It yields mutation sites: operator swaps (`+`↔`-`, `*`↔`/`,
-`<`↔`<=`, `>`↔`>=`, `===`↔`!==`, `&&`↔`||`) and literal nudges (an integer n → n+1, `true`↔`false`).
-Where a construct is ambiguous — `**`, `++`, `=>`, a generator's `*`, a number that is not a plain
-integer — the site is skipped rather than risk nonsense. The issue text is templated from the failing test
-names and states the symptom only: which tests fail, and that the fix belongs in the source, not the tests.
-It never names the operator or the line.
+A token-level scanner — deliberately not an AST — walks the detected stack's source, skipping the dead
+zones listed above (a JavaScript template literal keeps its interpolations; a `/` after a keyword such as
+`return` or `typeof` opens a regex, where division is impossible). It yields mutation sites: the operator
+swaps and literal nudges of the stack's table. Where a construct is ambiguous — `**`, `++`, `=>`, a
+generator's `*`, a number that is not a plain integer — the site is skipped rather than risk nonsense. The
+issue text is templated from the failing test names and states the symptom only: which tests fail, and
+that the fix belongs in the source, not the tests. It never names the operator or the line.
 
 ### The gate
 
@@ -200,10 +234,12 @@ Each candidate is checked before it is trusted, with the counts landing in `runs
 measured, not asserted:
 
 1. the reference checkout must be green, or generation aborts;
-2. `node --check` on the mutated file — a mutant that does not parse is rejected as vacuous breakage;
-3. the bugged checkout runs its tests twice: the same tests failing both times, compared name by name,
-   admits the instance to the held-out pool; differing failures mark a real but flaky bug, which goes to
-   the raid set; nothing failing rejects it as survived.
+2. the stack's syntax gate (the table above) — a mutant that does not compile is rejected as vacuous
+   breakage;
+3. the bugged checkout runs its tests twice (go with `-count=1`, so its result cache cannot replay the
+   first run as the second): the same tests failing both times, compared name by name, admits the
+   instance to the held-out pool; differing failures mark a real but flaky bug, which goes to the raid
+   set; nothing failing rejects it as survived.
 
 Generation also refuses a git work tree with uncommitted changes under the repo, so the commit recorded in
 each entry reproduces the mutated source exactly; outside git the commit is null. Every admitted entry
@@ -228,7 +264,16 @@ method, stack, status and age plus the gate's aggregate pass rate and cost per a
 
 Flaky mutants are real bugs that are unfit to score, so they are kept apart: never drawn from, never
 sharing an id with the held-out pool, and carrying briefs that name the injected class of bug and where it
-lives — ready for the red-team hunters.
+lives — ready for the red-team hunters, who now get them. A mothership pointed at the pool with
+`COLONIZER_BENCH_POOL=<dir>` reads `raid.json` at each red-team launch and deals the entries recorded against
+the raided repository out round-robin (entry i to hunter i, then every swarm-size-th entry after it, at most
+20 per brief), so no lead is ever handed to two hunters; a raid set longer than the swarm can carry at the
+cap waits for a later run. The hunter's brief gains a paragraph quoting each entry's brief with its
+`file:line`, injected class and commit, and saying to chase these first even where they fall outside the
+focus assignment. Entries whose `source.repo` names another repository are skipped (the match is ASCII
+case-insensitive), and a missing or malformed `raid.json` only logs — the swarm launches with ordinary
+briefs. The `source.repo` label is `owner/name` from the repository's `origin` remote; a checkout with no
+remote is labelled by its path, and no run's repo slug will match it.
 
 ### Measured so far
 
@@ -238,9 +283,8 @@ bench fixture admitted 3 of 3 candidates, `services/telemetry` 54 of 107 (53 sur
 
 ### Not yet
 
-An LM-rewrite method and PR-mirroring; stacks beyond Node (Rust, Go); wiring the raid set into the
-red-team hunters' briefs (`crates/colonizer/src/redteam.rs`); and the human review of the first 20 accepted
-tasks plus the colony trial that opens the pool to scoring.
+An LM-rewrite method and PR-mirroring; and the human review of the first 20 accepted tasks plus the
+colony trial that opens the pool to scoring.
 
 ## External suites (SWE-bench)
 
