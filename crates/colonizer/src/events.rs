@@ -411,8 +411,18 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             content,
             tags,
             origin,
+            kind,
+            confidence,
         } => {
-            memory_proposal(app, id, origin.as_deref(), scope.as_deref(), &title, &content, &tags).await;
+            let proposal = ProposalBody {
+                scope: scope.as_deref(),
+                title: &title,
+                content: &content,
+                tags: &tags,
+                kind: kind.as_deref(),
+                confidence,
+            };
+            memory_proposal_full(app, id, origin.as_deref(), proposal).await;
         }
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
@@ -576,9 +586,18 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     .await;
 }
 
-/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
-/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
-/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2).
+/// A proposal's body, as the runner sent it.
+pub(crate) struct ProposalBody<'a> {
+    pub scope: Option<&'a str>,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub tags: &'a [String],
+    pub kind: Option<&'a str>,
+    pub confidence: Option<f64>,
+}
+
+/// A proposal without a kind or confidence, as runners from before issue #766 send it.
+#[cfg(test)]
 pub(crate) async fn memory_proposal(
     app: &Shared,
     id: &str,
@@ -588,6 +607,31 @@ pub(crate) async fn memory_proposal(
     content: &str,
     tags: &[String],
 ) {
+    let body = ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind: None,
+        confidence: None,
+    };
+    memory_proposal_full(app, id, origin, body).await
+}
+
+/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
+/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
+/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2). A global
+/// proposal is only a sighting of a fleet-wide candidate (issue #766): it is queued for review as a
+/// global note once candidates from enough distinct repositories agree with enough confidence.
+pub(crate) async fn memory_proposal_full(app: &Shared, id: &str, origin: Option<&str>, body: ProposalBody<'_>) {
+    let ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind,
+        confidence,
+    } = body;
     let Some(s) = app.session(id).await else { return };
     let scope = scope.unwrap_or("repo");
     // Shared memory is read-only from inside a colony (docs/architecture.md, "Shared memory
@@ -620,15 +664,28 @@ pub(crate) async fn memory_proposal(
         .await;
         return;
     }
+    let Some(kind) = memory::parse_kind(kind) else {
+        app.session_log(
+            id,
+            "error",
+            format!("rejected a memory proposal: kind must be one of {}", memory::KINDS.join(", ")),
+        )
+        .await;
+        return;
+    };
+    // Out of range or not a number reads as no confidence at all, which never promotes.
+    let confidence = confidence.filter(|c| c.is_finite()).map(|c| c.clamp(0.0, 1.0));
     let key = match scope {
         "org" => s.org.clone(),
         "repo" => s.repo.clone(),
         _ => String::new(),
     };
-    // Who proposed, shown in the review queue: the session id is the colony id, and `origin` is
-    // always `orchestrator` here — everything else was refused above (absent: that same legacy case).
-    let source = json!({"session_id": s.id, "repo": s.repo, "origin": origin.unwrap_or("orchestrator")});
-    let note = match memory::draft(scope, &key, title, content, tags, source) {
+    // Who proposed, shown in the review queue and kept as the note's provenance (issue #766): the
+    // session id is the colony id, the commit is read host-side, and `origin` is always
+    // `orchestrator` here — everything else was refused above (absent: that same legacy case).
+    let commit = memory::colony_commit(app, &s).await;
+    let source = json!({"session_id": s.id, "repo": s.repo, "commit": commit, "origin": origin.unwrap_or("orchestrator")});
+    let mut note = match memory::draft(scope, &key, title, content, tags, source) {
         Ok(note) => note,
         Err(e) => {
             app.session_log(id, "error", format!("rejected a memory proposal: {e:#}"))
@@ -636,6 +693,12 @@ pub(crate) async fn memory_proposal(
             return;
         }
     };
+    note.kind = kind.to_string();
+    note.confidence = confidence;
+    if scope == "global" {
+        global_sighting(app, id, &s, note, commit).await;
+        return;
+    }
     let (title, scope) = (note.title.clone(), note.scope.clone());
     let review = orgs::memory_requires_review(&modules);
     // Only a repo note can skip review. An org or global note reaches every colony in the org or the
@@ -687,6 +750,59 @@ pub(crate) async fn memory_proposal(
         }
         Err(e) => {
             app.session_log(id, "error", format!("could not store a memory proposal: {e:#}"))
+                .await
+        }
+    }
+}
+
+/// A colony's global proposal (issue #766): recorded as a sighting of its fleet-wide candidate, and
+/// queued for review as a global note only once the candidate clears the bar. Fleet-wide memory is
+/// always reviewed, whatever `require_review` says: it reaches every colony (issue #376).
+async fn global_sighting(app: &Shared, id: &str, s: &Session, note: memory::Note, commit: Option<String>) {
+    let sighting = memory::Sighting {
+        colony: s.id.clone(),
+        repo: s.repo.clone(),
+        commit,
+        confidence: note.confidence.unwrap_or(0.0),
+        seen_at: Utc::now(),
+    };
+    let title = note.title.clone();
+    match app.memory.record_sighting(&note, sighting).await {
+        Ok(Some(global)) => match app.memory.add_proposal(global).await {
+            Ok(proposal) => {
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "memory: \"{title}\" was seen in {} repositories with enough confidence and is waiting for your review as fleet-wide memory",
+                        memory::PROMOTE_MIN_REPOS
+                    ),
+                )
+                .await;
+                let rt = app.runtimes.lock().await.get(id).cloned();
+                if let Some(rt) = rt {
+                    rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
+                }
+            }
+            Err(e) => {
+                app.session_log(id, "error", format!("could not queue a fleet-wide memory note: {e:#}"))
+                    .await
+            }
+        },
+        Ok(None) => {
+            app.session_log(
+                id,
+                "info",
+                format!(
+                    "memory: \"{title}\" is held as a fleet-wide candidate; it is reviewed for global memory once colonies in {} repositories propose it with confidence of at least {}",
+                    memory::PROMOTE_MIN_REPOS,
+                    memory::PROMOTE_CONFIDENCE
+                ),
+            )
+            .await
+        }
+        Err(e) => {
+            app.session_log(id, "error", format!("could not record a fleet-wide memory candidate: {e:#}"))
                 .await
         }
     }
@@ -922,28 +1038,30 @@ mod tests {
             propose(&app, Some(scope), "Sign commits", "Always sign.").await;
             assert!(app.memory.notes(scope, key).await.unwrap().is_empty(), "{scope}");
         }
-        assert_eq!(app.memory.proposals().await.len(), 2);
+        // The org note queues; the global one is only a sighting of a fleet-wide candidate (#766).
+        assert_eq!(app.memory.proposals().await.len(), 1);
+        assert_eq!(app.memory.candidates().await.len(), 1);
 
         // An absent origin is a runner from before the field existed: read as the orchestrator.
         memory_proposal(&app, "abc", None, None, "Run tests locked", "Use --locked.", &[]).await;
         let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].source["reviewed"], json!(false));
-        assert_eq!(app.memory.proposals().await.len(), 2, "the repo note did not queue");
+        assert_eq!(app.memory.proposals().await.len(), 1, "the repo note did not queue");
 
         // A repo note the store cannot take is queued instead, unmarked: approving it is its review.
         app.modules.write().await.memory.provider = memory::MEM0.into();
         set(&app, "base_url", json!("ftp://nowhere")).await;
         memory_proposal(&app, "abc", Some("orchestrator"), None, "Deploys", "Stage first.", &[]).await;
         let pending = app.memory.proposals().await;
-        assert_eq!(pending.len(), 3);
+        assert_eq!(pending.len(), 2);
         assert!(pending.iter().all(|p| p.note.source["reviewed"].is_null()), "{pending:?}");
 
         app.modules.write().await.memory.provider = "files".into();
         set(&app, "require_review", json!(true)).await;
         propose(&app, Some("repo"), "Commit style", "Keep commits small.").await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
-        assert_eq!(app.memory.proposals().await.len(), 4);
+        assert_eq!(app.memory.proposals().await.len(), 3);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -983,8 +1101,104 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending[0].note.source,
-            json!({"session_id": "abc", "repo": "acme/repo", "origin": "orchestrator"})
+            json!({"session_id": "abc", "repo": "acme/repo", "commit": null, "origin": "orchestrator"})
         );
+        assert!(
+            app.memory.candidates().await.is_empty(),
+            "no refused proposal left a sighting"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a colony's global proposal is a sighting, and fleet-wide memory needs confidence of
+    /// at least 0.8 in two distinct repositories — then it is queued for review, never stored, even
+    /// with review off. 0.79 anywhere never counts, and one repository at 0.8 is not enough.
+    #[tokio::test]
+    async fn fleet_wide_memory_needs_confidence_in_two_repositories() {
+        let (app, root) = crate::sessions::tests::app_with_colony("a1", SessionStatus::Running).await;
+        for (id, org) in [("a2", "acme"), ("b1", "beta"), ("c1", "gamma")] {
+            let mut s = crate::sessions::tests::colony(org, SessionStatus::Running);
+            s.id = id.into();
+            app.sessions.write().await.push(s);
+        }
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        async fn propose(app: &Shared, id: &str, confidence: f64) {
+            let body = ProposalBody {
+                scope: Some("global"),
+                title: "Pin the toolchain",
+                content: "Pin the Rust toolchain in rust-toolchain.toml.",
+                tags: &[],
+                kind: Some("convention"),
+                confidence: Some(confidence),
+            };
+            memory_proposal_full(app, id, Some("orchestrator"), body).await;
+        }
+        let pending = |app: Shared| async move { app.memory.proposals().await.len() };
+
+        // 0.79 in two repositories: not promoted.
+        propose(&app, "a1", 0.79).await;
+        propose(&app, "b1", 0.79).await;
+        assert_eq!(pending(app.clone()).await, 0, "0.79 is under the bar");
+        // 0.8 in only one repository (two colonies on acme/repo count once): not promoted.
+        propose(&app, "a1", 0.8).await;
+        propose(&app, "a2", 0.9).await;
+        assert_eq!(pending(app.clone()).await, 0, "one repository is not the fleet");
+        // 0.8 in a second repository: queued for review as a global note, with every sighting's provenance.
+        propose(&app, "c1", 0.8).await;
+        let queued = app.memory.proposals().await;
+        assert_eq!(queued.len(), 1);
+        let global = &queued[0].note;
+        assert_eq!((global.scope.as_str(), global.kind.as_str()), ("global", "convention"));
+        let repos: Vec<&str> = global.source["promoted_from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["repo"].as_str().unwrap())
+            .collect();
+        assert_eq!(repos, ["acme/repo", "gamma/repo"]);
+        assert!(
+            app.memory.notes("global", "").await.unwrap().is_empty(),
+            "review is never skipped"
+        );
+        // A third sighting does not queue it again.
+        propose(&app, "b1", 0.95).await;
+        assert_eq!(pending(app.clone()).await, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a proposal keeps its kind and confidence, an unknown kind is refused, and a repo
+    /// note lands in its own repository's scope only.
+    #[tokio::test]
+    async fn a_proposal_keeps_its_kind_and_stays_in_its_repository() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let mut other = crate::sessions::tests::colony("beta", SessionStatus::Running);
+        other.id = "def".into();
+        app.sessions.write().await.push(other);
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        let body = |kind| ProposalBody {
+            scope: Some("repo"),
+            title: "Migrations run first",
+            content: "Run migrations before the seed step.",
+            tags: &[],
+            kind: Some(kind),
+            confidence: Some(0.7),
+        };
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("failure")).await;
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("gossip")).await;
+        let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
+        assert_eq!(notes.len(), 1, "the unknown kind was refused");
+        assert_eq!((notes[0].kind.as_str(), notes[0].confidence), ("failure", Some(0.7)));
+        assert!(app.memory.notes("repo", "beta/repo").await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 

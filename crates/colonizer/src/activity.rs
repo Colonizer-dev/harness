@@ -604,6 +604,12 @@ const RULES: &[Rule] = &[
     ),
     rule(
         "POST",
+        "/api/memory/notes/{id}/revoke",
+        "memory.note",
+        Target::Fixed("revoked a memory note", "memory"),
+    ),
+    rule(
+        "POST",
         "/api/burn-down/stop",
         "burn_down.stop",
         Target::Fixed("burn-down", ""),

@@ -553,7 +553,7 @@ test('the colonizer MCP tools work end to end: findings, memory and wait', async
   assertSchema(runner.events);
 
   const { mcp } = runner.turns()[0];
-  assert.deepEqual(mcp.tools, ['ask_user', 'finding_file', 'memory_search', 'memory_propose', 'wait']);
+  assert.deepEqual(mcp.tools, ['ask_user', 'finding_file', 'memory_briefing', 'memory_changes', 'memory_search', 'memory_propose', 'wait']);
   assert.deepEqual(mcp.calls[0], { name: 'finding_file', isError: false, text: '{"filed":true}', error: null });
   assert.deepEqual(mcp.calls[1], { name: 'memory_propose', isError: false, text: '{"ok":true}', error: null });
   assert.equal(mcp.calls[2].isError, false);

@@ -207,6 +207,18 @@ explicit orchestrator proposals, and a proposal is persisted the moment its even
 colony that ends or dies loses no proposal already made. `MEMORY.md` is written at boot from landed
 notes only.
 
+Memory is pulled, never injected (issue #766). No note text is put into a colony's system prompt or
+first message: one fixed prompt line names the tools, and the agent calls `memory_briefing` (a short,
+sourced summary, optionally on a topic) and `memory_changes` (what was added or revoked since it last
+asked) when it wants memory. A note that reached the store through a mistaken or manipulated review
+therefore reaches an agent only as a tool answer framed as data, with its source beside it, and a
+revoked note is gone from the next answer. Fleet-wide (global) memory is not proposed directly: a
+colony's global proposal is a sighting of a candidate, promoted into the review queue only when
+colonies in two distinct repositories propose it with confidence of at least 0.8. Every note keeps
+the colony, repository and commit it came from (`source.session_id`, `source.repo`, `source.commit`,
+or `source.promoted_from` for a promoted note), so it can be traced and revoked; see
+[protocol §6.2](protocol.md#62-shared-memory-runner--mothership).
+
 ## Session lifecycle
 
 This is the mechanism. What a colony looks like from the operator's side (launching, claims,

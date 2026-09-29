@@ -221,7 +221,7 @@ export async function createBridge({ emit, setStatus, isWorking, findings = fals
         else {
           // Single agent, no subagents: the proposal is the orchestrator's, and the mothership
           // re-checks the origin before it touches a store.
-          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
         }
       } else if (req.url === '/loop_next') {

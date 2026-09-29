@@ -27,8 +27,9 @@ reference](https://developers.openai.com/codex/config-reference), verified again
 Each turn registers a `colonizer` MCP server with codex (`-c mcp_servers.colonizer.*` overrides,
 whose values are JSON and therefore valid TOML): `mcp.mjs`, a dependency-free stdio server that the
 runner points at a loopback HTTP bridge held for the colony's life. `wait` (block instead of
-polling; the server's `tool_timeout_sec` is raised to 3600 so a wait can run to its 1800 s cap) and
-`memory_search` run inside the server; `finding_file` and `memory_propose` cross the bridge and
+polling; the server's `tool_timeout_sec` is raised to 3600 so a wait can run to its 1800 s cap),
+`memory_briefing`, `memory_changes` and `memory_search` (shared memory is pulled through these, never
+put into the prompt; issue #766) run inside the server; `finding_file` and `memory_propose` cross the bridge and
 leave the colony as `finding` and `memory_proposal` events, and so do a loop colony's pacing tools:
 `loop_next` (the next run's delay in minutes, clamped to 15–1440 like the mothership clamps it) and
 `loop_stop`. The tool list follows the same switches as the other modules: findings only under
