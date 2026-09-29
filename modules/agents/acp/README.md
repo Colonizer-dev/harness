@@ -66,9 +66,11 @@ and a `question_answered` event travels back like the Claude module's. An interr
 
 ## Workspace confinement
 
-`fs/*` requests resolve every path against the runner's working directory (the workspace): the
-longest existing ancestor is resolved through `realpath`, so `../`, an absolute path outside, and a
-symlink pointing out of the tree are all refused with JSON-RPC error `-32602` before the filesystem
+`fs/*` requests resolve every path against the runner's working directory (the workspace): each
+symlink on the way is resolved component by component — a dangling one too, against its own
+directory, to where a write through it would land — and the result must stay under the workspace's
+real path, so `../`, an absolute path outside, a symlink pointing out of the tree (whether or not its
+target exists yet) and a symlink loop are all refused with JSON-RPC error `-32602` before the filesystem
 is touched — and a file over 16 MiB is refused rather than buffered whole. Terminal commands are a
 weaker fence: they are only *started* with a `cwd` inside the workspace (default: the workspace
 root) — what a command then does with its arguments, env and paths is the agent's business, and the

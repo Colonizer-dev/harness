@@ -134,6 +134,35 @@ test('the pure helpers: command split, risk, content text, option clamp, command
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
 });
 
+test('confine refuses a dangling symlink out of the tree, which a write would follow out of it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'acp-dangle-'));
+  const outside = mkdtempSync(join(tmpdir(), 'acp-outside-'));
+  const target = join(outside, 'outside.txt');
+  symlinkSync(target, join(root, 'link'));
+  symlinkSync(join(outside, 'deeper', 'x.txt'), join(root, 'link-deep'));
+  symlinkSync('../../escape.txt', join(root, 'rel'));
+  mkdirSync(join(root, 'sub'));
+  symlinkSync(join(root, 'link'), join(root, 'sub', 'chain'));
+  symlinkSync('loop-b', join(root, 'loop-a'));
+  symlinkSync('loop-a', join(root, 'loop-b'));
+  symlinkSync('sub/new.txt', join(root, 'inside'));
+
+  assert.equal(confine(root, 'link'), null, 'a dangling link to a missing file outside escapes');
+  assert.equal(confine(root, join(root, 'link')), null, 'spelled absolute, too');
+  assert.equal(confine(root, 'link-deep'), null, 'a dangling link whose target directory is missing escapes');
+  assert.equal(confine(root, 'rel'), null, 'a relative dangling link resolves against its own directory');
+  assert.equal(confine(root, 'sub/chain'), null, 'a chain ending in a dangling link out escapes');
+  assert.equal(confine(root, 'loop-a'), null, 'a symlink loop is refused');
+  assert.equal(confine(root, 'loop-a/x.txt'), null, 'a path through a symlink loop is refused');
+  assert.equal(confine(root, 'inside'), join(root, 'sub', 'new.txt'), 'a dangling link that stays inside resolves to its target');
+  assert.equal(confine(root, 'sub/new/deeper.txt'), join(root, 'sub', 'new', 'deeper.txt'), 'a new plain path still confines');
+  assert.equal(confine(root, '.'), root, 'the root itself');
+  // Why it matters: the write path writes through what confine returned, and the lexical in-tree
+  // spelling of the link lands the bytes outside.
+  writeFileSync(join(root, 'link'), 'escaped');
+  assert.ok(existsSync(target), 'writing through the in-tree spelling creates the file outside the workspace');
+});
+
 test('acp/execpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {
   const copy = readFileSync(join(moduleDir, 'execpolicy.mjs'));
   const original = readFileSync(join(moduleDir, '..', 'claude-code', 'execpolicy.mjs'));

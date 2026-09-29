@@ -11,13 +11,13 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { mkdtempSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
-import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
+import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
@@ -156,22 +156,15 @@ function optionByKind(options, prefix) {
   return real.find((option) => option.kind === `${prefix}_once`) ?? real.find((option) => option.kind.startsWith(prefix));
 }
 
-/** The workspace-confined absolute path for `target`, or null when it escapes: symlinks resolve
- * through the longest existing ancestor, so a link out of the tree cannot hide an escape. */
+/** The workspace-confined absolute path for `target`, or null when it escapes. Every symlink on
+ * the way resolves, component by component — a dangling one too, to where a write through it
+ * would land — so a link out of the tree cannot hide an escape (pathpolicy.mjs `resolveInWorkspace`).
+ * The result keeps the caller's spelling of the workspace root. */
 export function confine(workspace, target) {
-  let abs = resolve(workspace, String(target ?? ''));
-  const tail = [];
-  for (;;) {
-    try {
-      const resolved = join(realpathSync(abs), ...tail);
-      return resolved === workspace || resolved.startsWith(workspace + sep) ? resolved : null;
-    } catch {
-      tail.unshift(basename(abs));
-      const parent = dirname(abs);
-      if (parent === abs) return null;
-      abs = parent;
-    }
-  }
+  const inside = resolveInWorkspace(workspace, target);
+  if (!inside) return null;
+  const rel = relative(inside.root, inside.full);
+  return rel === '' ? workspace : join(workspace, rel);
 }
 
 // §2 caps tool_result output; file reads refuse anything over READ_CAP instead of buffering it.
