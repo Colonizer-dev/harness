@@ -5,14 +5,14 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { createBridge, mcpArgs, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { CODEX_HOME, createBridge, mcpArgs, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -29,9 +29,10 @@ function startRunner(env = {}) {
   const bin = join(binDir, 'codex');
   writeFileSync(bin, `#!/bin/sh\nexec ${process.execPath} ${JSON.stringify(fakeCodex)} "$@"\n`, { mode: 0o755 });
   const scratch = mkdtempSync(join(tmpdir(), 'codex-test-'));
+  const home = join(scratch, 'codex-home'); // COLONIZER_CODEX_HOME keeps the tests off /root/.codex
   const record = join(scratch, 'record.jsonl');
   const child = spawn(process.execPath, [join(moduleDir, 'runner.mjs')], {
-    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, CODEX_API_KEY: 'codex-test-key', COLONIZER_CODEX_BIN: bin, CODEX_FAKE_RECORD: record, ...env },
+    env: { PATH: '/usr/bin:/bin', TMPDIR: scratch, COLONIZER_CODEX_HOME: home, CODEX_API_KEY: 'codex-test-key', COLONIZER_CODEX_BIN: bin, CODEX_FAKE_RECORD: record, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const events = [];
@@ -69,7 +70,7 @@ function startRunner(env = {}) {
   const records = () => (existsSync(record) ? readFileSync(record, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   // Only the turn invocations carry --json; the records also hold the preflight's `--version` call.
   const turns = () => records().filter((r) => r.argv.includes('--json'));
-  return { child, events, send, waitUntil, waitExit, records, turns };
+  return { child, events, send, waitUntil, waitExit, records, turns, home };
 }
 
 const stop = (runner) => (runner.send({ type: 'shutdown' }), runner.waitExit());
@@ -91,6 +92,11 @@ const count = (type, n) => (events) => {
   const matches = events.filter((e) => e.type === type);
   return matches.length >= n ? matches[n - 1] : undefined;
 };
+
+test('module.json persists CODEX_HOME itself as the session_resume dir', () => {
+  const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
+  assert.equal(manifest.session_resume.dir, CODEX_HOME, 'the mounted dir and the runner’s CODEX_HOME must not drift');
+});
 
 test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('codex-cli 0.156.1'), '0.156.1');
@@ -177,7 +183,7 @@ test('a turn streams mapped events and the child carries the nesting env', async
   assert.equal(invocation.argv[invocation.argv.length - 1], '-', 'the prompt is the stdin sentinel');
   assert.equal(invocation.env.BROWSER, '/bin/false');
   assert.equal(invocation.env.CODEX_API_KEY, 'set');
-  assert.ok(invocation.env.CODEX_HOME && invocation.env.CODEX_HOME !== process.env.CODEX_HOME, 'a fresh CODEX_HOME is assigned');
+  assert.equal(invocation.env.CODEX_HOME, runner.home, 'CODEX_HOME is the injected, persisted colony path');
 
   runner.send({ type: 'shutdown' });
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
@@ -209,6 +215,143 @@ test('the second turn resumes the first turn’s thread, with cumulative token t
   assert.ok(!turns[0].argv.includes('resume'), 'the first turn starts a fresh thread');
   assert.deepEqual(turns[1].argv.slice(turns[1].argv.indexOf('resume'), -1), ['resume', 'thread-fake-1'], 'the second turn resumes thread.started’s id');
   assert.deepEqual(second.model_usage, { 'gpt-5.2': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } }, 'model_usage is cumulative for the colony');
+  assert.equal(runner.events.filter((e) => e.type === 'agent_session').length, 1, 'the resumed turn does not re-announce the id');
+
+  await stop(runner);
+});
+
+test('a restarted runner resumes the thread it announced, off the persisted CODEX_HOME', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-resume-'));
+  const firstRun = startRunner({ COLONIZER_CODEX_HOME: home });
+  t.after(() => firstRun.child.kill('SIGKILL'));
+
+  firstRun.send({ type: 'user_message', id: 'u-1', text: 'begin' });
+  await firstRun.waitUntil(count('turn_end', 1), 'the first process’s turn to finish');
+  assert.deepEqual(first('agent_session')(firstRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the thread id is announced');
+  const firstOrder = firstRun.events.map((e) => e.type);
+  assert.ok(firstOrder.indexOf('agent_session') < firstOrder.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+
+  // The VM is gone; the harness boots a fresh one with COLONIZER_RESUME_SESSION set (§2, issue #562)
+  // and the colony's persisted home mounted back in at the same path.
+  const secondRun = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-fake-1' });
+  t.after(() => secondRun.child.kill('SIGKILL'));
+
+  secondRun.send({ type: 'user_message', id: 'u-2', text: 'continue' });
+  await secondRun.waitUntil(count('turn_end', 1), 'the resumed turn to finish');
+
+  const turns = secondRun.turns();
+  assert.equal(turns.length, 1, 'the conversation continues without a fallback');
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-fake-1', '-'], 'the first turn of the new process resumes the announced thread');
+  assert.deepEqual(turns[0].prompt, 'continue');
+  const commandAt = turns[0].argv.findIndex((arg) => arg.startsWith('mcp_servers.colonizer.command='));
+  assert.ok(commandAt > -1 && turns[0].argv[commandAt - 1] === '-c', 'the resumed turn registers the colonizer MCP server');
+  assert.ok(commandAt < turns[0].argv.indexOf('resume'), 'the registration rides exec level, before the resume subcommand');
+  assert.deepEqual(first('agent_session')(secondRun.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'a new process announces the id once, like claude-code');
+  const order = secondRun.events.map((e) => e.type);
+  assert.ok(order.indexOf('agent_session') < order.indexOf('turn_end'), 'the id is announced inside the turn, before its turn_end');
+  assertSchema([...firstRun.events, ...secondRun.events]);
+
+  await stop(firstRun);
+  await stop(secondRun);
+});
+
+test('a resumed thread whose rollout is gone falls back to a fresh thread once', async (t) => {
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end').length, 1, 'the failed attempt emits no turn_end of its own');
+  assert.ok(
+    runner.events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('no rollout for thread thread-gone')),
+    'the failed resume is logged as a warning',
+  );
+  assert.equal(turnEnd.is_error, false, 'the colony is not failed by the missing rollout');
+  assert.equal(turnEnd.result, 'Hello, colony');
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-gone', '-'], 'the seeded thread is attempted first');
+  assert.ok(!turns[1].argv.includes('resume'), 'the retry starts a fresh thread');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'the fresh thread is what gets announced');
+  assertSchema(runner.events);
+
+  runner.send({ type: 'user_message', id: 'u-2', text: 'carry on' });
+  await runner.waitUntil(count('turn_end', 2), 'the next turn to finish');
+  assert.deepEqual(runner.turns()[2].argv.slice(runner.turns()[2].argv.indexOf('resume')), ['resume', 'thread-fake-1', '-'], 'the next message resumes the fresh thread the fallback started');
+
+  await stop(runner);
+});
+
+test('a fallback that also ends before naming a thread leaves no dead seed behind', async (t) => {
+  // The retry is given time to start (the fake sleeps before emitting; the seeded attempt exits
+  // before the sleep, on the missing rollout), then interrupted: it names no thread either.
+  const runner = startRunner({ COLONIZER_RESUME_SESSION: 'thread-gone', CODEX_FAKE_SLEEP_MS: '1500' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick it up' });
+  await runner.waitUntil(() => runner.turns().length >= 2, 'the fallback retry to start');
+  runner.send({ type: 'interrupt' });
+  const interrupted = await runner.waitUntil(first('turn_end'), 'the interrupted retry to end');
+  assert.match(interrupted.result, /interrupted/);
+
+  runner.send({ type: 'user_message', id: 'u-2', text: 'try again' });
+  const next = await runner.waitUntil(count('turn_end', 2), 'the next turn to finish');
+  assert.equal(next.is_error, false);
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 3);
+  assert.deepEqual(turns[0].argv.slice(turns[0].argv.indexOf('resume')), ['resume', 'thread-gone', '-'], 'the dead seed is attempted first');
+  assert.ok(!turns[1].argv.includes('resume'), 'the fallback retry starts a fresh thread');
+  assert.ok(!turns[2].argv.includes('resume'), 'the next message starts fresh too, not the dead seed');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-fake-1' }, 'only the fresh thread is ever announced');
+  assertSchema(runner.events);
+
+  await stop(runner);
+});
+
+test('a persisted home whose rollout store is not a real directory is rebuilt, not kept', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-home-'));
+  writeFileSync(join(home, 'sessions'), 'a file where the store belongs');
+  symlinkSync(mkdtempSync(join(tmpdir(), 'codex-test-elsewhere-')), join(home, 'archived_sessions'));
+  const runner = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-gone' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'carry on' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the retried turn to finish');
+  assert.equal(turnEnd.is_error, false, 'the colony recovers onto a fresh thread');
+  const store = lstatSync(join(home, 'sessions'));
+  assert.ok(store.isDirectory() && !store.isSymbolicLink(), 'sessions is a real directory again, holding the fresh rollout');
+  assert.ok(existsSync(join(home, 'sessions', 'thread-fake-1.jsonl')));
+  assert.throws(() => lstatSync(join(home, 'archived_sessions')), 'a symlinked store is removed, not followed');
+
+  await stop(runner);
+});
+
+test('a boot strips the persisted home down to its rollout store before any codex runs', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-test-home-'));
+  writeFileSync(join(home, 'config.toml'), 'model = "sneaky"');
+  writeFileSync(join(home, 'auth.json'), '{"OPENAI_API_KEY":"stale"}');
+  writeFileSync(join(home, 'AGENTS.md'), 'instructions a previous boot left behind');
+  mkdirSync(join(home, 'prompts'), { recursive: true });
+  writeFileSync(join(home, 'prompts', 'custom.md'), 'a planted custom prompt');
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  writeFileSync(join(home, 'sessions', 'thread-kept.jsonl'), 'thread\n');
+  const runner = startRunner({ COLONIZER_CODEX_HOME: home, COLONIZER_RESUME_SESSION: 'thread-kept' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'carry on' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the resumed turn to finish');
+  assert.ok(!existsSync(join(home, 'config.toml')), 'config.toml does not survive a boot');
+  assert.ok(!existsSync(join(home, 'auth.json')), 'auth.json does not survive a boot');
+  assert.ok(!existsSync(join(home, 'AGENTS.md')), 'global instructions do not survive a boot');
+  assert.ok(!existsSync(join(home, 'prompts')), 'custom prompts do not survive a boot');
+  assert.ok(existsSync(join(home, 'sessions', 'thread-kept.jsonl')), 'the rollout store does survive');
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end').length, 1, 'the seeded resume worked, so no fallback ran');
+  assert.equal(turnEnd.is_error, false);
+  const [invocation] = runner.turns();
+  assert.deepEqual(invocation.argv.slice(invocation.argv.indexOf('resume')), ['resume', 'thread-kept', '-'], 'the seeded thread resumed off the surviving rollout');
+  assert.deepEqual(first('agent_session')(runner.events), { type: 'agent_session', session_id: 'thread-kept' });
 
   await stop(runner);
 });
@@ -285,13 +428,13 @@ test('shutdown mid-turn exits cleanly with code 0', async (t) => {
   assert.equal(await runner.waitExit(), 0);
 });
 
-test('an answer is logged and ignored (no question path); stdin EOF exits like shutdown', async (t) => {
+test('an answer without an open question warns; stdin EOF exits like shutdown', async (t) => {
   const runner = startRunner();
   t.after(() => runner.child.kill('SIGKILL'));
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'idle'), 'the runner to come up');
   runner.send({ type: 'answer', question_id: 'q-1', answers: {}, response: 'yes' });
-  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.message.includes('answer')), 'the answer to be logged');
-  assert.equal(logged.level, 'info');
+  const logged = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && /no open question/.test(e.message)), 'the answer to be warned about');
+  assert.equal(logged.level, 'warn');
   runner.child.stdin.end();
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'exited'), 'the exited status');
   assert.equal(await runner.waitExit(), 0);
@@ -410,7 +553,7 @@ test('the colonizer MCP tools work end to end: findings, memory and wait', async
   assertSchema(runner.events);
 
   const { mcp } = runner.turns()[0];
-  assert.deepEqual(mcp.tools, ['finding_file', 'memory_search', 'memory_propose', 'wait']);
+  assert.deepEqual(mcp.tools, ['ask_user', 'finding_file', 'memory_search', 'memory_propose', 'wait']);
   assert.deepEqual(mcp.calls[0], { name: 'finding_file', isError: false, text: '{"filed":true}', error: null });
   assert.deepEqual(mcp.calls[1], { name: 'memory_propose', isError: false, text: '{"ok":true}', error: null });
   assert.equal(mcp.calls[2].isError, false);
@@ -430,7 +573,55 @@ test('finding_file and the memory tools are only offered when the mothership swi
 
   runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
-  assert.deepEqual(runner.turns()[0].mcp.tools, ['wait'], 'no findings switch and no memory dir leave only wait');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'wait'], 'no findings switch and no memory dir leave ask_user and wait');
+
+  await stop(runner);
+});
+
+test('ask_user asks the user over the bridge, and the answer finishes the turn', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Which color?', header: 'Paint', options: [{ label: 'Blue' }, { label: 'Red' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls) });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'pick a paint color' });
+  const question = await runner.waitUntil(first('question'), 'the question event');
+  assert.deepEqual(question, {
+    type: 'question',
+    question_id: 'q-1',
+    message_id: null,
+    questions: [{ question: 'Which color?', header: 'Paint', multi_select: false, options: [{ label: 'Blue', description: '', preview: null }, { label: 'Red', description: '', preview: null }] }],
+  });
+  await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'the waiting-for-answer status');
+
+  runner.send({ type: 'answer', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const answered = await runner.waitUntil(first('question_answered'), 'the question_answered event');
+  assert.deepEqual(answered, { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+  const turnEnd = await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.equal(turnEnd.is_error, false);
+
+  const { mcp } = runner.turns()[0];
+  assert.equal(mcp.tools[0], 'ask_user', 'ask_user rides the colonizer registration every turn already carries');
+  assert.deepEqual(mcp.calls[0], { name: 'ask_user', isError: false, text: JSON.stringify({ answers: { Paint: 'Blue' }, response: 'blue, please' }), error: null });
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'a question is never also a tool_call (§2)');
+  assert.equal(runner.events.some((e) => e.type === 'tool_result' && String(e.tool_call_id ?? '').startsWith('item_mcp_')), false);
+  assertSchema(runner.events);
+
+  await stop(runner);
+});
+
+test('an interrupt during a parked ask cancels it: no answer, and the interrupted turn ends', async (t) => {
+  const calls = [{ name: 'ask_user', arguments: { questions: [{ question: 'Proceed?', options: [{ label: 'Yes' }] }] } }];
+  const runner = startRunner({ CODEX_FAKE_MCP_CALLS: JSON.stringify(calls), CODEX_FAKE_SLEEP_MS: 30000, CODEX_FAKE_SLEEP_FIRST: '1' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'ask away' });
+  await runner.waitUntil(first('question'), 'the question event');
+  runner.send({ type: 'interrupt' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the interrupted turn to end');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /interrupted/);
+  assert.equal(runner.events.some((e) => e.type === 'question_answered'), false, 'a cancelled ask is never an answer');
+  assert.equal(runner.events.some((e) => e.type === 'tool_call' && e.name === 'mcp_tool_call'), false, 'the ask never became a tool_call');
 
   await stop(runner);
 });
@@ -471,6 +662,40 @@ test('the bridge turns /loop_next and /loop_stop into protocol events and refuse
   }
 });
 
+test('the bridge parks /ask until answer, and cancelAll releases a parked ask as cancelled', async () => {
+  const events = [];
+  const states = [];
+  const bridge = await createBridge({ emit: (event) => events.push(event), setStatus: (state) => states.push(state), isWorking: () => true });
+  const post = (path, body) =>
+    fetch(`${bridge.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${bridge.token}` }, body: JSON.stringify(body) }).then((r) => r.json());
+  try {
+    const parked = post('/ask', { questions: [{ question: 'Which color?', header: 'Paint', multiSelect: true, options: [{ label: 'Blue', description: 'the calm one' }] }] });
+    assert.equal(await Promise.race([parked.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked', 'the ask holds until an answer or a cancel');
+    assert.deepEqual(events[0], {
+      type: 'question',
+      question_id: 'q-1',
+      message_id: null,
+      questions: [{ question: 'Which color?', header: 'Paint', multi_select: true, options: [{ label: 'Blue', description: 'the calm one', preview: null }] }],
+    });
+    assert.equal(bridge.pending(), 1);
+    assert.deepEqual(states, ['waiting_for_answer']);
+    assert.ok(bridge.answer('q-1', { Paint: 'Blue' }, 'blue, please'));
+    assert.deepEqual(await parked, { answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(events[1], { type: 'question_answered', question_id: 'q-1', answers: { Paint: 'Blue' }, response: 'blue, please' });
+    assert.deepEqual(states, ['waiting_for_answer', 'working'], 'the answer hands the status back to the running turn');
+    assert.equal(bridge.answer('q-9', {}, ''), false, 'an unknown question id is not an answer');
+
+    const second = post('/ask', { questions: [{ question: 'Still there?' }] });
+    assert.equal(await Promise.race([second.then(() => 'settled'), sleep(100).then(() => 'parked')]), 'parked');
+    assert.equal(bridge.pending(), 1);
+    bridge.cancelAll();
+    assert.deepEqual(await second, { cancelled: true }, 'cancelAll releases the parked HTTP response');
+    assert.equal(bridge.pending(), 0);
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('a loop colony reports its pacing: loop_next with a clamped delay, and loop_stop', async (t) => {
   const calls = [
     { name: 'loop_next', arguments: { delay_minutes: 5, reason: 'review comments are due' } },
@@ -489,7 +714,7 @@ test('a loop colony reports its pacing: loop_next with a clamped delay, and loop
   assertSchema(runner.events);
 
   const { mcp } = runner.turns()[0];
-  assert.deepEqual(mcp.tools, ['loop_next', 'loop_stop', 'wait']);
+  assert.deepEqual(mcp.tools, ['ask_user', 'loop_next', 'loop_stop', 'wait']);
   assert.deepEqual(mcp.calls[0], { name: 'loop_next', isError: false, text: 'Next run scheduled in 15 minutes.', error: null });
   assert.deepEqual(mcp.calls[1], { name: 'loop_stop', isError: false, text: 'The loop is stopped; this is its last run.', error: null });
 
@@ -502,7 +727,7 @@ test('a loop colony on a fixed schedule gets loop_stop but no loop_next', async 
 
   runner.send({ type: 'user_message', id: 'u-1', text: 'hello' });
   await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
-  assert.deepEqual(runner.turns()[0].mcp.tools, ['loop_stop', 'wait'], 'only a self-paced loop schedules its next run');
+  assert.deepEqual(runner.turns()[0].mcp.tools, ['ask_user', 'loop_stop', 'wait'], 'only a self-paced loop schedules its next run');
 
   await stop(runner);
 });

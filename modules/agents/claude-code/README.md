@@ -46,6 +46,34 @@ are read by the mothership; the runner does not use them.
 Credentials come from `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` (a microsandbox placeholder in
 the VM).
 
+## Egress
+
+The `egress` declaration in `module.json` comes from a live capture, not from the CLI's documented
+requirements: on 2026-09-28, Claude Code 2.1.280 (the `vendor/claude-code.lock` pin) ran inside a
+colony sandbox behind a logging forward proxy (`HTTPS_PROXY`, HTTP CONNECT), with tcpdump on udp/53
+and socket sampling as backstops for anything bypassing the proxy and a fresh `HOME` per run. The
+scenarios were the runner's own invocation, CLI defaults, no credentials at all, `claude auth login`
+and `claude setup-token` under a pty, and `claude doctor`, `auth status` and `claude update` on a
+copy of the binary.
+
+| Host | Category | Evidence |
+| --- | --- | --- |
+| `api.anthropic.com` | `api` | Observed: the only host on the wire in the runner invocation, CLI defaults, the no-credential run and `claude doctor`; the binary also carries `/v1/messages`, `/v1/models`, first-party event logging, WebFetch's domain check, OAuth profile/roles and managed settings on it |
+| `platform.claude.com` | `auth` | In the binary, not observed: the OAuth token exchange. Authorize pages open in the user's browser, and the mothership runs `claude setup-token` host-side, never in-colony |
+| `http-intake.logs.us5.datadoghq.com` | `telemetry` | In the binary (Datadog logs intake); one DNS query during the capture that could not be attributed to the CLI |
+| `*.sentry.io` | `telemetry` | In the binary (`o1158394.ingest.us.sentry.io`), never contacted |
+| `api.typesafe.ai` | `extra` | Not the CLI: this module's own Jev compaction and shadow-routing plugin, running inside the CLI process (also a secrets host) |
+
+What the old declaration dropped, and why: `console.anthropic.com` and `statsig.anthropic.com` have
+zero occurrences in the 2.1.280 binary (statsig survives only as a local cache directory name),
+`claude.ai` was only ever the login page in a browser, `downloads.claude.ai` is reached by
+`claude update` alone — never at startup, even with updater defaults, and colonies disable it with
+`DISABLE_AUTOUPDATER=1` — and `mcp-proxy.anthropic.com` serves remote MCP connectors the runner does
+not configure.
+
+The capture could not exercise a credentialed model turn, WebFetch execution, a completed OAuth
+login or a forced Sentry/Datadog export; re-run it when the pin moves.
+
 ## Model routing
 
 `COLONIZER_MODEL` is the orchestrator's model, and the orchestrator does nearly all of the work in a
@@ -122,6 +150,17 @@ Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, He
 Pi do not — the harness refuses to launch a colony on one of them while a policy is set (the
 install's `exec_policy` setting, or a repo `.colonizer/exec-policy.json`), naming the module and
 where the policy came from, so a set policy is never silently ignored.
+
+## Path policy
+
+Every path-taking tool call (`Read`, `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `Grep`, `Glob`)
+meets the mounted bind list (`pathpolicy.mjs`, issue #647) after it is resolved through any
+symlink, the way the boot resolved its binds. A call that lands on a masked path — or writes to a
+masked or protected one — emits one `path_policy` event per distinct (access, path); reads of
+protected paths are allowed, so they are not attempts. Reporting only: the event carries no
+decision, the tool runs exactly as it would have, and the mount (docs/path-policy.md) is what
+enforces. The harness logs each attempt on the colony and in the History log. A masked path
+reached through `Bash` never gets here — that is the exec policy's `secret-paths` rule above.
 
 ## Waiting
 

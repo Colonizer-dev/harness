@@ -162,6 +162,27 @@ impl Drop for Counted {
     }
 }
 
+/// How many of one colony's requests may wait for a provider slot at once. Claude Code works
+/// through parallel subagents, so bursts well past the provider's own concurrency are normal;
+/// past this a colony's next request is refused instead of parked, and its client retries it.
+pub const COLONY_QUEUE_CAP: u64 = 16;
+
+/// Claims one of `cap` places on `counter` in a compare-and-swap, so parallel requests cannot all
+/// read the same total and slip past the cap together. `None` when the cap held: the caller
+/// refuses without queuing.
+fn counted_within(counter: &Arc<AtomicU64>, cap: u64) -> Option<Counted> {
+    let mut current = counter.load(Ordering::SeqCst);
+    loop {
+        if current >= cap {
+            return None;
+        }
+        match counter.compare_exchange(current, current + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(Counted(counter.clone())),
+            Err(seen) => current = seen,
+        }
+    }
+}
+
 /// Gives back what it took when dropped: one request's reservation of estimated spend against the
 /// colony's budget, added on dispatch (see [`proxy`]) and subtracted only once the response's real
 /// cost has been recorded — the recorder's task holds it across the gap between "body streamed"
@@ -351,6 +372,8 @@ pub struct Gateway {
     limits: Mutex<HashMap<String, Limit>>,
     /// Requests each colony has open through the gateway, queued or streaming.
     colonies: Mutex<HashMap<String, Arc<AtomicU64>>>,
+    /// Requests each colony has waiting for a provider slot, capped at [`COLONY_QUEUE_CAP`].
+    colony_queue: Mutex<HashMap<String, Arc<AtomicU64>>>,
     /// Estimated spend each colony has in flight but not yet recorded, in micro-dollars (`usd * 1e6`
     /// rounded) so a running dollar total fits an atomic: the per-request reservations that close the
     /// gap between dispatch and `record_routed_usage`, without which parallel requests each pass the
@@ -397,6 +420,7 @@ impl Gateway {
             stats: Default::default(),
             limits: Default::default(),
             colonies: Default::default(),
+            colony_queue: Default::default(),
             reserved: Default::default(),
             usage: Mutex::new(usage),
             usage_file,
@@ -584,6 +608,16 @@ impl Gateway {
 
     fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
         self.colonies.lock().unwrap().entry(colony.to_string()).or_default().clone()
+    }
+
+    /// The colony's requests waiting for a provider slot (see [`COLONY_QUEUE_CAP`]).
+    fn colony_queue_counter(&self, colony: &str) -> Arc<AtomicU64> {
+        self.colony_queue
+            .lock()
+            .unwrap()
+            .entry(colony.to_string())
+            .or_default()
+            .clone()
     }
 
     /// The colony's outstanding spend reservations, in micro-dollars (see [`Gateway::reserved`]).
@@ -972,11 +1006,14 @@ fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, reservation: 
     })
 }
 
-/// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`.
+/// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`. The path
+/// is held to plain URL characters with no `.`/`..` segment, and the query to the same kind of set
+/// plus `=&` — `None` for anything else, before the request is built.
 fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<String> {
     let clean = rest.starts_with('/')
         && rest.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c))
-        && !rest.split('/').any(|segment| segment == "." || segment == "..");
+        && !rest.split('/').any(|segment| segment == "." || segment == "..")
+        && query.is_none_or(|q| q.chars().all(|c| c.is_ascii_alphanumeric() || "/_-=&".contains(c)));
     if !clean {
         return None;
     }
@@ -1207,12 +1244,14 @@ async fn proxy(
     audit.set_wire(crate::gateway_audit::wire_name(provider.wire));
     // A configured provider is not necessarily this colony's (issue #409): providers.json is
     // mothership-wide, so the token alone must not open one the colony's model settings never
-    // routed to. Refused with the other local refusals — before credentials, budget, or any
-    // upstream call — and like the budget 403, one Claude Code does not retry in a loop.
-    if session
+    // routed to. A colony with no recorded set reaches no provider either (issue #681): the set is
+    // what the token's access is derived from, and boot records it before the token is written.
+    // Refused with the other local refusals — before credentials, budget, or any upstream call —
+    // and like the budget 403, one Claude Code does not retry in a loop.
+    if !session
         .allowed_providers
         .as_ref()
-        .is_some_and(|allowed| !allowed.contains(&id))
+        .is_some_and(|allowed| allowed.contains(&id))
     {
         audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::NotRouted);
         return api_error(
@@ -1221,6 +1260,29 @@ async fn proxy(
             format!(
                 "colonizer gateway: provider \"{id}\" is not routed to colony {colony}; a colony spends only on the providers its model settings route to"
             ),
+            None,
+        );
+    }
+    // Only the request shape the wires serve goes any further (issue #681): every guest module
+    // speaks Anthropic Messages to the gateway, so that — plus count_tokens where the provider
+    // serves it natively — is the whole surface. Anything else is refused before the provider's
+    // credential is ever attached, and the refusal keeps the audited failure code.
+    let served = rest == "/v1/messages" || (matches!(provider.wire, Wire::Anthropic) && rest == "/v1/messages/count_tokens");
+    if !served {
+        audit.fail(StatusCode::NOT_FOUND.as_u16(), GatewayFailure::BadRequest);
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+            format!("colonizer gateway: provider \"{id}\" does not serve {rest}"),
+            None,
+        );
+    }
+    if method != Method::POST {
+        audit.fail(StatusCode::METHOD_NOT_ALLOWED.as_u16(), GatewayFailure::BadRequest);
+        return api_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "invalid_request_error",
+            format!("colonizer gateway: provider \"{id}\" serves {rest} with POST, not {method}"),
             None,
         );
     }
@@ -1305,6 +1367,34 @@ async fn proxy(
     // The body's one parse, shared by the estimate and the audit record's requested model.
     let (estimate, model) = estimate_request_cost_usd(&provider, &body);
     audit.set_model(model.clone());
+    // A model the colony's settings never routed to is refused like a provider outside them
+    // (issue #681): the body's model is what the provider is asked to serve, and the token alone
+    // does not open the rest of a configured provider's catalogue. Checked on the requested name —
+    // before any `model_map` renaming — and before the spend reservation, so a refused request
+    // reserves nothing. Guests send the bare canonical name (the runner strips the `<provider>/`
+    // prefix), which is the form boot recorded.
+    // A colony booted before model scoping (#727) has a recorded provider set but no model set.
+    // Refusing it every model stranded running colonies at the upgrade (every subagent 403'd), so
+    // such a colony keeps the pre-#727 scope, its recorded providers, until it next boots and
+    // records its models. A colony with neither set is still refused at the provider check above.
+    let legacy = session.allowed_models.is_none() && session.allowed_providers.is_some();
+    let routed = legacy
+        || model
+            .as_deref()
+            .map(|m| format!("{id}/{m}"))
+            .is_some_and(|pair| session.allowed_models.as_ref().is_some_and(|allowed| allowed.contains(&pair)));
+    if !routed {
+        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::NotRouted);
+        let named = model.unwrap_or_else(|| "none".into());
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            format!(
+                "colonizer gateway: model \"{named}\" is not routed to colony {colony}; a colony spends only on the models its agent settings name"
+            ),
+            None,
+        );
+    }
     let reserved = app.gateway.colony_reserved(&colony);
     // Recorded spend and the reservation are read and claimed together, under the sessions read
     // lock: a recorder hands its estimate back under the write lock in the same step that adds the
@@ -1423,13 +1513,57 @@ async fn proxy(
         None => None,
         Some(slots) => {
             let queue_timeout = provider.queue_timeout_secs();
+            // A colony's own waiters are capped before it joins the queue: past the cap the
+            // refusal is immediate, so one colony cannot park unbounded requests on a busy
+            // provider (issue #681).
+            let colony_waiting = counted_within(&app.gateway.colony_queue_counter(&colony), COLONY_QUEUE_CAP);
+            if colony_waiting.is_none() {
+                usage.add_failure(GatewayFailure::QueueFull);
+                audit.fail(StatusCode::TOO_MANY_REQUESTS.as_u16(), GatewayFailure::QueueFull);
+                return api_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "overloaded_error",
+                    format!(
+                        "provider \"{id}\" is busy: colony {colony} already has {COLONY_QUEUE_CAP} requests waiting for a slot"
+                    ),
+                    None,
+                );
+            }
             let waiting = Counted::new(&stats.queued);
             let queued_at = Instant::now();
             let acquired = tokio::time::timeout(Duration::from_secs(queue_timeout), slots.acquire_owned()).await;
             drop(waiting);
+            drop(colony_waiting);
             match acquired {
                 Ok(Ok(permit)) => {
                     audit.set_queue_ms(queued_at.elapsed().as_millis() as u64);
+                    // The wait can outlast the admission: the colony may have stopped, or its
+                    // token stopped matching, while this request sat in the queue. Re-read the
+                    // token, and the budget the wait gave it time to pass, before anything
+                    // leaves for the provider (issue #681). The spend reservation rides the
+                    // return, so a refused request releases its estimate.
+                    if app.colony_for_token(token).await.as_ref().map(|s| s.id.as_str()) != Some(colony.as_str()) {
+                        usage.add_failure(GatewayFailure::ColonyInactive);
+                        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::ColonyInactive);
+                        return api_error(
+                            StatusCode::FORBIDDEN,
+                            "permission_error",
+                            format!("colonizer gateway: colony {colony} is no longer active; the queued request was not sent"),
+                            None,
+                        );
+                    }
+                    if crate::lifecycle::enforce_budget(&app, &colony).await {
+                        usage.add_failure(GatewayFailure::Budget);
+                        audit.fail(StatusCode::FORBIDDEN.as_u16(), GatewayFailure::Budget);
+                        return api_error(
+                            StatusCode::FORBIDDEN,
+                            "permission_error",
+                            format!(
+                                "colonizer gateway: colony {colony} passed its budget while its request waited; raise the budget and resume it"
+                            ),
+                            None,
+                        );
+                    }
                     Some(permit)
                 }
                 _ => {
@@ -2205,6 +2339,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.allowed_models = Some(vec!["deepseek/deepseek-chat".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -2230,7 +2365,7 @@ mod tests {
             Method::POST,
             "/providers/deepseek/v1/messages".parse().unwrap(),
             headers,
-            Bytes::from_static(b"{}"),
+            Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[]}"#),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK, "routed provider is not refused");
@@ -2243,7 +2378,10 @@ mod tests {
         let lines = audit_lines(&app, "c1");
         assert_eq!(lines.len(), 1, "exactly one audit line per request");
         assert_eq!(lines[0]["failure"], Value::Null, "a forwarded 2xx did not fail");
-        assert_eq!(lines[0]["model"], Value::Null, "the body had no model to validate");
+        assert_eq!(
+            lines[0]["model"], "deepseek-chat",
+            "the line names the model the body asked for"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2257,13 +2395,36 @@ mod tests {
             .collect()
     }
 
-    /// A running colony `c1` — token file written, session dir created — routed to `allowed`, with
-    /// `providers` as the mothership's providers.json. Returns the app and the colony token.
-    async fn colony_with_providers(root: &std::path::Path, allowed: &[&str], providers: Value) -> (Shared, String) {
+    /// Serves any path and method, counting what arrives. The zero the tests assert against says
+    /// nothing reached the provider.
+    async fn counting_upstream(hits: Arc<AtomicU64>) -> String {
+        let router = Router::new().fallback(move || {
+            let hits = hits.clone();
+            async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({}))
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// A running colony `c1` — token file written, session dir created — routed to `allowed` for
+    /// providers and `models` (`"<provider>/<model>"` pairs) for models, with `providers` as the
+    /// mothership's providers.json. Returns the app and the colony token.
+    async fn colony_with_providers(
+        root: &std::path::Path,
+        allowed: &[&str],
+        models: &[&str],
+        providers: Value,
+    ) -> (Shared, String) {
         let app = crate::tests::test_app(root);
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(allowed.iter().map(|id| id.to_string()).collect());
+        colony.allowed_models = Some(models.iter().map(|m| m.to_string()).collect());
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -2305,17 +2466,346 @@ mod tests {
 
     /// POSTs `body` to `provider` on the gateway as a colony carrying `token` and `credentials`.
     async fn post_to_gateway(app: &Shared, token: &str, provider: &str, credentials: HeaderMap, body: Bytes) -> Response {
+        gateway_request(app, token, provider, Method::POST, "v1/messages", credentials, body).await
+    }
+
+    /// Sends any method and provider-relative path to the gateway as colony `c1`'s token.
+    async fn gateway_request(
+        app: &Shared,
+        token: &str,
+        provider: &str,
+        method: Method,
+        rest: &str,
+        credentials: HeaderMap,
+        body: Bytes,
+    ) -> Response {
         let mut headers = credentials;
         headers.insert(COLONY_HEADER, HeaderValue::from_str(token).unwrap());
         proxy(
             State(app.clone()),
-            Path((provider.to_string(), "v1/messages".into())),
-            Method::POST,
-            format!("/providers/{provider}/v1/messages").parse().unwrap(),
+            Path((provider.to_string(), rest.into())),
+            method,
+            format!("/providers/{provider}/{rest}").parse().unwrap(),
             headers,
             body,
         )
         .await
+    }
+
+    /// The request shapes an anthropic-wire endpoint does not serve — a path outside the Messages
+    /// API, a GET on one it does — are refused before any upstream traffic: the provider's
+    /// credential is never attached to a request its endpoint did not ask for.
+    #[tokio::test]
+    async fn an_unserved_path_or_method_is_refused_before_any_upstream_call() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-shape-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &["deepseek/deepseek-chat"],
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none"}]),
+        )
+        .await;
+        let body = Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#);
+
+        let response = gateway_request(
+            &app,
+            &token,
+            "deepseek",
+            Method::POST,
+            "v1/models",
+            HeaderMap::new(),
+            body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response = gateway_request(
+            &app,
+            &token,
+            "deepseek",
+            Method::GET,
+            "v1/messages",
+            HeaderMap::new(),
+            Bytes::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing reached the provider");
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["failure"], "bad_request");
+        assert_eq!(lines[1]["failure"], "bad_request");
+        assert_eq!(
+            app.gateway.usage_counters("deepseek").snapshot().requests,
+            0,
+            "refused locally, so nothing counts as provider usage"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A request whose body names a model the colony's agent settings never routed to is refused
+    /// before any upstream call, like a provider outside the routing is (issue #681).
+    /// A colony booted before model scoping (#727) has providers on record but no models. It keeps
+    /// the provider-level scope it booted with, instead of every request being refused mid-run
+    /// (every subagent 403'd on the upgrade), and a provider outside its record is still refused.
+    #[tokio::test]
+    async fn a_colony_booted_before_model_scoping_keeps_its_provider_scope() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-legacy-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &[],
+            json!([
+                {"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none"},
+                {"id": "other", "name": "Other", "base_url": base, "auth": "none"}
+            ]),
+        )
+        .await;
+        app.sessions.write().await.iter_mut().for_each(|s| s.allowed_models = None);
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(
+                br#"{"model":"any-model-on-deepseek","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#,
+            ),
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a legacy colony's recorded provider still serves it"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the request reached the provider");
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "other",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"x","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a provider outside the record is still refused"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_model_outside_the_colonys_routing_is_refused_before_any_upstream_call() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-model-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &["deepseek/deepseek-chat"],
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none"}]),
+        )
+        .await;
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"unrouted-model","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "permission_error");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("unrouted-model"), "names the model: {message}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing reached the provider");
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "not_routed");
+
+        // The routed model on the same provider still passes: the pair on record is what admits.
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "the routed model is admitted");
+        let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["failure"], Value::Null);
+        assert_eq!(lines[1]["model"], "deepseek-chat");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A request that waited in the provider's queue is not sent once the colony it was
+    /// authenticated for has gone: the slot freeing re-checks the token and the budget before
+    /// anything leaves for the provider (issue #681).
+    #[tokio::test]
+    async fn a_queued_request_is_not_sent_after_the_colony_is_gone() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-queued-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &["deepseek/deepseek-chat"],
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none",
+                    "max_concurrent": 1, "queue_timeout_secs": 30}]),
+        )
+        .await;
+        let body = Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#);
+
+        // The provider's only slot is held, so the request below queues behind it.
+        let held = app.gateway.slots("deepseek", Some(1)).unwrap().acquire_owned().await.unwrap();
+        let task = {
+            let app = app.clone();
+            let token = token.clone();
+            tokio::spawn(async move { post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), body).await })
+        };
+        for _ in 0..1000 {
+            if app.gateway.load("deepseek").1 > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            app.gateway.load("deepseek").1,
+            1,
+            "the request is waiting on the provider's slot"
+        );
+
+        // The colony goes away while the request waits: stopped, and its token no longer any good.
+        app.update_session("c1", |x| x.status = crate::sessions::SessionStatus::Stopped)
+            .await;
+        std::fs::write(app.gateway_token_file("c1"), b"rotated").unwrap();
+        drop(held);
+
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "permission_error");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "the queued request never reached the provider"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose queue is already at its cap has further requests refused on arrival rather
+    /// than queued behind it (issue #681): agents work through parallel subagents, so bursts are
+    /// routine, and an unbounded wait would pile latency and held estimates on the colony.
+    #[tokio::test]
+    async fn a_colony_with_a_full_queue_is_refused_without_queueing() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-queuecap-{}", uuid::Uuid::new_v4()));
+        let (app, token) = colony_with_providers(
+            &root,
+            &["deepseek"],
+            &["deepseek/deepseek-chat"],
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none",
+                    "max_concurrent": 1, "queue_timeout_secs": 30}]),
+        )
+        .await;
+        let body = Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#);
+
+        // The provider's only slot is held, so the first COLONY_QUEUE_CAP requests queue and the
+        // next one arrives to a full queue.
+        let held = app.gateway.slots("deepseek", Some(1)).unwrap().acquire_owned().await.unwrap();
+        let mut tasks = Vec::new();
+        for _ in 0..COLONY_QUEUE_CAP {
+            tasks.push({
+                let app = app.clone();
+                let token = token.clone();
+                let body = body.clone();
+                tokio::spawn(async move { post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), body).await })
+            });
+        }
+        for _ in 0..1000 {
+            if app.gateway.load("deepseek").1 == COLONY_QUEUE_CAP {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            app.gateway.load("deepseek").1,
+            COLONY_QUEUE_CAP,
+            "the cap's worth are waiting"
+        );
+
+        let response = post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), body).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let refused: Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(refused["error"]["type"], "overloaded_error");
+
+        drop(held);
+        for task in tasks {
+            assert_eq!(task.await.unwrap().status(), StatusCode::OK);
+        }
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.iter().filter(|l| l["failure"] == "queue_full").count(), 1);
+        assert_eq!(
+            lines.len(),
+            COLONY_QUEUE_CAP as usize + 1,
+            "each request leaves exactly one line"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony with no recorded allowlist — the field is filled in at boot, before the token is
+    /// written — reaches no provider: the record is what the token's access is derived from, so
+    /// without it there is nothing to admit (issue #681).
+    #[tokio::test]
+    async fn a_colony_without_a_recorded_allowlist_is_refused_every_provider() {
+        let hits = Arc::new(AtomicU64::new(0));
+        let base = counting_upstream(hits.clone()).await;
+        let root = std::env::temp_dir().join(format!("colonizer-gateway-noallow-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
+        colony.id = "c1".into();
+        colony.allowed_providers = None;
+        app.sessions.write().await.push(colony);
+        let token = "t".repeat(40);
+        std::fs::create_dir_all(app.session_dir("c1")).unwrap();
+        std::fs::write(app.gateway_token_file("c1"), &token).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            json!([{"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none"}]).to_string(),
+        )
+        .unwrap();
+
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(body["error"]["type"], "permission_error");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "nothing reached the provider");
+        let lines = audit_lines(&app, "c1");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["failure"], "not_routed");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A forwarded 2xx leaves one audit line per request carrying the outcome and the usage, and
@@ -2350,6 +2840,7 @@ mod tests {
         let (app, token) = colony_with_providers(
             &root,
             &["deepseek", "strix"],
+            &["deepseek/claude-sonnet-5", "strix/gpt-5.5"],
             json!([
                 {"id": "deepseek", "name": "DeepSeek", "base_url": anthropic_base, "auth": "none"},
                 {"id": "strix", "name": "Strix", "base_url": openai_base, "auth": "none", "wire": "openai"},
@@ -2447,6 +2938,7 @@ mod tests {
         let (app, token) = colony_with_providers(
             &root,
             &["deepseek"],
+            &["deepseek/claude-sonnet-5"],
             json!([
                 {"id": "deepseek", "name": "DeepSeek", "base_url": base, "auth": "none",
                  "model_map": {"claude-sonnet-5": "deepseek-v4-pro"}},
@@ -2479,11 +2971,19 @@ mod tests {
         let (app, token) = colony_with_providers(
             &root,
             &["deepseek"],
+            &["deepseek/deepseek-chat"],
             json!([{"id": "deepseek", "name": "DeepSeek", "base_url": "http://127.0.0.1:9", "auth": "none"}]),
         )
         .await;
 
-        let response = post_to_gateway(&app, &token, "deepseek", HeaderMap::new(), Bytes::from_static(b"{}")).await;
+        let response = post_to_gateway(
+            &app,
+            &token,
+            "deepseek",
+            HeaderMap::new(),
+            Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#),
+        )
+        .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(
             response.headers().get(FALLBACK_HEADER).and_then(|v| v.to_str().ok()),
@@ -2571,6 +3071,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.allowed_models = Some(vec!["deepseek/deepseek-chat".into()]);
         colony.sensitivity = Some("restricted".into());
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
@@ -2598,7 +3099,7 @@ mod tests {
             Method::POST,
             "/providers/deepseek/v1/messages".parse().unwrap(),
             headers,
-            Bytes::from_static(b"{}"),
+            Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[]}"#),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK, "a trusted provider is not refused");
@@ -2625,6 +3126,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.allowed_models = Some(vec!["deepseek/deepseek-chat".into()]);
         colony.sensitivity = Some("restricted".into());
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
@@ -2662,7 +3164,7 @@ mod tests {
                 Method::POST,
                 "/providers/deepseek/v1/messages".parse().unwrap(),
                 headers,
-                Bytes::from_static(b"{}"),
+                Bytes::from_static(br#"{"model":"deepseek-chat","max_tokens":8,"messages":[]}"#),
             )
             .await
         }
@@ -2780,6 +3282,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.allowed_models = Some(vec!["deepseek/m".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();
@@ -2906,6 +3409,7 @@ mod tests {
         let mut colony = crate::sessions::tests::colony("acme", crate::sessions::SessionStatus::Running);
         colony.id = "c1".into();
         colony.allowed_providers = Some(vec!["deepseek".into()]);
+        colony.allowed_models = Some(vec!["deepseek/m".into()]);
         app.sessions.write().await.push(colony);
         let token = "t".repeat(40);
         std::fs::create_dir_all(app.session_dir("c1")).unwrap();

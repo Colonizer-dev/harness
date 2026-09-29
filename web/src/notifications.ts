@@ -10,7 +10,7 @@
 // edge-triggered with no backlog: the first session list only seeds the snapshot, so a colony that
 // was already waiting when the page loaded is the sidebar's job, not an interruption.
 import type { AttentionReason, Session, SessionStatus } from "./types";
-import { orgOf, sameOrg } from "./components/ui";
+import { isAnsweredWaiting, orgOf, sameOrg } from "./components/ui";
 
 // ---------------------------------------------------------------------------
 // Pure decisions
@@ -47,7 +47,11 @@ export function isTerminal(status: SessionStatus): boolean {
  */
 export function needsYou(session: Session): boolean {
   if (isTerminal(session.status)) return false;
-  if (session.status === "waiting_for_answer") return true;
+  if (session.status === "waiting_for_answer") {
+    // One that answered while suspended (issue #667) is not waiting on a person any more — its
+    // answer is stored and it is queued for a parallelism slot. Nothing here is left to do.
+    return !isAnsweredWaiting(session);
+  }
   if (!session.attention) return false;
   // A provider error on a colony that is still working is not yours to act on yet: its next
   // request may succeed (the gateway then lifts the flag). It needs you once the turn has stopped.

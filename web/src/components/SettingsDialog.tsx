@@ -61,6 +61,7 @@ import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
 import { RemoteAccessPane } from "./RemoteAccessPane";
+import { TokensPane } from "./TokensPane";
 import { SkillsetField } from "./Skillsets";
 import { ClaudeLoginSection, GithubTokenForm } from "./Connections";
 import { SetupSection } from "./SetupSection";
@@ -75,7 +76,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -375,6 +376,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "tokens",
+          label: "API tokens",
+          hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
+        },
+        {
           id: "updates",
           label: "Updates",
           hint: "Which Colonizer this is, and whether a newer one is out",
@@ -534,6 +540,7 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
   else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
@@ -3329,6 +3336,15 @@ function hostOf(url: string): string {
   }
 }
 
+/** The scheme, host and port of a base URL — what the credential's destination is pinned to. Unparsable input has none, which counts as a change. */
+function originOf(url: string): string {
+  try {
+    return new URL(url.trim()).origin;
+  } catch {
+    return "";
+  }
+}
+
 /**
  * The long tail of Anthropic-compatible endpoints, searchable. Kept behind "More" because six
  * vendors cover almost everyone and seventy would bury them.
@@ -3498,7 +3514,15 @@ function ProviderForm({
       ? null
       : "An http(s) URL";
   const keyError = auth !== "none" && keyMode === "replace" && initial?.has_key && !key.trim() ? "Paste the new key" : null;
-  const invalid = Boolean(idError || urlError || keyError || limitsInvalid || pricingInvalid || !name.trim());
+  // The saved key rides the base URL, and the server refuses a save that moves the provider to
+  // another origin without re-entering it: say so here rather than after the save comes back.
+  // "Keep" leaves api_key unset, and so does auth "none" — both trip the rule.
+  const originMoved = Boolean(initial?.has_key && originOf(url) !== originOf(initial.base_url));
+  const originKeyError =
+    originMoved && (keyMode === "keep" || auth === "none")
+      ? "Changing the base URL to another origin requires entering the API key again — or removing the saved key"
+      : null;
+  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
@@ -3610,7 +3634,7 @@ function ProviderForm({
           id={ids.url}
           label="Base URL"
           className="sm:col-span-2"
-          error={urlError && baseUrl && !unfilled.length ? urlError : null}
+          error={originKeyError ?? (urlError && baseUrl && !unfilled.length ? urlError : null)}
           hint={
             unfilled.length
               ? urlError ?? undefined
@@ -3626,7 +3650,7 @@ function ProviderForm({
             readOnly={template.length > 0}
             placeholder={wire === "openai" ? "https://api.openai.com" : "https://api.example.com/anthropic"}
             spellCheck={false}
-            aria-invalid={Boolean(urlError && baseUrl && !unfilled.length)}
+            aria-invalid={Boolean(originKeyError || (urlError && baseUrl && !unfilled.length))}
             className={cx(inputClass, "font-mono text-[13px]", template.length > 0 && "text-muted")}
           />
         </FormField>

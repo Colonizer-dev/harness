@@ -521,6 +521,8 @@ Vendor logos in the UI are CC0 artwork from Simple Icons; the marks stay their o
   <a href="docs/gaps.md">Gaps</a>
   &nbsp;·&nbsp;
   <a href="docs/runner-authoring.md">Runner authoring</a>
+  &nbsp;·&nbsp;
+  <a href="docs/good-first-issues.md">Good first issues</a>
 </p>
 
 <p align="center">

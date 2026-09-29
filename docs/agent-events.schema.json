@@ -20,6 +20,7 @@
     { "$ref": "#/$defs/memory_proposal" },
     { "$ref": "#/$defs/finding" },
     { "$ref": "#/$defs/jev_ladder" },
+    { "$ref": "#/$defs/path_policy" },
     { "$ref": "#/$defs/loop_next" },
     { "$ref": "#/$defs/loop_stop" }
   ],
@@ -182,7 +183,7 @@
     },
     "agent_session": {
       "type": "object",
-      "description": "The runner's own agent-session id (§2), announced when an init first names one — the same once-only rule model_changed follows for the model. The mothership keeps it on the colony's record; a colony suspended while it waited on its user boots again with COLONIZER_RESUME_SESSION set to it and the runner continues that conversation. A runner that cannot resume a session never emits this.",
+      "description": "The runner's own agent-session id (§2), announced as soon as the runner knows its conversation id — the same once-only rule model_changed follows for the model. The mothership keeps it on the colony's record; a colony suspended while it waited on its user boots again with COLONIZER_RESUME_SESSION set to it and the runner continues that conversation. A runner that cannot resume a session never emits this.",
       "properties": {
         "type": { "const": "agent_session" },
         "session_id": { "type": "string", "description": "Opaque to the harness: whatever id the agent's own session store answers to." }
@@ -283,6 +284,18 @@
         "reason": { "type": "string", "description": "Why then, one short line. Absent reads as empty." }
       },
       "required": ["type", "delay_minutes"]
+    },
+    "path_policy": {
+      "type": "object",
+      "description": "The agent reached for a path the path policy masks or write-protects (docs/path-policy.md, issue #647), reported by the runner from the same bind list the guest booted with. Reporting only: the mount enforced before this ran, so the event carries no decision and no permission field, and the mothership's only act is to log it — one colony log line and one activity entry per distinct (access, path).",
+      "properties": {
+        "type": { "const": "path_policy" },
+        "access": { "type": "string", "enum": ["read", "write"], "description": "What the agent was trying to do. A read is reported only for a masked path; reads of protected paths are allowed." },
+        "policy": { "type": "string", "enum": ["masked", "protected"], "description": "Which side of the policy the path falls on." },
+        "path": { "type": "string", "description": "The workspace-relative path, as the runner resolved it through any symlink." },
+        "tool": { "type": "string", "description": "The tool that made the attempt (\"Read\", an ACP `fs/write_text_file`). Absent on a runner from before the field existed." }
+      },
+      "required": ["type", "access", "policy", "path"]
     },
     "loop_stop": {
       "type": "object",

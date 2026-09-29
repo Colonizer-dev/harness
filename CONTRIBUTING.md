@@ -6,6 +6,51 @@ in the [pull request template](.github/pull_request_template.md) still apply. Th
 conventions that keep parallel pull requests from conflicting. How the mothership is put together,
 and where a new module plugs into it, is in [docs/architecture.md](docs/architecture.md).
 
+## Your first PR in 15 minutes
+
+Every issue in [docs/good-first-issues.md](docs/good-first-issues.md) runs on a plain laptop: no
+KVM, no microVM, no protoc, no libkrun. From a fresh clone:
+
+1. Install Node 24 (what CI pins) — it runs the web build, the script tests and the changelog
+   steps. A Rust issue also needs stable Rust from rustup (`--profile minimal`, plus the rustfmt
+   and clippy components); there is no `rust-toolchain.toml`, and `rustfmt.toml` sets the line
+   width to 130. `python3` is only needed for colonizer-agentd's integration tests. The first
+   cargo build fetches dependencies over the network, even for a single crate.
+
+2. Clone the repository and run the lane your issue is in:
+
+   ```sh
+   git clone https://github.com/Colonizer-dev/harness && cd harness   # ~5 s
+   cd web && npm ci            # ~7 s
+   npm run build               # tsc --noEmit && vite build: the typecheck, ~4 s
+   npm test                    # vitest, ~15 s
+   ```
+
+   The build's one warning (two chunks over 900 kB after minification, monaco the larger) is
+   expected, and web has no lint step. To click through the cockpit while you work: `npm run dev`,
+   then open http://127.0.0.1:5173/?mock=1 — the UI against an in-browser mock backend, no Rust
+   needed.
+
+   For a Rust issue, start with the smallest crate, the guest agent:
+   `cargo test -p colonizer-agentd --locked` — cold build and test in about 15 seconds, 13 tests.
+   The "cannot harden the daemon" warning inside a container is expected test output. The
+   mothership (`-p colonizer-harness`) is a much bigger build, and `cargo test --workspace` also
+   needs Node 24 on PATH. A docs-only change needs nothing but Node:
+   `node scripts/check-doc-links.mjs` runs in under a second.
+
+3. Before you push Rust, run what [Checks](#checks) runs: `cargo fmt --all --check` and
+   `cargo clippy --workspace --all-targets --locked -- -D warnings`.
+
+4. For a user-visible change, add a fragment: `node scripts/changelog.mjs new <issue> <type>`
+   writes `changelog.d/<issue>.<type>.md` containing only a template comment — replace it with a
+   bold one-line summary, then what changed, ending with `([#<issue>])`.
+   `node scripts/changelog.mjs check` validates it, and fails on a file that is still the
+   template. Which type to pick is in
+   [the changelog section](#changelog-add-a-fragment-never-edit-changelogmd) above.
+
+5. Open the pull request — the checks in its template apply. Questions go on the issue, or in
+   Discussions (Q&A) once it is enabled.
+
 ## Changelog: add a fragment, never edit CHANGELOG.md
 
 Every user-visible change adds one file under [`changelog.d/`](changelog.d/README.md):

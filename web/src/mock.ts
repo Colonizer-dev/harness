@@ -5,6 +5,7 @@ import { isTerminal } from "./notifications";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
 import type {
   ActivityEntry,
+  ApiTokenMeta,
   ArchiveEntry,
   RetentionPlan,
   PackagesPublished,
@@ -1381,6 +1382,19 @@ export function createMockApi(): Api {
     owner: null,
     pending: [{ code: "481516", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 600 }],
   };
+  // Scoped API tokens (issue #646): three rows with the shapes the list must tell apart — a capped
+  // launcher in daily use, a reader that has never been used, and an operate token limited to one
+  // org and repo. The plaintext of none of them is known, like the server's: only the hash is kept.
+  const apiTokens: ApiTokenMeta[] = [
+    { id: "tok_nightly7", name: "nightly burn-down", scope: "launch", orgs: [], repos: [], max_concurrent: 2, budget_usd_per_day: 5, created_at: ago(12 * 1440), last_used_at: ago(19) },
+    { id: "tok_wallboard", name: "wallboard", scope: "read", orgs: [], repos: [], created_at: ago(34 * 1440) },
+    { id: "tok_phoneops", name: "phone ops", scope: "operate", orgs: ["acme"], repos: ["acme/webshop"], created_at: ago(5 * 1440), last_used_at: ago(185) },
+  ];
+  // util::valid_repo: exactly owner/name, each 1–100 chars of [-._a-zA-Z0-9] and not "." or "..".
+  const validMockRepo = (repo: string) => {
+    const [owner, name, extra] = repo.split("/");
+    return extra === undefined && [owner, name].every((p) => !!p && p.length <= 100 && p !== "." && p !== ".." && /^[._a-zA-Z0-9-]+$/.test(p));
+  };
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
   // be "mapped", which takes a few seconds like a real mapping colony would take minutes.
   // acme/design-system's map has its entry far off the centre (bottom-left), as a real repo's did.
@@ -2635,6 +2649,51 @@ export function createMockApi(): Api {
       remotePairingState.owner = null;
       remotePairingState.pending = [];
       logActivity({ kind: "remote.unpair", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+    },
+    tokens: () => later(() => apiTokens.map(clone)),
+    createToken: async (body) => {
+      await sleep(250);
+      // The server's validation, in its order (api_tokens.rs `create`); the reason is what the 400's body says.
+      const name = body?.name?.trim() ?? "";
+      if (!name) throw new ApiError("name is required", 400);
+      if (name.length > 120) throw new ApiError(`name is ${name.length} characters; keep it under 120`, 400);
+      if (!(["read", "operate", "launch"] as string[]).includes(body?.scope ?? "")) throw new ApiError("scope must be one of: read, operate, launch", 400);
+      const orgs: string[] = [];
+      for (const raw of body.orgs ?? []) {
+        const org = raw.trim();
+        if (!org || org.includes("/")) throw new ApiError(`orgs entries must be organization names, not repositories (got "${org}")`, 400);
+        orgs.push(org);
+      }
+      const repos: string[] = [];
+      for (const raw of body.repos ?? []) {
+        const repo = raw.trim();
+        if (!validMockRepo(repo)) throw new ApiError(`repos entries must be owner/repo (got "${repo}")`, 400);
+        repos.push(repo);
+      }
+      if (body.max_concurrent != null && body.max_concurrent < 1) throw new ApiError("max_concurrent must be at least 1", 400);
+      if (body.budget_usd_per_day != null && (!Number.isFinite(body.budget_usd_per_day) || body.budget_usd_per_day <= 0)) {
+        throw new ApiError("budget_usd_per_day must be a positive number of dollars", 400);
+      }
+      const meta: ApiTokenMeta = {
+        id: `tok_${mockId()}`,
+        name,
+        scope: body.scope,
+        orgs,
+        repos,
+        ...(body.max_concurrent != null ? { max_concurrent: body.max_concurrent } : {}),
+        ...(body.budget_usd_per_day != null ? { budget_usd_per_day: body.budget_usd_per_day } : {}),
+        created_at: now(),
+      };
+      apiTokens.push(meta);
+      // col_ plus 64 hex, the shape of util::random_token; only this answer ever holds it.
+      const token = `col_${Array.from({ length: 64 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("")}`;
+      return { ...clone(meta), token };
+    },
+    revokeToken: async (id) => {
+      await sleep(200);
+      const at = apiTokens.findIndex((row) => row.id === id);
+      if (at < 0) throw new ApiError("no such token", 404);
+      apiTokens.splice(at, 1);
     },
     setUsage: async (enabled) => {
       await sleep(250);

@@ -60,30 +60,34 @@ pub(crate) fn defaults() -> Policy {
     }
 }
 
-/// Reads the policy off a sandbox module choice plus its schema — the same resolved settings the
-/// boot uses for image and memory. Entries are re-validated here rather than trusted: modules.json
-/// is a file a hand can edit, and [`apply`] must never chase an absolute path out of the worktree.
-/// Entries that fail are dropped, not fatal — the save-time gate is where an operator is told — and
-/// the boot's summary line counts what will actually be enforced.
-pub(crate) fn from_settings(choice: &ModuleChoice, schema: &Value) -> Policy {
-    let list = |key: &str, masked: bool| -> Vec<String> {
-        let usable = |p: &str| {
+/// The usable entries of one path list, wherever it is saved. Applied to the module setting and to
+/// the org's lists alike, because both land in files a hand can edit; the save-time gate is where
+/// an operator is told, and a bad entry that slipped past is dropped here, not half-enforced.
+fn usable_list(items: impl IntoIterator<Item = impl AsRef<str>>, masked: bool) -> Vec<String> {
+    items
+        .into_iter()
+        .map(|p| p.as_ref().to_string())
+        .filter(|p| {
             if masked {
                 validate_masked(p).is_ok()
             } else {
                 validate_path(p).is_ok()
             }
-        };
+        })
+        .collect()
+}
+
+/// Reads the policy off a sandbox module choice plus its schema — the same resolved settings the
+/// boot uses for image and memory — and the org's overrides ([`crate::orgs::PathPolicyOverrides`],
+/// issue #649), which join last. Entries are re-validated here rather than trusted: modules.json
+/// and orgs.json are files a hand can edit, and [`apply`] must never chase an absolute path out of
+/// the worktree. Entries that fail are dropped, not fatal — the save-time gate is where an operator
+/// is told — and the boot's summary line counts what will actually be enforced.
+pub(crate) fn from_settings(choice: &ModuleChoice, schema: &Value, org: &crate::orgs::PathPolicyOverrides) -> Policy {
+    let list = |key: &str, masked: bool| -> Vec<String> {
         setting(choice, schema, key)
             .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .filter(|p| usable(p))
-                    .map(str::to_string)
-                    .collect()
-            })
+            .map(|items| usable_list(items.iter().filter_map(Value::as_str), masked))
             .unwrap_or_default()
     };
     let mut policy = defaults();
@@ -107,6 +111,22 @@ pub(crate) fn from_settings(choice: &ModuleChoice, schema: &Value) -> Policy {
     // defaults and extras alike — and the boot logs each one (see `opt_outs`).
     policy.masked.retain(|p| !policy.unmasked.iter().any(|u| same_path(u, p)));
     policy.protected.retain(|p| !policy.unmasked.iter().any(|u| same_path(u, p)));
+    // The org's entries (#649) join after the opt-out, so they tighten what the global
+    // `unmask_paths` had cleared — an org can re-mask or re-protect a path the install opted out
+    // of, and there is no per-org unmask to loosen anything back.
+    for (paths, user) in [
+        (&mut policy.masked, usable_list(org.mask_paths.iter().flatten(), true)),
+        (&mut policy.protected, usable_list(org.protect_paths.iter().flatten(), false)),
+    ] {
+        for entry in user {
+            if !paths.iter().any(|p| same_path(p, &entry)) {
+                paths.push(entry);
+            }
+        }
+    }
+    // Mask wins again across the org additions: an org mask settles a path the global lists
+    // protect, and an org protect on a masked path stays masked.
+    policy.protected.retain(|p| !policy.masked.iter().any(|m| same_path(m, p)));
     policy
 }
 
@@ -136,14 +156,19 @@ pub(crate) fn summary(policy: &Policy, planned: &Materialized) -> String {
 }
 
 /// The warn line for `unmask_paths`: each opt-out with the default's one-line rationale where it
-/// has one, so a colony log explains itself years later.
+/// has one, so a colony log explains itself years later. Only the opt-outs that took effect are
+/// named: an org entry (issue #649) beats a global one, so a path an org re-masked or re-protected
+/// is not something the colony sees after all.
 pub(crate) fn opt_outs(policy: &Policy) -> Option<String> {
-    if policy.unmasked.is_empty() {
+    let effective = |entry: &String| {
+        !policy.masked.iter().any(|m| same_path(m, entry)) && !policy.protected.iter().any(|p| same_path(p, entry))
+    };
+    let taken: Vec<&String> = policy.unmasked.iter().filter(|u| effective(u)).collect();
+    if taken.is_empty() {
         return None;
     }
-    let named = policy
-        .unmasked
-        .iter()
+    let named = taken
+        .into_iter()
         .map(|entry| {
             match DEFAULT_MASKED
                 .iter()
@@ -512,6 +537,56 @@ pub(crate) fn violations(changed: &[String], policy: &Policy) -> Vec<String> {
         .collect()
 }
 
+/// The most distinct (access, path) attempts one run reports into the colony log and the activity
+/// (issue #647). A colony circling against its policy must not grow the set without bound; once
+/// the cap is hit further attempts stay unreported, and one notice says so.
+pub(crate) const ATTEMPT_CAP: usize = 100;
+
+/// The runtime report's dispatch arm (issue #647; events.rs keeps it thin, like `jev_ladder.rs`):
+/// one colony log line and one activity entry per distinct (access, path) a runner reports. The
+/// fields are untrusted runner output, so they re-clear the gates the trusted side passed before
+/// they reach a log: the access and the side must be exactly the contract's two words, the path
+/// must clear [`validate_path`] — relative, no control characters, no traversal, which is also
+/// every path a bind could carry — and the tool name is only clipped. Reporting only: nothing
+/// here blocks or decides anything, the mount did that before the report existed.
+pub(crate) async fn on_attempt(
+    app: &crate::Shared,
+    id: &str,
+    rt: &crate::sessions::Runtime,
+    access: &str,
+    policy: &str,
+    path: &str,
+    tool: &str,
+) {
+    if !matches!(access, "read" | "write") || !matches!(policy, "masked" | "protected") || validate_path(path).is_err() {
+        return;
+    }
+    let tool = crate::util::truncate(tool.trim(), 40);
+    let Some(first) = rt.note_path_policy(&format!("{access}\0{path}")).await else {
+        let notice =
+            format!("path policy: over {ATTEMPT_CAP} distinct attempted paths this run; further attempts are not reported");
+        if rt.warn_path_policy_once(&notice).await {
+            app.session_log(id, "warn", notice).await;
+        }
+        return;
+    };
+    if !first {
+        return;
+    }
+    let who = if !tool.is_empty() {
+        format!(" ({tool})")
+    } else {
+        String::new()
+    };
+    let message = format!("path policy: agent tried to {access} {policy} `{path}`{who}");
+    app.session_log(id, "warn", message.clone()).await;
+    if let Some(s) = app.session(id).await {
+        let mut entry = crate::activity::Entry::new("colony.path_policy", "colony").colony(&s);
+        entry.detail = Some(format!("tried to {access} {policy} `{path}`{who}"));
+        crate::activity::record(app, entry).await;
+    }
+}
+
 fn matches_any(path: &str, entries: &[String]) -> bool {
     let components: Vec<&str> = path.split('/').collect();
     entries.iter().any(|entry| {
@@ -736,6 +811,7 @@ mod tests {
                 "unmask_paths": [".envrc", ".idea/"]
             })),
             &schema(),
+            &Default::default(),
         );
         // User entries join the built-ins, and mask wins: `.env` in both sets stays only masked.
         assert!(p.masked.contains(&"secrets/credentials.json".to_string()));
@@ -755,6 +831,78 @@ mod tests {
         let note = opt_outs(&p).expect("the opt-out is logged");
         assert!(note.contains(".envrc") && note.contains("direnv exports"), "{note}");
         assert_eq!(opt_outs(&Policy::default()), None, "nothing opted out, nothing logged");
+    }
+
+    /// An org's overrides (#649) join the module's lists and the built-ins, and tighten past a
+    /// global opt-out: an org entry beats `unmask_paths`, so a path the install opted out of is
+    /// hidden again. Unusable org entries are dropped like the module's own, mask still wins, and
+    /// an opt-out an org re-tightened is no longer logged as if the colony saw it.
+    #[test]
+    fn org_entries_union_onto_the_globals_beat_a_global_opt_out_and_stay_mask_wins() {
+        let org = crate::orgs::PathPolicyOverrides {
+            mask_paths: Some(vec![
+                "secrets/".into(),
+                ".envrc".into(),
+                "ok.env".into(),
+                "/etc/passwd".into(),
+                "../../etc".into(),
+                ".git/config".into(),
+                "secrets/".into(),
+            ]),
+            protect_paths: Some(vec![
+                "vendor/".into(),
+                ".idea/".into(),
+                "plain.env".into(),
+                "../../etc".into(),
+            ]),
+        };
+        let p = from_settings(
+            &choice(json!({
+                "mask_paths": ["global.env", "both/", "plain.env"],
+                "protect_paths": ["vendor/", "plain.env", "both/"],
+                "unmask_paths": [".envrc", ".idea/"]
+            })),
+            &schema(),
+            &org,
+        );
+        // Org entries join the global ones and the defaults.
+        assert!(p.masked.contains(&"global.env".to_string()));
+        assert!(p.masked.contains(&"secrets/".to_string()));
+        assert!(p.protected.contains(&"vendor/".to_string()));
+        // An org entry beats the global unmask: the path is off-limits again, whichever side.
+        assert!(p.masked.contains(&".envrc".to_string()));
+        assert!(p.protected.contains(&".idea/".to_string()));
+        // Duplicates collapse — the org's second `secrets/` and the module's `vendor/` — so each
+        // name is enforced once.
+        assert_eq!(p.masked.iter().filter(|e| **e == "secrets/").count(), 1, "{p:?}");
+        assert_eq!(p.protected.iter().filter(|e| **e == "vendor/").count(), 1, "{p:?}");
+        // Entries the gate refuses are dropped, never half-enforced: absolute, traversal, and a
+        // masked reach into `.git`.
+        assert!(!p.masked.contains(&"/etc/passwd".to_string()));
+        assert!(!p.masked.contains(&"../../etc".to_string()));
+        assert!(!p.protected.contains(&"../../etc".to_string()));
+        assert!(!p.masked.contains(&".git/config".to_string()));
+        // Mask wins still: an org mask settles a path the module protects, and an org protect on a
+        // masked path stays masked.
+        assert!(p.masked.contains(&"both/".to_string()));
+        assert!(!p.protected.contains(&"both/".to_string()));
+        assert!(p.masked.contains(&"plain.env".to_string()));
+        assert!(!p.protected.contains(&"plain.env".to_string()));
+        // The summary counts the effective lists, org entries included.
+        let line = summary(&p, &Default::default());
+        assert!(line.contains(&format!("masking {} path(s)", p.masked.len())), "{line}");
+        // And the beaten opt-out is no longer announced as if the colony saw it.
+        assert_eq!(opt_outs(&p), None, "every opt-out was re-tightened by the org");
+        // Where the org does not re-tighten, the surviving opt-out still is.
+        let loose = from_settings(
+            &choice(json!({"unmask_paths": [".idea/"]})),
+            &schema(),
+            &crate::orgs::PathPolicyOverrides::default(),
+        );
+        assert_eq!(
+            opt_outs(&loose).as_deref(),
+            Some("path policy: unmasked by setting, so the colony sees them: .idea/ (editor tasks and run configs)")
+        );
     }
 
     #[test]
@@ -1047,6 +1195,27 @@ mod tests {
             "only the filled one is left untracked"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The host-side dedupe and cap behind the runtime report (issue #647): one (access, path) is
+    /// carried once, the set stops at [`ATTEMPT_CAP`], and an already-carried path still dedupes
+    /// after the cap — reported as not-new either way, never as a fresh attempt.
+    #[tokio::test]
+    async fn attempts_are_deduped_and_capped_per_run() {
+        let dir = tempfile("attempts");
+        let rt = crate::sessions::Runtime::load(&dir.path);
+        assert_eq!(
+            rt.note_path_policy("read\0.env").await,
+            Some(true),
+            "the first of a kind is new"
+        );
+        assert_eq!(rt.note_path_policy("read\0.env").await, Some(false), "the repeat is not");
+        for i in 0..ATTEMPT_CAP {
+            rt.note_path_policy(&format!("write\0p{i}")).await;
+        }
+        assert_eq!(rt.note_path_policy("write\0one-more").await, None, "the cap holds");
+        assert_eq!(rt.note_path_policy("read\0.env").await, Some(false));
+        dir.close();
     }
 
     /// Little local tempdir helper, so the tests do not need a new dev-dependency. Named and

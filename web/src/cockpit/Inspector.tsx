@@ -9,7 +9,7 @@ import { AntAvatar } from "../components/AntAvatar";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
 import { Avatar } from "../components/Avatar";
 import type { SectionId } from "../components/SettingsDialog";
-import { SESSION_STATUS, type Tone, cx, isLive, statusLabel, timeAgo } from "../components/ui";
+import { SESSION_STATUS, type Tone, cx, isLive, ordinal, restorePlace, statusLabel, timeAgo } from "../components/ui";
 import { claimWaitPosition } from "../api";
 import { useBehind } from "../behind";
 import { useApi } from "../context";
@@ -319,10 +319,14 @@ export function Inspector({
   // A `claim_wait` successor also knows its place: the issue's oldest waiter takes over first.
   const inLine = session ? claimWaitPosition(sessions, session) : null;
   const position = inLine ? ` · #${inLine} in line` : "";
+  // So does one that answered while suspended: it restores in answer order once a slot frees.
+  const inRestore = session ? restorePlace(session, sessions) : null;
   const statusText =
     session?.status === "queued" && queuedBehind
       ? `Queued behind ${queuedBehind}${position}`
-      : (session ? statusLabel(session) : "");
+      : (session
+        ? [statusLabel(session), inRestore ? `${ordinal(inRestore)} in line` : ""].filter(Boolean).join(" · ")
+        : "");
   // Cross-colony boot medians for the mothership pane; the colony branch never reads it.
   const medianBoot = mothership ? bootMedians(sessions) : null;
 

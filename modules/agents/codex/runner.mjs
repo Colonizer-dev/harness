@@ -3,14 +3,18 @@
 // docs/protocol.md §2 (JSON-line commands on stdin, JSON-line protocol events on stdout). One
 // `codex exec` child per turn, the prompt on stdin; the first turn's `thread.started` event carries
 // the codex thread id and every later turn resumes it with `resume`, so a colony is one continuous
-// codex thread. The pin lives in module.json; every flag and event field is cited in the README.
+// codex thread. The thread id is announced as `agent_session` the moment `thread.started` names it,
+// and a resumed boot seeds its first turn from COLONIZER_RESUME_SESSION, so the thread (and its
+// rollouts, persisted under CODEX_HOME) outlives the runner process. The model asks the user
+// through the colonizer MCP server (mcp.mjs, registered via the `-c mcp_servers.colonizer.*`
+// overrides of every turn); its asks park on this runner's loopback bridge until the matching
+// `answer` command. The pin lives in module.json; every flag and event field is cited in the README.
 
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +27,41 @@ export const MISSING_CREDENTIAL = 'CODEX_CREDENTIAL_MISSING';
 export const MISSING_BINARY = 'CODEX_BINARY_MISSING';
 export const VERSION_DRIFT = 'CODEX_VERSION_DRIFT';
 export const MODEL_PROVIDER = 'CODEX_MODEL_PROVIDER';
+
+/** The CODEX_HOME the codex children run with: a fixed path, declared as this module's
+ * session_resume dir in module.json, so the session rollouts `resume` reads are persisted outside
+ * the microVM and a suspended colony's thread survives its VM (README, "Session resume"). Nothing
+ * sensitive lives in it — auth rides the environment and prompt history is off — and a boot strips
+ * it back to the rollout store (sanitizeHome below). COLONIZER_CODEX_HOME moves it in tests. */
+export const CODEX_HOME = '/root/.codex';
+
+// What of the persisted CODEX_HOME a boot keeps: the session rollouts, which is all `codex exec
+// resume <id>` needs — codex resolves a thread id to its rollout file by name under sessions/
+// (compacted rollouts end up under archived_sessions/), and rebuilds its sqlite index from the
+// files it finds when the databases are gone. Everything else is wiped at startup, so nothing a
+// previous boot or the agent's own shell — the home is writable — left behind survives as config,
+// credentials or instructions: no config.toml, no auth.json, no AGENTS.md global instructions, no
+// prompts/, skills/ or hooks/, no state. The colony's config is only this runner's own `-c`
+// overrides and its credential rides the environment.
+const RESUME_KEEP = new Set(['sessions', 'archived_sessions']);
+
+/** Strip the persisted CODEX_HOME down to its rollout store, creating the directory. The kept names
+ * are kept only as real directories (lstat, so a symlink — even one pointing at a directory — is
+ * removed: codex must write its rollouts inside the mounted home, never through a link out of it). */
+function sanitizeHome(home) {
+  mkdirSync(home, { recursive: true });
+  for (const entry of readdirSync(home)) {
+    let keep = false;
+    if (RESUME_KEEP.has(entry)) {
+      try {
+        keep = lstatSync(join(home, entry)).isDirectory();
+      } catch {
+        keep = false; // vanished under the scan: nothing to keep
+      }
+    }
+    if (!keep) rmSync(join(home, entry), { recursive: true, force: true });
+  }
+}
 
 /** The pin, read from module.json so the manifest and this preflight cannot drift apart. */
 export function readPin() {
@@ -100,9 +139,13 @@ export function resolveModel(spec) {
 
 /** Loopback bridge to mcp.mjs: finding_file, memory_propose, loop_next and loop_stop arrive here
  * and leave the colony as protocol events (docs/protocol.md §6.6, §6.2), the way the opencode
- * module's bridge does. The loop delay was clamped in mcp.mjs; the bridge only validates the shape
- * it must not emit malformed (§2's delay_minutes is an integer). */
-export async function createBridge({ emit, findings = false, token = randomBytes(16).toString('hex') }) {
+ * module's bridge does. An ask_user call parks here instead: the HTTP response is held until the
+ * matching `answer` command resolves it with {answers, response}, the question card having gone
+ * out as a `question` event (§2). The loop delay was clamped in mcp.mjs; the bridge only validates
+ * the shape it must not emit malformed (§2's delay_minutes is an integer). */
+export async function createBridge({ emit, findings = false, setStatus = () => {}, isWorking = () => false, token = randomBytes(16).toString('hex') }) {
+  let count = 0;
+  const pending = new Map();
   const server = createServer((req, res) => {
     const reply = (status, payload) => { if (!res.destroyed) { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)); } };
     if (req.method !== 'POST' || req.headers.authorization !== `Bearer ${token}`) { reply(req.method !== 'POST' ? 404 : 401, {}); return; }
@@ -111,7 +154,13 @@ export async function createBridge({ emit, findings = false, token = randomBytes
     req.on('end', () => {
       let msg = null;
       try { msg = JSON.parse(body || '{}'); } catch { reply(400, {}); return; }
-      if (req.url === '/finding') {
+      if (req.url === '/ask') {
+        const questionId = `q-${++count}`;
+        pending.set(questionId, (answers) => reply(200, answers ?? { cancelled: true }));
+        const qs = Array.isArray(msg.questions) ? msg.questions : [];
+        emit({ type: 'question', question_id: questionId, message_id: typeof msg.message_id === 'string' ? msg.message_id : null, questions: qs.map((q) => ({ question: String(q?.question ?? ''), header: String(q?.header ?? q?.question ?? ''), multi_select: Boolean(q?.multiSelect), options: (Array.isArray(q?.options) ? q.options : []).map((o) => ({ label: String(o?.label ?? ''), description: String(o?.description ?? ''), preview: null })) })) });
+        setStatus('waiting_for_answer');
+      } else if (req.url === '/finding') {
         const missing = ['title', 'body', 'evidence'].filter((k) => typeof msg[k] !== 'string' || !msg[k].trim());
         if (missing.length) reply(200, { error: `finding_file needs ${missing.join(', ')}` });
         else {
@@ -145,16 +194,28 @@ export async function createBridge({ emit, findings = false, token = randomBytes
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   return {
-    url: `http://127.0.0.1:${server.address().port}`, token,
+    url: `http://127.0.0.1:${server.address().port}`, token, pending: () => pending.size,
+    answer(questionId, answers, response) {
+      const resolve = pending.get(questionId);
+      if (!resolve) return false;
+      pending.delete(questionId);
+      emit({ type: 'question_answered', question_id: questionId, answers, response });
+      if (pending.size) setStatus('waiting_for_answer');
+      else setStatus(isWorking() ? 'working' : 'idle');
+      resolve({ answers, response });
+      return true;
+    },
+    cancelAll() { for (const resolve of pending.values()) resolve(null); pending.clear(); },
     close: () => new Promise((resolve) => { server.close(resolve); server.closeAllConnections?.(); }),
   };
 }
 
 /** The `-c` overrides that register the colonizer MCP server (mcp.mjs) with codex: the upstream
  * config keys are `mcp_servers.<id>.command`, `.args` and `.env`, and `tool_timeout_sec` (default
- * 60) must cover a wait's 1800 s hard cap. The values ride as JSON, which is valid TOML for the
- * strings, the array and the inline table. Findings, memory and the loop switches ride through so
- * mcp.mjs can gate its tool list the way the mothership gated the runner env. */
+ * 60) must cover a wait's 1800 s hard cap and an ask_user parked on a human for a while. The values
+ * ride as JSON, which is valid TOML for the strings, the array and the inline table. Findings,
+ * memory and the loop switches ride through so mcp.mjs can gate its tool list the way the mothership
+ * gated the runner env; ask_user needs no switch — the bridge is always up. */
 export function mcpArgs({ url, token, env }) {
   const server = {
     command: process.execPath,
@@ -167,7 +228,7 @@ export function mcpArgs({ url, token, env }) {
       COLONIZER_LOOP: env.COLONIZER_LOOP, // a loop colony's pacing tools; SELF_PACED gates loop_next
       COLONIZER_LOOP_SELF_PACED: env.COLONIZER_LOOP_SELF_PACED,
     },
-    tool_timeout_sec: 3600,
+    tool_timeout_sec: 3600, // an ask waits on a human past codex's own default
   };
   return Object.entries(server).flatMap(([key, value]) => ['-c', `mcp_servers.colonizer.${key}=${JSON.stringify(value)}`]);
 }
@@ -207,10 +268,11 @@ export function turnArgs({ model, threadId, mcp = [], disabledTools = [] }) {
   return args;
 }
 
-/** The child's environment. A fresh CODEX_HOME is the one nesting lever the docs verify: codex's
- * config.toml, auth.json and session rollouts all live under it (README "Nesting"). The API key
- * itself rides the inherited environment: `codex exec` reads CODEX_API_KEY from it — and only that
- * name, so an OPENAI_API_KEY credential the preflight accepted is handed down under the real name. */
+/** The child's environment. CODEX_HOME is the persisted colony path, the one nesting lever the
+ * docs verify: codex's config.toml, auth.json and session rollouts all live under it (README
+ * "Nesting" — a boot strips everything but the rollouts out). The API key itself rides the
+ * inherited environment: `codex exec` reads CODEX_API_KEY from it — and only that name, so an
+ * OPENAI_API_KEY credential the preflight accepted is handed down under the real name. */
 export function childEnv(env, home) {
   const mapped = { ...env };
   if (!String(mapped.CODEX_API_KEY ?? '').trim() && String(mapped.OPENAI_API_KEY ?? '').trim()) {
@@ -228,6 +290,10 @@ const TOOL_RESULT_LIMIT = 20000;
 // item types that are a tool: started emits the tool_call, completed its tool_result. agent_message
 // and reasoning are the model's own voice; todo_list (plan updates) has no protocol counterpart.
 const TOOL_ITEMS = new Set(['command_execution', 'file_change', 'mcp_tool_call', 'web_search']);
+// colonizer ask_user calls are question traffic, not work: §2 says a question is never also a
+// tool_call/tool_result, so those mcp_tool_call items are dropped (the bridge's question events
+// carry them). The colonizer server's other tools (findings, memory, the loop tools) still stream.
+const isAsk = (item) => item.type === 'mcp_tool_call' && item.server === 'colonizer' && item.tool === 'ask_user';
 
 const clip = (text, limit = TOOL_RESULT_LIMIT) => (text.length > limit ? `${text.slice(0, limit - 1)}…` : text);
 const plainObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
@@ -259,14 +325,17 @@ export function mergeUsage(totals, model, usage) {
 }
 
 /** Runs one turn as a codex child, emitting the mapped protocol events as they arrive; resolves with
- * the turn's codex thread id once the child exits. `interrupt()` SIGINTs the child (codex saves the
- * session rollout continuously) and escalates to SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, spawnFn = spawn, totals, mcp = [], disabledTools = [] }) {
+ * the turn's codex thread id once the child exits. `announceSession` gets the thread id the moment
+ * `thread.started` names one, so the colony's record carries it before the turn ends (§2).
+ * `interrupt()` SIGINTs the child (codex saves the session rollout continuously) and escalates to
+ * SIGKILL after a grace period. */
+export function startTurn({ prompt, model, threadId, messageId, env, home, emit, announceSession = () => {}, spawnFn = spawn, totals, mcp = [], disabledTools = [] }) {
   let child = null;
   let interrupted = false;
-  // The thread id to carry into the next turn: whatever `thread.started` named last, else the one
-  // this turn resumed.
-  let latestThread = threadId ?? null;
+  // The thread id the child actually named: whatever `thread.started` carried last. Null when it
+  // named none, so a resumed turn that never got going is recognisable (and the colony keeps the
+  // id it had, the caller's `?? threadId`).
+  let latestThread = null;
   const done = (async () => {
     const startedAt = Date.now();
     const text = [];
@@ -295,10 +364,13 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
       }
       switch (event.type) {
         case 'thread.started':
-          if (typeof event.thread_id === 'string' && event.thread_id) latestThread = event.thread_id;
+          if (typeof event.thread_id === 'string' && event.thread_id) {
+            latestThread = event.thread_id;
+            announceSession(event.thread_id); // the id a suspended colony is restored with (§2)
+          }
           break;
         case 'item.started':
-          if (TOOL_ITEMS.has(event.item?.type)) emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.item.id ?? ''), name: event.item.type, input: toolInput(event.item) });
+          if (TOOL_ITEMS.has(event.item?.type) && !isAsk(event.item)) emit({ type: 'tool_call', message_id: messageId, tool_call_id: String(event.item.id ?? ''), name: event.item.type, input: toolInput(event.item) });
           break;
         case 'item.updated': // progress only; the completed item carries the outcome
           break;
@@ -306,7 +378,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
           const item = plainObject(event.item);
           if (item.type === 'agent_message' && typeof item.text === 'string' && item.text) text.push(item.text);
           else if (item.type === 'reasoning' && typeof item.text === 'string' && item.text) thoughts.push(item.text);
-          else if (TOOL_ITEMS.has(item.type)) {
+          else if (TOOL_ITEMS.has(item.type) && !isAsk(item)) {
             emit({ type: 'tool_result', tool_call_id: String(item.id ?? ''), output: clip(toolOutput(item)), is_error: toolIsError(item) });
           }
           break;
@@ -354,7 +426,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
       duration_ms: Date.now() - startedAt,
       ...(hasModels ? { model_usage: totals.models } : {}),
     });
-    return { threadId: latestThread, failure };
+    return { threadId: latestThread, failure, interrupted };
   })();
 
   return {
@@ -396,17 +468,36 @@ class AsyncQueue {
 /** The command loop: turns run one at a time (one prompt per codex process); a user_message that
  * arrives mid-turn is queued for the next slot, while interrupt, set_model and answer apply at once. */
 export async function run({ commands, emit, env, spawnFn = spawn }) {
-  emit({ type: 'status', state: 'idle' });
+  let status = null;
+  // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
+  const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
+  setStatus('idle');
   const problem = await preflight({ env, spawnFn });
-  const home = mkdtempSync(join(tmpdir(), 'colonizer-codex-'));
+  // The persisted colony home (§2's session_resume dir): sanitized to its rollout store before any
+  // codex child runs, so a rollout written last boot is readable by this boot's `resume` and no
+  // stale config is.
+  const home = String(env.COLONIZER_CODEX_HOME ?? '').trim() || CODEX_HOME;
+  sanitizeHome(home);
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
-    emit({ type: 'status', state: 'error', detail: problem.code });
+    setStatus('error', problem.code);
   }
 
   let modelSpec = String(env.COLONIZER_MODEL ?? '');
   let currentModel = null; // what the UI last heard through model_changed
-  let threadId = null;
+  // A colony restored while it waited on its user (§2's COLONIZER_RESUME_SESSION) boots with the
+  // thread id it last announced: its first turn resumes that codex thread. `resumed` lets exactly
+  // that turn fall back to a fresh thread when the rollout is missing from the persisted home.
+  let threadId = String(env.COLONIZER_RESUME_SESSION ?? '').trim() || null;
+  const resumed = Boolean(threadId);
+  let agentSession = null; // the thread id last announced in an agent_session
+  // Announced the moment codex names a thread, not at turn end: a colony that goes idle waiting on
+  // its user must already carry the id the harness would resume it with (§2, issue #562).
+  const announceSession = (id) => {
+    if (!id || id === agentSession) return;
+    agentSession = id;
+    emit({ type: 'agent_session', session_id: id });
+  };
   let turn = null;
   let pumping = false;
   const pending = [];
@@ -421,7 +512,9 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     .filter(Boolean);
 
   // One bridge for the runner's life; the colonizer MCP server codex spawns each turn points at it.
-  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true' });
+  // An ask_user call parks on it (createBridge), so question routing needs nothing beyond the
+  // registration that was already unconditional: ask_user is on whenever the runner is.
+  const bridge = await createBridge({ emit, findings: env.COLONIZER_FINDINGS === 'true', setStatus, isWorking: () => turn !== null });
   const mcp = mcpArgs({ url: bridge.url, token: bridge.token, env });
 
   const pump = async () => {
@@ -430,12 +523,13 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
     try {
       while (pending.length) {
         const message = pending.shift();
-        emit({ type: 'status', state: 'working' });
+        setStatus('working');
         const resolved = resolveModel(modelSpec);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: problem ? 'error' : 'idle', ...(problem ? { detail: problem.code } : {}) });
+          if (problem) setStatus('error', problem.code);
+          else setStatus('idle');
           continue;
         }
         if (currentModel === null && resolved.model) {
@@ -443,20 +537,45 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, mcp, disabledTools });
+        // The seeded first attempt holds its turn_end back: if its rollout is missing it is retried
+        // silently on a fresh thread, so the harness sees a single turn for the message.
+        const seeded = resumed && n === 1;
+        let heldEnd = null;
+        const emitFor = (event) => {
+          if (seeded && event.type === 'turn_end') heldEnd = event;
+          else emit(event);
+        };
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit: emitFor, announceSession, spawnFn, totals, mcp, disabledTools });
         try {
-          const result = await turn.done;
-          threadId = result.threadId ?? threadId;
+          let result = await turn.done;
+          if (seeded && result.failure && !result.threadId && !result.interrupted) {
+            // The resumed thread's rollout is not in the persisted home (the child never names a
+            // thread): the same prompt retries on a fresh thread, so a restored colony is not lost
+            // to a mount that changed under it. An interrupted attempt is excluded: a prompt the
+            // user stopped must not start over on the fresh thread.
+            heldEnd = null; // dropped here: only the failed attempt's turn_end was held back
+            emit({ type: 'log', level: 'warn', message: `codex has no rollout for thread ${threadId} in the persisted CODEX_HOME; starting a fresh thread: ${clip(result.failure ?? 'unknown failure', 300)}` });
+            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, home, emit, announceSession, spawnFn, totals, mcp, disabledTools });
+            result = await turn.done;
+            // The seed is proven dead: carry only what the retry named, so a retry that also ended
+            // before naming a thread hands the next turn a fresh one instead of the dead id.
+            threadId = result.threadId ?? null;
+          } else {
+            if (heldEnd) emit(heldEnd);
+            threadId = result.threadId ?? threadId;
+          }
         } catch (err) {
           // A turn that throws must still end as an error turn, or the colony's turn never terminates.
           turn = null;
+          bridge.cancelAll(); // a dead turn cannot answer its open asks any more
           emit({ type: 'log', level: 'error', message: `the turn crashed: ${err?.message ?? err}` });
           emit({ type: 'turn_end', is_error: true, result: `the turn crashed: ${err?.message ?? err}`, cost_usd: null, duration_ms: 0 });
-          emit({ type: 'status', state: 'error', detail: 'turn crashed' });
+          setStatus('error', 'turn crashed');
           break;
         }
         turn = null;
-        emit({ type: 'status', state: 'idle' });
+        bridge.cancelAll(); // a turn that merely ended leaves its open asks stale too
+        setStatus('idle');
       }
     } finally {
       pumping = false;
@@ -478,6 +597,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         break;
       }
       case 'interrupt':
+        bridge.cancelAll(); // the interrupted turn cannot answer its open asks any more
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
@@ -491,21 +611,25 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         currentModel = resolved.model; // applied from the next turn on: one codex process per turn
         break;
       }
-      case 'answer':
-        // Headless codex has no question path (README, "Questions"); question routing is a follow-up.
-        emit({ type: 'log', level: 'info', message: 'ignored an answer: headless codex cannot ask questions yet' });
+      case 'answer': {
+        // The model asked through ask_user and the bridge parked its HTTP response on this id.
+        const answers = command.answers && typeof command.answers === 'object' && !Array.isArray(command.answers) ? command.answers : {};
+        const response = typeof command.response === 'string' && command.response.trim() ? command.response : null;
+        if (!bridge.answer(command.question_id, answers, response)) emit({ type: 'log', level: 'warn', message: `no open question with id ${command.question_id}` });
         break;
+      }
       default:
         break; // unknown commands are ignored (protocol forward compatibility)
     }
   }
 
+  bridge.cancelAll(); // a parked ask is released with the runner above; the orphaned mcp.mjs drains
   if (turn) {
     turn.interrupt();
     await Promise.race([turn.done, sleep(3000)]);
   }
   await bridge.close();
-  emit({ type: 'status', state: 'exited' });
+  setStatus('exited');
 }
 
 async function main() {

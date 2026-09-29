@@ -70,7 +70,8 @@ with a fix in the message, when any of these holds:
    the colony log: its requests go to that Claude model instead.
 
 Only the connections this colony's model settings name (`model`, `subagent_model`,
-`background_model`, and `model_low`/`model_high` when per-task routing picks one) are checked, so an
+`background_model`, `small_model` where the agent module has one, and `model_low`/`model_high` when
+per-task routing picks one) are checked, so an
 unrelated connection that is down blocks nothing.
 
 Two more misconfigurations refuse the launch the same way, before any probe runs:
@@ -88,8 +89,9 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
 (`PUT /api/providers/{id}`) and `providers.json` holds it, but `GET /api/providers` does not return it.
 
 - **Which colonies may use it.** A colony's gateway token opens only the connections its model settings
-  route to. A request for any other connection is refused with `403`, so one colony cannot spend on a
-  provider it was not configured for.
+  route to, and only for the models they name: both are recorded at boot, before the token is written,
+  and a colony with no recorded set reaches nothing. A request for any other connection or model is
+  refused with `403`, so one colony cannot spend on a provider or a model it was not configured for.
 - **`pricing`** — dollars per million input, output, cache-read, cache-write and thinking tokens. Unset,
   routed requests cost `$0` but their tokens are still counted, so the sandbox module's `budget_tokens`
   still holds a colony on a prepaid plan that `budget_usd` never can.
@@ -99,6 +101,11 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
   The provider health check (`GET /api/providers/{id}/health`) then answers `quota: {remaining, error}`,
   and the provider card shows "N left in plan". A failed quota read never marks the connection
   unreachable. `quota` omitted on a `PUT` keeps the saved probe; an empty `url` clears it.
+- **Moving a connection.** The credential is sent wherever `base_url` points, so a `PUT` that moves a
+  keyed connection to a different origin — scheme, host or port — is refused unless the API key is
+  entered again (`api_key`) or removed (`""`) with the save. A path change on the same origin is the
+  same party and keeps the saved key, and a connection with no key stored moves freely. A saved
+  `quota` probe left on the old origin is refused the same way: move or clear it in the same save.
 - **Quota exhaustion.** When a provider answers `429` or `403` with a message that says the plan ran out
   (not a plain rate limit), the gateway records it as exhausted until the reset the message names, or
   for 15 minutes when it names none. With a `fallback_model`, the request is retried on that Claude

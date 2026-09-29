@@ -53,9 +53,16 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
   until the subagent-inheritance contract covers it.
 - **Scheduling and messaging.** `hermes gateway` (cron, messaging) is never started by this runner;
   the cronjob toolset is off.
-- **Questions.** None: `clarify` is a toolset for interactive questions and headless `-q` mode has no
-  channel to answer one, so an `answer` command gets a `warn` log. A future ACP driver (`hermes acp`)
-  is the gap-filler.
+- **Questions.** The runner registers a vendored MCP server under `mcp_servers.colonizer` in the
+  config (the module's `mcp.mjs`, byte-identical to the codex module's) whose `ask_user` tool POSTs
+  to a loopback bridge in the runner: the call becomes a `question` event for the cockpit, and the
+  `answer` command resolves it and returns `{answers, response}` to the tool call. The server's
+  tool-call `timeout` is an hour and `mcp.mjs` holds a long ask open with progress notes; an
+  interrupt or a turn end cancels the ask. A question is never also a `tool_call`/`tool_result`
+  (§2). `clarify` stays disabled — the MCP tool replaces it. Hermes only loads MCP servers when the
+  optional `mcp` Python extra is installed (`pip install -e ".[mcp]"`); without it the tool is
+  silently absent. The config's server env carries only the bridge coordinates, so mcp.mjs's own
+  gating leaves the findings, memory and loop tools unoffered here.
 - **Credentials.** Only gateway routes, above: no provider secret ever enters the colony.
 
 ## Gaps
@@ -64,7 +71,8 @@ are a prepaid pool the gateway cannot account for ([#199](https://github.com/Col
   boot on the stock preset images, which carry no agent CLIs, and on a custom image the runner's
   preflight fails loudly (`status error`, non-zero exit, the pinned install command in the message)
   when it is missing.
-- No ACP question channel, so the module cannot ask you anything.
+- Questions need the `[mcp]` extra: an image whose hermes-agent install skipped it silently has no
+  `ask_user` tool, and the model then has no channel to ask anything.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
   launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo
   `.colonizer/exec-policy.json`).

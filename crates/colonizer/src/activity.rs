@@ -79,6 +79,7 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.cleanup",
     "colony.retain",
     "colony.answer",
+    "colony.path_policy",
     "chat.colony",
     "chat.issue",
     "colonize.issue",

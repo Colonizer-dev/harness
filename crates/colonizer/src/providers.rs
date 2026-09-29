@@ -386,20 +386,31 @@ fn valid_preset(preset: &str) -> bool {
 }
 
 /// The model env vars a colony can be pointed at, matched against the configured providers. The
-/// first three reach the runner as is; the two tier models are the mothership's per-task routing and
-/// are stripped from the runner env before launch, so only `used_by` reads them — counting the tier
-/// settings in the module's configured env, while a colony booted onto a tier meets the tier's
-/// provider through the substituted `COLONIZER_MODEL`. Order matches the settings array in [`used_by`].
-const MODEL_VARS: [&str; 5] = [
+/// first four reach the runner as is (OpenCode's small model among them, which registers its own
+/// gateway route); the two tier models are the mothership's per-task routing and are stripped from
+/// the runner env before launch, so only `used_by` reads them — counting the tier settings in the
+/// module's configured env, while a colony booted onto a tier meets the tier's provider through the
+/// substituted `COLONIZER_MODEL`. `COLONIZER_SUMMARY_MODEL` is absent on purpose: the mothership
+/// serves summaries itself, straight to Anthropic, never through the gateway. Order matches the
+/// settings array in [`used_by`].
+const MODEL_VARS: [&str; 6] = [
     "COLONIZER_MODEL",
     "COLONIZER_SUBAGENT_MODEL",
     "COLONIZER_BACKGROUND_MODEL",
+    "COLONIZER_SMALL_MODEL",
     "COLONIZER_MODEL_LOW",
     "COLONIZER_MODEL_HIGH",
 ];
 
 /// The model settings behind [`MODEL_VARS`], same order: the names a boot refusal can point a fix at.
-const SETTING_NAMES: [&str; 5] = ["model", "subagent_model", "background_model", "model_low", "model_high"];
+const SETTING_NAMES: [&str; 6] = [
+    "model",
+    "subagent_model",
+    "background_model",
+    "small_model",
+    "model_low",
+    "model_high",
+];
 
 impl App {
     fn providers_file(&self) -> PathBuf {
@@ -572,19 +583,50 @@ pub struct ColonyRoutes {
     pub providers: Vec<Provider>,
 }
 
+/// Whether a model setting's value points at `provider_id`: named with that `<provider>/` prefix
+/// and a non-empty canonical. `deepseek/` names no model, so it routes nothing on either side of
+/// the record — [`ColonyRoutes::used`] admits no provider for it and [`ColonyRoutes::used_models`]
+/// records no pair.
+fn names_model_on(value: &str, provider_id: &str) -> bool {
+    value
+        .strip_prefix(provider_id)
+        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
+}
+
 impl ColonyRoutes {
     /// Providers the colony's model settings actually point at.
     pub fn used(&self, runner_env: &Map<String, Value>) -> Vec<Provider> {
         let models: Vec<&str> = MODEL_VARS.iter().filter_map(|var| runner_env.get(*var)?.as_str()).collect();
         self.providers
             .iter()
-            .filter(|p| {
-                models
-                    .iter()
-                    .any(|m| m.strip_prefix(p.id.as_str()).is_some_and(|rest| rest.starts_with('/')))
-            })
+            .filter(|p| models.iter().any(|m| names_model_on(m, &p.id)))
             .cloned()
             .collect()
+    }
+
+    /// The `<provider>/<model>` pairs those same settings name, deduplicated in first-appearance
+    /// order (issue #681): what the gateway checks a request body's model against, next to
+    /// [`Self::used`]'s providers. The same walk, so a pair is always on record for every provider
+    /// `used` admits — and for nothing else. An empty canonical (`deepseek/`) is skipped here and
+    /// admits nothing in [`Self::used`], per [`names_model_on`].
+    pub fn used_models(&self, runner_env: &Map<String, Value>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for value in MODEL_VARS
+            .iter()
+            .filter_map(|var| runner_env.get(*var))
+            .filter_map(Value::as_str)
+        {
+            let Some(prefix) = provider_prefix(value) else { continue };
+            let canonical = &value[prefix.len() + 1..];
+            if canonical.is_empty() {
+                continue;
+            }
+            let pair = format!("{prefix}/{canonical}");
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        out
     }
 
     /// The first model setting whose connection cannot serve this colony, as the boot-refusal message
@@ -627,7 +669,7 @@ pub fn unreachable_route(backend: &str, provider: &Provider, health: &Value, run
     let value = MODEL_VARS
         .iter()
         .filter_map(|var| runner_env.get(*var).and_then(Value::as_str))
-        .find(|m| m.strip_prefix(provider.id.as_str()).is_some_and(|rest| rest.starts_with('/')))?;
+        .find(|m| names_model_on(m, &provider.id))?;
     let error = health.get("error").and_then(Value::as_str).unwrap_or("unknown error");
     Some(format!(
         "backend '{backend}' has no provider for model '{value}': the endpoint {} is unreachable ({error}); \
@@ -718,7 +760,8 @@ pub fn harness_disabled_tool_lines(agent: &AgentModule, runner_env: &Map<String,
     Ok(lines)
 }
 
-/// The model settings (`model`, `subagent_model`, `background_model`, `model_low`, `model_high`)
+/// The model settings (`model`, `subagent_model`, `background_model`, `small_model`, `model_low`,
+/// `model_high`)
 /// whose resolved value — schema default, global setting or org override — routes to this provider as
 /// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
 /// points at it. A bare alias or a partial id prefix is Claude's or another provider's model, so it
@@ -730,7 +773,7 @@ fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> 
             let points_here = env
                 .get(*var)
                 .and_then(Value::as_str)
-                .is_some_and(|m| m.strip_prefix(provider_id).is_some_and(|rest| rest.starts_with('/')));
+                .is_some_and(|m| names_model_on(m, provider_id));
             if points_here && !used.contains(&setting) {
                 used.push(setting);
             }
@@ -1089,6 +1132,43 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         return Err(bad(&format!(
             "provider \"{id}\" is listed more than once in providers.json; delete it and add it again (or remove the duplicate by hand), then save"
         )));
+    }
+    // The credential rides the base URL: the gateway forwards it there, and the health probe follows.
+    // So a save that moves the provider to another origin — scheme, host or port, the origin the quota
+    // rule already pins (#199) — must bring the key with it or remove it: the saved key belongs to the
+    // origin it was issued at, and a path change on the same origin is the same party. An origin that
+    // will not parse counts as a move, on either side.
+    let existing = providers.iter().find(|p| p.id == id);
+    let origin_moved = match existing.map(|p| split_url(&p.base_url)) {
+        None => false,
+        Some(saved) => !split_url(&base_url)
+            .zip(saved)
+            .is_some_and(|(new, saved)| same_origin(new, saved)),
+    };
+    if origin_moved && existing.is_some() && app.provider_key(&id).is_some() {
+        let supplied = req.api_key.as_deref().map(str::trim);
+        let brings_key = matches!(supplied, Some(key) if !key.is_empty());
+        if !brings_key && supplied != Some("") {
+            return Err(bad(
+                "changing the base URL to a different origin requires entering the API key again — the saved \
+                 key belongs to the origin it was issued at; remove the key with this save if the new address \
+                 needs none",
+            ));
+        }
+    }
+    // The quota probe carries the credential too, so the probe this save leaves in place — sent or
+    // kept — is held to the same-origin rule its own save applies; a base URL that moves out from
+    // under a kept probe would send the credential to the probe's old origin.
+    let kept_quota = quota.clone().unwrap_or_else(|| existing.and_then(|p| p.quota.clone()));
+    if let Some(probe) = &kept_quota
+        && !split_url(&base_url)
+            .zip(split_url(&probe.url))
+            .is_some_and(|(base, probe)| same_origin(base, probe))
+    {
+        return Err(bad(
+            "the quota probe URL must stay on the same origin as the base URL — scheme, host and port — \
+             because the provider's credential is sent to it; move or clear the probe in the same save",
+        ));
     }
     match req.api_key.as_deref().map(str::trim) {
         Some("") => {
@@ -1519,6 +1599,32 @@ mod tests {
         env.insert("COLONIZER_EFFORT".into(), json!("deepseek/not-a-model-var"));
         let used: Vec<String> = routes.used(&env).into_iter().map(|p| p.id).collect();
         assert_eq!(used, vec!["strix"]);
+    }
+
+    #[test]
+    fn used_models_records_the_pairs_the_settings_name() {
+        let routes = ColonyRoutes {
+            routes: vec![],
+            providers: vec![provider("strix"), provider("deepseek")],
+        };
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("opus"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_SMALL_MODEL".into(), json!("strix/deepseek-v4-flash"));
+        env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("deepseek/deepseek-chat"));
+        // Bare aliases and an empty canonical name nothing; the same pair named by two settings is
+        // recorded once.
+        env.insert("COLONIZER_MODEL_LOW".into(), json!("deepseek/"));
+        env.insert("COLONIZER_MODEL_HIGH".into(), json!("sonnet"));
+        assert_eq!(
+            routes.used_models(&env),
+            vec!["strix/deepseek-v4-flash".to_string(), "deepseek/deepseek-chat".to_string()]
+        );
+        // And the empty canonical admits no provider either side: `used` skips it like `used_models`.
+        env.clear();
+        env.insert("COLONIZER_MODEL".into(), json!("deepseek/"));
+        assert!(routes.used(&env).is_empty());
+        assert!(routes.used_models(&env).is_empty());
     }
 
     #[test]
@@ -2282,6 +2388,159 @@ mod tests {
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
         assert!(cleared.quota.is_none(), "an empty URL removes the probe");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- moving a provider to another origin (#681) --------------------------------------------------
+
+    /// The credential rides the base URL, so a save that moves a keyed provider to another origin —
+    /// host, scheme or port — is refused unless the key comes with it, and a refused save leaves both
+    /// the record and the key file exactly as they were.
+    #[tokio::test]
+    async fn an_origin_change_without_the_key_is_refused_and_persists_nothing() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        for moved_to in [
+            "https://api.example.com/anthropic",       // another host
+            "http://api.deepseek.com/anthropic",       // the same host, plaintext
+            "https://api.deepseek.com:8443/anthropic", // the same host, another port
+        ] {
+            let mut moved = put_req("DeepSeek");
+            moved.base_url = moved_to.into();
+            let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+                .await
+                .unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{moved_to}");
+            assert!(
+                err.message().contains("different origin") && err.message().contains("API key"),
+                "{moved_to}: {}",
+                err.message()
+            );
+            let stored = &app.providers()[0];
+            assert_eq!(
+                stored.base_url, "https://api.deepseek.com/anthropic",
+                "{moved_to}: the refused save writes nothing"
+            );
+            assert_eq!(
+                app.provider_key("deepseek").as_deref(),
+                Some("sk-saved-1"),
+                "{moved_to}: the saved key stays"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Entering the key again is the way through: the move lands and the fresh key is what is stored.
+    #[tokio::test]
+    async fn an_origin_change_with_a_fresh_key_moves_the_provider_and_the_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A path change on the same origin is the same party: the saved key carries on.
+    #[tokio::test]
+    async fn a_same_origin_path_change_keeps_the_saved_key() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.deepseek.com/other/path".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.deepseek.com/other/path");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-saved-1"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removing the key with the move (`api_key: ""`) is allowed — nothing is left to send anywhere.
+    #[tokio::test]
+    async fn removing_the_key_with_the_origin_change_is_allowed() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("".into());
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None, "the key is gone with the move");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider with no key stored moves freely: there is nothing saved to send on.
+    #[tokio::test]
+    async fn an_origin_change_with_no_key_stored_needs_no_key() {
+        let (app, root) = providers_app();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(put_req("DeepSeek")))
+            .await
+            .unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(moved)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek"), None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The quota probe carries the credential too, so a move that leaves the saved probe on the old
+    /// origin is refused even with a fresh key; bringing the probe along (or an empty URL, which the
+    /// quota rules already define as a clear) lets the move through.
+    #[tokio::test]
+    async fn an_origin_change_that_leaves_the_quota_probe_behind_is_refused() {
+        let (app, root) = providers_app();
+        let mut first = put_req("DeepSeek");
+        first.api_key = Some("sk-saved-1".into());
+        first.quota = Some(QuotaProbe {
+            url: "https://api.deepseek.com/plan".into(),
+            pointer: "/data/remaining".into(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
+
+        let mut moved = put_req("DeepSeek");
+        moved.base_url = "https://api.example.com/anthropic".into();
+        moved.api_key = Some("sk-fresh-2".into());
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(moved))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("quota probe") && err.message().contains("same origin"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(
+            app.providers()[0].base_url,
+            "https://api.deepseek.com/anthropic",
+            "the refused save writes nothing"
+        );
+
+        let mut retried = put_req("DeepSeek");
+        retried.base_url = "https://api.example.com/anthropic".into();
+        retried.api_key = Some("sk-fresh-2".into());
+        retried.quota = Some(QuotaProbe {
+            url: "https://api.example.com/plan".into(),
+            pointer: "/data/remaining".into(),
+        });
+        let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
+        assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
+        assert_eq!(app.provider_key("deepseek").as_deref(), Some("sk-fresh-2"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

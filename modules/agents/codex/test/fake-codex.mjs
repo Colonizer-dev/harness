@@ -17,10 +17,14 @@
 //                            MCP server the runner registered via its -c mcp_servers.colonizer.*
 //                            overrides (initialize, tools/list, one tools/call per entry); the tool
 //                            names and each call's outcome are recorded under `mcp`
+//
+// Cross-process resume is modelled too: a fresh thread writes a rollout file under
+// $CODEX_HOME/sessions, and `resume <id>` fails (non-zero, on stderr, no thread.started) when that
+// file is not there — the real CLI cannot resume a thread it holds no rollout for.
 
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 
 const argv = process.argv.slice(2);
@@ -111,8 +115,22 @@ const mcp = process.env.CODEX_FAKE_MCP_CALLS && cfg.command ? await callMcp(cfg,
 record(mcp ? { mcp } : {});
 
 const threadId = process.env.CODEX_FAKE_THREAD_ID ?? 'thread-fake-1';
+// The rollout store, exactly where the real CLI keeps it: a fresh thread creates its file, `resume`
+// answers with the named thread only if the file survived in the CODEX_HOME it was handed.
+const home = process.env.CODEX_HOME;
+const rollout = (id) => join(home, 'sessions', `${id}.jsonl`);
+const resumeId = argv.includes('resume') ? argv[argv.indexOf('resume') + 1] : null;
+if (home && !resumeId) {
+  mkdirSync(join(home, 'sessions'), { recursive: true });
+  writeFileSync(rollout(threadId), 'thread\n');
+}
+if (home && resumeId && !existsSync(rollout(resumeId))) {
+  process.stderr.write(`no session rollout for thread ${resumeId} under ${home}\n`);
+  process.exit(1);
+}
+const activeThread = resumeId ?? threadId; // a resumed turn reports the thread it resumed
 const defaultEvents = () => [
-  { type: 'thread.started', thread_id: threadId },
+  { type: 'thread.started', thread_id: activeThread },
   { type: 'turn.started' },
   { type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: 'bash -lc ls', status: 'in_progress' } },
   { type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: 'bash -lc ls', aggregated_output: 'src\nREADME.md', exit_code: 0, status: 'completed' } },

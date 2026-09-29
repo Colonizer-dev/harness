@@ -58,8 +58,9 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    - Drop hosts the task's providers already cover: model traffic goes through the provider
      gateway, so a host only reached through a `<provider>/` route needs no entry.
 
-   The claude-code declaration came from the CLI's documented requirements and the manifest's
-   secret hosts, not yet from a live capture; replace it when a capture runs.
+   The claude-code declaration comes from a live capture of the pinned CLI (2026-09-28, Claude Code
+   2.1.280 — [modules/agents/claude-code/README.md](../modules/agents/claude-code/README.md#egress));
+   a credentialed model turn is still unobserved, so re-check it when the pin moves.
 3. **Denial-hint hooks.** Classify errored tool results and attach `denial: {class, hint}` to the
    `tool_result` event — classes `egress`, `read_only`, `tool_disabled`, following
    `modules/agents/claude-code/denials.mjs`. Deliver the hint twice: on the event for the record,
@@ -69,8 +70,10 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    verdict. Never change `is_error`, the content or any return code. Ship a strip test — with the
    layer off, every event is identical apart from the `denial` field. Known limits: masked-path
    empty reads are not detectable from text, and tools the agent spawns through `sh` never reach
-   your classifier — they rely on the runner-level hints. Only the claude-code runner implements
-   this layer today (`modules/agents/claude-code/runner.mjs`, the `PostToolUseFailure` hook).
+   your classifier — they rely on the runner-level hints. (The masked-path *attempt* itself is
+   reported separately, as the `path_policy` event of issue #647 — `pathpolicy.mjs`.) Only the
+   claude-code runner implements this layer today (`modules/agents/claude-code/runner.mjs`, the
+   `PostToolUseFailure` hook).
 4. **Preflight, naming the error.** Check the agent binary and everything it needs before the
    first turn, and refuse with a message naming the missing thing and the way out: the codex
    runner's `preflight` (`modules/agents/codex/runner.mjs:55-84`) refuses a missing credential, a
@@ -105,14 +108,15 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
 9. **Session resume (optional).** If the runner can pick an old conversation back up, declare
    `session_resume: { "dir": "/absolute/in-vm/path" }` in `module.json`: the harness mounts a
    writable host directory over that path (the colony session dir's `transcripts/`), the runner
-   announces its session id with an `agent_session` event when the SDK's init first names one, and
+   announces its session id with an `agent_session` event as soon as it knows its conversation id, and
    a colony suspended while it waits on its user boots again with `COLONIZER_RESUME_SESSION` set
-   ([#562](https://github.com/Colonizer-dev/harness/issues/562)) — the id goes to the SDK's resume
-   option (Claude Code: `options.resume`) and the held answer arrives as the first user message.
+   ([#562](https://github.com/Colonizer-dev/harness/issues/562)) — the id goes to the backend's
+   resume mechanism (Claude Code: the SDK's `options.resume`; codex: `codex exec … resume`; ACP:
+   `session/load`) and the held answer arrives as the first user message.
    A colony is only suspended when both hold: the module declares `session_resume` and the runner
    has announced a session. Otherwise the colony keeps its microVM while its question waits, said
-   once in the colony log. Claude Code is the only shipped module that declares it
-   (`/root/.claude/projects`).
+   once in the colony log. Shipped modules that declare it: Claude Code (`/root/.claude/projects`),
+   Codex (`/root/.codex`) and ACP (`/root/.gemini`).
 
 ## The ACP runner
 
@@ -138,8 +142,8 @@ happened (module README).
   else `workspace_write`). ACP has no free-text answer, so "Other" replies `cancelled`.
 - **Workspace.** `fs/read_text_file` and `fs/write_text_file` are confined to the workspace;
   `terminal/*` commands only start with a workspace `cwd`, and the VM is the boundary.
-- **Limits.** No resume (no `session_resume`, no `agent_session`), no denial hints, no `plan`
-  event (plans arrive as a `thinking` checklist), and `turn_end.cost_usd` is always null.
+- **Limits.** Resume rides `session/load` when the agent advertises it (item 9); no denial hints, no
+  `plan` event (plans arrive as a `thinking` checklist), and `turn_end.cost_usd` is always null.
 - **Tests.** `npm test` drives the real `runner.mjs` against `test/fake-acp-agent.mjs`, and
   checks every event against the schema's required fields.
 
