@@ -183,7 +183,7 @@
     },
     "agent_session": {
       "type": "object",
-      "description": "The runner's own agent-session id (§2), announced when an init first names one — the same once-only rule model_changed follows for the model. The mothership keeps it on the colony's record; a colony suspended while it waited on its user boots again with COLONIZER_RESUME_SESSION set to it and the runner continues that conversation. A runner that cannot resume a session never emits this.",
+      "description": "The runner's own agent-session id (§2), announced as soon as the runner knows its conversation id — the same once-only rule model_changed follows for the model. The mothership keeps it on the colony's record; a colony suspended while it waited on its user boots again with COLONIZER_RESUME_SESSION set to it and the runner continues that conversation. A runner that cannot resume a session never emits this.",
       "properties": {
         "type": { "const": "agent_session" },
         "session_id": { "type": "string", "description": "Opaque to the harness: whatever id the agent's own session store answers to." }

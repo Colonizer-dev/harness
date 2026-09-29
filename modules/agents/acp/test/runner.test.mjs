@@ -193,6 +193,77 @@ test('handshake and prompt turns: initialize, session/new in the workspace, mapp
   assert.equal(code, 0);
 });
 
+test('resume: a stop and a fresh boot reload the recorded session with session/load, its replayed history staying history', async (t) => {
+  // ACP_FAKE_STATE is the fake's session store, standing in for the module's persisted /root/.gemini:
+  // whatever session the first boot's agent keeps there, the second boot's fresh agent can still load.
+  const state = join(mkdtempSync(join(tmpdir(), 'acp-resume-')), 'state');
+  const script = {
+    handshake: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] },
+    models: { currentModelId: 'm-1' },
+    replay: [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'from history' } }],
+    // The agent renames the session as it loads it; the runner must follow the rename.
+    loadedSessionId: 'sess-reloaded',
+  };
+  const boot = startRunner({ script, env: { ACP_FAKE_STATE: state } });
+  t.after(() => boot.child.kill('SIGKILL'));
+  boot.send({ type: 'user_message', id: 'initial', text: 'one' });
+  await boot.waitUntil(count('turn_end', 1), 'the first boot to finish its turn');
+  assert.deepEqual(first('agent_session')(boot.events), { type: 'agent_session', session_id: 'sess-fake-1' });
+  await stop(boot);
+
+  const resumed = startRunner({ script, env: { ACP_FAKE_STATE: state, COLONIZER_RESUME_SESSION: 'sess-fake-1' } });
+  t.after(() => resumed.child.kill('SIGKILL'));
+  resumed.send({ type: 'user_message', id: 'initial', text: 'two' });
+  await resumed.waitUntil(count('turn_end', 1), 'the resumed boot to finish its turn');
+  assert.deepEqual(
+    resumed.records().filter((x) => x.method).map((x) => x.method),
+    ['initialize', 'session/load', 'session/prompt'],
+    'the recorded session is loaded, not recreated',
+  );
+  const load = resumed.records().find((x) => x.method === 'session/load');
+  assert.deepEqual(load.params, { sessionId: 'sess-fake-1', cwd: resumed.workspace, mcpServers: [] });
+  // The load result renames the session (loadedSessionId); the runner adopts what the agent answered with.
+  assert.deepEqual(first('agent_session')(resumed.events), { type: 'agent_session', session_id: 'sess-reloaded' });
+  assert.deepEqual(resumed.records().filter((x) => x.method === 'session/prompt').map((x) => x.params.sessionId), ['sess-reloaded'], 'the turn runs on the session the load result named');
+  assert.ok(!resumed.events.some((e) => e.type === 'assistant_text_delta' || e.type === 'assistant_text'), 'the replayed history is not re-emitted as events');
+  // The load result carries what session/new would, so the resumed colony keeps its model surface:
+  // the current model is announced from it and set_model is accepted.
+  assert.deepEqual(first('model_changed')(resumed.events), { type: 'model_changed', model: 'm-1', previous: null });
+  resumed.send({ type: 'set_model', model: 'm-2' });
+  const switched = await resumed.waitUntil(count('model_changed', 2), 'the set_model on the resumed session to be announced');
+  assert.deepEqual(switched, { type: 'model_changed', model: 'm-2', previous: 'm-1' });
+  assert.ok(resumed.records().some((x) => x.method === 'session/set_model' && x.params?.modelId === 'm-2'), 'the switch reached the agent on the resumed session');
+  assert.ok(!resumed.events.some((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('set_model')), 'the switch is not refused');
+  assertSchema(resumed.events);
+  await stop(resumed);
+});
+
+test('resume falls back to a fresh session: an agent without loadSession, or one that does not know the id', async (t) => {
+  // Without loadSession there is no agent_session at all, and a resume id changes nothing.
+  const plain = startRunner({ script: { turns: { '*': {} } }, env: { COLONIZER_RESUME_SESSION: 'sess-fake-1' } });
+  t.after(() => plain.child.kill('SIGKILL'));
+  await plain.waitRecord((r) => r.some((x) => x.method === 'session/new'), 'the fresh session');
+  assert.equal(first('agent_session')(plain.events), undefined, 'a session this runner could not resume is never announced (§2 rules)');
+  assert.ok(!plain.records().some((x) => x.method === 'session/load'), 'no load is attempted without loadSession');
+  const skipped = await plain.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('sess-fake-1')), 'the cannot-resume note');
+  assert.match(skipped.message, /does not advertise loadSession/);
+  await stop(plain);
+
+  // A loadSession agent that does not know the id: the load fails, a fresh session starts in its place.
+  const fallback = startRunner({
+    script: { handshake: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [] } },
+    env: { ACP_FAKE_STATE: join(mkdtempSync(join(tmpdir(), 'acp-resume-')), 'state'), COLONIZER_RESUME_SESSION: 'sess-gone' },
+  });
+  t.after(() => fallback.child.kill('SIGKILL'));
+  const note = await fallback.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('sess-gone')), 'the failed-resume note');
+  assert.match(note.message, /could not resume session sess-gone/);
+  await fallback.waitRecord((r) => r.some((x) => x.method === 'session/new'), 'the fresh session in place of the failed load');
+  assert.deepEqual(fallback.records().filter((x) => x.method).map((x) => x.method), ['initialize', 'session/load', 'session/new']);
+  assert.deepEqual(first('agent_session')(fallback.events), { type: 'agent_session', session_id: 'sess-fake-1' }, 'the fresh session is announced instead');
+  assertSchema(fallback.events);
+  await stop(fallback);
+});
+
 test('every session/update type maps (or is ignored) without breaking the turn', async (t) => {
   const runner = startRunner({
     script: {

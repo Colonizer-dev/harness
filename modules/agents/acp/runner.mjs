@@ -2,7 +2,8 @@
 // Colonizer agent runner for any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio,
 // newline-delimited — https://agentclientprotocol.com), mapped onto the runner contract of
 // docs/protocol.md §2 (JSON-line commands on stdin, protocol events on stdout). One long-lived ACP
-// agent process per colony: `initialize` + `session/new` at boot, every user_message one
+// agent process per colony: `initialize` + `session/new` at boot (a resume boot `session/load`s the
+// COLONIZER_RESUME_SESSION id instead, when the agent can reload it), every user_message one
 // `session/prompt` turn. First verified agent is Google's Gemini CLI (`gemini --experimental-acp`);
 // any other ACP agent runs through the custom-command setting (README).
 
@@ -281,6 +282,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   const pathPolicy = loadPathPolicy(env).policy;
   let sessionId = null, currentModel = null, modelSupported = false;
   let turn = null; // { messageId, text, thoughts } while a session/prompt is in flight
+  let replaying = false; // a session/load in flight: its updates replay history the harness logged
   let dead = false;
   let turnCount = 0, permissionCount = 0, terminalCount = 0, activePump = null;
   const queued = [];
@@ -298,7 +300,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   /** `session/update` → protocol events (README, "Mapping"). */
   const onUpdate = (update) => {
-    if (!turn) return; // an update outside a turn has nothing to attach to
+    if (!turn || replaying) return; // an update outside a turn (or replayed history) has nothing to attach to
     switch (String(update.sessionUpdate ?? '')) {
       case 'agent_message_chunk': {
         const text = contentText(update.content);
@@ -483,16 +485,39 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   let acp = null;
   if (!problem) acp = startAgent({ argv, env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
-  // The handshake: negotiate ACP, open one session in the workspace. No session/load: this runner
-  // cannot resume, so it never emits agent_session (§2 rules).
+  // The handshake: negotiate ACP, then the session — `session/load` for §1's COLONIZER_RESUME_SESSION
+  // when the agent advertises loadSession, `session/new` otherwise and as the fallback on a failed
+  // load. agent_session is announced only when the session could be resumed again (§2 rules).
   if (acp) {
     try {
       const init = await acp.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: true } });
       if (init.protocolVersion !== 1) {
         emit({ type: 'log', level: 'warn', message: `the agent speaks ACP protocol version ${JSON.stringify(init.protocolVersion)}, this runner negotiates 1` });
       }
-      const session = await acp.request('session/new', { cwd: workspace, mcpServers: [] });
-      sessionId = String(session.sessionId ?? '');
+      const loadable = Boolean(plainObject(init.agentCapabilities).loadSession);
+      const resumeId = String(env.COLONIZER_RESUME_SESSION ?? '').trim();
+      if (resumeId && !loadable) {
+        emit({ type: 'log', level: 'warn', message: `cannot resume session ${resumeId}: the agent does not advertise loadSession; a fresh session starts instead` });
+      }
+      let session = {};
+      if (loadable && resumeId) {
+        replaying = true; // the agent replays the old conversation; the harness logged it once already
+        try {
+          // The load result carries what session/new would (models included), so a resumed colony
+          // keeps its model surface.
+          session = plainObject(await acp.request('session/load', { sessionId: resumeId, cwd: workspace, mcpServers: [] }));
+          // The agent may rename the session as it loads it; talk to the id it answered with.
+          sessionId = typeof session.sessionId === 'string' && session.sessionId ? session.sessionId : resumeId;
+        } catch (err) {
+          emit({ type: 'log', level: 'warn', message: `could not resume session ${resumeId} (${err?.message ?? err}); a fresh session starts instead` });
+        }
+        replaying = false;
+      }
+      if (!sessionId) {
+        session = await acp.request('session/new', { cwd: workspace, mcpServers: [] });
+        sessionId = String(session.sessionId ?? '');
+      }
+      if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
       if (session.models?.currentModelId) {
         currentModel = String(session.models.currentModelId);
