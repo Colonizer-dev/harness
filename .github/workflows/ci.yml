@@ -262,6 +262,10 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The hosted demo (docs/cockpit.md, "Hosted demo") must keep building too.
+      - name: Build demo
+        run: npm run build:demo
+
       - name: Test
         run: npm test
 

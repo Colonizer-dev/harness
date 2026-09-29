@@ -2,6 +2,8 @@
 // keeps the browser's install prompt so Settings → Desktop can offer an "Install app" button.
 import { useEffect, useState } from "react";
 
+import { DEMO } from "./demo";
+
 interface InstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
@@ -39,10 +41,10 @@ export function setupInstallApp(): void {
     deferred = null;
     notify();
   });
-  // The service worker only in a real build served by the mothership: the dev server and the
-  // in-browser mock (?mock=1) have no stable /assets to cache.
+  // The service worker only in a real build served by the mothership: the dev server, the
+  // in-browser mock (?mock=1) and the hosted demo have no stable /assets to cache.
   const mock = new URLSearchParams(window.location.search).has("mock");
-  if (import.meta.env.PROD && !mock && "serviceWorker" in navigator) {
+  if (import.meta.env.PROD && !mock && !DEMO && "serviceWorker" in navigator) {
     window.addEventListener("load", () => {
       navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {
         /* installable-app extras only; the cockpit works without them */

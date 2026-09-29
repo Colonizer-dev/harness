@@ -38,6 +38,16 @@ Limits:
 Add `?mock=1` to the address to run the cockpit against a built-in fake backend. It needs no
 mothership and is useful for trying the UI.
 
+### Hosted demo
+
+The same mock also ships as a static bundle: `npm run build:demo` in `web/` writes `web/dist-demo/`,
+a cockpit build with the mock forced on (no `?mock=1` needed). It makes no `/api` calls, registers
+no service worker, and carries no install manifest, so it is a plain page. The website repo serves
+it at `https://colonizer.dev/demo`; the host needs one SPA rule — every `/demo/*` path that is not a
+file in the bundle serves `/demo/index.html` with a 200 — because the cockpit keeps its view in the
+page rather than in the address. The demo is not published yet, so do not expect the link to work
+until the website repo ships it.
+
 ## Layout
 
 The layout depends on the window width:
