@@ -984,6 +984,18 @@ pub struct PrInfo {
     pub created_at: Option<DateTime<Utc>>,
     /// The checks on the head commit, summed up (see [`ci_verdict`]).
     pub ci: CiState,
+    /// Whether the pull request is a draft; a field `gh` leaves out reads as not.
+    pub is_draft: bool,
+    /// The pull request's title; empty when GitHub gave none.
+    pub title: String,
+    /// The pull request's labels, by name.
+    pub labels: Vec<String>,
+    /// The branch the pull request merges from, and the commit at its tip (the merge train pins
+    /// `--match-head-commit` to it); `None` when `gh` left either out.
+    pub head_ref_name: Option<String>,
+    pub head_ref_oid: Option<String>,
+    /// The branch the pull request targets, as GitHub sees it right now.
+    pub base_ref_name: Option<String>,
 }
 
 /// A pull request's checks in one word, from `gh pr view`'s `statusCheckRollup`: any failed check
@@ -1041,7 +1053,7 @@ pub fn ci_verdict(rollup: Option<&Value>) -> CiState {
 /// `gh` rejects the whole call when any requested field is not one it knows — asking for `merged`,
 /// which it never had, failed every check and left every colony at `pr_opened` — so this stays next to
 /// the struct and a test holds the two together.
-const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid,createdAt,statusCheckRollup";
+const PR_VIEW_FIELDS: &str = "state,mergeable,mergeStateStatus,mergedAt,baseRefOid,createdAt,statusCheckRollup,isDraft,title,labels,headRefName,headRefOid,baseRefName";
 
 /// Unknown fields are refused so the test below catches a requested field this struct would ignore;
 /// `gh --json` prints only the fields it was asked for, so real output never trips it. The
@@ -1064,6 +1076,24 @@ struct PrView {
     /// Kept as raw JSON: its items come in two shapes, and [`ci_verdict`] reads both.
     #[serde(rename = "statusCheckRollup", default)]
     status_check_rollup: Option<Value>,
+    #[serde(rename = "isDraft", default)]
+    is_draft: Option<bool>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    labels: Option<Vec<LabelName>>,
+    #[serde(rename = "headRefName", default)]
+    head_ref_name: Option<String>,
+    #[serde(rename = "headRefOid", default)]
+    head_ref_oid: Option<String>,
+    #[serde(rename = "baseRefName", default)]
+    base_ref_name: Option<String>,
+}
+
+/// One label of a pull request, as `gh pr view --json labels` names it.
+#[derive(Deserialize)]
+struct LabelName {
+    name: String,
 }
 
 /// Asks GitHub for one pull request's state, mergeability and merge-state status through the user's
@@ -1101,6 +1131,70 @@ fn pr_file_paths(out: &str) -> Vec<String> {
         .collect()
 }
 
+/// One commit of a pull request, as the merge train's guards read it: who wrote it and what the
+/// message says. Own call, not a `PR_VIEW_FIELDS` field: only the train reads commits, and only
+/// for its candidates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PrCommit {
+    /// The commit's authors as `(login, email)`, lowercased; either side may be empty.
+    pub authors: Vec<(String, String)>,
+    /// Headline plus body, the message the attribution guard reads.
+    pub message: String,
+}
+
+/// Reads `gh pr view --json commits` for one pull request. A commit GitHub names no author or
+/// message for still yields a [`PrCommit`], so a caller can refuse what it cannot vouch for.
+pub async fn pr_commits(app: &App, url: &str) -> Result<Vec<PrCommit>> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "commits"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    pr_commits_from_json(&out)
+}
+
+/// Reads `gh pr view --json commits` output, split from `pr_commits` so it is tested without `gh`.
+fn pr_commits_from_json(out: &str) -> Result<Vec<PrCommit>> {
+    #[derive(Deserialize)]
+    struct Commits {
+        #[serde(default)]
+        commits: Vec<CommitView>,
+    }
+    #[derive(Deserialize)]
+    struct CommitView {
+        #[serde(default)]
+        authors: Vec<AuthorView>,
+        #[serde(rename = "messageHeadline", default)]
+        message_headline: Option<String>,
+        #[serde(rename = "messageBody", default)]
+        message_body: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct AuthorView {
+        login: Option<String>,
+        email: Option<String>,
+    }
+    let view: Commits = serde_json::from_str(out).context("could not parse `gh pr view` commits")?;
+    Ok(view
+        .commits
+        .into_iter()
+        .map(|c| PrCommit {
+            authors: c
+                .authors
+                .into_iter()
+                .map(|a| {
+                    (
+                        a.login.unwrap_or_default().to_lowercase(),
+                        a.email.unwrap_or_default().to_lowercase(),
+                    )
+                })
+                .collect(),
+            message: [c.message_headline.unwrap_or_default(), c.message_body.unwrap_or_default()].join("\n"),
+        })
+        .collect())
+}
+
 /// Reads `gh pr view --json` output into a [`PrInfo`], split from `pr_info` so it is tested
 /// without `gh`.
 fn pr_info_from_json(out: &str) -> Result<PrInfo> {
@@ -1121,6 +1215,12 @@ fn pr_info_from_json(out: &str) -> Result<PrInfo> {
         base_ref_oid: view.base_ref_oid,
         created_at: view.created_at.as_deref().and_then(parse_merged_at),
         ci: ci_verdict(view.status_check_rollup.as_ref()),
+        is_draft: view.is_draft.unwrap_or(false),
+        title: view.title.unwrap_or_default(),
+        labels: view.labels.unwrap_or_default().into_iter().map(|l| l.name).collect(),
+        head_ref_name: view.head_ref_name,
+        head_ref_oid: view.head_ref_oid,
+        base_ref_name: view.base_ref_name,
     })
 }
 
@@ -3389,6 +3489,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         assert_eq!(
@@ -3401,6 +3507,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         // A field `gh` leaves out reads as not yet computed, never as a licence to merge.
@@ -3414,6 +3526,12 @@ mod tests {
                 base_ref_oid: None,
                 created_at: None,
                 ci: CiState::NoChecks,
+                is_draft: false,
+                title: String::new(),
+                labels: Vec::new(),
+                head_ref_name: None,
+                head_ref_oid: None,
+                base_ref_name: None,
             }
         );
         // `baseRefOid` rides along when GitHub reports one, for the auto-rebase backoff (issue
@@ -3465,7 +3583,18 @@ mod tests {
         let fields: Vec<&str> = PR_VIEW_FIELDS.split(',').collect();
         let sample: serde_json::Map<String, Value> = fields
             .iter()
-            .map(|f| (f.to_string(), Value::String("MERGED".into())))
+            .map(|f| {
+                (
+                    f.to_string(),
+                    // The two fields that are not strings are given their own shapes; everything
+                    // else a string is fine for.
+                    match *f {
+                        "isDraft" => Value::Bool(true),
+                        "labels" => json!([{"name": "bug"}]),
+                        _ => Value::String("MERGED".into()),
+                    },
+                )
+            })
             .collect();
         let view: PrView = serde_json::from_value(Value::Object(sample)).unwrap();
         assert_eq!(view.state, "MERGED");
@@ -3475,6 +3604,12 @@ mod tests {
         assert_eq!(view.base_ref_oid.as_deref(), Some("MERGED"));
         assert_eq!(view.created_at.as_deref(), Some("MERGED"));
         assert!(view.status_check_rollup.is_some());
+        assert_eq!(view.is_draft, Some(true));
+        assert_eq!(view.title.as_deref(), Some("MERGED"));
+        assert_eq!(view.labels.as_deref().map(|l| l.len()), Some(1));
+        assert_eq!(view.head_ref_name.as_deref(), Some("MERGED"));
+        assert_eq!(view.head_ref_oid.as_deref(), Some("MERGED"));
+        assert_eq!(view.base_ref_name.as_deref(), Some("MERGED"));
     }
 
     #[test]

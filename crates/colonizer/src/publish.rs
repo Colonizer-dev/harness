@@ -1549,6 +1549,12 @@ mod tests {
             base_ref_oid: None,
             created_at: Some(opened),
             ci: github::CiState::Success,
+            is_draft: false,
+            title: String::new(),
+            labels: Vec::new(),
+            head_ref_name: None,
+            head_ref_oid: None,
+            base_ref_name: None,
         };
         assert!(apply_pr_facts(&mut s, &info));
         assert_eq!((s.pr_opened_at, s.ci_state), (Some(opened), Some(github::CiState::Success)));
