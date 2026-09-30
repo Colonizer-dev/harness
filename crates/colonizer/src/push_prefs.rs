@@ -257,7 +257,6 @@ pub fn silent(prefs: &Prefs, event: &str) -> bool {
 
 /// Issue #742's hook: whether a question's push to this device may carry answer buttons (the option
 /// labels and a one-shot token). Asked per device after [`allows`]; off means the plain question push.
-#[cfg_attr(not(test), expect(dead_code, reason = "a hook for #742; drop this line once it calls it"))]
 pub fn answer_actions(prefs: &Prefs, event: &str) -> bool {
     event == QUESTION && prefs.answer_actions
 }

@@ -675,39 +675,52 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
     };
     let now = Utc::now().timestamp();
     let colony = session.map(|s| s.id.as_str());
-    // The one push that can be answered in place (issue #742): mint a token once, before the
-    // devices, and carry it with the option labels. A question that cannot be answered from a
-    // notification mints nothing and pushes the empty answer instead.
+    let recipients = recipients(&list, event, session, now);
+    // The one push that can be answered in place (issue #742): mint a token once per deliver, and
+    // only when at least one receiving device shows answer buttons (push_prefs::answer_actions).
+    // A question that cannot be answered from a notification mints nothing.
+    let wants_answer = recipients
+        .iter()
+        .any(|subscription| push_prefs::answer_actions(&subscription.prefs, event));
     let answer = match (event, colony) {
-        ("question", Some(id)) => app.answer_tokens.for_push(app, id).await,
+        ("question", Some(id)) if wants_answer => app.answer_tokens.for_push(app, id).await,
         _ => None,
     };
+    let answer = answer.as_ref().map(|(token, labels)| (token.as_str(), labels.as_slice()));
     // A question blocks a colony, so the phone buzzes like it matters; the rest can wait for the
     // device's own idea of a good moment.
     let urgency = if event == "question" { "high" } else { "normal" };
     let mut sent = false;
-    for subscription in &list {
-        let seen = push_prefs::presence_of(&subscription.id);
-        if !push_prefs::allows(&subscription.prefs, event, session, now, seen.as_ref()) {
-            continue;
-        }
-        // Built per device: its prefs shape the payload (push_prefs::silent today, and the answer
-        // buttons and badge through push_prefs::answer_actions and push_prefs::badge).
-        let built = match (event, colony) {
-            ("question", Some(id)) => question_payload(
-                text,
-                id,
-                answer.as_ref().map(|(token, labels)| (token.as_str(), labels.as_slice())),
-                &subscription.prefs,
-            ),
-            _ => payload(event, text, colony, &subscription.prefs),
-        };
-        let Ok(body) = serde_json::to_vec(&built) else {
+    for subscription in recipients {
+        let Ok(body) = serde_json::to_vec(&device_payload(event, text, colony, &subscription.prefs, answer)) else {
             continue;
         };
         sent |= send_one(app, client, &key, subscription, &body, urgency, colony).await;
     }
     sent
+}
+
+/// The devices one event reaches: each subscription's own [`push_prefs::allows`] — its switch,
+/// scope, quiet hours and presence — decides for that device alone.
+fn recipients<'a>(list: &'a [Subscription], event: &str, session: Option<&Session>, now: i64) -> Vec<&'a Subscription> {
+    list.iter()
+        .filter(|subscription| {
+            let seen = push_prefs::presence_of(&subscription.id);
+            push_prefs::allows(&subscription.prefs, event, session, now, seen.as_ref())
+        })
+        .collect()
+}
+
+/// One device's payload: its prefs decide whether it sounds (push_prefs::silent) and, for a
+/// question, whether it carries the answer buttons (push_prefs::answer_actions). A device with
+/// the buttons off gets the question's empty answer, which opens the cockpit instead.
+fn device_payload(event: &str, text: &str, colony: Option<&str>, prefs: &Prefs, answer: Option<(&str, &[String])>) -> Value {
+    match colony {
+        Some(id) if event == "question" => {
+            question_payload(text, id, answer.filter(|_| push_prefs::answer_actions(prefs, event)), prefs)
+        }
+        _ => payload(event, text, colony, prefs),
+    }
 }
 
 /// Drops the gone subscriptions out of a list re-read now, not the one loaded before the sends: a
@@ -1004,6 +1017,25 @@ mod tests {
         let value = question_payload("acme/webshop #42 needs an answer", "abc123", None, &Prefs::default());
         assert_eq!(value["answer"], json!({"choices": []}));
         assert!(value["answer"].get("token").is_none(), "no token, no credential");
+    }
+
+    /// A device with answer buttons off gets the question's empty answer — no token, no labels —
+    /// while a device with them on gets both; other events never carry an answer.
+    #[test]
+    fn answer_buttons_follow_each_devices_answer_actions() {
+        let labels = vec!["Push now".to_string(), "Wait".to_string()];
+        let answer = Some(("tok123", labels.as_slice()));
+        let text = "acme/webshop #42 needs an answer";
+        let on = device_payload("question", text, Some("abc123"), &Prefs::default(), answer);
+        assert_eq!(on["answer"], json!({"token": "tok123", "choices": ["Push now", "Wait"]}));
+        let off_prefs = Prefs {
+            answer_actions: false,
+            ..Prefs::default()
+        };
+        let off = device_payload("question", text, Some("abc123"), &off_prefs, answer);
+        assert_eq!(off["answer"], json!({"choices": []}));
+        let failed = device_payload("failed", "acme/webshop #42 failed", Some("abc123"), &Prefs::default(), answer);
+        assert!(failed.get("answer").is_none());
     }
 
     #[test]
