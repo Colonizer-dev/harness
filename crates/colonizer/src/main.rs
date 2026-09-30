@@ -11,6 +11,7 @@
 // does not touch the lines a parallel pull request adds for another one.
 mod activity;
 mod answer_cache;
+mod answer_tokens;
 mod api_tokens;
 mod app;
 mod archive;

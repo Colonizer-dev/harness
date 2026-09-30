@@ -231,11 +231,12 @@ fn external_text(name: &str, text: &str) -> String {
 
 /// An answer as the API takes it: the question it answers, one choice per question label, and the
 /// free-text note the agent reads alongside. Exactly the socket command's fields (`client_command`),
-/// parsed once so both paths validate identically.
-struct AnswerCommand {
-    question_id: String,
-    answers: Value,
-    response: Value,
+/// parsed once so both paths validate identically. The push-answer route (issue #742) builds one
+/// directly, so the shape is crate-visible.
+pub(crate) struct AnswerCommand {
+    pub(crate) question_id: String,
+    pub(crate) answers: Value,
+    pub(crate) response: Value,
 }
 
 impl AnswerCommand {
@@ -272,7 +273,7 @@ impl AnswerCommand {
 /// Why an HTTP answer was refused. Each refusal names itself in the handler above: a colony that
 /// is not there is a 404; one that cannot take an answer, is not asking, or is asking something
 /// else is a 409 — a conflict with the colony's state that re-reading the question resolves.
-enum AnswerError {
+pub(crate) enum AnswerError {
     NoSession,
     NotAccepting(SessionStatus),
     NoQuestion,
@@ -292,7 +293,7 @@ enum AnswerError {
 /// runner under the open question's lock — the same lock the suspension tick claims under — so an
 /// answer and a suspension cannot interleave: either the answer goes first and the tick leaves the
 /// colony alone, or the claim goes first and the answer is held.
-async fn submit_answer(
+pub(crate) async fn submit_answer(
     app: &Shared,
     id: &str,
     rt: &Arc<Runtime>,
@@ -337,11 +338,25 @@ async fn submit_answer(
         drop(gate);
         return hold_answer(app, id, rt, open, answer, external, via).await;
     }
+    // An HTTP answer (require_pending) that lost the race for the question — a push or cockpit tap
+    // that took it down between the open read above and this lock — stops here: forwarding it too
+    // would hand the runner a second answer to a question the host no longer counts as open
+    // (issue #742's promise: a notification tap and the cockpit's button answer a colony once).
+    // The socket path keeps forwarding whatever it is given: the host may not know the question it
+    // answers yet, and the runner refuses what is stale.
+    let gate_matches = gate.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id);
+    if require_pending && !gate_matches {
+        return Err(if open.is_some() {
+            AnswerError::Stale
+        } else {
+            AnswerError::NoQuestion
+        });
+    }
     // The answer is on its way to the runner, whose own `question_answered` echo closes the
     // question: close it here first, so the tick — which claims only under an open question, and
     // matching the one the answer is for — reads none. A stale answer (socket path) matches
     // nothing and leaves the live question standing for the runner to refuse it.
-    if gate.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id) {
+    if gate_matches {
         *gate = None;
     }
     drop(gate);

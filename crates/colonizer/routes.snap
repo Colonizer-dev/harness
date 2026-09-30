@@ -92,6 +92,7 @@
 /api/providers/{id}                                  DELETE unauth=401    token=owner            activity=settings.remove
 /api/providers/{id}                                  PUT    unauth=401    token=owner            activity=settings.save
 /api/providers/{id}/health                           GET    unauth=401    token=owner            activity=-
+/api/push/answer                                     POST   unauth=415    token=owner            activity=-
 /api/push/key                                        GET    unauth=401    token=owner            activity=-
 /api/push/presence                                   POST   unauth=401    token=owner            activity=-
 /api/push/subscriptions                              GET    unauth=401    token=owner            activity=-

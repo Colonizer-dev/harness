@@ -10,7 +10,9 @@
 //! removing a subscription in Settings ends the channel for that device alone.
 //!
 //! Like the other channels, what leaves is one short line about the colony and a link — never
-//! question text, agent output, or any repository content.
+//! question text, agent output, or any repository content. The one addition (issue #742): a
+//! question the notification itself can answer also carries its option labels and a one-shot
+//! answer token (answer_tokens.rs) — the labels, never the question or its header.
 
 use crate::{
     ApiResult, App, AppError, Shared, client_error,
@@ -242,6 +244,24 @@ pub fn payload(event: &str, text: &str, session: Option<&str>, prefs: &Prefs) ->
         "tag": tag,
         "silent": push_prefs::silent(prefs, event),
     })
+}
+
+/// The question push's payload: the five keys plus `answer` (issue #742) — the one-shot token that
+/// `POST /api/push/answer` consumes and the option labels a notification can offer, in order. The
+/// question's text and header are not parameters: a push never carries them, only the one line and
+/// the labels. A question that cannot be answered from a notification (no minted token) still gets
+/// the `answer` key, as `{"choices": []}`, so the service worker sees one question shape.
+pub fn question_payload(text: &str, session: &str, answer: Option<(&str, &[String])>, prefs: &Prefs) -> Value {
+    let mut value = payload("question", text, Some(session), prefs);
+    let answer = match answer {
+        Some((token, labels)) => json!({ "token": token, "choices": labels }),
+        None => json!({ "choices": [] }),
+    };
+    value
+        .as_object_mut()
+        .expect("payload is an object")
+        .insert("answer".into(), answer);
+    value
 }
 
 /// The short title per event. A notification shade has room for one line of sense, not a sentence.
@@ -655,7 +675,15 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
     };
     let now = Utc::now().timestamp();
     let colony = session.map(|s| s.id.as_str());
-    // A question blocks a colony, so the phone buzzes like it matters; the rest can wait.
+    // The one push that can be answered in place (issue #742): mint a token once, before the
+    // devices, and carry it with the option labels. A question that cannot be answered from a
+    // notification mints nothing and pushes the empty answer instead.
+    let answer = match (event, colony) {
+        ("question", Some(id)) => app.answer_tokens.for_push(app, id).await,
+        _ => None,
+    };
+    // A question blocks a colony, so the phone buzzes like it matters; the rest can wait for the
+    // device's own idea of a good moment.
     let urgency = if event == "question" { "high" } else { "normal" };
     let mut sent = false;
     for subscription in &list {
@@ -665,7 +693,16 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
         }
         // Built per device: its prefs shape the payload (push_prefs::silent today, and the answer
         // buttons and badge through push_prefs::answer_actions and push_prefs::badge).
-        let Ok(body) = serde_json::to_vec(&payload(event, text, colony, &subscription.prefs)) else {
+        let built = match (event, colony) {
+            ("question", Some(id)) => question_payload(
+                text,
+                id,
+                answer.as_ref().map(|(token, labels)| (token.as_str(), labels.as_slice())),
+                &subscription.prefs,
+            ),
+            _ => payload(event, text, colony, &subscription.prefs),
+        };
+        let Ok(body) = serde_json::to_vec(&built) else {
             continue;
         };
         sent |= send_one(app, client, &key, subscription, &body, urgency, colony).await;
@@ -891,8 +928,13 @@ mod tests {
     #[test]
     fn the_push_payload_carries_five_keys_and_no_session_content() {
         let session = colony();
-        let text = Event::Question.text(&session.repo, session.issue);
-        let body = serde_json::to_string(&payload("question", &text, Some(&session.id), &Prefs::default())).unwrap();
+        let body = serde_json::to_string(&payload(
+            "failed",
+            "acme/webshop #42 failed",
+            Some(&session.id),
+            &Prefs::default(),
+        ))
+        .unwrap();
         for sentinel in [
             "SENTINEL-issue-title",
             "SENTINEL-branch",
@@ -909,11 +951,59 @@ mod tests {
             ["body", "silent", "tag", "title", "url"],
             "exactly five keys, one shape for the service worker"
         );
+        assert_eq!(value["silent"], true, "only a question sounds");
+        assert_eq!(value["title"], "Colony failed");
+        assert_eq!(value["body"], "acme/webshop #42 failed");
+        assert_eq!(value["url"], "/?colony=abc123");
+        assert_eq!(value["tag"], "failed-abc123");
+    }
+
+    /// The question push is the one payload with a sixth key (issue #742): a token and the option
+    /// labels — labels only, never the question text or header, so nothing of the ask itself leaves
+    /// the install.
+    #[test]
+    fn a_question_push_carries_a_token_and_labels_but_never_the_question() {
+        let session = colony();
+        let labels = vec!["Push now".to_string(), "Wait".to_string()];
+        let text = Event::Question.text(&session.repo, session.issue);
+        let body = serde_json::to_string(&question_payload(
+            &text,
+            &session.id,
+            Some(("tok123", &labels)),
+            &Prefs::default(),
+        ))
+        .unwrap();
+        for sentinel in [
+            "SENTINEL-issue-title",
+            "SENTINEL-branch",
+            "SENTINEL-error",
+            "sk-ant-api03-SENTINEL",
+        ] {
+            assert!(!body.contains(sentinel), "the push payload leaked {sentinel}: {body}");
+        }
+        let value: Value = serde_json::from_str(&body).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["answer", "body", "silent", "tag", "title", "url"],
+            "the question shape: five plus answer"
+        );
         assert_eq!(value["title"], "Colony asks a question");
         assert_eq!(value["body"], "acme/webshop #42 needs an answer");
         assert_eq!(value["url"], "/?colony=abc123");
         assert_eq!(value["tag"], "question-abc123");
         assert_eq!(value["silent"], false, "a sounding question is the one loud payload");
+        assert_eq!(value["answer"], json!({"token": "tok123", "choices": ["Push now", "Wait"]}));
+    }
+
+    /// A question that cannot be answered from a notification pushes the empty answer: same six
+    /// keys, no token in it.
+    #[test]
+    fn an_unanswerable_question_push_carries_an_empty_answer_and_no_token() {
+        let value = question_payload("acme/webshop #42 needs an answer", "abc123", None, &Prefs::default());
+        assert_eq!(value["answer"], json!({"choices": []}));
+        assert!(value["answer"].get("token").is_none(), "no token, no credential");
     }
 
     #[test]

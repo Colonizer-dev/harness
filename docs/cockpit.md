@@ -549,7 +549,24 @@ Every device has preferences of its own, kept on the mothership and checked befo
   ignored.
 
 Notifications only name the repository and issue number. They never include the issue title, the
-question, or an error.
+question's text, or an error — with one exception: a question the notification itself can answer
+carries that question's option labels, so the buttons can name them (below). The question and its
+header are never sent.
+
+**Answering from the notification.** When the colony's open question set is exactly one
+single-select question with one to three options, its notification shows a button per option, then
+**Other…** for a typed reply where the browser delivers one (ChromeOS today), then **Open** while
+button slots remain. More options than fit, a multi-select, or several open questions get a single
+**Open to answer** button instead. Browsers that show no notification buttons at all — an iPhone or
+iPad home-screen app, Firefox, Safari on macOS — fall back to open-on-tap: the tap opens the colony,
+where the question card answers as usual. Chrome on Android and desktop show the buttons.
+
+A button answers straight from the service worker with a one-time token the push carried. The token
+works for that one question and colony, once, and expires after 24 hours or as soon as the question
+is answered or replaced, so a notification is a credential for exactly one answer and nothing else. On success the notification is replaced by a silent
+`Answered: <label>` confirmation; on any failure — the question was answered in the cockpit first,
+the token expired, no network — the tap opens the colony instead. With several devices subscribed,
+the first tap answers and the rest open the cockpit.
 
 Limits: Web Push needs a secure origin (localhost counts) and a browser with push support. On iPhone
 and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen; on an iOS device that

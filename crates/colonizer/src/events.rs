@@ -388,11 +388,14 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             // too — the judge answers only at or below its ceiling — and a question without one,
             // from an older runner, counts as a workspace write.
             let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
+            // A new question retires the old one's notification answer tokens (issue #742).
+            app.answer_tokens.revoke(id).await;
             *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {
             *rt.open_question.lock().await = None;
+            app.answer_tokens.revoke(id).await;
             let mut activity = rt.activity.lock().await;
             activity.question_since = None;
             // The question is resolved either way, so an unanswered-provider streak behind it is over.

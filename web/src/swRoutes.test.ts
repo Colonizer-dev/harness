@@ -5,11 +5,14 @@ import workerSource from "../public/sw.js?raw";
 import { BUILD_LINE, buildHash, withBuild } from "./swBuild";
 
 // The service worker's routing script, run the way importScripts runs it: against a `self`.
+type Answer = { token: string; choices: string[] };
+type NotificationAction = { action: string; title: string; type?: string; placeholder?: string };
 const context: {
   self: {
     colonizerRoute?: (url: URL, method: string, mode: string, origin: string) => string;
     colonizerSafeUrl?: (url: unknown) => string;
-    colonizerPushPayload?: (raw: unknown) => { title: string; body: string; url: string; tag: string; silent: boolean };
+    colonizerPushPayload?: (raw: unknown) => { title: string; body: string; url: string; tag: string; silent: boolean; answer?: Answer };
+    colonizerNotificationActions?: (answer: Answer | undefined, maxActions: number, supportsReply: boolean) => NotificationAction[];
   };
 } = { self: {} };
 new Function("self", routesSource)(context.self);
@@ -17,6 +20,8 @@ const route = (path: string, method = "GET", mode = "cors", origin = "http://127
   context.self.colonizerRoute!(new URL(path, "http://127.0.0.1:7878"), method, mode, origin);
 const safeUrl = (url: unknown) => context.self.colonizerSafeUrl!(url);
 const payload = (raw: unknown) => context.self.colonizerPushPayload!(raw);
+const actions = (answer: Answer | undefined, maxActions: number, supportsReply = false) =>
+  context.self.colonizerNotificationActions!(answer, maxActions, supportsReply);
 
 describe("service worker routing", () => {
   it("never touches the API, writes, the sign-in link or other origins", () => {
@@ -308,12 +313,94 @@ describe("push notifications", () => {
     expect(payload(JSON.stringify({ title: "acme/webshop #42", url: "//evil.test" }))).toEqual({ title: "acme/webshop #42", body: "A colony needs you.", url: "/", tag: "", silent: true });
   });
 
-  it("the worker shows and opens notifications, and always waits on them", () => {
+  it("carries an answerable question's answer through, trimmed and capped", () => {
+    expect(
+      payload(JSON.stringify({ title: "demo", body: "Issue a token for guests?", url: "/?colony=demo", answer: { token: "ab".repeat(32), choices: ["  Yes  ", "No"] } })),
+    ).toEqual({
+      title: "demo",
+      body: "Issue a token for guests?",
+      url: "/?colony=demo",
+      tag: "",
+      silent: true,
+      answer: { token: "ab".repeat(32), choices: ["Yes", "No"] },
+    });
+    const long = "a".repeat(90);
+    expect(payload(JSON.stringify({ answer: { token: "ab".repeat(32), choices: [long] } })).answer).toEqual({ token: "ab".repeat(32), choices: [long.slice(0, 80)] });
+  });
+
+  it("answers only from the notification what a notification can answer", () => {
+    // No answer key: not a question, no answer block at all.
+    expect(payload(JSON.stringify({ title: "t" })).answer).toBeUndefined();
+    // The mothership's own "not answerable here" shape, and everything that cannot be answered
+    // inline, degrade to open-only: no token, no choices.
+    const openOnly = { token: "", choices: [] };
+    expect(payload(JSON.stringify({ answer: { choices: [] } })).answer).toEqual(openOnly);
+    expect(payload(JSON.stringify({ answer: { token: "ab".repeat(32), choices: ["a", "b", "c", "d"] } })).answer).toEqual(openOnly);
+    // Dropped field by field: a non-object block drops whole, a bad token or non-string choices
+    // drop alone, labels are trimmed, and a hex token keeps its case.
+    expect(payload(JSON.stringify({ answer: "yes" })).answer).toBeUndefined();
+    expect(payload(JSON.stringify({ answer: { token: "xyz", choices: ["Yes"] } })).answer).toEqual(openOnly);
+    expect(payload(JSON.stringify({ answer: { token: Array(400).fill("a").join(""), choices: ["Yes"] } })).answer).toEqual(openOnly);
+    expect(payload(JSON.stringify({ answer: { token: "AB".repeat(16), choices: ["Yes", 42, "   "] } })).answer).toEqual({ token: "AB".repeat(16), choices: ["Yes"] });
+  });
+
+  it("offers no actions on a plain push or where the platform shows none", () => {
+    expect(actions(undefined, 3, true)).toEqual([]);
+    expect(actions(undefined, 0)).toEqual([]);
+    expect(actions({ token: "ab".repeat(16), choices: ["Yes"] }, 0, true)).toEqual([]);
+  });
+
+  it("offers one action per choice, then free text when the platform can reply, then Open", () => {
+    const answer = { token: "ab".repeat(16), choices: ["Yes", "No"] };
+    expect(actions(answer, 4, true)).toEqual([
+      { action: "choice:0", title: "Yes" },
+      { action: "choice:1", title: "No" },
+      { action: "other", type: "text", title: "Other…", placeholder: "Your answer" },
+      { action: "open", title: "Open" },
+    ]);
+    // Three choices fill three slots: with reply support the text field takes the last one.
+    const three = { token: "ab".repeat(16), choices: ["a", "b", "c"] };
+    expect(actions(three, 4, true)).toEqual([
+      { action: "choice:0", title: "a" },
+      { action: "choice:1", title: "b" },
+      { action: "choice:2", title: "c" },
+      { action: "other", type: "text", title: "Other…", placeholder: "Your answer" },
+    ]);
+    // No reply support (Safari, Firefox, Android Chrome): the freed slot goes to Open.
+    expect(actions(answer, 3)).toEqual([
+      { action: "choice:0", title: "Yes" },
+      { action: "choice:1", title: "No" },
+      { action: "open", title: "Open" },
+    ]);
+    expect(actions(answer, 2, true)).toEqual([
+      { action: "choice:0", title: "Yes" },
+      { action: "choice:1", title: "No" },
+    ]);
+  });
+
+  it("a question that cannot be answered inline opens the cockpit instead", () => {
+    const openToAnswer = [{ action: "open", title: "Open to answer" }];
+    expect(actions({ token: "", choices: [] }, 3, true)).toEqual(openToAnswer);
+    // More choices than fit is never cut down to a misleading subset.
+    expect(actions({ token: "ab".repeat(16), choices: ["a", "b", "c"] }, 2, true)).toEqual(openToAnswer);
+    expect(actions({ token: "ab".repeat(16), choices: [] }, 1)).toEqual(openToAnswer);
+    // A missing or non-numeric maxActions counts as no room at all.
+    expect(actions({ token: "", choices: [] }, Number.NaN)).toEqual([]);
+    expect(actions({ token: "ab".repeat(16), choices: ["Yes"] }, Number.NaN, true)).toEqual([]);
+  });
+
+  it("the worker answers a question push from its actions and confirms the answer", () => {
     expect(workerSource).toMatch(/addEventListener\("push"/);
     expect(workerSource).toMatch(/addEventListener\("notificationclick"/);
     expect(workerSource).toMatch(/showNotification\(/);
     expect(workerSource).toMatch(/colonizer:open/);
     expect(workerSource).toMatch(/clients\.openWindow\(/);
+    expect(workerSource).toMatch(/colonizerNotificationActions\(/);
+    expect(workerSource).toMatch(/Notification\.maxActions/);
+    expect(workerSource).toMatch(/"reply" in NotificationEvent\.prototype/);
+    expect(workerSource).toMatch(/api\/push\/answer/);
+    expect(workerSource).toMatch(/event\.reply/);
+    expect(workerSource).toMatch(/Answered: /);
   });
 });
 

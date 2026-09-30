@@ -153,10 +153,17 @@ self.addEventListener("fetch", (event) => {
 /** Shows one push, whatever arrived: a payload the mothership malformed still shows generically. */
 async function showPush(raw) {
   const payload = self.colonizerPushPayload(raw);
+  // A question push answers from the notification itself (issue #742): one button per choice where
+  // the platform shows buttons at all — Notification.maxActions is 0 or undefined on iOS, Safari
+  // and Firefox, so there the tap opens the cockpit — and free text only where the platform can
+  // deliver it, which NotificationEvent.reply is the one honest signal for.
+  const maxActions = self.Notification.maxActions || 0;
+  const supportsReply = typeof NotificationEvent === "function" && "reply" in NotificationEvent.prototype;
   await self.registration.showNotification(payload.title, {
     body: payload.body,
     tag: payload.tag || undefined,
-    data: { url: payload.url },
+    actions: self.colonizerNotificationActions(payload.answer, maxActions, supportsReply),
+    data: { url: payload.url, answer: payload.answer || undefined },
     icon: "/icons/icon-192.png",
     badge: "/icons/mark.svg",
     // Silent unless the mothership said otherwise — a question may sound (issue #743); the in-app
@@ -196,5 +203,39 @@ async function openFromNotification(url) {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = self.colonizerSafeUrl(event.notification.data && event.notification.data.url);
-  event.waitUntil(openFromNotification(url).catch(() => undefined));
+  event.waitUntil(
+    (async () => {
+      // A question's buttons answer straight from the notification: the endpoint authenticates by
+      // the one-time token in the notification's data alone, so no stored credentials leave the
+      // worker. Anything the button cannot do — no token, a stale or used one, a network miss —
+      // opens the colony, and every step below, clients.openWindow included, stays inside this
+      // click's waitUntil.
+      const answer = event.notification.data && event.notification.data.answer;
+      const action = event.action || "";
+      const raw = action.startsWith("choice:") ? action.slice("choice:".length) : "";
+      const choice = /^\d+$/.test(raw) ? (answer && answer.choices ? answer.choices[Number(raw)] : "") : "";
+      const other = action === "other" && typeof event.reply === "string" ? event.reply.trim() : "";
+      if (answer && answer.token && (choice || other)) {
+        try {
+          const response = await fetch("/api/push/answer", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(choice ? { token: answer.token, choice } : { token: answer.token, other }),
+          });
+          if (!response.ok) throw new Error(`status ${response.status}`);
+          await self.registration.showNotification(`Answered: ${(choice || other).slice(0, 80)}`, {
+            tag: event.notification.tag || undefined,
+            data: { url },
+            icon: "/icons/icon-192.png",
+            badge: "/icons/mark.svg",
+            silent: true,
+          });
+          return;
+        } catch {
+          // The cockpit is the reliable way to answer: fall through and open it.
+        }
+      }
+      await openFromNotification(url).catch(() => undefined);
+    })(),
+  );
 });

@@ -115,6 +115,9 @@ pub struct App {
     /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
     /// `gh` or a disk walk: see [`cached_answer`].
     pub answer_cache: AnswerCache,
+    /// One-shot answer tokens carried by question pushes (issue #742, answer_tokens.rs), in
+    /// memory only: a restart drops them and old notifications answer 401.
+    pub answer_tokens: crate::answer_tokens::Registry,
     /// Scoped API tokens handed to CLIs and automations (issue #508, api_tokens.rs), saved to
     /// `<config_dir>/api-tokens.json`; `host_guard` checks a Bearer against them when it is not
     /// the owner token.
@@ -238,6 +241,7 @@ impl App {
             // ---- Module state: one line per module, in alphabetical order.
             activity: crate::activity::ActivityLog::new(),
             answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
+            answer_tokens: crate::answer_tokens::Registry::default(),
             api_tokens: crate::api_tokens::Registry::load(&cfg.config_dir),
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),

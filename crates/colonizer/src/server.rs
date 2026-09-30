@@ -119,6 +119,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // Answering a question straight from its push (issue #742): the one-shot token in the body
+        // is the whole credential, so this one method+path is admitted with no cookie or bearer —
+        // anything but a live minted token answers 401 in `answer_tokens::answer`.
+        if req.method() == Method::POST && path == "/api/push/answer" {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
@@ -204,6 +211,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
     // One line per module that serves API routes, kept in alphabetical order.
     Router::new()
         .merge(crate::activity::routes())
+        .merge(crate::answer_tokens::routes())
         .merge(crate::api_tokens::routes())
         .merge(crate::archive::routes())
         .merge(crate::burn_down::routes())
