@@ -9,7 +9,7 @@ const context: {
   self: {
     colonizerRoute?: (url: URL, method: string, mode: string, origin: string) => string;
     colonizerSafeUrl?: (url: unknown) => string;
-    colonizerPushPayload?: (raw: unknown) => { title: string; body: string; url: string; tag: string };
+    colonizerPushPayload?: (raw: unknown) => { title: string; body: string; url: string; tag: string; silent: boolean };
   };
 } = { self: {} };
 new Function("self", routesSource)(context.self);
@@ -286,19 +286,26 @@ describe("push notifications", () => {
       body: "needs an answer",
       url: "/?colony=demo1234",
       tag: "colonizer:demo1234",
+      silent: true,
     });
   });
 
+  it("stays silent unless the payload says otherwise, an old payload included", () => {
+    expect(payload(JSON.stringify({ title: "x", body: "y", url: "/", tag: "" })).silent).toBe(true);
+    expect(payload(JSON.stringify({ title: "x", body: "y", url: "/", tag: "", silent: false })).silent).toBe(false);
+    expect(payload(JSON.stringify({ title: "x", body: "y", url: "/", tag: "", silent: "no" })).silent).toBe(true);
+  });
+
   it("never throws on a malformed, empty or absent payload — a generic notification instead", () => {
-    const generic = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" };
+    const generic = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true };
     expect(payload("")).toEqual(generic);
     expect(payload("not json{")).toEqual(generic);
     expect(payload(null)).toEqual(generic);
     expect(payload(undefined)).toEqual(generic);
     expect(payload("[1,2]")).toEqual(generic);
-    expect(payload(JSON.stringify({ title: "  ", body: 42, url: "https://evil.test/" }))).toEqual({ title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" });
+    expect(payload(JSON.stringify({ title: "  ", body: 42, url: "https://evil.test/" }))).toEqual({ title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true });
     // A payload with only a title still degrades field by field, and its url is sanitized.
-    expect(payload(JSON.stringify({ title: "acme/webshop #42", url: "//evil.test" }))).toEqual({ title: "acme/webshop #42", body: "A colony needs you.", url: "/", tag: "" });
+    expect(payload(JSON.stringify({ title: "acme/webshop #42", url: "//evil.test" }))).toEqual({ title: "acme/webshop #42", body: "A colony needs you.", url: "/", tag: "", silent: true });
   });
 
   it("the worker shows and opens notifications, and always waits on them", () => {

@@ -1831,6 +1831,37 @@ export interface LoginItemStatus {
 // Web push (issue #516): the mothership pushes to phones via GET/POST/DELETE /api/push
 // ---------------------------------------------------------------------------
 
+/** One event a device can be told about; a key the prefs omit means "the default". */
+export type PushEventKind =
+  | "question"
+  | "pull_request"
+  | "needs_rebase"
+  | "failed"
+  | "attention"
+  | "provider_degraded"
+  | "digest";
+
+/** Per-device delivery prefs (issue #743), as PATCH takes and the summary answers. */
+export interface PushPrefs {
+  events: Partial<Record<PushEventKind, boolean>>;
+  /** A sound may accompany a question's push; every other event is silent. */
+  question_sound: boolean;
+  /** A question's notification may offer answer buttons (issue #742). */
+  answer_actions: boolean;
+  /** Pushes set the installed app's badge to the needs-you count (issue #744). */
+  badge: boolean;
+  /** Repositories the device hears about, entries "org" or "org/repo"; empty means all. */
+  scope: string[];
+  /** Minutes since local midnight; start may wrap past midnight, never equals end. Null is off. */
+  quiet: { start: number; end: number } | null;
+  /** A question's push breaks through quiet hours when nothing else may. */
+  questions_break_quiet: boolean;
+  /** The device's IANA timezone, as it reported itself; null until a save that knows it. */
+  tz: string | null;
+  /** Minutes east of UTC (the sign of JS `getTimezoneOffset()`, negated). */
+  utc_offset: number;
+}
+
 /** One enrolled device, as GET /api/push/subscriptions answers and POST returns. */
 export interface PushSubscriptionSummary {
   id: string;
@@ -1839,6 +1870,9 @@ export interface PushSubscriptionSummary {
   created_at: number;
   /** The push service's host (e.g. fcm.googleapis.com); the full endpoint never reaches the list. */
   endpoint_host: string;
+  /** Unix seconds of the last presence report; null until the first one. */
+  last_seen: number | null;
+  prefs: PushPrefs;
 }
 
 /** POST /api/push/subscriptions: the browser's `PushSubscription.toJSON()` plus a device label. */
@@ -1846,6 +1880,22 @@ export interface PushSubscribeBody {
   label: string;
   endpoint: string;
   keys: { p256dh: string; auth: string };
+}
+
+/** PATCH /api/push/subscriptions/{id}: rename the device and/or replace its prefs wholesale. */
+export interface PushSubscriptionPatch {
+  label?: string;
+  prefs?: PushPrefs;
+}
+
+/** POST /api/push/presence: where this tab is, and whether it can take the notification itself. */
+export interface PushPresenceBody {
+  endpoint: string;
+  /** The colony this tab has open, or null when none — a push for it can be suppressed. */
+  colony: string | null;
+  focused: boolean;
+  tz?: string;
+  utc_offset?: number;
 }
 
 // ---------------------------------------------------------------------------

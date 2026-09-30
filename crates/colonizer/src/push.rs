@@ -5,9 +5,9 @@
 //! key with a fresh ephemeral ECDH key, so the push service that relays it — a browser maker's,
 //! not ours — carries bytes it cannot open. RFC 8292 (VAPID) signs every request with a key
 //! generated on first use and kept beside the other secrets, so the push service knows the sender
-//! and the browser knows who was allowed to wake it. Subscribing is the opt-in: there is no
-//! module setting to forget, and removing a subscription in Settings ends the channel for that
-//! device alone.
+//! and the browser knows who was allowed to wake it. Subscribing is the opt-in, and each
+//! subscription's own preferences (push_prefs.rs, issue #743) decide what reaches that device;
+//! removing a subscription in Settings ends the channel for that device alone.
 //!
 //! Like the other channels, what leaves is one short line about the colony and a link — never
 //! question text, agent output, or any repository content.
@@ -15,6 +15,8 @@
 use crate::{
     ApiResult, App, AppError, Shared, client_error,
     protocol::Origin,
+    push_prefs::{self, MAX_OFFSET, Prefs, Presence, TZ_RULE, forget_presence, tz_ok},
+    sessions::Session,
     util::{b64_decode, b64_encode, read_secret, short_id, truncate, write_private, write_secret},
 };
 use anyhow::{Result, anyhow};
@@ -34,6 +36,7 @@ use ring::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 /// ring's errors are deliberately unspecifiable — no details, no cause — so each call site names
 /// the step that failed instead.
@@ -224,11 +227,10 @@ fn encrypt(ua_public: &[u8], auth_secret: &[u8], plaintext: &[u8]) -> Result<Vec
 // The payload
 // ---------------------------------------------------------------------------
 
-/// The four-key push payload. `text` is the same one line the desktop popup and the webhook carry
-/// — the only content this function is handed, so repository content cannot travel through it —
-/// and `session` only names the colony, for the deep link and the tag. Provider and digest events
-/// have no colony and link to the cockpit's front page.
-pub fn payload(event: &str, text: &str, session: Option<&str>) -> Value {
+/// The five-key push payload. `text` is the same one line the desktop popup and the webhook carry —
+/// the only content this function is handed, so repository content cannot travel through it — and
+/// `session` only names the colony. Only a question on a device that lets questions sound is loud.
+pub fn payload(event: &str, text: &str, session: Option<&str>, prefs: &Prefs) -> Value {
     let (url, tag) = match session {
         Some(id) => (format!("/?colony={id}"), format!("{event}-{id}")),
         None => ("/".to_string(), event.to_string()),
@@ -238,6 +240,7 @@ pub fn payload(event: &str, text: &str, session: Option<&str>) -> Value {
         "body": one_line(text),
         "url": url,
         "tag": tag,
+        "silent": push_prefs::silent(prefs, event),
     })
 }
 
@@ -262,6 +265,13 @@ fn one_line(text: &str) -> String {
     truncate(flat.trim(), MAX_BODY)
 }
 
+/// How far the written `last_seen` may lag a heartbeat: pings come every half minute; the file need not move each time.
+const LAST_SEEN_SAVE_SECS: i64 = 5 * 60;
+
+/// Serialises every read-modify-write of the subscription file: a heartbeat, a settings save and a
+/// prune can land together, and the last writer would otherwise resurrect stale state. Never an await.
+static STORE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 // ---------------------------------------------------------------------------
 // The subscription store
 // ---------------------------------------------------------------------------
@@ -277,6 +287,12 @@ pub struct Subscription {
     pub auth: String,
     pub label: String,
     pub created_at: i64,
+    /// The device's notification preferences; a file from before the field existed loads defaults.
+    #[serde(default)]
+    pub prefs: Prefs,
+    /// When the device last pinged presence, unix seconds; absent until the first ping.
+    #[serde(default)]
+    pub last_seen: Option<i64>,
 }
 
 fn subscriptions_file(config_dir: &FsPath) -> PathBuf {
@@ -323,6 +339,14 @@ struct Checked {
     label: String,
 }
 
+/// The stored form of a device label: trimmed, capped, defaulted — the same rule on create and PATCH.
+fn label_of(label: Option<&str>) -> String {
+    match label.map(str::trim) {
+        None | Some("") => "This device".to_string(),
+        Some(label) => truncate(label, MAX_LABEL),
+    }
+}
+
 /// Checks a subscription before it is stored. The endpoint must be an `https://` URL (we POST
 /// nowhere else, and the endpoint is a capability that must not travel in the clear); the p256dh
 /// key must decode to a 65-byte uncompressed P-256 point (RFC 8291's exact form) and the auth
@@ -343,10 +367,7 @@ fn check(new: NewSubscription) -> Result<Checked, String> {
     if auth.len() != 16 {
         return Err("the auth secret must be 16 bytes".into());
     }
-    let label = match new.label.as_deref().map(str::trim) {
-        None | Some("") => "This device".to_string(),
-        Some(label) => truncate(label, MAX_LABEL),
-    };
+    let label = label_of(new.label.as_deref());
     Ok(Checked {
         endpoint,
         p256dh: new.keys.p256dh,
@@ -358,6 +379,7 @@ fn check(new: NewSubscription) -> Result<Checked, String> {
 /// Adds a subscription, or refreshes an endpoint's keys — a browser re-subscribing in place
 /// rotates them and keeps the device's row, id and age.
 fn upsert(config_dir: &FsPath, checked: Checked) -> Result<Subscription> {
+    let _store = STORE.lock().expect("the subscription store lock");
     let mut list = load(config_dir)?;
     let entry = match list.iter_mut().find(|s| s.endpoint == checked.endpoint) {
         Some(existing) => {
@@ -374,6 +396,8 @@ fn upsert(config_dir: &FsPath, checked: Checked) -> Result<Subscription> {
                 auth: checked.auth,
                 label: checked.label,
                 created_at: Utc::now().timestamp(),
+                prefs: Prefs::default(),
+                last_seen: None,
             };
             list.push(entry.clone());
             entry
@@ -385,6 +409,7 @@ fn upsert(config_dir: &FsPath, checked: Checked) -> Result<Subscription> {
 
 /// Removes one subscription by id; answers whether it was there.
 fn delete(config_dir: &FsPath, id: &str) -> Result<bool> {
+    let _store = STORE.lock().expect("the subscription store lock");
     let mut list = load(config_dir)?;
     let before = list.len();
     list.retain(|s| s.id != id);
@@ -392,17 +417,19 @@ fn delete(config_dir: &FsPath, id: &str) -> Result<bool> {
         return Ok(false);
     }
     save(config_dir, &list)?;
+    forget_presence(id);
     Ok(true)
 }
 
-/// What the API says about one subscription: the host's name, the label and the age — never the
-/// endpoint URL (a capability) or the keys.
+/// What the API says about one subscription — never the endpoint URL (a capability) or the keys.
 fn summary(subscription: &Subscription) -> Value {
     json!({
         "id": subscription.id,
         "label": subscription.label,
         "created_at": subscription.created_at,
         "endpoint_host": endpoint_host(&subscription.endpoint),
+        "last_seen": subscription.last_seen,
+        "prefs": subscription.prefs,
     })
 }
 
@@ -454,6 +481,117 @@ pub async fn delete_subscription(State(app): State<Shared>, Path(id): Path<Strin
     }
 }
 
+/// What PATCH /api/push/subscriptions/{id} takes: a new label, new preferences, or both — `None` leaves a field as it is.
+#[derive(Deserialize)]
+pub struct PatchSubscription {
+    label: Option<String>,
+    prefs: Option<Prefs>,
+}
+
+/// `PATCH /api/push/subscriptions/{id}`: renames a device or edits its preferences; the label follows the create rules.
+pub async fn patch_subscription(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchSubscription>,
+) -> ApiResult<Value> {
+    if let Err(m) = body.prefs.as_ref().map(Prefs::validate).transpose() {
+        return Err(client_error(StatusCode::BAD_REQUEST, &m));
+    }
+    let label = body.label.as_deref().map(|label| label_of(Some(label)));
+    let _store = STORE.lock().expect("the subscription store lock");
+    let mut list = load(&app.cfg.config_dir)?;
+    let Some(entry) = list.iter_mut().find(|s| s.id == id) else {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such subscription"));
+    };
+    if let Some(label) = label {
+        entry.label = label;
+    }
+    if let Some(prefs) = body.prefs {
+        entry.prefs = prefs;
+    }
+    let updated = entry.clone();
+    save(&app.cfg.config_dir, &list)?;
+    Ok(Json(summary(&updated)))
+}
+
+/// `POST /api/push/subscriptions/{id}/test`: one test push to that device alone, through the same
+/// encryption and prune-on-Gone as a real event but past every preference — proof the pipe works.
+pub async fn test_subscription(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let list = load(&app.cfg.config_dir)?;
+    let Some(subscription) = list.iter().find(|s| s.id == id) else {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such subscription"));
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| anyhow!("an HTTP client could not be built ({e})"))?;
+    let key = signing_key(&app)?;
+    // The "test" event has no title of its own, so the payload falls back to "Colonizer".
+    let body = serde_json::to_vec(&payload("test", "Test notification", None, &Prefs::default()))?;
+    let sent = send_one(&app, &client, &key, subscription, &body, "normal", None).await;
+    Ok(Json(json!({ "sent": sent })))
+}
+
+#[derive(Deserialize)]
+pub struct PresencePing {
+    endpoint: String,
+    colony: Option<String>,
+    focused: bool,
+    tz: Option<String>,
+    utc_offset: Option<i32>,
+}
+
+/// `POST /api/push/presence`: the cockpit's heartbeat — what the tab is looking at, and where in the day it is.
+pub async fn ping(State(app): State<Shared>, Json(body): Json<PresencePing>) -> Result<StatusCode, AppError> {
+    if body.utc_offset.is_some_and(|offset| offset.abs() > MAX_OFFSET) {
+        return Err(client_error(StatusCode::BAD_REQUEST, "the utc offset is out of range"));
+    }
+    let tz = body.tz.as_deref().map(str::trim).filter(|tz| !tz.is_empty());
+    if tz.is_some_and(|tz| !tz_ok(tz)) {
+        return Err(client_error(StatusCode::BAD_REQUEST, TZ_RULE));
+    }
+    if heartbeat(&app.cfg.config_dir, &body, tz, Utc::now().timestamp())? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(client_error(StatusCode::NOT_FOUND, "no such subscription"))
+    }
+}
+
+/// One heartbeat, as one read-modify-write of the subscription file: find the device by endpoint,
+/// record its last seen and any time-zone move, and write only when something changed or the record went stale.
+fn heartbeat(config_dir: &FsPath, ping: &PresencePing, tz: Option<&str>, now: i64) -> Result<bool> {
+    let _store = STORE.lock().expect("the subscription store lock");
+    let mut list = load(config_dir)?;
+    let Some(entry) = list.iter_mut().find(|s| s.endpoint == ping.endpoint) else {
+        return Ok(false);
+    };
+    let stale = entry.last_seen.is_none_or(|seen| now - seen >= LAST_SEEN_SAVE_SECS);
+    let mut changed = false;
+    if let Some(tz) = tz.filter(|tz| entry.prefs.tz.as_deref() != Some(tz)) {
+        entry.prefs.tz = Some(tz.to_string());
+        changed = true;
+    }
+    if let Some(offset) = ping.utc_offset.filter(|offset| entry.prefs.utc_offset != *offset) {
+        entry.prefs.utc_offset = offset;
+        changed = true;
+    }
+    push_prefs::record_presence(
+        &entry.id,
+        Presence {
+            colony: ping.colony.clone(),
+            focused: ping.focused,
+            at: now,
+        },
+    );
+    entry.last_seen = Some(now);
+    if changed || stale {
+        save(config_dir, &list)?;
+    }
+    Ok(true)
+}
+
 // ---------------------------------------------------------------------------
 // Delivery
 // ---------------------------------------------------------------------------
@@ -466,11 +604,38 @@ enum NotSent {
     Failed(String),
 }
 
-/// The push channel of [`crate::notify`]'s `deliver`: one announcement to every subscribed
-/// device, behind the same ledger and event switches as the other channels. Answers whether at
-/// least one device took it, like they do; each failure is a line in the colony's log (or stderr,
-/// for the events with no colony), never a fault in the others.
-pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &str, session: Option<&str>) -> bool {
+/// Sends one already-built payload to one device and answers whether it took; a Gone reports and
+/// prunes the device, and any failure is a line in the log, never a fault in the other sends.
+async fn send_one(
+    app: &App,
+    client: &reqwest::Client,
+    key: &EcdsaKeyPair,
+    subscription: &Subscription,
+    body: &[u8],
+    urgency: &str,
+    session: Option<&str>,
+) -> bool {
+    match send(client, key, subscription, body, urgency).await {
+        Ok(()) => true,
+        Err(NotSent::Gone(why)) => {
+            let what = format!(
+                "push: subscription {} ({}) dropped: {why}",
+                subscription.label, subscription.id
+            );
+            report(app, session, what, "info").await;
+            prune(app, std::slice::from_ref(&subscription.id));
+            false
+        }
+        Err(NotSent::Failed(why)) => {
+            report(app, session, format!("push: {} failed: {why}", subscription.label), "warn").await;
+            false
+        }
+    }
+}
+
+/// The push channel of [`crate::notify`]'s `deliver`: one announcement to every subscribed device
+/// its own preferences let through, behind the same ledger and event switches as the other channels.
+pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &str, session: Option<&Session>) -> bool {
     let list = match load(&app.cfg.config_dir) {
         Ok(list) => list,
         Err(e) => {
@@ -488,49 +653,42 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
             return false;
         }
     };
-    let Ok(body) = serde_json::to_vec(&payload(event, text, session)) else {
-        return false;
-    };
-    // A question blocks a colony, so the phone buzzes like it matters; the rest can wait for the
-    // device's own idea of a good moment.
+    let now = Utc::now().timestamp();
+    let colony = session.map(|s| s.id.as_str());
+    // A question blocks a colony, so the phone buzzes like it matters; the rest can wait.
     let urgency = if event == "question" { "high" } else { "normal" };
     let mut sent = false;
-    let mut gone: Vec<String> = Vec::new();
     for subscription in &list {
-        match send(client, &key, subscription, &body, urgency).await {
-            Ok(()) => sent = true,
-            Err(NotSent::Gone(why)) => {
-                report(
-                    app,
-                    session,
-                    format!(
-                        "push: subscription {} ({}) dropped: {why}",
-                        subscription.label, subscription.id
-                    ),
-                    "info",
-                )
-                .await;
-                gone.push(subscription.id.clone());
-            }
-            Err(NotSent::Failed(why)) => {
-                report(app, session, format!("push: {} failed: {why}", subscription.label), "warn").await;
-            }
+        let seen = push_prefs::presence_of(&subscription.id);
+        if !push_prefs::allows(&subscription.prefs, event, session, now, seen.as_ref()) {
+            continue;
         }
-    }
-    if !gone.is_empty() {
-        // Prune out of a list re-read now, not the one loaded before the sends: a device that
-        // subscribed while the push services above were being reached must not be lost with them.
-        match load(&app.cfg.config_dir) {
-            Ok(mut remaining) => {
-                remaining.retain(|s| !gone.contains(&s.id));
-                if let Err(e) = save(&app.cfg.config_dir, &remaining) {
-                    eprintln!("push: could not save the subscription list ({e:#})");
-                }
-            }
-            Err(e) => eprintln!("push: could not re-read the subscription list to prune it ({e:#}); the gone ones stay"),
-        }
+        // Built per device: its prefs shape the payload (push_prefs::silent today, and the answer
+        // buttons and badge through push_prefs::answer_actions and push_prefs::badge).
+        let Ok(body) = serde_json::to_vec(&payload(event, text, colony, &subscription.prefs)) else {
+            continue;
+        };
+        sent |= send_one(app, client, &key, subscription, &body, urgency, colony).await;
     }
     sent
+}
+
+/// Drops the gone subscriptions out of a list re-read now, not the one loaded before the sends: a
+/// device that subscribed meanwhile must not be lost with them.
+fn prune(app: &App, gone: &[String]) {
+    let _store = STORE.lock().expect("the subscription store lock");
+    match load(&app.cfg.config_dir) {
+        Ok(mut remaining) => {
+            remaining.retain(|s| !gone.contains(&s.id));
+            if let Err(e) = save(&app.cfg.config_dir, &remaining) {
+                eprintln!("push: could not save the subscription list ({e:#})");
+            }
+        }
+        Err(e) => eprintln!("push: could not re-read the subscription list to prune it ({e:#}); the gone ones stay"),
+    }
+    for id in gone {
+        forget_presence(id);
+    }
 }
 
 /// One encrypted POST to one push service: RFC 8291 body, RFC 8292 authorization, a day to
@@ -592,7 +750,12 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
             "/api/push/subscriptions",
             routing::get(list_subscriptions).post(add_subscription),
         )
-        .route("/api/push/subscriptions/{id}", routing::delete(delete_subscription))
+        .route(
+            "/api/push/subscriptions/{id}",
+            routing::delete(delete_subscription).patch(patch_subscription),
+        )
+        .route("/api/push/subscriptions/{id}/test", routing::post(test_subscription))
+        .route("/api/push/presence", routing::post(ping))
 }
 
 #[cfg(test)]
@@ -720,16 +883,16 @@ mod tests {
             assert_eq!(title(event), want);
         }
         assert_eq!(title("anything-else"), "Colonizer");
-        let provider = payload("provider_degraded", "zai is failing 29.4% of its requests", None);
+        let provider = payload("provider_degraded", "failing", None, &Prefs::default());
         assert_eq!(provider["url"], "/");
         assert_eq!(provider["tag"], "provider_degraded");
     }
 
     #[test]
-    fn the_push_payload_carries_four_keys_and_no_session_content() {
+    fn the_push_payload_carries_five_keys_and_no_session_content() {
         let session = colony();
         let text = Event::Question.text(&session.repo, session.issue);
-        let body = serde_json::to_string(&payload("question", &text, Some(&session.id))).unwrap();
+        let body = serde_json::to_string(&payload("question", &text, Some(&session.id), &Prefs::default())).unwrap();
         for sentinel in [
             "SENTINEL-issue-title",
             "SENTINEL-branch",
@@ -743,13 +906,14 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["body", "tag", "title", "url"],
-            "exactly four keys, one shape for the service worker"
+            ["body", "silent", "tag", "title", "url"],
+            "exactly five keys, one shape for the service worker"
         );
         assert_eq!(value["title"], "Colony asks a question");
         assert_eq!(value["body"], "acme/webshop #42 needs an answer");
         assert_eq!(value["url"], "/?colony=abc123");
         assert_eq!(value["tag"], "question-abc123");
+        assert_eq!(value["silent"], false, "a sounding question is the one loud payload");
     }
 
     #[test]
@@ -877,5 +1041,24 @@ mod tests {
         }))
         .unwrap();
         assert!(check(with_extras).is_ok());
+    }
+
+    #[test]
+    fn a_file_from_before_the_prefs_existed_loads_with_defaults() {
+        let old: Subscription = serde_json::from_value(json!({
+            "id": "dev1", "endpoint": "https://fcm.googleapis.com/x", "p256dh": "k", "auth": "a", "label": "Pixel", "created_at": 1_789_000_000,
+        }))
+        .unwrap();
+        assert_eq!(old.prefs, Prefs::default(), "no preferences means the defaults");
+        assert_eq!(old.last_seen, None);
+        // And the full new shape round-trips.
+        let sub: Subscription = serde_json::from_value(json!({
+            "id": "dev1", "endpoint": "https://fcm.googleapis.com/x", "p256dh": "k", "auth": "a", "label": "Pixel", "created_at": 1_789_000_000,
+            "prefs": { "quiet": { "start": 1320, "end": 420 }, "scope": ["acme"] },
+            "last_seen": 1_789_000_000,
+        }))
+        .unwrap();
+        let back: Subscription = serde_json::from_str(&serde_json::to_string(&sub).unwrap()).unwrap();
+        assert_eq!(back, sub);
     }
 }

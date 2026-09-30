@@ -159,8 +159,9 @@ async function showPush(raw) {
     data: { url: payload.url },
     icon: "/icons/icon-192.png",
     badge: "/icons/mark.svg",
-    // The in-app sound channel stays the only thing that beeps (notifications.ts).
-    silent: true,
+    // Silent unless the mothership said otherwise — a question may sound (issue #743); the in-app
+    // channel stays the only other thing that beeps (notifications.ts).
+    silent: payload.silent,
   });
 }
 

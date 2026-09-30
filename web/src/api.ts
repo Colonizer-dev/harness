@@ -92,6 +92,8 @@ import type {
   LoginItemStatus,
   PushSubscriptionSummary,
   PushSubscribeBody,
+  PushSubscriptionPatch,
+  PushPresenceBody,
   RemotePairing,
   RemoteStatus,
   MergeTrainStatus,
@@ -244,6 +246,12 @@ export interface Api {
   subscribePush(body: PushSubscribeBody): Promise<PushSubscriptionSummary>;
   /** DELETE /api/push/subscriptions/{id}: revokes one device. */
   deletePushSubscription(id: string): Promise<void>;
+  /** PATCH /api/push/subscriptions/{id}: renames a device and/or replaces its prefs; 400 on bad prefs, 404 unknown. */
+  updatePushSubscription(id: string, body: PushSubscriptionPatch): Promise<PushSubscriptionSummary>;
+  /** POST /api/push/subscriptions/{id}/test: one push the device should actually show. */
+  testPushSubscription(id: string): Promise<{ sent: boolean }>;
+  /** POST /api/push/presence: the focused-tab report; 404 once the endpoint is no longer subscribed. */
+  pushPresence(body: PushPresenceBody): Promise<void>;
   /** GET /api/remote: the remote-access switch, the tunnel host and the live link (issue #535, docs/protocol.md §6.10). */
   remote(): Promise<RemoteStatus>;
   /** PUT /api/remote: switches the tunnel on or off. 502 when the relay refused the registration — the switch stays off; 500 when the key file is broken and needs a reset. */
@@ -617,6 +625,9 @@ export const httpApi: Api = {
   pushSubscriptions: () => request("/api/push/subscriptions"),
   subscribePush: (body) => post("/api/push/subscriptions", body),
   deletePushSubscription: (id) => del(`/api/push/subscriptions/${enc(id)}`),
+  updatePushSubscription: (id, body) => request(`/api/push/subscriptions/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  testPushSubscription: (id) => post(`/api/push/subscriptions/${enc(id)}/test`),
+  pushPresence: (body) => post("/api/push/presence", body),
   remote: () => request("/api/remote"),
   setRemote: (enabled) => put("/api/remote", { enabled }),
   resetRemote: () => post("/api/remote/reset"),

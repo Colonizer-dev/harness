@@ -37,6 +37,7 @@ import {
   type LiveConnection,
 } from "./liveStream";
 import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
+import { usePushPresence } from "./push";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { useAppUpdate } from "./installApp";
@@ -568,6 +569,11 @@ export function App() {
   }, []);
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
+
+  // The focused-tab report (issue #743): tells the mothership which colony this tab has open and
+  // whether it could show a notification itself, so a push for it can be held back. A no-op where
+  // push cannot work and in mock mode.
+  usePushPresence(api, current?.id ?? null);
 
   const storageAlert = visibleStorageAlert(status?.storage, dismissedStorage);
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;

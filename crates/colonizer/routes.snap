@@ -93,9 +93,12 @@
 /api/providers/{id}                                  PUT    unauth=401    token=owner            activity=settings.save
 /api/providers/{id}/health                           GET    unauth=401    token=owner            activity=-
 /api/push/key                                        GET    unauth=401    token=owner            activity=-
+/api/push/presence                                   POST   unauth=401    token=owner            activity=-
 /api/push/subscriptions                              GET    unauth=401    token=owner            activity=-
 /api/push/subscriptions                              POST   unauth=401    token=owner            activity=-
 /api/push/subscriptions/{id}                         DELETE unauth=401    token=owner            activity=-
+/api/push/subscriptions/{id}                         PATCH  unauth=401    token=owner            activity=-
+/api/push/subscriptions/{id}/test                    POST   unauth=401    token=owner            activity=-
 /api/redteam/runs                                    GET    unauth=401    token=owner            activity=-
 /api/redteam/runs                                    POST   unauth=401    token=owner            activity=redteam.start
 /api/redteam/runs/{id}                               GET    unauth=401    token=owner            activity=-

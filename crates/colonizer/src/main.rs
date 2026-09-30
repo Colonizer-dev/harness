@@ -74,6 +74,7 @@ mod provider_quota;
 mod providers;
 mod publish;
 mod push;
+mod push_prefs;
 mod queue;
 mod rebase;
 mod reclaim;

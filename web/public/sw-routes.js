@@ -18,7 +18,7 @@ self.colonizerSwr = [
 
 // --- Push notifications -----------------------------------------------------------------------
 //
-// The mothership encrypts one small JSON payload per push: {title, body, url, tag}. These two run
+// The mothership encrypts one small JSON payload per push: {title, body, url, tag, silent}. These two run
 // inside the worker but are kept here, pure, so the tests can load them exactly like colonizerRoute.
 
 /**
@@ -39,7 +39,7 @@ self.colonizerSafeUrl = function colonizerSafeUrl(url) {
  * would look exactly like a missed colony. Missing fields fall back one at a time.
  */
 self.colonizerPushPayload = function colonizerPushPayload(raw) {
-  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" };
+  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true };
   let data = null;
   try {
     data = JSON.parse(raw);
@@ -53,6 +53,8 @@ self.colonizerPushPayload = function colonizerPushPayload(raw) {
     body: text(data.body) || fallback.body,
     url: self.colonizerSafeUrl(data.url),
     tag: text(data.tag),
+    // The mothership may let a question's push sound (issue #743); anything it does not say is silent.
+    silent: typeof data.silent === "boolean" ? data.silent : true,
   };
 };
 

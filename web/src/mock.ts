@@ -2,6 +2,7 @@
 import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
+import { defaultPushPrefs, mergePushPrefs } from "./push";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
 import type {
   ActivityEntry,
@@ -1372,10 +1373,22 @@ export const DEMO_MAP: ArchMap = {
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   // Web push (issue #516): one device is already enrolled, so Settings has a row to show and
-  // revoke, and the VAPID key has the shape of a real base64url uncompressed P-256 point.
+  // revoke, and the VAPID key has the shape of a real base64url uncompressed P-256 point. It was
+  // last seen 42 minutes ago and quiet at night, so the per-device prefs editor (#743) has
+  // something to show on open.
   const MOCK_PUSH_KEY = "BB5fVboJOnLBVPursGoy1AZA5DXhRqSdoaBnAGjI8NeR1PuBgnN3Vx6rbF5pvoxqTOhaLHQwxrRLmZgA2pHcg0k";
+  // label_of (crates/colonizer/src/push.rs): trimmed, capped, "This device" when blank — the same
+  // rule for a new subscription and a PATCHed one.
+  const pushLabel = (label: string) => (label.trim() ? label.trim().slice(0, 60) : "This device");
   const pushSubs: PushSubscriptionSummary[] = [
-    { id: "push_iphone01", label: "iPhone · Safari", created_at: Math.floor(Date.now() / 1000) - 86_400 * 2, endpoint_host: "fcm.googleapis.com" },
+    {
+      id: "push_iphone01",
+      label: "iPhone · Safari",
+      created_at: Math.floor(Date.now() / 1000) - 86_400 * 2,
+      endpoint_host: "fcm.googleapis.com",
+      last_seen: Math.floor(Date.now() / 1000) - 60 * 42,
+      prefs: { ...defaultPushPrefs(), scope: ["acme"], quiet: { start: 1320, end: 480 }, questions_break_quiet: true, tz: "Europe/Berlin", utc_offset: 120 },
+    },
   ];
   // Remote access (issue #535): the switch starts off, like a fresh install's. Enabling mints the
   // host and a live tunnel; a reset changes the host, like the server's fresh identity. Install
@@ -2596,8 +2609,8 @@ export function createMockApi(): Api {
     pushSubscriptions: () => later(() => [...pushSubs].sort((a, b) => b.created_at - a.created_at)),
     subscribePush: async (body) => {
       await sleep(300);
-      // The server answers 400 with a message for anything short of a full subscription plus a
-      // label; the endpoint host is all the list ever shows of it.
+      // The server answers 400 with a message for anything short of a full subscription; a blank
+      // label becomes the default, and the endpoint host is all the list ever shows of it.
       const endpoint = (() => {
         try {
           return new URL(body?.endpoint ?? "").host;
@@ -2605,10 +2618,17 @@ export function createMockApi(): Api {
           return null;
         }
       })();
-      if (!body || !endpoint || !body.keys?.p256dh || !body.keys?.auth || !body.label?.trim()) {
-        throw new ApiError("the subscription needs an endpoint, its p256dh and auth keys, and a label", 400);
+      if (!body || !endpoint || !body.keys?.p256dh || !body.keys?.auth) {
+        throw new ApiError("the subscription needs an endpoint and its p256dh and auth keys", 400);
       }
-      const row: PushSubscriptionSummary = { id: `push_${mockId()}`, label: body.label.trim(), created_at: Math.floor(Date.now() / 1000), endpoint_host: endpoint };
+      const row: PushSubscriptionSummary = {
+        id: `push_${mockId()}`,
+        label: pushLabel(body.label),
+        created_at: Math.floor(Date.now() / 1000),
+        endpoint_host: endpoint,
+        last_seen: null,
+        prefs: defaultPushPrefs(),
+      };
       pushSubs.push(row);
       return clone(row);
     },
@@ -2616,6 +2636,50 @@ export function createMockApi(): Api {
       await sleep(200);
       const at = pushSubs.findIndex((row) => row.id === id);
       if (at >= 0) pushSubs.splice(at, 1);
+    },
+    updatePushSubscription: async (id, body) => {
+      await sleep(200);
+      const row = pushSubs.find((candidate) => candidate.id === id);
+      if (!row) throw new ApiError("no such subscription", 404);
+      if (body.prefs !== undefined) {
+        // Mirrors Prefs::validate (crates/colonizer/src/push.rs): the prefs arrive wholesale and
+        // are checked as a whole before any is kept.
+        const { events, scope, quiet, utc_offset, tz } = body.prefs;
+        const bad = (why: string) => new ApiError(why, 400);
+        if (events && Object.keys(events).some((event) => !(event in defaultPushPrefs().events))) throw bad("unknown event in prefs");
+        if (scope && (scope.length > 50 || scope.some((entry) => !entry || entry.length > 200 || /\s/.test(entry) || entry.split("/").length > 2))) {
+          throw bad("a scope entry is an org or an org/repo: 1..=200 characters, no whitespace, one slash at most");
+        }
+        if (
+          quiet &&
+          (!Number.isInteger(quiet.start) || !Number.isInteger(quiet.end) || quiet.start === quiet.end || quiet.start < 0 || quiet.end < 0 || quiet.start > 1439 || quiet.end > 1439)
+        ) {
+          throw bad("quiet hours are two different minutes since midnight, 0..1440");
+        }
+        if (typeof utc_offset === "number" && Math.abs(utc_offset) > 840) throw bad("the utc offset is more than 840 minutes");
+        if (typeof tz === "string" && tz.length > 64) throw bad("the timezone name is more than 64 characters");
+        row.prefs = mergePushPrefs(body.prefs);
+      }
+      if (body.label !== undefined) row.label = pushLabel(body.label);
+      return clone(row);
+    },
+    testPushSubscription: async (id) => {
+      await sleep(250);
+      if (!pushSubs.some((candidate) => candidate.id === id)) throw new ApiError("no such device", 404);
+      return { sent: true };
+    },
+    pushPresence: async (body) => {
+      // The endpoint arrives whole; the list only keeps its host, so match on that like the server.
+      const host = (() => {
+        try {
+          return new URL(body?.endpoint ?? "").host;
+        } catch {
+          return null;
+        }
+      })();
+      const row = pushSubs.find((candidate) => candidate.endpoint_host === host);
+      if (!row) throw new ApiError("this endpoint is not subscribed", 404);
+      row.last_seen = Math.floor(Date.now() / 1000);
     },
     remote: () => later(() => remoteState),
     setRemote: async (enabled) => {

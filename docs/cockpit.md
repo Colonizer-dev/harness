@@ -526,8 +526,27 @@ token only — never this cockpit's own credential.
   settings first.
 
 **Web Push** reaches a device even when Colonizer is closed. Press **Subscribe** under "Push to this
-device" to enrol the current browser. Enrolled devices are listed with the date they joined;
-**Revoke** stops pushes to one. Tapping a notification opens the colony it names.
+device" to enrol the current browser. Each enrolled device is listed with its name (rename it in
+place), when it was last seen, **Send test**, **Prefs** and **Revoke**. Tapping a notification opens
+the colony it names.
+
+Every device has preferences of its own, kept on the mothership and checked before it sends:
+
+- **Events**: Questions, Pull request opened, Needs rebase, Failed and Needs attention are on by
+  default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
+  preferences existed keep working on these defaults — so Provider degraded and the digest now start
+  off for them.
+- **Play a sound for questions.** A question is the only push that may sound; everything else
+  arrives silent. **Answer buttons on questions** and the **Needs-you count on the app icon** can
+  be switched off per device too.
+- **Repositories**: empty hears about every colony; entries name an `org` or an `org/repo`, and only
+  narrow the events tied to a colony.
+- **Quiet hours** hold everything back through the device's own night, with an optional break-through
+  for questions. The time zone is stamped when the preferences are saved from that device, and the
+  cockpit keeps it fresh while it is open.
+- A focused cockpit tab showing a colony holds that device's pushes for the same colony back: the tab
+  reports what it is showing every half minute while focused, and a report older than 75 seconds is
+  ignored.
 
 Notifications only name the repository and issue number. They never include the issue title, the
 question, or an error.
