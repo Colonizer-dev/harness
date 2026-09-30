@@ -370,6 +370,12 @@ impl PhoneStore {
         Some(gone.label)
     }
 
+    /// A paired phone's label, for naming its push subscription.
+    pub(crate) fn label(&self, id: &str) -> Option<String> {
+        let devices = self.devices.read().unwrap_or_else(|p| p.into_inner());
+        devices.iter().find(|d| d.id == id).map(|d| d.label.clone())
+    }
+
     pub(crate) fn view(&self) -> Value {
         let pending = self.book().pending_view(now_secs());
         let devices = self.devices.read().unwrap_or_else(|p| p.into_inner());
@@ -534,10 +540,23 @@ async fn revoke(
     phone: Option<Extension<PhoneDevice>>,
 ) -> Result<StatusCode, crate::AppError> {
     not_a_phone(phone.as_ref())?;
-    match app.phones.revoke(&id) {
+    match forget(&app, &id).await {
         Some(_) => Ok(StatusCode::NO_CONTENT),
         None => Err(client_error(StatusCode::NOT_FOUND, "no such phone")),
     }
+}
+
+/// Revokes a phone and everything that still reaches it: its credential and open sockets
+/// ([`PhoneStore::revoke`]), its push subscriptions (push.rs) and the answer tokens its
+/// notifications carry (answer_tokens.rs, issue #742). Answers the phone's label, `None` for an
+/// unknown phone.
+pub(crate) async fn forget(app: &crate::App, id: &str) -> Option<String> {
+    let label = app.phones.revoke(id)?;
+    if let Err(e) = crate::push::drop_phone(&app.cfg.config_dir, id) {
+        eprintln!("phones: the push subscriptions of {id} could not be dropped ({e:#})");
+    }
+    app.answer_tokens.revoke_phone(id).await;
+    Some(label)
 }
 
 /// The pairing cookie, `<pairing id>.<secret>`.

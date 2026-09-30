@@ -16,6 +16,7 @@
 
 use crate::{
     ApiResult, App, AppError, Shared, client_error,
+    phone::PhoneDevice,
     protocol::Origin,
     push_prefs::{self, MAX_OFFSET, Prefs, Presence, TZ_RULE, forget_presence, tz_ok},
     sessions::{Session, SessionStatus},
@@ -23,7 +24,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
 };
@@ -385,6 +386,11 @@ pub struct Subscription {
     /// When the device last pinged presence, unix seconds; absent until the first ping.
     #[serde(default)]
     pub last_seen: Option<i64>,
+    /// The paired phone (phone.rs, issue #746) that subscribed this device, when a phone credential
+    /// did: revoking that phone drops this subscription with it, and the phone may change this
+    /// subscription's settings and no other device's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
 }
 
 fn subscriptions_file(config_dir: &FsPath) -> PathBuf {
@@ -429,6 +435,8 @@ struct Checked {
     p256dh: String,
     auth: String,
     label: String,
+    /// The paired phone subscribing, if a phone credential made the request; `check` leaves it unset.
+    phone: Option<String>,
 }
 
 /// The stored form of a device label: trimmed, capped, defaulted — the same rule on create and PATCH.
@@ -465,6 +473,7 @@ fn check(new: NewSubscription) -> Result<Checked, String> {
         p256dh: new.keys.p256dh,
         auth: new.keys.auth,
         label,
+        phone: None,
     })
 }
 
@@ -478,6 +487,7 @@ fn upsert(config_dir: &FsPath, checked: Checked) -> Result<Subscription> {
             existing.p256dh = checked.p256dh;
             existing.auth = checked.auth;
             existing.label = checked.label;
+            existing.phone = checked.phone;
             existing.clone()
         }
         None => {
@@ -490,6 +500,7 @@ fn upsert(config_dir: &FsPath, checked: Checked) -> Result<Subscription> {
                 created_at: Utc::now().timestamp(),
                 prefs: Prefs::default(),
                 last_seen: None,
+                phone: checked.phone,
             };
             list.push(entry.clone());
             entry
@@ -513,6 +524,36 @@ fn delete(config_dir: &FsPath, id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Removes every subscription a paired phone made (issue #746): revoking the phone ends its push
+/// channel with its credential, so a lost phone stops receiving notifications — and answer
+/// buttons — at once. Answers how many went.
+pub(crate) fn drop_phone(config_dir: &FsPath, phone: &str) -> Result<usize> {
+    let _store = STORE.lock().expect("the subscription store lock");
+    let mut list = load(config_dir)?;
+    let (gone, kept): (Vec<Subscription>, Vec<Subscription>) = list.drain(..).partition(|s| s.phone.as_deref() == Some(phone));
+    if gone.is_empty() {
+        return Ok(0);
+    }
+    save(config_dir, &kept)?;
+    for subscription in &gone {
+        forget_presence(&subscription.id);
+    }
+    Ok(gone.len())
+}
+
+/// A paired phone manages its own device's subscription and no other: its per-device settings
+/// (issue #743) are its own to change, the owner's desktop's are not. The owner's credentials
+/// reach every subscription.
+fn may_manage(phone: Option<&Extension<PhoneDevice>>, subscription: &Subscription) -> Result<(), AppError> {
+    match phone {
+        Some(Extension(phone)) if subscription.phone.as_deref() != Some(phone.id.as_str()) => Err(client_error(
+            StatusCode::FORBIDDEN,
+            "a phone can change only its own notification settings",
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// What the API says about one subscription — never the endpoint URL (a capability) or the keys.
 fn summary(subscription: &Subscription) -> Value {
     json!({
@@ -522,6 +563,7 @@ fn summary(subscription: &Subscription) -> Value {
         "endpoint_host": endpoint_host(&subscription.endpoint),
         "last_seen": subscription.last_seen,
         "prefs": subscription.prefs,
+        "phone": subscription.phone,
     })
 }
 
@@ -558,14 +600,36 @@ pub async fn list_subscriptions(State(app): State<Shared>) -> ApiResult<Value> {
 }
 
 /// `POST /api/push/subscriptions`: saves a device. The same endpoint again refreshes its keys.
-pub async fn add_subscription(State(app): State<Shared>, Json(body): Json<NewSubscription>) -> ApiResult<Value> {
-    let checked = check(body).map_err(|m| client_error(StatusCode::BAD_REQUEST, &m))?;
+pub async fn add_subscription(
+    State(app): State<Shared>,
+    phone: Option<Extension<PhoneDevice>>,
+    Json(body): Json<NewSubscription>,
+) -> ApiResult<Value> {
+    let unlabelled = body.label.as_deref().is_none_or(|label| label.trim().is_empty());
+    let mut checked = check(body).map_err(|m| client_error(StatusCode::BAD_REQUEST, &m))?;
+    // A paired phone's subscription belongs to that phone (issue #746), and without a label of
+    // its own it takes the phone's name from Settings → Add your phone.
+    if let Some(Extension(phone)) = phone {
+        if unlabelled && let Some(label) = app.phones.label(&phone.id) {
+            checked.label = label_of(Some(&label));
+        }
+        checked.phone = Some(phone.id);
+    }
     let entry = upsert(&app.cfg.config_dir, checked)?;
     Ok(Json(summary(&entry)))
 }
 
 /// `DELETE /api/push/subscriptions/{id}`: forgets one device.
-pub async fn delete_subscription(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode, AppError> {
+pub async fn delete_subscription(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    phone: Option<Extension<PhoneDevice>>,
+) -> Result<StatusCode, AppError> {
+    if phone.is_some()
+        && let Some(subscription) = load(&app.cfg.config_dir)?.iter().find(|s| s.id == id)
+    {
+        may_manage(phone.as_ref(), subscription)?;
+    }
     if delete(&app.cfg.config_dir, &id)? {
         Ok(StatusCode::NO_CONTENT)
     } else {
@@ -584,6 +648,7 @@ pub struct PatchSubscription {
 pub async fn patch_subscription(
     State(app): State<Shared>,
     Path(id): Path<String>,
+    phone: Option<Extension<PhoneDevice>>,
     Json(body): Json<PatchSubscription>,
 ) -> ApiResult<Value> {
     if let Err(m) = body.prefs.as_ref().map(Prefs::validate).transpose() {
@@ -595,6 +660,7 @@ pub async fn patch_subscription(
     let Some(entry) = list.iter_mut().find(|s| s.id == id) else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such subscription"));
     };
+    may_manage(phone.as_ref(), entry)?;
     if let Some(label) = label {
         entry.label = label;
     }
@@ -608,11 +674,16 @@ pub async fn patch_subscription(
 
 /// `POST /api/push/subscriptions/{id}/test`: one test push to that device alone, through the same
 /// encryption and prune-on-Gone as a real event but past every preference — proof the pipe works.
-pub async fn test_subscription(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+pub async fn test_subscription(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    phone: Option<Extension<PhoneDevice>>,
+) -> ApiResult<Value> {
     let list = load(&app.cfg.config_dir)?;
     let Some(subscription) = list.iter().find(|s| s.id == id) else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such subscription"));
     };
+    may_manage(phone.as_ref(), subscription)?;
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
@@ -756,7 +827,15 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
         .iter()
         .any(|subscription| push_prefs::answer_actions(&subscription.prefs, event));
     let answer = match (event, colony) {
-        ("question", Some(id)) if wants_answer => app.answer_tokens.for_push(app, id).await,
+        ("question", Some(id)) if wants_answer => {
+            // The paired phones this token reaches (issue #746): revoking one of them burns it.
+            let phones: Vec<String> = recipients
+                .iter()
+                .filter(|subscription| push_prefs::answer_actions(&subscription.prefs, event))
+                .filter_map(|subscription| subscription.phone.clone())
+                .collect();
+            app.answer_tokens.for_push(app, id, &phones).await
+        }
         _ => None,
     };
     let answer = answer.as_ref().map(|(token, labels)| (token.as_str(), labels.as_slice()));
@@ -1464,6 +1543,7 @@ pub(crate) mod tests {
             created_at: Utc::now().timestamp(),
             prefs: Prefs::default(),
             last_seen: None,
+            phone: None,
         };
         Device {
             subscription,
@@ -1605,6 +1685,7 @@ pub(crate) mod tests {
             created_at: Utc::now().timestamp(),
             prefs: Prefs::default(),
             last_seen: None,
+            phone: None,
         };
         notify_on(&app).await;
         std::fs::create_dir_all(&app.cfg.config_dir).unwrap();

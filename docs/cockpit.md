@@ -501,8 +501,12 @@ single-use code to start, a code confirmed on this machine to finish.
    **Turn on notifications**.
 
 Each paired phone is listed under **Paired phones** with a **Revoke** button that signs out that
-phone alone; you can revoke from the relay link too. A phone runs the whole cockpit, but it cannot
-pair or revoke phones, mint API tokens, or change remote access or the fleet. Failed pairing steps
+phone alone; you can revoke from the relay link too. Revoking also removes the phone's
+notification subscription and disables the answer buttons on the notifications already sent to it.
+Once a phone turns on notifications, it is a device under Notifications like any other, with its
+own settings (named after the phone), and it can change only its own. A phone runs the whole
+cockpit, but it cannot pair or revoke phones, mint API tokens, or change remote access or the
+fleet. Failed pairing steps
 (an unknown invite, a wrong code) are rate limited: after ten in a minute, pairing pauses until the
 minute is over.
 

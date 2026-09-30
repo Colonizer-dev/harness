@@ -56,6 +56,9 @@ struct Entry {
     digest: String,
     labels: Vec<String>,
     expires_at: Instant,
+    /// The paired phones (phone.rs, issue #746) whose notification carries this token: revoking
+    /// any of them burns it, since the token sits in that phone's notification shade.
+    phones: Vec<String>,
 }
 
 /// The answer tokens of the running process, keyed by the token's SHA-256.
@@ -69,7 +72,9 @@ impl Registry {
     /// notification at all: exactly one question, not a multi-select, and one to three labels.
     /// One token per push — every subscribed device shows the same buttons, and the first tap
     /// anywhere wins.
-    pub(crate) async fn for_push(&self, app: &App, session: &str) -> Option<(String, Vec<String>)> {
+    /// `phones` are the paired phones among the receiving devices, recorded so revoking one of them
+    /// burns the token ([`Registry::revoke_phone`]).
+    pub(crate) async fn for_push(&self, app: &App, session: &str, phones: &[String]) -> Option<(String, Vec<String>)> {
         let (question_id, questions, _) = open_question(app, session).await?;
         let [question] = questions.as_slice() else {
             return None;
@@ -101,6 +106,7 @@ impl Registry {
                 digest: question_digest(&questions),
                 labels: labels.clone(),
                 expires_at: Instant::now() + TTL,
+                phones: phones.to_vec(),
             },
         )
         .await;
@@ -140,6 +146,13 @@ impl Registry {
     /// this on `question` and `question_answered`), so no notification of the old one answers.
     pub(crate) async fn revoke(&self, session: &str) {
         self.entries.lock().await.retain(|_, e| e.session != session);
+    }
+
+    /// Drops every token a paired phone was sent (issue #746): its notifications hold them, and a
+    /// revoked phone answers nothing. The other devices' copies of the same push go with it — the
+    /// cockpit's question card still answers.
+    pub(crate) async fn revoke_phone(&self, phone: &str) {
+        self.entries.lock().await.retain(|_, e| !e.phones.iter().any(|p| p == phone));
     }
 
     /// A live token's claims, without consuming it — the checks run against this, then [`Registry::take`]
@@ -247,11 +260,11 @@ pub async fn answer(State(app): State<Shared>, Json(command): Json<Value>) -> Re
     let open = open_question(&app, &entry.session).await;
     let question = match &open {
         Some((open_id, questions, _)) if open_id == &entry.question_id && question_digest(questions) == entry.digest => {
-            questions.first().and_then(|q| q["question"].as_str())
+            questions.first().and_then(|q| q["question"].as_str()).map(|q| (q, questions))
         }
         _ => None,
     };
-    let Some(question) = question else {
+    let Some((question, saw)) = question else {
         app.answer_tokens.take(&body.token).await;
         return Err(client_error(StatusCode::CONFLICT, stale));
     };
@@ -261,7 +274,10 @@ pub async fn answer(State(app): State<Shared>, Json(command): Json<Value>) -> Re
         question_id: entry.question_id.clone(),
         answers: answers.into(),
         response: Value::Null,
-        questions: None,
+        // The content the token was minted for, so the shared path refuses a question that changed
+        // under this id exactly as it refuses an offline outbox's replayed answer (issue #746):
+        // whichever of the two lands first takes the question, and the other is the stale 409.
+        questions: Some(saw.clone()),
     };
     // Then consume, and only then submit: a tap that lost the race stops here as a 401, and the
     // colony takes exactly one answer.
@@ -312,7 +328,7 @@ mod tests {
 
     /// A minted token for `asking`'s question: labels as the push would carry them.
     async fn mint(app: &Shared) -> String {
-        app.answer_tokens.for_push(app, "abc").await.unwrap().0
+        app.answer_tokens.for_push(app, "abc", &[]).await.unwrap().0
     }
 
     /// The real `host_guard` over the two answer routes, driven with `oneshot`.
@@ -344,6 +360,53 @@ mod tests {
     /// A push answer through the guard, as (status, body).
     async fn tap(app: &Shared, body: String) -> (StatusCode, Value) {
         status_and_json(router(app).oneshot(post("/api/push/answer", &body)).await.unwrap()).await
+    }
+
+    /// Revoking a paired phone (issue #746) ends everything that still reaches it: its credential,
+    /// its push subscription — the owner's own device's stays — and the answer token its
+    /// notification carries, which then answers nothing.
+    #[tokio::test]
+    async fn revoking_a_phone_drops_its_push_subscription_and_its_answer_tokens() {
+        let (app, mut rx, root) = asking().await;
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let credential = app.phones.add("iPhone").unwrap();
+        let phone = app.phones.view()["devices"][0]["id"].as_str().unwrap().to_string();
+        let device = |id: &str, phone: Option<&str>| crate::push::Subscription {
+            id: id.into(),
+            endpoint: format!("https://fcm.googleapis.com/fcm/send/{id}"),
+            p256dh: "k".into(),
+            auth: "a".into(),
+            label: id.into(),
+            created_at: 0,
+            prefs: crate::push_prefs::Prefs::default(),
+            last_seen: None,
+            phone: phone.map(str::to_string),
+        };
+        crate::push::save(&app.cfg.config_dir, &[device("desk", None), device("pocket", Some(&phone))]).unwrap();
+        let token = app
+            .answer_tokens
+            .for_push(&app, "abc", std::slice::from_ref(&phone))
+            .await
+            .unwrap()
+            .0;
+
+        assert!(crate::phone::forget(&app, &phone).await.is_some());
+
+        assert!(app.phones.authenticate(&credential).is_none(), "the credential is gone");
+        let bytes = std::fs::read(app.cfg.config_dir.join("push-subscriptions.json")).unwrap();
+        let left: Vec<crate::push::Subscription> = serde_json::from_slice(&bytes).unwrap();
+        let ids: Vec<&str> = left.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["desk"], "only the phone's subscription goes");
+        let (status, body) = tap(&app, format!(r#"{{"token": "{token}", "choice": "Push now"}}"#)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(rx.try_recv().is_err(), "a revoked phone's notification answers nothing");
+        // Revoking again finds no phone, and a token sent to other devices only is untouched.
+        assert!(crate::phone::forget(&app, &phone).await.is_none());
+        let desk_only = mint(&app).await;
+        app.answer_tokens.revoke_phone(&phone).await;
+        let (status, body) = tap(&app, format!(r#"{{"token": "{desk_only}", "choice": "Wait"}}"#)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -452,7 +515,7 @@ mod tests {
         *rt_xyz.open_question.lock().await = app.runtime("abc").await.open_question().await;
         let mut rx_xyz = rt_xyz.commands_rx.lock().await.take().unwrap();
         let for_abc = mint(&app).await;
-        let for_xyz = app.answer_tokens.for_push(&app, "xyz").await.unwrap().0;
+        let for_xyz = app.answer_tokens.for_push(&app, "xyz", &[]).await.unwrap().0;
         assert_ne!(for_abc, for_xyz);
         let (status, _) = tap(&app, format!(r#"{{"token": "{for_xyz}", "choice": "Wait"}}"#)).await;
         assert_eq!(status, StatusCode::OK);
@@ -635,7 +698,7 @@ mod tests {
     #[tokio::test]
     async fn for_push_mints_labels_only_for_answerable_questions() {
         let (app, _rx, root) = asking().await;
-        let (token, labels) = app.answer_tokens.for_push(&app, "abc").await.unwrap();
+        let (token, labels) = app.answer_tokens.for_push(&app, "abc", &[]).await.unwrap();
         assert_eq!(labels, vec!["Push now", "Wait"], "labels, in order");
         assert_eq!(token.len(), 64, "the token is hex, hashed before it is stored");
         let payload = crate::push::question_payload(
@@ -654,7 +717,7 @@ mod tests {
         async fn asked(app: &Shared, questions: Vec<Value>) -> Option<(String, Vec<String>)> {
             let rt = app.runtime("abc").await;
             *rt.open_question.lock().await = Some(("q1".into(), questions, crate::protocol::QuestionRisk::ReadOnly));
-            app.answer_tokens.for_push(app, "abc").await
+            app.answer_tokens.for_push(app, "abc", &[]).await
         }
         assert!(
             asked(

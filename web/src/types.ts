@@ -1879,6 +1879,8 @@ export interface PushSubscriptionSummary {
   /** Unix seconds of the last presence report; null until the first one. */
   last_seen: number | null;
   prefs: PushPrefs;
+  /** The paired phone (issue #746) that subscribed this device, if one did; revoking it drops this subscription. */
+  phone?: string | null;
 }
 
 /** POST /api/push/subscriptions: the browser's `PushSubscription.toJSON()` plus a device label. */
