@@ -72,8 +72,8 @@ const MAX_ANSWER: usize = 1024 * 1024;
 /// The member's drain state, in the data dir.
 const STATE_FILE: &str = "fleet-sync.json";
 /// The owner's per-member ingest root, in its data dir.
-const INGEST_DIR: &str = "fleet-ingest";
-const ROWS_FILE: &str = "sessions.json";
+pub(crate) const INGEST_DIR: &str = "fleet-ingest";
+pub(crate) const ROWS_FILE: &str = "sessions.json";
 /// `{"rows":[` and `]}` around the rows of one batch.
 const BODY_OVERHEAD: usize = 11;
 
@@ -984,7 +984,7 @@ pub async fn consent(State(app): State<Shared>, Json(body): Json<ConsentBody>) -
 // ---------------------------------------------------------------------------
 
 /// Serializes the read-modify-write of a member's `sessions.json`.
-static INGEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static INGEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The member a request's fleet token belongs to, or the 403 a non-member gets.
 async fn ingest_member(
@@ -1131,6 +1131,9 @@ pub async fn post_rows(
         util::write_atomic(&file, &bytes)
             .await
             .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
+        // The member's name, kept beside its rows, so the owner's history view still names a
+        // member after it is removed (`fleet_history.rs`).
+        crate::fleet_history::note_member(&app, &root).await;
     }
     Ok(Json(answer))
 }

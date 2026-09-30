@@ -34,6 +34,9 @@ import type {
   FleetPending,
   FleetSyncPreview,
   FleetSyncStatus,
+  FleetHistoryEntry,
+  FleetHistoryPage,
+  FleetHistoryTotals,
   FleetRole,
   FindingRecord,
   HarnessStatus,
@@ -1425,6 +1428,32 @@ export function createMockApi(): Api {
   ];
   let fleetMembership: FleetMembership | null = null;
   let fleetJoining: FleetJoining | null = null;
+  // Issue #762: what the members synced, as the owner's history view reads it. One entry comes
+  // from a member that was since removed, so the demo shows the "removed" marker too.
+  const fleetHistoryRow = (n: number, member: [string, string, boolean], repo: string, status: "merged" | "pr_opened" | "failed", cost: number | null): FleetHistoryEntry => {
+    const host = member[1];
+    const id = `${host}:session-${n}`;
+    return {
+      key: `${member[0]}/${id}`, member_id: member[0], member_name: member[1], member_removed: member[2], id, received_at: ago(n * 700),
+      record: {
+        id, origin_host: host, original_id: `session-${n}`, repo, org: repo.split("/")[0], issue: 100 + n, issue_title: `Synced colony ${n}`, status,
+        branch: `colonizer/issue-${100 + n}`, pr_url: status === "failed" ? null : `https://github.com/${repo}/pull/${n}`,
+        merged_at: status === "merged" ? ago(n * 720) : null, summary: `Finished on ${host}.`, error: status === "failed" ? "tests failed" : null,
+        cost_usd: cost, agent: "claude", created_at: ago(n * 760), updated_at: ago(n * 720),
+      },
+      payloads: [{ name: "events.jsonl", sha256: "0".repeat(63) + String(n % 10), bytes: 2048 * n }],
+    };
+  };
+  const fleetHistoryRows: FleetHistoryEntry[] = [
+    fleetHistoryRow(1, ["mem_seed1", "studio-2", false], "acme/web", "merged", 1.25),
+    fleetHistoryRow(2, ["mem_seed1", "studio-2", false], "acme/api", "pr_opened", 0.8),
+    fleetHistoryRow(3, ["mem_gone", "old-laptop", true], "acme/web", "merged", null),
+    fleetHistoryRow(4, ["mem_seed1", "studio-2", false], "acme/web", "failed", 0.3),
+  ];
+  const fleetTotals = (rows: FleetHistoryEntry[]): FleetHistoryTotals => {
+    const costs = rows.map((r) => r.record.cost_usd).filter((c): c is number => c != null);
+    return { colonies: rows.length, merged: rows.filter((r) => r.record.status === "merged").length, cost_usd: costs.length ? costs.reduce((a, b) => a + b, 0) : null };
+  };
   const fleetRole = (): FleetRole => (fleetMembership ? "member" : fleetMembers.length > 0 ? "owner" : "none");
   const mockInviteCode = () => Array.from({ length: 16 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join(""); // 80 bits
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
@@ -2840,6 +2869,45 @@ export function createMockApi(): Api {
         last_synced_at: enabled ? now() : null,
         next_attempt_at: null,
       };
+    },
+    fleetHistory: async (q = {}): Promise<FleetHistoryPage> => {
+      await sleep(200);
+      const day = (v: string | undefined, end: boolean) => (v ? Date.parse(v.length === 10 ? `${v}T${end ? "23:59:59.999" : "00:00:00"}Z` : v) : null);
+      const since = day(q.since, false);
+      const until = day(q.until, true);
+      const hits = fleetHistoryRows.filter((r) => {
+        const at = Date.parse(r.record.updated_at);
+        return (!q.member || r.member_id === q.member) && (!q.repo || r.record.repo === q.repo) && (!q.status || r.record.status === q.status) &&
+          (since == null || at >= since) && (until == null || at <= until);
+      });
+      const start = q.cursor ? hits.findIndex((r) => r.key === q.cursor) + 1 : 0;
+      if (q.cursor && start === 0) throw new ApiError("`cursor` names no entry in this list", 400);
+      const end = Math.min(start + (q.limit ?? 20), hits.length);
+      const members = [...new Map(fleetHistoryRows.map((r) => [r.member_id, { id: r.member_id, name: r.member_name, removed: r.member_removed }])).values()];
+      return clone({
+        colonies: hits.slice(start, end),
+        next_cursor: end < hits.length ? hits[end - 1].key : null,
+        stats: {
+          total: fleetTotals(hits),
+          members: members.map((m) => ({ member_id: m.id, name: m.name, removed: m.removed, ...fleetTotals(hits.filter((r) => r.member_id === m.id)) })).filter((m) => m.colonies > 0),
+          repos: [...new Set(hits.map((r) => r.record.repo))].sort().map((repo) => ({ repo, ...fleetTotals(hits.filter((r) => r.record.repo === repo)) })),
+        },
+        members,
+        repos: [...new Set(fleetHistoryRows.map((r) => r.record.repo))].sort(),
+        retention_days: 90,
+      });
+    },
+    fleetHistoryEntry: async (member, rowId) => {
+      await sleep(150);
+      const row = fleetHistoryRows.find((r) => r.member_id === member && r.id === rowId);
+      if (!row) throw new ApiError("no such fleet history entry", 404);
+      return clone({ ...row, logs: row.payloads.map((p) => ({ ...p, omitted: false, stored: true })) });
+    },
+    fleetHistoryLog: async (member, rowId, name) => {
+      await sleep(150);
+      const row = fleetHistoryRows.find((r) => r.member_id === member && r.id === rowId);
+      if (!row || !row.payloads.some((p) => p.name === name)) throw new ApiError("this colony has no such stored log", 404);
+      return `{"type":"status","status":"running"}\n{"type":"status","status":"${row.record.status}"}\n`;
     },
     setUsage: async (enabled) => {
       await sleep(250);

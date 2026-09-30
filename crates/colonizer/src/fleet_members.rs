@@ -276,6 +276,13 @@ impl FleetStore {
         state.members.iter().find(|m| m.token_id == token_id).map(|m| m.id.clone())
     }
 
+    /// On an owner, every current member as `(id, name)`: the history view's names and its
+    /// "removed" test (`fleet_history.rs`) — a member directory with no current member was removed.
+    pub async fn member_names(&self) -> Vec<(String, String)> {
+        let state = self.state.read().await;
+        state.members.iter().map(|m| (m.id.clone(), m.name.clone())).collect()
+    }
+
     /// Whether this member's operator has consented to the history push; `None` when this
     /// mothership belongs to no fleet.
     pub async fn history_sync(&self) -> Option<bool> {

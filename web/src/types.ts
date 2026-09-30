@@ -509,6 +509,92 @@ export interface FleetSyncStatus {
   next_attempt_at: string | null;
 }
 
+// Fleet history (issue #762, the owner's view): what members pushed with history sync on, read
+// back from <data_dir>/fleet-ingest/ by GET /api/fleet/history… (docs/fleet.md). Owner-only.
+
+/** A synced colony's record: the allowlist projection the member sent (`ImportedSession`). */
+export interface FleetHistoryRecord {
+  /** `<origin_host>:<original_id>`. */
+  id: string;
+  origin_host: string;
+  original_id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  branch: string;
+  base?: string | null;
+  pr_url: string | null;
+  pr_opened_at?: string | null;
+  merged_at: string | null;
+  summary: string | null;
+  error: string | null;
+  cost_usd: number | null;
+  model_tier?: string | null;
+  agent: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One log a synced colony carries; `omitted` was too large to travel. */
+export interface FleetHistoryPayload {
+  name: string;
+  sha256: string;
+  bytes: number;
+  omitted?: boolean;
+}
+
+/** One synced colony in GET /api/fleet/history. `key` (`<member_id>/<row id>`) is its cursor. */
+export interface FleetHistoryEntry {
+  key: string;
+  member_id: string;
+  member_name: string;
+  /** The member was removed from the fleet; its history stays. */
+  member_removed: boolean;
+  id: string;
+  received_at: string;
+  record: FleetHistoryRecord;
+  payloads: FleetHistoryPayload[];
+}
+
+/** Totals over the filtered history; `cost_usd` is null when no row carried a cost. */
+export interface FleetHistoryTotals {
+  colonies: number;
+  merged: number;
+  cost_usd: number | null;
+}
+
+/** GET /api/fleet/history's filters and page; every field optional. Dates are YYYY-MM-DD or RFC 3339, on the colony's finish. */
+export interface FleetHistoryQuery {
+  member?: string;
+  repo?: string;
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** GET /api/fleet/history: one page, newest finish first, the totals over every filtered row, and the filter options. */
+export interface FleetHistoryPage {
+  colonies: FleetHistoryEntry[];
+  next_cursor: string | null;
+  stats: {
+    total: FleetHistoryTotals;
+    members: (FleetHistoryTotals & { member_id: string; name: string; removed: boolean })[];
+    repos: (FleetHistoryTotals & { repo: string })[];
+  };
+  members: { id: string; name: string; removed: boolean }[];
+  repos: string[];
+  retention_days: number;
+}
+
+/** GET /api/fleet/history/{member}/{row_id}: the entry, and each log with whether the owner holds it. */
+export interface FleetHistoryDetail extends FleetHistoryEntry {
+  logs: (FleetHistoryPayload & { omitted: boolean; stored: boolean })[];
+}
+
 /** GET /api/fleet `joining`: a join this mothership started and has not finished; both screens show `confirm_code` until the owner decides. */
 export interface FleetJoining {
   owner_url: string;

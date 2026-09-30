@@ -5,6 +5,7 @@ import { cloneElement, useEffect, useState, type FormEvent, type ReactElement, t
 
 import { errorMessage, useApi, useToast } from "../context";
 import { formatBytes } from "../cockpit/host";
+import { FleetHistory } from "./FleetHistory";
 import type { CreatedFleetInvite, FleetJoinStatus, FleetMemberHealth, FleetMemberHealthState, FleetPending, FleetRole, FleetState, FleetSyncPreview } from "../types";
 import { Pane } from "./SettingsDialog";
 import { Badge, Button, Spinner, cx, inputClass, timeAgo, type Tone } from "./ui";
@@ -396,8 +397,13 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                     </div>
                   )}
                 </Section>
+
+                <FleetHistory />
               </>
             )}
+
+            {/* Every member removed: the history they synced is still the owner's to read. */}
+            {role === "none" && <FleetHistory hideWhenEmpty />}
 
             {role === "none" &&
               (fleet.joining ? (

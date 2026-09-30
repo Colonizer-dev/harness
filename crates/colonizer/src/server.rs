@@ -226,6 +226,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
+        .merge(crate::fleet_history::routes())
         .merge(crate::fleet_members::routes())
         .merge(crate::fleet_sync::routes())
         .merge(crate::gateway::routes())

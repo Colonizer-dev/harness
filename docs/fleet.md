@@ -156,6 +156,31 @@ shows where it stands.
 Background drains stay stopped after a 401 or a 403; a manual `fleet sync` tries again. Leaving
 and re-joining starts the drain state over, since a new membership is a new owner's view.
 
+### Reading it on the owner
+
+Settings → Fleet on the owner has a **Fleet history** section: every member's synced colonies,
+newest finish first, each marked "finished on <member>". Filters narrow it by member, repository,
+status and finish date, and the totals at the top — colonies, merged, and cost where the rows
+carry one — are counted per member and per repository over whatever the filters leave. Picking a
+colony opens its record (repository, issue, branch, pull request, cost, summary, error) and its
+logs, each read from the payload the member sent. The cockpit's fleet panel lists hosts rather than
+colonies, so the history lives here. The routes are `GET /api/fleet/history`,
+`GET /api/fleet/history/{member}/{row_id}` and `…/logs/{name}`
+([protocol.md](protocol.md#fleet-history-on-the-owner-issue-762)); they are the owner's alone — a
+scoped token, a member's `fleet` token included, reads **403**.
+
+- **Removed members.** Removing a member keeps what it synced. Its colonies stay listed, marked
+  "(removed)", under the name it had: the owner writes it to `member.json` beside the rows. When
+  the last member is removed the section still shows while any history remains.
+- **Redaction.** Logs are served exactly as the member sent them. Redacting secrets before they
+  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)); the
+  owner runs no redaction pass of its own on this history.
+- **Retention.** The owner keeps a synced row for `COLONIZER_FLEET_INGEST_RETENTION_DAYS` days after
+  it arrives (default `90`; `0` keeps everything). The reclaim tick, every five minutes, drops older
+  rows and then every payload no remaining row references that is itself older than the window —
+  so a log uploaded just before its row is never taken. A member directory left empty is removed.
+  The member keeps its own copy either way, and an unchanged row is not sent again.
+
 ## Member health
 
 Settings → Fleet shows each member with one badge: **OK**, a grey **Not checked yet** until the

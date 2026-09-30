@@ -287,6 +287,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/fleet/leave` | A member ends its own membership; the token is revoked and every local colony and setting stays |
 | `GET /api/fleet/sync` · `POST /api/fleet/sync` | A member's history push (Fleet history push, below): where it stands — `{member, consent, enabled, status, detail, acknowledged, retired, last_drain_at, last_synced_at, next_attempt_at}` — and drain now, answering the drain report; **409** when this mothership has not joined a fleet, or its operator has not consented |
 | `GET /api/fleet/sync/preview` · `POST /api/fleet/sync/consent` | What the history push would send — `{owner_url, colonies, payloads, payload_bytes, omitted_payloads, row_bytes, total_bytes, pending_colonies, pending_bytes, includes, excludes}`, sending nothing — and the operator's consent for this membership (`{enabled}` → the status); both **409** when not a member |
+| `GET /api/fleet/history` · `GET /api/fleet/history/{member}/{row_id}` · `…/logs/{name}` | The owner's view of what members synced (Fleet history on the owner, below): the filtered, paged list with totals per member and repository, one colony's record and its logs, and one log streamed; owner-only |
 | `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | The owner's ingest for a member's history push, on the member's `fleet` token: one log payload stored by its hash (**204**), then a batch of colony rows upserted by id (`{rows}` → `{accepted, rejected}`); **403** for a token that belongs to no member |
 | `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
@@ -1235,6 +1236,31 @@ all and not yet acknowledged) from the same collection the drain sends, and
 `POST /api/fleet/sync/consent` `{"enabled": true|false}` records the answer on the membership in
 `<config_dir>/fleet.json`. A new join starts with it off; until it is on, `GET /api/fleet/sync`
 reads `status: "consent_required"` and `POST /api/fleet/sync` answers **409**.
+
+### Fleet history on the owner (issue #762)
+
+What members pushed, read back on the owner ([fleet.md](fleet.md#reading-it-on-the-owner)). All
+three routes are owner-only: a scoped token — a member's `fleet` token included — answers **403**.
+
+- `GET /api/fleet/history?member=&repo=&status=&since=&until=&limit=&cursor=` — every member's
+  synced colonies, newest `record.updated_at` first. `member` is a member id, `repo` the record's
+  `owner/name`, `status` its status (`merged`, `pr_opened`, …); `since`/`until` bound the finish
+  time, each RFC 3339 or `YYYY-MM-DD` (`until`'s day is inclusive). Pagination follows
+  `GET /api/sessions`: `limit` 1–100 (default 20), `cursor` the last entry's `key`, `next_cursor`
+  null at the end; a malformed filter or a cursor naming no entry is **400**. The answer:
+  `{colonies: [{key, member_id, member_name, member_removed, id, received_at, record, payloads}],
+  next_cursor, stats: {total, members: [{member_id, name, removed, …}], repos: [{repo, …}]},
+  members: [{id, name, removed}], repos: [..], retention_days}`, where each total is
+  `{colonies, merged, cost_usd}` over every filtered row (`cost_usd` null when no row carries a
+  cost), and `key` is `<member_id>/<row id>`. `member_removed` marks a member the owner removed.
+- `GET /api/fleet/history/{member}/{row_id}` — one entry as above plus
+  `logs: [{name, sha256, bytes, omitted, stored}]`; **404** for an unknown member or row.
+- `GET /api/fleet/history/{member}/{row_id}/logs/{name}` — one stored log, streamed as
+  `text/plain` exactly as the member sent it (no owner-side redaction); **404** when the row names
+  no such log, it was omitted, or the owner does not hold it.
+
+Rows are pruned `COLONIZER_FLEET_INGEST_RETENTION_DAYS` (default 90, `0` = never) after
+`received_at` by the reclaim tick, together with the payloads only they referenced.
 
 ### Member health (issue #764)
 

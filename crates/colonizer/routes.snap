@@ -35,6 +35,9 @@
 /api/editor/settings                                 PUT    unauth=401    token=owner            activity=-
 /api/findings                                        GET    unauth=401    token=owner            activity=-
 /api/fleet                                           GET    unauth=401    token=owner            activity=-
+/api/fleet/history                                   GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}                 GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}/logs/{name}     GET    unauth=401    token=owner            activity=-
 /api/fleet/invites                                   POST   unauth=401    token=owner            activity=-
 /api/fleet/invites/{id}                              DELETE unauth=401    token=owner            activity=-
 /api/fleet/join                                      DELETE unauth=401    token=owner            activity=-
