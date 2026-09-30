@@ -171,6 +171,9 @@
 /api/status                                          GET    unauth=public token=read             activity=-
 /api/storage                                         GET    unauth=401    token=owner            activity=-
 /api/stream                                          GET    unauth=401    token=owner            activity=-
+/api/supply-chain-loop                               GET    unauth=401    token=read             activity=-
+/api/supply-chain-loop                               PUT    unauth=401    token=owner            activity=loop.update
+/api/supply-chain-loop/run                           POST   unauth=401    token=owner            activity=loop.run_now
 /api/telemetry                                       GET    unauth=401    token=owner            activity=-
 /api/telemetry                                       PUT    unauth=401    token=owner            activity=settings.save
 /api/telemetry/usage                                 GET    unauth=401    token=owner            activity=-

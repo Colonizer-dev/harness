@@ -95,6 +95,9 @@ import type {
   RemotePairing,
   RemoteStatus,
   MergeTrainStatus,
+  SupplyChainLoop,
+  SupplyChainReport,
+  SupplyChainSettings,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -460,6 +463,12 @@ export interface Api {
   loopRuns(id: string): Promise<Session[]>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
+  /** GET /api/supply-chain-loop: the built-in dependencies and supply-chain loop. */
+  supplyChainLoop(): Promise<SupplyChainLoop>;
+  /** PUT /api/supply-chain-loop: replaces its settings (off, with an empty allowlist, by default). */
+  saveSupplyChainLoop(settings: SupplyChainSettings): Promise<SupplyChainLoop>;
+  /** POST /api/supply-chain-loop/run: a run now, or a dry run that writes nothing. 409 while one runs. */
+  runSupplyChainLoop(body: { dry_run: boolean; repo?: string }): Promise<SupplyChainReport>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
   createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
   updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
@@ -763,6 +772,9 @@ export const httpApi: Api = {
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
   mergeTrain: () => request("/api/merge-train"),
+  supplyChainLoop: () => request("/api/supply-chain-loop"),
+  saveSupplyChainLoop: (settings) => put("/api/supply-chain-loop", settings),
+  runSupplyChainLoop: (body) => post("/api/supply-chain-loop/run", body),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
   updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),

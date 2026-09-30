@@ -12,6 +12,7 @@ import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } f
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { Page } from "./Page";
+import { SupplyChainLoopCard } from "./SupplyChainLoop";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -120,6 +121,8 @@ export function LoopsView({
             New loop
           </Button>
         </div>
+
+        <SupplyChainLoopCard onOpenColony={onOpenColony} />
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (

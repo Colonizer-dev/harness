@@ -382,6 +382,11 @@ and how the last one went. **New loop** starts from a template or from scratch. 
 lists every colony it launched. **Run now** starts one immediately. Deleting a loop keeps its past
 colonies.
 
+At the top sits the built-in **Dependencies & supply chain** loop: off until you switch it on and
+opt an org or repository in. Its card shows the scanners installed on the host, **Dry run** and
+**Run now**, its settings (allowlist, cadence, caps, cooldown, threshold), and the last report:
+findings by severity, what was dispatched, what was skipped and why, and anything that needs you.
+
 Details are in [loops.md](loops.md).
 
 ## Red team

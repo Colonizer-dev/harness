@@ -4,6 +4,8 @@ import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
 import type {
+  SupplyChainLoop,
+  SupplyChainReport,
   ActivityEntry,
   ApiTokenMeta,
   ArchiveEntry,
@@ -2217,6 +2219,47 @@ export function createMockApi(): Api {
     { session: "demo1234", title: "Free-shipping threshold shows the cart subtotal", state: "rejected", reason: "does not reproduce on the staging sandbox", ts: ago(60 * 24 * 2) },
   ];
 
+  // The built-in supply-chain loop: off, with an empty allowlist, and one sample report so the
+  // demo has something to show.
+  const supplySample: SupplyChainReport = {
+    id: "scr_demo01",
+    started_at: ago(60 * 5),
+    finished_at: ago(60 * 5 - 2),
+    dry_run: true,
+    trigger: "manual",
+    blocked: false,
+    repos: [
+      {
+        repo: "acme/webshop",
+        sha: "4f2c9a1",
+        scanners: ["npm audit", "built-in OSV lookup"],
+        findings: [
+          { ecosystem: "npm", package: "lodash.template", version: null, kind: "vulnerability", severity: "critical", id: "GHSA-35jh-r3h4-6jhm", title: "Command Injection in lodash.template (affects <=4.5.0)", fixed: null, fix_available: false, major_bump: false, url: "https://github.com/advisories/GHSA-35jh-r3h4-6jhm", lockfile: "package-lock.json", scanner: "npm audit" },
+          { ecosystem: "npm", package: "vite", version: null, kind: "vulnerability", severity: "high", id: "GHSA-xxxx-yyyy-zzzz", title: "vite server.fs.deny bypass (affects >=5.0.0 <5.4.12)", fixed: "5.4.12", fix_available: true, major_bump: false, url: null, lockfile: "package-lock.json", scanner: "npm audit" },
+          { ecosystem: "npm", package: "semver", version: "7.5.1", kind: "vulnerability", severity: "moderate", id: "GHSA-c2qf-rxjj-qqgw", title: "semver vulnerable to Regular Expression Denial of Service", fixed: "7.5.2", fix_available: true, major_bump: false, url: null, lockfile: "package-lock.json", scanner: "npm audit" },
+        ],
+        notes: ["no host scanner for Cargo.lock: checked with the built-in OSV lookup; install cargo-audit (cargo install --locked cargo-audit) or osv-scanner for a fuller check"],
+        missing: [],
+        error: null,
+      },
+    ],
+    counts: { critical: 1, high: 1, moderate: 1 },
+    dispatched: [{ repo: "acme/webshop", ecosystem: "npm", session: null, title: "Supply chain: fix 2 npm findings (high at worst)", findings: 2, worst: "high" }],
+    skipped: [{ repo: "acme/webshop", ecosystem: null, reason: "not dispatched: 1 with no fixed version", findings: 1 }],
+    attention: [{ repo: "acme/webshop", ecosystem: "npm", package: "lodash.template", version: null, id: "GHSA-35jh-r3h4-6jhm", severity: "critical", reason: "critical GHSA-35jh-r3h4-6jhm: no fixed version is published, so no colony can bump past it; replace the package, patch it, or accept the risk" }],
+    note: null,
+  };
+  let supplyLoop: SupplyChainLoop = {
+    name: "Dependencies & supply chain",
+    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 6, minute: 17 }, max_per_repo: 1, max_per_run: 3, cooldown_hours: 12, min_severity: "moderate", outdated: false, builtin: true, autopilot: true },
+    next_run_at: null,
+    running: false,
+    scanners: { "cargo-audit": false, "cargo-deny": false, "npm audit": true, "osv-scanner": false },
+    blocked: false,
+    last_report: supplySample,
+    history: [],
+    attention: [],
+  };
   const redSchedules: RedTeamSchedule[] = [];
   const loopList: Loop[] = [];
   const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
@@ -3789,6 +3832,22 @@ export function createMockApi(): Api {
     loops: () => later(() => loopList.map(clone)),
     // The mock has no train driving anything; an empty answer keeps the cockpit block hidden.
     mergeTrain: () => later(() => ({ repos: [] })),
+    supplyChainLoop: () => later(() => clone(supplyLoop)),
+    saveSupplyChainLoop: async (settings) => {
+      await sleep(150);
+      if (settings.cadence.every === "interval" && settings.cadence.minutes < 60) throw new ApiError("the supply-chain loop runs at most hourly", 400);
+      const active = settings.enabled && settings.allow.length > 0;
+      supplyLoop = { ...supplyLoop, settings: clone(settings), next_run_at: active ? new Date(Date.now() + 6 * 3_600_000).toISOString() : null };
+      return clone(supplyLoop);
+    },
+    runSupplyChainLoop: async (body) => {
+      await sleep(400);
+      const report: SupplyChainReport = { ...supplySample, id: `scr_${Math.random().toString(16).slice(2, 8)}`, dry_run: body.dry_run, trigger: "manual", started_at: now(), finished_at: now() };
+      // The mock never starts colonies: a real run says what it would have started, like a dry run.
+      report.dispatched = report.dispatched.map((d) => ({ ...d, session: null }));
+      if (!body.dry_run) supplyLoop = { ...supplyLoop, last_report: report, attention: report.attention };
+      return clone(report);
+    },
     createLoop: async (body) => {
       await sleep(200);
       const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
