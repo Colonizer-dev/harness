@@ -5,6 +5,8 @@
 // mothership is not running, shows the mothership's web pushes and opens the colony they name when
 // tapped, and never touches writes, sign-in or any other /api call (see sw-routes.js).
 importScripts("/sw-routes.js");
+// The offline outbox (issue #746): answers and messages queued while a colony's socket is down.
+importScripts("/sw-outbox.js");
 
 // Bumped whenever the routing or the caches change: the activate step drops every other cache.
 const VERSION = "v4";

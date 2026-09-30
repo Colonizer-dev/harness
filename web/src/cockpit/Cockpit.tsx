@@ -4,13 +4,14 @@
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
 import { CodeView } from "./CodeView";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "../components/ui";
-import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewFromUrl, type SharedIssue } from "../launchUrl";
+import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewFromUrl, welcomeFromUrl, type SharedIssue } from "../launchUrl";
+import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { colonyFromUrl } from "../push";
@@ -36,6 +37,7 @@ import { NestView } from "./NestView";
 import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
 import { Page } from "./Page";
+import { PhoneWelcomeSheet } from "../components/PhoneWelcomeSheet";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -178,6 +180,9 @@ export function Cockpit({
   // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
   // `colonizer:open` message from the service worker, opened once the session list has it.
   const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
+  // A phone that just signed in through a scanned code lands on `?welcome=phone` (issue #746),
+  // which offers the install-and-notify sheet once.
+  const [welcome, setWelcome] = useState<"phone" | null>(() => welcomeFromUrl(window.location.href));
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -301,6 +306,10 @@ export function Cockpit({
   // the view on screen. Without this the open colony would carry two sockets.
   const streamFor = view === "home" && inspector?.kind === "colony" ? inspector.session.id : null;
   const { stream, state } = useSessionStream(api, streamFor);
+  // The outbox's view of what the worker is holding, so an answer queued while the socket was
+  // down can be reported when the mothership finally refuses it.
+  const outbox = useOutbox();
+  const queuedAnswers = useRef(new Set<string>());
   const settlers = useMemo(() => Object.values(buildThread(state).subagents), [state]);
   // The inspector answers the colony's question from this same stream, so the pane clears itself
   // the moment `question_answered` arrives — nothing here is cached from render to render.
@@ -308,22 +317,41 @@ export function Cockpit({
   const questionActions = useMemo<QuestionActions>(() => {
     const live = inspector?.kind === "colony" ? isLive(inspector.session.status) : false;
     const connected = state.connection === "open";
+    // Offline is no longer a wall (issue #746): with the worker's outbox behind us the answer can
+    // queue and send on reconnect, so the card stays open — and owns up to the queueing.
+    const queueing = !connected && live && canQueue();
     return {
-      answer: (questionId, answers, response) => {
+      answer: (questionId, answers, response, questions) => {
         try {
-          const sent = stream?.send({ type: "answer", question_id: questionId, answers, response }) ?? false;
-          if (!sent) toast("Not connected to the colony — try again in a moment.", "error");
-          return sent;
+          const outcome = sendOrQueue(stream, { type: "answer", question_id: questionId, answers, response }, questions);
+          if (outcome.status === "failed") toast("Not connected to the colony — try again in a moment.", "error");
+          if (outcome.status === "queued") {
+            queuedAnswers.current.add(outcome.id);
+            toast("Answer queued — it sends when you're back online.");
+          }
+          return outcome.status !== "failed";
         } catch (error) {
           toast(errorMessage(error), "error");
           return false;
         }
       },
       submitting: state.submitting,
-      canAnswer: connected && live,
-      blockedBy: !live ? "ended" : !connected ? "disconnected" : null,
+      canAnswer: (connected || queueing) && live,
+      willQueue: queueing,
+      blockedBy: !live ? "ended" : !connected && !queueing ? "disconnected" : null,
     };
   }, [stream, inspector, state.submitting, state.connection, toast]);
+
+  // A queued answer the mothership refused — a fresher answer won (409), or the colony is gone —
+  // must not vanish without a word.
+  useEffect(() => {
+    for (const drop of outbox.dropped) {
+      if (queuedAnswers.current.has(drop.id)) {
+        queuedAnswers.current.delete(drop.id);
+        toast(droppedText("answer", drop.status), "error");
+      }
+    }
+  }, [outbox.dropped, toast]);
 
   // The inspector points at a colony by identity, so a poll that replaces the list must not leave it
   // holding a stale copy — or pointing at a colony that has since been forgotten.
@@ -773,6 +801,9 @@ export function Cockpit({
       </div>
       </div>
       <MobileTabBar view={view} onNavigate={navigate} inboxCount={needAnywhere} />
+      {/* The phone sign-in welcome (issue #746): offered once, gone on dismiss or on reload —
+          the ?welcome= that opened it is stripped at boot. */}
+      {welcome && <PhoneWelcomeSheet onClose={() => setWelcome(null)} />}
     </div>
     </ColonizeProvider>
   );

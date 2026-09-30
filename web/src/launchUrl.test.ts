@@ -3,7 +3,7 @@
 // them. The iOS guess is pinned here too, so the Home-Screen sheet can only ever show on iOS.
 import { describe, expect, it } from "vitest";
 
-import { holdingSession, isIosSafari, sharedIssueFromUrl, sessionWithPull, stripLaunchParams, viewFromUrl } from "./launchUrl";
+import { holdingSession, isIosSafari, sharedIssueFromUrl, sessionWithPull, stripLaunchParams, viewFromUrl, welcomeFromUrl } from "./launchUrl";
 import type { Session } from "./types";
 
 const iPhoneUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
@@ -146,8 +146,21 @@ describe("stripLaunchParams", () => {
     expect(stripLaunchParams("/?share_url=https%3A%2F%2Fgithub.com%2Fa%2Fb%2Fissues%2F1&mock=1")).toBe("/?mock=1");
     expect(stripLaunchParams("/?view=inbox&colony=demo1234&mock=1")).toBe("/?colony=demo1234&mock=1");
     expect(stripLaunchParams("/?share_title=Hi&share_text=Read&share_url=https%3A%2F%2Fgithub.com%2Fa%2Fb%2Fpull%2F1")).toBe("/");
+    // A paired phone's welcome (issue #746) must not survive into a reloadable address bar.
+    expect(stripLaunchParams("/?welcome=phone&mock=1")).toBe("/?mock=1");
     expect(stripLaunchParams("/")).toBe("/");
     expect(stripLaunchParams("http://[bad")).toBe("http://[bad");
+  });
+});
+
+describe("welcomeFromUrl", () => {
+  it("reads the phone sign-in landing, and nothing else", () => {
+    expect(welcomeFromUrl("/?welcome=phone")).toBe("phone");
+    expect(welcomeFromUrl("https://cockpit.test/?mock=1&welcome=phone")).toBe("phone");
+    expect(welcomeFromUrl("/?welcome=")).toBeNull();
+    expect(welcomeFromUrl("/?welcome=someday")).toBeNull();
+    expect(welcomeFromUrl("/")).toBeNull();
+    expect(welcomeFromUrl("not a url")).toBeNull();
   });
 });
 

@@ -70,6 +70,7 @@ import { SetupSection } from "./SetupSection";
 import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { PhonePane } from "./PhonePane";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -79,7 +80,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -379,6 +380,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "phone",
+          label: "Add your phone",
+          hint: "Pair your phone with a code, and revoke it here",
+        },
+        {
           id: "tokens",
           label: "API tokens",
           hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
@@ -548,6 +554,7 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "phone") pane = <PhonePane back={back} />;
   else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "fleet") pane = <FleetPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;

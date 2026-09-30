@@ -8,12 +8,18 @@ import { useEnter } from "./motion";
 import { Button, Spinner, cx } from "./ui";
 
 export interface QuestionActions {
-  answer(questionId: string, answers: Answers, response: string | null): boolean;
+  /// `questions` is what the operator read: a queued answer carries it, so the mothership can
+  /// refuse the replay if the question changed meanwhile (issue #746).
+  answer(questionId: string, answers: Answers, response: string | null, questions?: readonly Question[]): boolean;
   submitting: Record<string, true>;
   canAnswer: boolean;
   /// Why answering is off, when it is: the card must not say "reconnecting" to
   /// someone whose colony has finished.
   blockedBy: "disconnected" | "ended" | null;
+  /// True when a submit would be queued for the service worker rather than sent
+  /// now (issue #746): the card then owns up to that instead of pretending the
+  /// socket is live.
+  willQueue?: boolean;
 }
 
 export const QuestionActionsContext = createContext<QuestionActions>({
@@ -47,7 +53,7 @@ export function AskUserCard({ toolCallId, args, result }: ToolCallMessagePartPro
 }
 
 function OpenCard({ questionId, questions }: { questionId: string; questions: Question[] }) {
-  const { answer, submitting, canAnswer, blockedBy } = useContext(QuestionActionsContext);
+  const { answer, submitting, canAnswer, blockedBy, willQueue } = useContext(QuestionActionsContext);
   const [drafts, setDrafts] = useState<Draft[]>(() => questions.map(() => emptyDraft));
   const isSubmitting = Boolean(submitting[questionId]);
   const complete = questions.length > 0 && questions.every((_, i) => draftComplete(drafts[i] ?? emptyDraft));
@@ -68,7 +74,7 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
       if (q.multi_select) answers[q.question] = other ? [...draft.selected, other] : draft.selected;
       else answers[q.question] = other || draft.selected[0];
     });
-    answer(questionId, answers, null);
+    answer(questionId, answers, null, questions);
   };
 
   return (
@@ -111,15 +117,18 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
             ? "This colony has finished, so the agent cannot be answered."
             : blockedBy === "disconnected"
               ? "Reconnecting to the colony…"
-              : isSubmitting
-              ? "Sending your answer to the agent…"
-              : complete
-                ? "Ready to send."
-                  : `Answer ${remaining === 1 ? "1 more question" : `${remaining} more questions`} to continue.`}
+              : willQueue
+                ? "The colony is offline — your answer will queue and send when you're back."
+                : isSubmitting
+                  ? "Sending your answer to the agent…"
+                  : complete
+                    ? "Ready to send."
+                    : `Answer ${remaining === 1 ? "1 more question" : `${remaining} more questions`} to continue.`}
         </p>
         <Button type="submit" variant="primary" disabled={!complete || isSubmitting || !canAnswer}>
           {isSubmitting ? <Spinner /> : <IconCheck size={15} />}
-          Submit answer{questions.length > 1 ? "s" : ""}
+          {willQueue ? "Queue answer" : "Submit answer"}
+          {questions.length > 1 ? "s" : ""}
         </Button>
       </div>
     </form>

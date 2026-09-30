@@ -350,6 +350,8 @@ impl Registry {
         let at = tokens.iter().position(|t| t.id == id)?;
         let removed = tokens.remove(at);
         self.save(&tokens).await;
+        // Its open sockets and streams end now, not at its next request (issue #746).
+        crate::auth::Revocation::fire(&format!("token:{id}"));
         Some(removed.meta())
     }
 
@@ -484,7 +486,9 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
+        // colony drive, like answering.
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },

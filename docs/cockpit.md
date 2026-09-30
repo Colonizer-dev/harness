@@ -27,6 +27,9 @@ year) and then removes `?token=` from the address bar, so the token does not sta
 A browser without the cookie gets a "Sign in to your cockpit" page that tells you to run
 `colonizer open`.
 
+A phone pairs through [Add your phone](#add-your-phone) instead, and gets a sign-in of its own:
+the API token never appears on it or in any URL.
+
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file
@@ -448,7 +451,7 @@ what would be removed before you apply it.
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
 - **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
+  access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
   ([usage-data.md](usage-data.md)), Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
@@ -479,6 +482,53 @@ The link exposes this cockpit, including colony terminals, and nothing else on t
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
 [protocol.md](protocol.md#610-remote-access-tunnel) for the routes, and
 [remote-access-review.md](remote-access-review.md) for the security review.
+
+### Add your phone
+
+**Settings → Add your phone.**
+
+Pairs your phone with this cockpit, the way [remote access](#remote-access) pairs its owner: a
+single-use code to start, a code confirmed on this machine to finish.
+
+1. **Show a code to scan** shows a QR code of `<origin>/?pair=<invite>`. The invite is single use,
+   lives five minutes, and is kept only as a hash in memory. It is a ticket to ask, not a
+   credential: the API token appears in no QR code and no URL.
+2. The phone opens it and shows a six-digit code. Opening the invite spends it and ties the pairing
+   to that one browser, so a second phone that scans the same QR code gets the locked page.
+3. Type the phone's code into the pane on this machine and press **Confirm**. Confirming works
+   only in the cockpit on this machine, never through the remote-access link or from a phone.
+4. The phone gets a sign-in of its own and lands on a welcome sheet offering **Install** and
+   **Turn on notifications**.
+
+Each paired phone is listed under **Paired phones** with a **Revoke** button that signs out that
+phone alone; you can revoke from the relay link too. A phone runs the whole cockpit, but it cannot
+pair or revoke phones, mint API tokens, or change remote access or the fleet. Failed pairing steps
+(an unknown invite, a wrong code) are rate limited: after ten in a minute, pairing pauses until the
+minute is over.
+
+The QR code names the best address your phone can reach, in this order: the remote-access link
+(`https://<install>.my.colonizer.dev`) when remote access is on and connected, then this machine's
+tailnet address, then its LAN address. Install from the remote-access link when you can:
+
+- The installed app belongs to the address it was installed from. Pairing through a different
+  address later means installing the app again.
+- A tailnet or LAN address is plain HTTP: the pairing crosses that network unencrypted, it works
+  only on that network, and browsers offer the app install and notifications only over HTTPS. The
+  pane warns when that is the best address it has.
+- When no address is reachable, the pane says why and how to fix it: bind past loopback
+  (`COLONIZER_BIND=0.0.0.0:7878`) and add the address to `COLONIZER_ALLOWED_HOSTS` (a wildcard bind
+  does not widen the Host allowlist), or turn on remote access.
+- Revoking takes effect at once: the phone's open colony, terminal and dashboard connections close,
+  its requests in flight fail, and it cannot connect again. Revoking a scoped API token does the
+  same for that token.
+
+**Offline answers and messages.** With a colony's live connection down, an answer or a message is
+queued in the service worker instead of lost, and the chat shows it as queued. It is sent when the
+mothership is reachable again: through Background Sync where the browser offers it, otherwise the
+next time the cockpit opens, comes back online or returns to the front. Each item is delivered
+once. A queued answer carries the question it answers, so if the question was answered from
+elsewhere, or changed while you were offline, the mothership refuses it and the cockpit says so.
+Anything still queued after a day is dropped unsent.
 
 ### API tokens
 
@@ -637,8 +687,9 @@ above the phone's home indicator.
 ⌘K and ⌘B are keyboard shortcuts and do nothing on a phone without a keyboard. Use the Colonize
 button on Overview instead. The Colonize pane opens full width over the tab bar.
 
-To reach the cockpit from a phone, turn on [remote access](#remote-access). To be told when a colony
-needs you, subscribe the phone to [Web Push](#notifications-and-web-push).
+To use the cockpit on your phone, pair it with [Add your phone](#add-your-phone); turn on
+[remote access](#remote-access) first to reach it from anywhere. To be told when a colony needs
+you, subscribe the phone to [Web Push](#notifications-and-web-push).
 
 ## Keyboard shortcuts
 

@@ -97,6 +97,8 @@ import type {
   RemotePairing,
   RemoteStatus,
   MergeTrainStatus,
+  PhoneInvite,
+  Phones,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -266,6 +268,16 @@ export interface Api {
   rejectRemotePairing(code: string): Promise<{ github_login: string }>;
   /** DELETE /api/remote/owner: unbinds the owner and clears pending codes; the owner's relay sessions stop working. Local-only. */
   unbindRemoteOwner(): Promise<void>;
+  /** GET /api/phone (issue #746): the paired phones and the ones waiting for their code to be confirmed. */
+  phones(): Promise<Phones>;
+  /** POST /api/phone/invites: a single-use, five-minute invite for a phone to scan, and the origins it might open it on. Never a credential. */
+  phoneInvite(): Promise<PhoneInvite>;
+  /** POST /api/phone/pairings/confirm: approve the phone showing this code. Local-only; 404 for a wrong, expired or used code. */
+  confirmPhone(code: string): Promise<{ label: string }>;
+  /** POST /api/phone/pairings/{id}/reject: that phone is never approved. Local-only. */
+  rejectPhone(id: string): Promise<void>;
+  /** DELETE /api/phone/devices/{id}: signs that one phone out. */
+  revokePhone(id: string): Promise<void>;
   /** GET /api/tokens: every scoped API token's metadata, oldest first (docs/cli.md, "Scoped API tokens"). */
   tokens(): Promise<ApiTokenMeta[]>;
   /** POST /api/tokens: mints one. The plaintext in the answer is shown once and never again; 400 with the reason on bad input. */
@@ -637,6 +649,11 @@ export const httpApi: Api = {
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
   rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),
   unbindRemoteOwner: () => del("/api/remote/owner"),
+  phones: () => request("/api/phone"),
+  phoneInvite: () => post("/api/phone/invites"),
+  confirmPhone: (code) => post("/api/phone/pairings/confirm", { code }),
+  rejectPhone: (id) => post(`/api/phone/pairings/${enc(id)}/reject`),
+  revokePhone: (id) => del(`/api/phone/devices/${enc(id)}`),
   tokens: () => request("/api/tokens"),
   createToken: (body) => post("/api/tokens", body),
   revokeToken: (id) => del(`/api/tokens/${enc(id)}`),

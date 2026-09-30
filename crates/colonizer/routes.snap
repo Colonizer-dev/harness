@@ -85,6 +85,12 @@
 /api/orgs/{org}/packages/dependencies                GET    unauth=401    token=owner            activity=-
 /api/orgs/{org}/packages/published                   GET    unauth=401    token=owner            activity=-
 /api/orgs/{org}/packages/supply-chain                GET    unauth=401    token=owner            activity=-
+/api/phone                                           GET    unauth=401    token=owner            activity=-
+/api/phone/claim                                     POST   unauth=404    token=owner            activity=-
+/api/phone/devices/{id}                              DELETE unauth=401    token=owner            activity=-
+/api/phone/invites                                   POST   unauth=401    token=owner            activity=-
+/api/phone/pairings/confirm                          POST   unauth=401    token=owner            activity=-
+/api/phone/pairings/{id}/reject                      POST   unauth=401    token=owner            activity=-
 /api/plugins                                         GET    unauth=401    token=owner            activity=-
 /api/plugins/graft                                   GET    unauth=401    token=owner            activity=-
 /api/plugins/graft/download                          POST   unauth=401    token=owner            activity=-
@@ -161,6 +167,7 @@
 /api/sessions/{id}/files/archive                     GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/files/{name}/content              GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/messages                          POST   unauth=401    token=session>=operate activity=-
 /api/sessions/{id}/publish                           POST   unauth=401    token=owner            activity=colony.publish
 /api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/resume                            POST   unauth=401    token=session>=operate activity=colony.resume

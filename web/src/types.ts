@@ -1938,6 +1938,53 @@ export interface RemotePairing {
 }
 
 // ---------------------------------------------------------------------------
+// Add your phone (issue #746): /api/phone — a single-use invite a phone scans,
+// a code confirmed in the local cockpit, and a revocable credential per phone
+// ---------------------------------------------------------------------------
+
+/** One place the cockpit is reachable from, in the mothership's preference order (relay → tailnet → lan). */
+export interface PhoneOrigin {
+  kind: "relay" | "tailnet" | "lan";
+  /** `scheme://host[:port]`, no trailing slash — the base the invite link is built on. */
+  url: string;
+  /** Whether the mothership thinks a phone can reach this origin right now. */
+  reachable: boolean;
+  /** False for a plain-http origin: the phone can pair, but not install the app or get notifications. */
+  secure: boolean;
+  /** Why the origin is (un)usable, when the mothership has something to say about it. */
+  note: string | null;
+}
+
+/** POST /api/phone/invites: a single-use invite — a ticket to ask, never a credential — and where a phone might open it. */
+export interface PhoneInvite {
+  code: string;
+  /** RFC3339: when the invite stops working. */
+  expires_at: string;
+  ttl_secs: number;
+  origins: PhoneOrigin[];
+}
+
+/** A paired phone, with its own credential; revoking it signs that phone out alone. */
+export interface PairedPhone {
+  id: string;
+  label: string;
+  paired_at: string;
+}
+
+/** A phone that opened an invite and shows a code, waiting for it to be typed here. */
+export interface PendingPhone {
+  id: string;
+  label: string;
+  expires_at: string;
+}
+
+/** GET /api/phone. */
+export interface Phones {
+  devices: PairedPhone[];
+  pending: PendingPhone[];
+}
+
+// ---------------------------------------------------------------------------
 // Scoped API tokens (issue #646): GET/POST /api/tokens, DELETE /api/tokens/{id}
 // (docs/cli.md, "Scoped API tokens")
 // ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@ import type {
   PushSubscriptionSummary,
   RemotePairing,
   RemoteStatus,
+  Phones,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1397,6 +1398,7 @@ export function createMockApi(): Api {
   // and unbinding (or a reset) clears the owner (#599).
   const remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
   let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
+  const phoneState: Phones = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
   let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
   const remotePairingState: RemotePairing = {
     owner: null,
@@ -2736,6 +2738,41 @@ export function createMockApi(): Api {
       remotePairingState.owner = null;
       remotePairingState.pending = [];
       logActivity({ kind: "remote.unpair", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+    },
+    // Add your phone (issue #746): a fresh invite each call; the relay origin tracks the remote
+    // switch, and the lan origin is plain http so the insecure-origin warning has a real case. The
+    // mock has no phone to scan with, so a minted invite shows up as one phone waiting for a code
+    // ("123 456"), which confirming turns into a paired phone.
+    phones: () => later(() => clone(phoneState)),
+    phoneInvite: async () => {
+      await sleep(250);
+      phoneState.pending = [{ id: `ph_${mockId()}`, label: "iPhone", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
+      return clone({
+        code: `${mockId()}${mockId()}`,
+        expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        ttl_secs: 300,
+        origins: [
+          remoteState.enabled
+            ? { kind: "relay" as const, url: `https://${remoteHost}`, reachable: true, secure: true, note: null }
+            : { kind: "lan" as const, url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" },
+        ],
+      });
+    },
+    confirmPhone: async (code) => {
+      await sleep(250);
+      const waiting = phoneState.pending[0];
+      if (!waiting || code.replace(/\D/g, "") !== "123456") throw new ApiError("no phone is waiting with that code: it is wrong, expired or already used", 404);
+      phoneState.pending = [];
+      phoneState.devices.push({ id: `dev_${mockId()}`, label: waiting.label, paired_at: now() });
+      return { label: waiting.label };
+    },
+    rejectPhone: async (id) => {
+      await sleep(150);
+      phoneState.pending = phoneState.pending.filter((p) => p.id !== id);
+    },
+    revokePhone: async (id) => {
+      await sleep(150);
+      phoneState.devices = phoneState.devices.filter((d) => d.id !== id);
     },
     tokens: () => later(() => apiTokens.map(clone)),
     createToken: async (body) => {

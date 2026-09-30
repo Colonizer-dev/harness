@@ -269,8 +269,10 @@ Every `/api/` route needs the install's API token (`Authorization: Bearer`) or t
 sign-in cookie; a cookie write also needs a same-origin `Origin`. Without either the answer is
 **401**, except `GET /api/status`, which answers a reduced body (below), and `POST /api/push/answer`,
 which authenticates by the one-time token in its body (below). A request naming a Host
-that is not allowed is **403** whatever it carries. `crates/colonizer/routes.snap` is the complete
-route table: each method and path with what an unauthenticated request gets, which scoped-token
+that is not allowed is **403** whatever it carries. A paired phone's cookie (Add your phone, below)
+authenticates like the owner's, except that its writes to `/api/phone`, `/api/tokens`,
+`/api/remote` and `/api/fleet` are **403**. `crates/colonizer/routes.snap` is the complete route
+table: each method and path with what an unauthenticated request gets, which scoped-token
 class reaches it (Scoped API tokens, below) and the activity-log kind it records (§6.9). Routes
 not named in a scoped-token class are owner only.
 
@@ -330,8 +332,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, verify?, allow_duplicate?, allow_epic?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, claude_account?, after?, stack?, serialize?, origin?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6); `verify` overrides its `verify` setting (§6.3, Done-verification); `claude_account` runs the colony on that Claude account (Connections, below; **400** for a malformed id); `after` names a parent colony: the new one queues until the parent's pull request merges, or with `stack: true` branches from the parent's branch once it is pushed and targets its pull request at it (**404** for an unknown parent, **409** for one in another repository); `serialize: true` queues behind a live colony in the same repository whose changed files overlap instead of starting beside it; `origin` labels who launched it (below)). **400** also when the org's workspace is switched off, the repository name is invalid, or the agent module or Claude login is missing. Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set and skips the GitHub check too; without it a remote conflict (below) is a **409**. **409** when the issue is an epic (sub-issues, an `epic` label, or a title marking one), listing its open sub-issues; `allow_epic: true` starts one anyway (*Epics*, below) |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
-| `POST /api/sessions/{id}/answer` | `{question_id, answers, response?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads. A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
+| `POST /api/sessions/{id}/answer` | `{question_id, answers, response?, questions?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads; `questions`, when given, is the question content the answerer saw, and must equal the open question's or the answer is the stale **409** (runners number questions afresh after a reboot, so an id alone can name a different question). A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore, or one whose send into a colony that stopped between the checks and the send fails, is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
 | `POST /api/sessions/{id}/seen` | Someone is looking at the colony: clears `unseen_failure` (below), and when it actually cleared something — the cockpit only calls this for a `failed` colony nobody has opened yet, with the page in front — pushes the silent `{"type":"resolved","colony","badge"}` to every push subscription, so each device closes that colony's notification and lowers its badge ([cockpit.md](cockpit.md#notifications-and-web-push)). Answered **204** either way; **404** for an unknown colony. Read scope for API tokens — looking is not driving |
+| `POST /api/sessions/{id}/messages` | `{id, text}` — the events socket's `user_message` command over HTTP, the offline outbox's route (§5). It shares the socket's one user-message path, so the same colony-state check, the same trim and 100,000-byte cap, and a scoped token's text marked external input — but it answers instead of dropping: `200 {"id": "u-<id>", "duplicate": false}`, `duplicate: true` when that client `id` was already delivered to this colony, so a repeat sent after a lost answer is answered, not delivered twice (`id` is 1–64 of `A–Z a–z 0–9 _ -`, **400** otherwise). **400** also for an empty or over-cap `text`, which the socket drops silently; **404** for an unknown colony; **409** when the colony is not live and cannot take a message, or when the send into a colony that stopped between that check and the send fails — nothing was delivered and the `id` stays free, so the retry is not absorbed as a duplicate |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|automerge\|blocked\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
@@ -360,6 +363,38 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/activity` | The activity log (§6.9): colony outcomes recorded at the transition and what a person changed through the API, newest first, paged with `before`/`limit` and filtered by `kind`, `actor`, `org`, `repo` and `q`. **400** naming an unknown kind or actor, or a `limit` outside 1–500 |
 | `GET /api/tokens` · `POST /api/tokens` · `DELETE /api/tokens/{id}` | Scoped API tokens (below), owner only: the metadata list, a mint, and a revoke. `POST` takes `{name, scope, orgs?, repos?, max_concurrent?, budget_usd_per_day?}` (**400** naming what is wrong) and answers `{token, …meta}` — the `col_…` plaintext comes back exactly once; the registry (`<config_dir>/api-tokens.json`) keeps only its SHA-256 |
 | `GET /api/tokens/self` | Who is asking: `{owner: false, name, scope, orgs, repos}` for a scoped token, `{owner: true, scope: "owner", orgs: [], repos: []}` for the install token or the browser cookie |
+| `GET /api/phone` · `POST /api/phone/invites` · `POST /api/phone/pairings/confirm` · `POST /api/phone/pairings/{id}/reject` · `DELETE /api/phone/devices/{id}` · `POST /api/phone/claim` | Add your phone ([cockpit.md](cockpit.md#add-your-phone)), below |
+
+### Add your phone
+
+A phone pairs in four steps and ends up with a credential of its own (`crates/colonizer/src/phone.rs`):
+
+1. `POST /api/phone/invites` (owner, not a phone) answers `{code, expires_at, ttl_secs, origins}`:
+   an invite of 256 random bits, single use, live 300 s, kept as a SHA-256 in memory (**429** with
+   four open). `origins` is where a phone could reach this mothership, best first, each
+   `{kind: relay|tailnet|lan, url, reachable, secure, note}`: `https://<install>.my.colonizer.dev`
+   while remote access is on (reachable while connected), the tailnet address, the LAN address. A
+   plain-HTTP origin is reachable only when the listener answers on it **and** the Host allowlist
+   accepts it; `note` names the fix or the no-HTTPS caveat.
+2. An unauthenticated `GET /?pair=<invite>` spends the invite and opens a pairing bound to that
+   browser: the answer is a page showing a six-digit confirm code, with a `colonizer_pair` cookie
+   (`HttpOnly`, `SameSite=Strict`, `Path=/api/phone/claim`) holding the pairing's id and secret. An
+   unknown, spent or expired invite gets the locked page. No credential is set.
+3. `POST /api/phone/pairings/confirm {"code"}` approves the pairing showing that code: local only
+   (**403** through the remote tunnel) and never from a phone. **404** for a code no pairing shows.
+   `POST /api/phone/pairings/{id}/reject` turns one down.
+4. `POST /api/phone/claim`, admitted without a token, is the pairing page's poll: **202** while
+   unconfirmed, **404** once expired, rejected or unknown, and **200** once confirmed, setting the
+   phone's own `colonizer_token` cookie (`cph_…`, stored as a SHA-256 in `<config_dir>/phones.json`)
+   and consuming the pairing.
+
+Failed steps (an invite that opens nothing, a claim that finds nothing, a wrong confirm code)
+share one limit: after 10 in 60 s every step answers **429** until the window slides.
+`GET /api/phone` lists `{devices: [{id, label, paired_at}], pending: [{id, label, expires_at}]}`,
+never a code or a hash. `DELETE /api/phone/devices/{id}` revokes one phone (owner, not a phone).
+Revoking a phone, or a scoped API token (`DELETE /api/tokens/{id}`), takes effect at once: every
+request that credential has in flight answers **401**, a streamed body it is reading ends, and its
+open WebSockets (events, terminal, `/api/stream`) close.
 
 ### Scoped API tokens
 
@@ -377,7 +412,7 @@ routed together).
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
   `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -1486,8 +1521,8 @@ not to print, log, commit or persist them. The harness log records which names a
   on a phone) and these views: overview (the nest), launch, a colony view (status, branch, cost, host
   disk, the actions Create PR, Stop, Resume, Clean up; chat beside a terminal), Code, Chat, Loops,
   Secrets, Host, Inbox and History, plus memory and settings. The Settings dialog has Setup,
-  Connections, Model providers, Runtime, Live map, Remote access, Updates, Usage data, Notifications
-  and Desktop, and the module settings.
+  Connections, Model providers, Runtime, Live map, Remote access, Add your phone, Updates, Usage
+  data, Notifications and Desktop, and the module settings.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.
@@ -1500,6 +1535,16 @@ not to print, log, commit or persist them. The harness log records which names a
   with a text field; a single Submit button that sends `answer`. Once `question_answered` arrives the
   card collapses to a summary of the chosen answers.
 - The composer sends `user_message`; a Stop button sends `interrupt` while the agent is working.
+- Offline: with a colony's events socket down, an answer or a `user_message` the composer cannot
+  send is queued in the service worker (`web/public/sw-outbox.js`, IndexedDB) and sent one at a
+  time, in order, through the two HTTP twins above — Background Sync (tag `colonizer-outbox`) where
+  the browser offers it, otherwise on the next open, `online` or return to the tab. A queued answer
+  carries `questions`, the question content the operator read: the answer route refuses it (**409**)
+  unless the open question still has that id and that content, and the first delivery closes the
+  question, so a replay is delivered at most once and never to a changed question. A queued message
+  carries its item id as the dedupe `id`. A final refusal — a 4xx other than an auth 401/403 — drops
+  the item with a note; a network error, a 5xx or an auth 401/403 keeps it; an item queued over a day
+  ago is dropped unsent.
 - Light and dark themes via `prefers-color-scheme`; usable at 400 px width.
 
 ---

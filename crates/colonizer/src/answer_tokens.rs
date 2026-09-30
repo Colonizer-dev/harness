@@ -261,6 +261,7 @@ pub async fn answer(State(app): State<Shared>, Json(command): Json<Value>) -> Re
         question_id: entry.question_id.clone(),
         answers: answers.into(),
         response: Value::Null,
+        questions: None,
     };
     // Then consume, and only then submit: a tap that lost the race stops here as a 401, and the
     // colony takes exactly one answer.

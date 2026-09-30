@@ -139,6 +139,14 @@ impl Remote {
         self.saved.read().await.enabled
     }
 
+    /// The tunnel host (`<install_id>.my.colonizer.dev`) while remote access is on, and whether the
+    /// link is connected right now — the `https://` origin a phone is offered first (phone.rs).
+    pub(crate) async fn link(&self) -> Option<(String, bool)> {
+        let saved = self.saved.read().await;
+        let host = saved.host.clone().filter(|_| saved.enabled)?;
+        Some((host, self.status.read().await.connected))
+    }
+
     async fn saved(&self) -> Saved {
         self.saved.read().await.clone()
     }
@@ -488,7 +496,7 @@ pub struct CodeRequest {
 /// link at all, so it happens only on this machine: were it reachable through the tunnel, anyone
 /// who got a request through could pair themselves. The marker is an extension only the tunnel
 /// client sets (see [`Tunnelled`]), never a header a peer could send.
-fn local_only(tunnelled: Option<&Extension<Tunnelled>>, what: &str) -> Result<(), AppError> {
+pub(crate) fn local_only(tunnelled: Option<&Extension<Tunnelled>>, what: &str) -> Result<(), AppError> {
     match tunnelled {
         Some(_) => Err(client_error(
             StatusCode::FORBIDDEN,
