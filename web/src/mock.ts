@@ -1538,6 +1538,8 @@ export function createMockApi(): Api {
   const stuck = new MockSession({
     ...baseSession("stuck2468", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
     status: "failed",
+    // A failure nobody has opened yet (issue #744): the badge counts it until the colony is opened.
+    unseen_failure: true,
     mesh: null,
     parent: "stall5678",
     base: "colonizer/issue-43-stall5678",
@@ -2977,6 +2979,11 @@ export function createMockApi(): Api {
       logActivity({ kind: "outcome.stopped", actor: "you", via: "cockpit", org: s.session.org, repo: s.session.repo, issue: s.session.issue, colony: s.session.id, title: s.session.issue_title });
       s.log("microVM stopped and removed; the worktree was kept");
       return { ...clone(s.session), result: "stopped" };
+    },
+    // The colony was looked at (issue #744): it leaves the badge, like on the server.
+    seenSession: async (id) => {
+      await sleep(120);
+      find(id).patch({ unseen_failure: false });
     },
     deleteSession: async (id, opts) => {
       const s = find(id);

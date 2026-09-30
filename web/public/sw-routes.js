@@ -37,7 +37,10 @@ self.colonizerSafeUrl = function colonizerSafeUrl(url) {
 /**
  * The push payload to show. Anything malformed — empty, truncated by the push service, not JSON,
  * an array — degrades to a generic "Colonizer" notification instead of throwing: a silent drop
- * would look exactly like a missed colony. Missing fields fall back one at a time.
+ * would look exactly like a missed colony. Missing fields fall back one at a time. `colony` is the
+ * session id a colony notification names, `badge` the mothership's attention count behind the push
+ * (null when absent or not a non-negative integer), and `resolved` marks the silent push that asks
+ * every device to drop one colony's notification (issue #744).
  *
  * A question push also carries `answer: {token, choices}` — the labels the notification itself may
  * answer with. That block is parsed just as defensively: a non-object drops entirely, a bad field
@@ -46,7 +49,7 @@ self.colonizerSafeUrl = function colonizerSafeUrl(url) {
  * `{token: "", choices: []}`, which the actions below turn into a plain "Open to answer".
  */
 self.colonizerPushPayload = function colonizerPushPayload(raw) {
-  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true };
+  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true, colony: null, badge: null, resolved: false };
   let data = null;
   try {
     data = JSON.parse(raw);
@@ -64,6 +67,8 @@ self.colonizerPushPayload = function colonizerPushPayload(raw) {
     if (!token || choices.length < 1 || choices.length > 3) return { token: "", choices: [] };
     return { token, choices };
   };
+  const badge = typeof data.badge === "number" && Number.isInteger(data.badge) && data.badge >= 0 ? data.badge : null;
+  const colony = text(data.colony);
   return {
     title: text(data.title) || fallback.title,
     body: text(data.body) || fallback.body,
@@ -72,6 +77,9 @@ self.colonizerPushPayload = function colonizerPushPayload(raw) {
     // The mothership may let a question's push sound (issue #743); anything it does not say is silent.
     silent: typeof data.silent === "boolean" ? data.silent : true,
     answer: answerOf(data.answer),
+    colony: colony || null,
+    badge,
+    resolved: data.type === "resolved",
   };
 };
 
@@ -90,6 +98,16 @@ self.colonizerNotificationActions = function colonizerNotificationActions(answer
   if (supportsReply && actions.length < room) actions.push({ action: "other", type: "text", title: "Other…", placeholder: "Your answer" });
   if (actions.length < room) actions.push({ action: "open", title: "Open" });
   return actions;
+};
+
+/**
+ * The one summary notification standing in for several colony notifications at once (issue #744):
+ * shown from two colonies waiting, closed again at one or none — where it would only repeat what a
+ * single colony notification already says. null when there is nothing to show.
+ */
+self.colonizerSummary = function colonizerSummary(count) {
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 2) return null;
+  return { title: `${count} colonies need you`, tag: "summary", url: "/" };
 };
 
 self.colonizerRoute = function colonizerRoute(url, method, mode, origin) {

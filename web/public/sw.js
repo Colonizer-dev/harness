@@ -148,28 +148,82 @@ self.addEventListener("fetch", (event) => {
   // "network": not handled, so the browser does exactly what it would without a worker.
 });
 
-// --- Web push (issue #516) --------------------------------------------------------------------
+// --- Web push (issue #516, #744) ---------------------------------------------------------------
+
+/** Closes every notification carrying one tag, where the browser offers the filtered lookup. */
+async function closeTagged(tag) {
+  if (!self.registration.getNotifications) return;
+  for (const notification of await self.registration.getNotifications({ tag })) notification.close();
+}
+
+/** The app badge to the attention count the mothership pushes, cleared at zero. Absent on a browser
+ *  without the Badging API, and any refusal is swallowed — the notifications are the record. */
+async function applyBadge(count) {
+  if (count == null) return;
+  try {
+    if (count > 0) {
+      if (self.navigator.setAppBadge) await self.navigator.setAppBadge(count);
+    } else if (self.navigator.clearAppBadge) {
+      await self.navigator.clearAppBadge();
+    }
+  } catch {
+    /* no badge here; the colony notifications still show */
+  }
+}
+
+/** The one summary standing in for several colony notifications, replaced in place and closed again
+ *  once a single colony notification says it all. */
+async function applySummary(count) {
+  if (count == null) return;
+  try {
+    const summary = self.colonizerSummary(count);
+    if (summary) {
+      await self.registration.showNotification(summary.title, {
+        tag: summary.tag,
+        data: { url: summary.url },
+        icon: "/icons/icon-192.png",
+        badge: "/icons/mark.svg",
+        silent: true,
+      });
+    } else {
+      await closeTagged("summary");
+    }
+  } catch {
+    /* the summary is decoration; the colony notifications carry the news */
+  }
+}
+
+/** The silent "seen elsewhere" push (issue #744): drop that colony's notification here too, then
+ *  follow the badge and the summary down. */
+async function resolveColony(colony, badge) {
+  if (colony) await closeTagged(`colony-${colony}`);
+  await applyBadge(badge);
+  await applySummary(badge);
+}
 
 /** Shows one push, whatever arrived: a payload the mothership malformed still shows generically. */
 async function showPush(raw) {
   const payload = self.colonizerPushPayload(raw);
+  if (payload.resolved) return resolveColony(payload.colony, payload.badge);
   // A question push answers from the notification itself (issue #742): one button per choice where
   // the platform shows buttons at all — Notification.maxActions is 0 or undefined on iOS, Safari
   // and Firefox, so there the tap opens the cockpit — and free text only where the platform can
   // deliver it, which NotificationEvent.reply is the one honest signal for.
-  const maxActions = self.Notification.maxActions || 0;
+  const maxActions = (self.Notification && self.Notification.maxActions) || 0;
   const supportsReply = typeof NotificationEvent === "function" && "reply" in NotificationEvent.prototype;
   await self.registration.showNotification(payload.title, {
     body: payload.body,
     tag: payload.tag || undefined,
     actions: self.colonizerNotificationActions(payload.answer, maxActions, supportsReply),
-    data: { url: payload.url, answer: payload.answer || undefined },
+    data: { url: payload.url, colony: payload.colony, answer: payload.answer || undefined },
     icon: "/icons/icon-192.png",
     badge: "/icons/mark.svg",
     // Silent unless the mothership said otherwise — a question may sound (issue #743); the in-app
     // channel stays the only other thing that beeps (notifications.ts).
     silent: payload.silent,
   });
+  await applyBadge(payload.badge);
+  await applySummary(payload.badge);
 }
 
 self.addEventListener("push", (event) => {

@@ -488,6 +488,12 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Operate,
         },
+        // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
+        // unseen-failure flag — so watching it is enough, however it arrives.
+        ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
         // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
         // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
@@ -861,6 +867,11 @@ mod tests {
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
                 "read {path}"
             );
+            assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
+        }
+        // Marking a colony seen (issue #744) is looking at it, not driving it: read may POST it.
+        for path in ["/api/sessions/abc/seen"] {
+            assert!(authorize(&app, &read, &post, path).await.is_ok(), "read {path}");
             assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
         }
         // Launching needs launch.

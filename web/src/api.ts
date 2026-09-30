@@ -309,6 +309,8 @@ export interface Api {
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<StopReply>;
   cleanupSession(id: string): Promise<Session>;
+  /** POST /api/sessions/{id}/seen: the colony was looked at — clears `unseen_failure` and has the mothership push "resolved" to every device (issue #744). */
+  seenSession(id: string): Promise<void>;
   /** GET /api/storage: disk usage plus the reclaimable / unpushed / orphan breakdown (issue #223). */
   storageSummary(): Promise<StorageSummary>;
   /** POST /api/sessions/{id}/retain: keep (`{keep: true}`) or release this colony's worktree from automatic reclamation. */
@@ -670,6 +672,7 @@ export const httpApi: Api = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
+  seenSession: (id) => post(`/api/sessions/${enc(id)}/seen`),
   storageSummary: () => request("/api/storage"),
   setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),
   deleteSession: (id, opts) => del(`/api/sessions/${enc(id)}${query({ purge_logs: opts?.purgeLogs ? "true" : undefined })}`),

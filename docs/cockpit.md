@@ -519,16 +519,30 @@ token only — never this cockpit's own credential.
 **Settings → Notifications.** These switches are kept in the browser, per browser:
 
 - **In this tab**: the number of colonies that need you in the tab title, a dot on the favicon, and a
-  strip above the colony list.
+  strip above the colony list. The same count is the app badge on the installed app's icon, set
+  whenever the session list moves and cleared again at zero; a browser without the Badging API simply
+  has no badge, and nothing else changes.
 - **Play a sound when a colony asks a question.**
 - **Browser notifications while the tab is not in front.** Switching it on asks the browser for
   permission. If the browser blocks notifications for the site, allow them in the browser's own site
   settings first.
 
+"Needs you" counts colonies with an open question (one answered while the colony was suspended no
+longer waits on you — it is queued for a slot), live colonies the watchdog has flagged (stalled or
+out of nudges; a model error only once the turn has stopped), and failed colonies nobody has opened
+yet. Answering a question clears its colony everywhere at once: the mothership pushes a silent
+"resolved" note to every enrolled device (while the notify module is on; with it off nothing was
+announced), each of which closes that colony's notification and lowers its badge. The same happens when you open a failed colony nobody has looked at yet. Nothing else
+closes a notification: the cockpit reports a colony seen only while the page is in front, and only
+for that unseen failure, so a colony whose question is still open keeps counting — and keeps its
+notification on other devices — until its question is answered.
+
 **Web Push** reaches a device even when Colonizer is closed. Press **Subscribe** under "Push to this
 device" to enrol the current browser. Each enrolled device is listed with its name (rename it in
 place), when it was last seen, **Send test**, **Prefs** and **Revoke**. Tapping a notification opens
-the colony it names.
+the colony it names. Notifications are grouped one per colony — a colony's next push replaces its
+last instead of stacking up — and when two or more colonies need you, a "N colonies need you"
+summary stands in for the pile and opens the front page; it closes again once fewer than two remain.
 
 Every device has preferences of its own, kept on the mothership and checked before it sends:
 
@@ -570,7 +584,13 @@ the first tap answers and the rest open the cockpit.
 
 Limits: Web Push needs a secure origin (localhost counts) and a browser with push support. On iPhone
 and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen; on an iOS device that
-isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead.
+isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead. The
+"resolved" push shows nothing by design, so it is never sent to Apple endpoints — Safari and iOS
+revoke a subscription that receives an invisible push — and there a notification stays until you tap
+or clear it, the badge catching up next time the app opens (an installed iOS 16.4+ app can show one).
+Chrome and Firefox budget silent pushes, so a resolution that leaves nothing to announce may
+occasionally surface their generic "site updated in the background" notice; with two or more
+colonies still waiting, the summary notification is visible anyway.
 
 ### Desktop
 

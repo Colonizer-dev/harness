@@ -642,6 +642,7 @@ mod tests {
             "abc",
             Some((&token, &labels)),
             &crate::push_prefs::Prefs::default(),
+            None,
         );
         let body = serde_json::to_string(&payload).unwrap();
         for sentinel in ["SENTINEL-question", "SENTINEL-header", "Push now?"] {

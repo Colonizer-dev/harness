@@ -217,6 +217,36 @@ pub async fn answer(
     }
 }
 
+/// `POST /api/sessions/{id}/seen` (issue #744): someone is looking at this colony now, so a
+/// failure it moved into is no longer unseen — the flag the app badge counts is cleared here, and
+/// the silent `resolved` push lets every other device close its notification and lower the badge.
+/// The push only fires when something was actually unseen: a look at a colony whose question is
+/// still open must not close that question's notification elsewhere. Never awaits the push.
+pub async fn seen(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode, crate::AppError> {
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let mut cleared = false;
+    let _ = app
+        .update_session(&id, |s| {
+            cleared = s.unseen_failure;
+            s.unseen_failure = false;
+        })
+        .await;
+    if cleared {
+        spawn_resolved(&app, &id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fires [`crate::push::resolved`] for one colony, spawned: an answer or a look must never wait
+/// on the push services, and a failed push costs nothing but a log line on the device's side.
+fn spawn_resolved(app: &Shared, id: &str) {
+    let app = app.clone();
+    let id = id.to_string();
+    tokio::spawn(async move { crate::push::resolved(&app, &id).await });
+}
+
 /// A scoped API token's free text, prefixed with the external-input marker (issue #508): the agent
 /// reads it as a description of the task from outside, never as the operator's voice. Shared by
 /// the answer paths' `response` note and the socket's `user_message`. An empty note leaves the
@@ -362,6 +392,9 @@ pub(crate) async fn submit_answer(
     drop(gate);
     let _ = rt.commands.send(answer.forward(external));
     crate::activity::record_answer(app, &s, via).await;
+    // The question is answered as far as the person is concerned (issue #744): every other
+    // device closes its notification and drops the colony from its badge.
+    spawn_resolved(app, id);
     Ok(())
 }
 
@@ -458,6 +491,8 @@ async fn hold_answer(
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;
             }
+            // The held answer settles the question the same way a live one does (issue #744).
+            spawn_resolved(app, id);
             // Where the colony stands in the restore line (issue #667), read off the same admission
             // the restore pass answers to, so the log says what the next ticks will do with it.
             // The pause is the tick's own hold on the restore pass (`start_queued` skips it while
@@ -870,6 +905,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}", routing::get(get))
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
+        .route("/api/sessions/{id}/seen", routing::post(seen))
         .route("/api/sessions/{id}/events", routing::get(events_ws))
         .route("/api/sessions/{id}/terminal", routing::get(terminal_ws))
 }
@@ -1188,6 +1224,40 @@ mod tests {
 
         // An unknown colony stays a 404.
         let error = question(State(app), Path("zzz".into())).await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `POST /api/sessions/{id}/seen` (issue #744): a look at a colony with nothing unseen answers
+    /// 204 and stays silent — its question, if any, is still open, and no other device may close a
+    /// notification for it — while a look at an unseen failure clears the flag and resolves it on
+    /// the one subscribed device. An unknown colony is a 404 either way.
+    #[tokio::test]
+    async fn seen_clears_the_unseen_failure_and_404s_an_unknown_id() {
+        let captures: crate::push::tests::Captures = std::sync::Arc::default();
+        let addr = crate::push::tests::capture_server(captures.clone()).await;
+        let (app, root) = app_with_colony("abc", SessionStatus::Failed).await;
+        let phone = crate::push::tests::device(&format!("http://{addr}/phone"), [7u8; 16]);
+        crate::push::tests::notify_on(&app).await;
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        crate::push::save(&app.cfg.config_dir, &[phone.subscription]).unwrap();
+
+        let response = seen(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(captures.lock().unwrap().is_empty(), "a look with nothing unseen stays silent");
+
+        app.update_session("abc", |s| s.unseen_failure = true).await.unwrap();
+        assert!(
+            crate::push::needs_you(&app.session("abc").await.unwrap()),
+            "the failure is unseen"
+        );
+        let response = seen(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        crate::push::tests::await_captures(&captures, 1).await;
+        assert!(!app.session("abc").await.unwrap().unseen_failure, "the failure has been seen");
+
+        let error = seen(State(app), Path("zzz".into())).await.unwrap_err();
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(root);
     }

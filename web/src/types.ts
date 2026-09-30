@@ -128,6 +128,12 @@ export interface Session {
   last_activity_at?: string | null;
   attention?: Attention | null;
   /**
+   * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
+   * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
+   * at, which also pushes "resolved" to every other device. Older mothership builds omit the field.
+   */
+  unseen_failure?: boolean;
+  /**
    * Set while the colony is paused with its question outstanding (issue #562): the microVM is
    * stopped and it holds no parallelism slot, but `status` stays `waiting_for_answer` and the
    * question stays answerable exactly as before. The answer re-boots the colony with priority;

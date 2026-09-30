@@ -315,6 +315,11 @@ pub struct Session {
     /// `needs_rebase` on its own. Cleared wherever `needs_rebase` is cleared.
     #[serde(default)]
     pub rebase_orphaned: bool,
+    /// Whether the failure that put the colony here has been seen by a person (issue #744): set
+    /// by [`App::update_session`] at the crossing itself, cleared by `POST /api/sessions/{id}/seen`,
+    /// read by the app badge (`push::needs_you`). A failure already on record was seen long ago.
+    #[serde(default)]
+    pub unseen_failure: bool,
     /// The live same-repo colony a fresh colony queued behind for overlap (issue #453): it starts
     /// once that colony is no longer live. `None` once started; stacked colonies never carry one —
     /// they already wait on their parent.
@@ -496,6 +501,7 @@ impl Default for Session {
             publishing_holds_slot: false,
             needs_rebase: false,
             rebase_orphaned: false,
+            unseen_failure: false,
             queued_behind: None,
             claim_wait: false,
             verify: None,
