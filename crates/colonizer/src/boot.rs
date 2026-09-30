@@ -223,6 +223,209 @@ async fn default_base(app: &Shared, repo: &str, log: &SessionLogger, started_at:
     }
 }
 
+/// Where a colony keeps the issue it was started on, inside its session directory: written at the
+/// first boot that fetched it, and read back by every resume instead of asking GitHub again.
+pub(crate) const ISSUE_FILE: &str = "issue.json";
+
+/// How long a resume waits on GitHub for an issue it has no stored copy of at all.
+const RESUME_ISSUE_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long a resume waits on the best-effort refresh of its base branch.
+const BASE_REFRESH_LIMIT: Duration = Duration::from_secs(60);
+
+/// How many lines of one event log are searched for the colony's first brief. The runner sends it
+/// as the first message, so it sits near the top.
+const BRIEF_SEARCH_LINES: usize = 200;
+
+/// The issue a boot works on. A fresh boot calls `fetch` (which carries the retry budget and the
+/// access wording) and stores what comes back in [`ISSUE_FILE`]. A resume never needs GitHub: it
+/// reads the stored issue, else the one recovered from its first brief (`vm/session.json`, then
+/// the event logs), and only a colony with neither asks `fetch` once — whose failure is a warning,
+/// not a failed resume, since the worktree and branch are what the colony's work lives in.
+async fn resolve_issue<F, Fut>(
+    dir: &std::path::Path,
+    s: &Session,
+    resume: bool,
+    log: &SessionLogger,
+    fetch: F,
+) -> Result<Option<Value>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let Some(number) = s.issue else { return Ok(None) };
+    if !resume {
+        let issue = fetch().await?;
+        store_issue(dir, &issue, log).await;
+        return Ok(Some(issue));
+    }
+    if let Some(issue) = stored_issue(dir) {
+        log.info(format!(
+            "resuming on the stored copy of issue #{number}; GitHub is not asked again"
+        ))
+        .await;
+        return Ok(Some(issue));
+    }
+    if let Some(issue) = issue_from_brief(dir) {
+        log.info(format!("resuming on issue #{number} as this colony's first brief carried it"))
+            .await;
+        store_issue(dir, &issue, log).await;
+        return Ok(Some(issue));
+    }
+    match fetch().await {
+        Ok(issue) => {
+            store_issue(dir, &issue, log).await;
+            Ok(Some(issue))
+        }
+        Err(e) => {
+            log.warn(format!(
+                "resumed offline: issue #{number} is not stored and GitHub could not be read ({}); resuming on its \
+                 title and the kept worktree",
+                truncate(&format!("{e:#}"), 300)
+            ))
+            .await;
+            Ok(Some(
+                json!({"number": number, "title": s.issue_title, "body": "", "labels": [], "comments": []}),
+            ))
+        }
+    }
+}
+
+/// The stored issue, when there is a readable one.
+fn stored_issue(dir: &std::path::Path) -> Option<Value> {
+    let bytes = std::fs::read(dir.join(ISSUE_FILE)).ok()?;
+    let issue: Value = serde_json::from_slice(&bytes).ok()?;
+    issue.get("title")?.as_str()?;
+    Some(issue)
+}
+
+/// Stores the issue a boot works on. Best effort: a colony that cannot write it still boots, and
+/// its resume recovers the issue from its brief instead.
+async fn store_issue(dir: &std::path::Path, issue: &Value, log: &SessionLogger) {
+    let written = std::fs::create_dir_all(dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(serde_json::to_vec_pretty(issue)?))
+        .and_then(|bytes| write_private(&dir.join(ISSUE_FILE), &bytes));
+    if let Err(e) = written {
+        log.warn(format!("could not store the issue for a later resume: {e:#}")).await;
+    }
+}
+
+/// The issue as this colony's first brief carried it, for a colony started before issues were
+/// stored: the `<issue>` block of the last `vm/session.json`, else of the first message in the
+/// event logs, oldest run first.
+fn issue_from_brief(dir: &std::path::Path) -> Option<Value> {
+    let from_session = std::fs::read(dir.join("vm").join("session.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|v| v["initial_prompt"].as_str().and_then(parse_issue_block));
+    if from_session.is_some() {
+        return from_session;
+    }
+    let mut archives: Vec<u64> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_prefix("events-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    archives.sort_unstable();
+    let mut logs: Vec<PathBuf> = archives.into_iter().map(|n| dir.join(format!("events-{n}.jsonl"))).collect();
+    logs.push(dir.join("events.jsonl"));
+    logs.iter()
+        .find_map(|path| first_brief(path).as_deref().and_then(parse_issue_block))
+}
+
+/// The runner's echo of its first message (`user_message` with id `initial`) in one event log.
+fn first_brief(path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    std::io::BufReader::new(file)
+        .lines()
+        .take(BRIEF_SEARCH_LINES)
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|e| e["type"] == "user_message" && e["id"] == "initial")
+        .and_then(|e| e["text"].as_str().map(String::from))
+}
+
+/// Reads back the `<issue>` block `github::build_prompt` writes: its header lines, then the body
+/// (comments included, as the prompt carried them).
+fn parse_issue_block(prompt: &str) -> Option<Value> {
+    let start = prompt.find("<issue>\n")? + "<issue>\n".len();
+    let rest = &prompt[start..];
+    let end = rest
+        .find("\n</issue>\n\nThe issue text above")
+        .or_else(|| rest.rfind("\n</issue>"))?;
+    let block = &rest[..end];
+    let (head, body) = block.split_once("\n\n").unwrap_or((block, ""));
+    let mut issue = json!({"title": "", "body": "", "labels": [], "comments": []});
+    for line in head.lines() {
+        if let Some(title) = line.strip_prefix("Title: ") {
+            issue["title"] = json!(title.trim());
+        } else if let Some(url) = line.strip_prefix("URL: ") {
+            issue["url"] = json!(url.trim());
+        } else if let Some(author) = line.strip_prefix("Author: @") {
+            issue["author"] = json!({"login": author.trim()});
+        } else if let Some(labels) = line.strip_prefix("Labels: ") {
+            let names: Vec<Value> = labels
+                .split(", ")
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| json!({"name": l}))
+                .collect();
+            issue["labels"] = Value::Array(names);
+        }
+    }
+    let body = body.trim();
+    if body != "(no description)" {
+        issue["body"] = json!(body);
+    }
+    issue["title"].as_str().filter(|t| !t.is_empty())?;
+    Some(issue)
+}
+
+/// The default branch as the local mirror records it (a bare clone's `HEAD`), so a resume need
+/// not ask GitHub.
+async fn local_default_branch(app: &App, bare: &std::path::Path) -> Option<String> {
+    let out = crate::util::exec(app.git(bare).args(["symbolic-ref", "--short", "HEAD"]))
+        .await
+        .ok()?;
+    let branch = out.trim();
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+/// Best-effort refresh of a resumed colony's base in the local mirror. The colony's own work is on
+/// its kept branch, so a remote that is unreachable or refuses costs only freshness: the resume
+/// carries on with the mirror as it is and says so. With external effects off it is not tried.
+async fn refresh_base(app: &Shared, repo: &str, bare: &std::path::Path, base: &str, log: &SessionLogger) {
+    if crate::authority::external_writes_blocked() {
+        log.info("resumed offline: external effects are off, so the base was not refreshed")
+            .await;
+        return;
+    }
+    let lock = app.repo_lock(repo).await;
+    let _guard = lock.lock().await;
+    let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+    let fetched = crate::util::exec_within(
+        BASE_REFRESH_LIMIT,
+        app.git(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
+    )
+    .await;
+    if let Err(e) = fetched {
+        log.warn(format!(
+            "resumed offline: base not refreshed, carrying on with origin/{base} as the local mirror has it ({})",
+            truncate(&format!("{e:#}"), 300)
+        ))
+        .await;
+    }
+}
+
 /// The network fence a colony boots with, resolved from the egress policy (#303): the harness's
 /// own port-scoped infrastructure allows — never the broad `host` profile, which allows every
 /// host-loopback port and would let the untrusted colony agent drive the cockpit API
@@ -300,21 +503,31 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .cloned()
         .context("agent module is not installed")?;
 
-    let issue = match s.issue {
-        Some(number) => {
-            let label = format!("fetching issue {}#{number}", s.repo);
-            log.info(label.clone()).await;
-            let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
-                github::fetch_issue(app, &s.repo, number)
-            })
-            .await;
-            match fetched {
-                Ok(issue) => Some(issue),
-                Err(e) => return Err(github::access_error(app, &s.repo, e).await),
-            }
+    let dir = app.session_dir(id);
+    let bare = app.bare_repo(&s.repo);
+    // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
+    // resumed one already has it — stored at its first boot, or recovered from its first brief —
+    // and does not ask GitHub again, so a GitHub that refuses or is unreachable cannot fail it.
+    let issue = resolve_issue(&dir, &s, resume, &log, || async {
+        let number = s.issue.unwrap_or_default();
+        if resume {
+            // One bounded attempt, only for a colony that has nothing stored at all.
+            return tokio::time::timeout(RESUME_ISSUE_LIMIT, github::fetch_issue(app, &s.repo, number))
+                .await
+                .context("GitHub did not answer in time")?;
         }
-        None => None,
-    };
+        let label = format!("fetching issue {}#{number}", s.repo);
+        log.info(label.clone()).await;
+        let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
+            github::fetch_issue(app, &s.repo, number)
+        })
+        .await;
+        match fetched {
+            Ok(issue) => Ok(issue),
+            Err(e) => Err(github::access_error(app, &s.repo, e).await),
+        }
+    })
+    .await?;
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
@@ -345,6 +558,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             stacked_on = Some(branch.clone());
             branch
         }
+        // A resumed colony that never recorded its base (an older record) reads the default branch
+        // off the local mirror rather than asking GitHub; only a mirror that cannot say asks.
+        stack::BootBase::Default if resume => match local_default_branch(app, &bare).await {
+            Some(base) => base,
+            None => default_base(app, &s.repo, &log, boot_started_at).await?,
+        },
         stack::BootBase::Default => default_base(app, &s.repo, &log, boot_started_at).await?,
         stack::BootBase::Wait { colony } => {
             bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
@@ -363,12 +582,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     mark_phase(app, id, &mut timing, "issue").await;
 
-    let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
     let admin = if resume {
         // The worktree and branch outlive the microVM, so a resumed colony picks them up as they are.
         log.info(format!("resuming on the kept worktree, branch {}", s.branch)).await;
-        PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?)
+        let admin = PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?);
+        refresh_base(app, &s.repo, &bare, &base, &log).await;
+        admin
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
@@ -429,7 +649,6 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     mark_phase(app, id, &mut timing, "git").await;
 
-    let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
     // Cloned out of the lock before the awaits below: `touched_files` shells out to git per
@@ -1443,6 +1662,218 @@ mod tests {
         assert!(!story.contains("the new run"), "the live log is not the story");
         assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resumable colony on issue #7, in a throwaway App, with its session directory made.
+    fn resumable(tag: &str) -> (std::path::PathBuf, Shared, Session, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-resume-{tag}-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let app = crate::app::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Starting);
+        s.id = format!("res{tag}");
+        s.issue = Some(7);
+        s.issue_title = "Fix the flaky login".into();
+        s.branch = "colonizer/issue-7".into();
+        let dir = app.session_dir(&s.id);
+        std::fs::create_dir_all(dir.join("vm")).unwrap();
+        (root, app, s, dir)
+    }
+
+    fn github_issue() -> Value {
+        json!({
+            "number": 7,
+            "title": "Fix the flaky login",
+            "body": "The login test fails one run in ten.",
+            "labels": [{"name": "bug"}, {"name": "ready"}],
+            "comments": [],
+            "url": "https://github.com/acme/repo/issues/7",
+            "author": {"login": "octo"},
+        })
+    }
+
+    /// What a colony's session log said at `level`, oldest first.
+    async fn said(app: &Shared, id: &str, level: &str) -> Vec<String> {
+        let rt = app.runtime(id).await;
+        let logs = rt.logs.lock().await;
+        logs.iter()
+            .filter(|e| e["level"] == level)
+            .filter_map(|e| e["message"].as_str().map(String::from))
+            .collect()
+    }
+
+    /// The observed outage: GitHub refusing (403, account suspended) or unreachable. A resume with
+    /// a stored issue never asks, so neither can fail it, and the issue it boots on is the stored one.
+    #[tokio::test]
+    async fn a_resume_boots_on_the_stored_issue_whatever_github_says() {
+        for (tag, refusal) in [
+            ("403", "gh: Sorry. Your account was suspended. (HTTP 403)"),
+            ("net", "error connecting to api.github.com: dial tcp: network is unreachable"),
+        ] {
+            let (root, app, s, dir) = resumable(tag);
+            let worktree = root.join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::write(worktree.join("half-done.rs"), "// unfinished work").unwrap();
+            std::fs::write(dir.join(ISSUE_FILE), github_issue().to_string()).unwrap();
+            let asked = std::cell::Cell::new(0);
+            let log = app.logger(&s.id);
+            let issue = resolve_issue(&dir, &s, true, &log, || async {
+                asked.set(asked.get() + 1);
+                Err(anyhow::anyhow!(refusal))
+            })
+            .await
+            .expect("a resume with a stored issue does not fail on GitHub");
+            assert_eq!(issue, Some(github_issue()));
+            assert_eq!(asked.get(), 0, "GitHub is not asked again on resume");
+            assert!(worktree.join("half-done.rs").exists(), "the worktree is left as it was");
+            assert!(said(&app, &s.id, "error").await.is_empty());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A colony started before issues were stored recovers its issue from its first brief:
+    /// `vm/session.json` first, else the runner's echo of it in the oldest event log. Either way the
+    /// recovered issue is stored, so the next resume reads it directly.
+    #[tokio::test]
+    async fn an_old_colony_recovers_its_issue_from_its_brief() {
+        let (root, app, mut s, dir) = resumable("brief");
+        s.base = Some("main".into());
+        let prompt = github::build_prompt(&s, Some(&github_issue()), "main", false, &[], None, None);
+        let failing = || async { Err::<Value, _>(anyhow::anyhow!("gh: Sorry. Your account was suspended. (HTTP 403)")) };
+        let log = app.logger(&s.id);
+
+        std::fs::write(
+            dir.join("vm/session.json"),
+            json!({"session_id": s.id, "initial_prompt": prompt}).to_string(),
+        )
+        .unwrap();
+        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        assert_eq!(issue["title"], "Fix the flaky login");
+        assert_eq!(issue["body"], "The login test fails one run in ten.");
+        assert_eq!(issue["labels"], json!([{"name": "bug"}, {"name": "ready"}]));
+        assert_eq!(issue["author"]["login"], "octo");
+        assert!(dir.join(ISSUE_FILE).exists(), "the recovered issue is stored");
+
+        // The last session.json carried only a held answer; the first run's event log has the brief.
+        std::fs::remove_file(dir.join(ISSUE_FILE)).unwrap();
+        std::fs::write(
+            dir.join("vm/session.json"),
+            json!({"initial_prompt": "The maintainer answered: yes"}).to_string(),
+        )
+        .unwrap();
+        let echo = json!({"seq": 1, "type": "user_message", "id": "initial", "text": prompt});
+        std::fs::write(
+            dir.join("events-1.jsonl"),
+            format!("{}\n{echo}\n", json!({"seq": 0, "type": "status", "state": "running"})),
+        )
+        .unwrap();
+        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        assert_eq!(issue["body"], "The login test fails one run in ten.");
+        // And it resumes with the same brief as before: the prompt rebuilt from the recovered
+        // issue carries the same issue block.
+        let rebuilt = github::build_prompt(&s, Some(&issue), "main", true, &[], None, None);
+        assert!(rebuilt.contains("Title: Fix the flaky login") && rebuilt.contains("Labels: bug, ready"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Nothing stored anywhere and GitHub down: the resume still goes ahead, on the issue's title
+    /// and the kept worktree, with a warning rather than a failure.
+    #[tokio::test]
+    async fn a_resume_with_nothing_stored_and_github_down_warns_and_carries_on() {
+        let (root, app, s, dir) = resumable("bare");
+        let log = app.logger(&s.id);
+        let issue = resolve_issue(&dir, &s, true, &log, || async {
+            Err(anyhow::anyhow!("error connecting to api.github.com"))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(issue["title"], "Fix the flaky login");
+        let warned = said(&app, &s.id, "warn").await;
+        assert!(warned.iter().any(|w| w.starts_with("resumed offline")), "{warned:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The path when GitHub works: a fresh boot fetches the issue and stores it, and the resume
+    /// boots on exactly what was fetched.
+    #[tokio::test]
+    async fn a_fresh_boot_stores_the_issue_its_resume_reads_back() {
+        let (root, app, s, dir) = resumable("fresh");
+        let log = app.logger(&s.id);
+        let fresh = resolve_issue(&dir, &s, false, &log, || async { Ok(github_issue()) })
+            .await
+            .unwrap();
+        assert_eq!(fresh, Some(github_issue()));
+        let resumed = resolve_issue(&dir, &s, true, &log, || async { Ok(json!({"title": "changed since"})) })
+            .await
+            .unwrap();
+        assert_eq!(resumed, fresh, "the resume boots on the stored issue");
+        // A colony with no issue asks nobody either way.
+        let mut chat = s.clone();
+        chat.issue = None;
+        let none = resolve_issue(&dir, &chat, false, &log, || async { Err(anyhow::anyhow!("never asked")) }).await;
+        assert!(none.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh launch still needs GitHub, but a suspended account is named as one — not sent off to
+    /// reconnect — and the failure reaches the boot.
+    #[tokio::test]
+    async fn a_fresh_launch_refused_by_a_suspended_account_says_so() {
+        let (root, app, s, dir) = resumable("susp");
+        let log = app.logger(&s.id);
+        let raw = "`gh issue view 7 -R acme/repo` failed (exit status: 1): gh: Sorry. Your account was suspended. (HTTP 403)";
+        let err = resolve_issue(&dir, &s, false, &log, || async {
+            Err(github::access_error(&app, "acme/repo", anyhow::anyhow!(raw)).await)
+        })
+        .await
+        .expect_err("a fresh launch cannot start without its issue");
+        let message = format!("{err:#}");
+        assert!(message.contains("suspended the account"), "{message}");
+        assert!(!message.contains("Reconnect GitHub"), "{message}");
+        assert!(!dir.join(ISSUE_FILE).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The base refresh on resume is best effort: a remote that cannot be reached is a warning and
+    /// the mirror stays as it was; with external effects off it is not tried at all. The mirror's
+    /// own `HEAD` answers the default branch without GitHub.
+    #[tokio::test]
+    async fn a_base_refresh_that_fails_on_resume_is_a_warning() {
+        let (root, app, s, _dir) = resumable("fetch");
+        let bare = root.join("mirror.git");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&["init", "--quiet", "--bare", "--initial-branch=trunk"]);
+        let gone = root.join("no-such-remote.git");
+        git(&["remote", "add", "origin", gone.to_str().unwrap()]);
+        let log = app.logger(&s.id);
+
+        refresh_base(&app, &s.repo, &bare, "trunk", &log).await;
+        let warned = said(&app, &s.id, "warn").await;
+        assert!(
+            warned.iter().any(|w| w.starts_with("resumed offline: base not refreshed")),
+            "{warned:?}"
+        );
+        assert!(said(&app, &s.id, "error").await.is_empty());
+        assert_eq!(local_default_branch(&app, &bare).await.as_deref(), Some("trunk"));
+
+        {
+            let _offline = crate::authority::test_block_external_writes();
+            refresh_base(&app, &s.repo, &bare, "trunk", &log).await;
+        }
+        let noted = said(&app, &s.id, "info").await;
+        assert!(noted.iter().any(|i| i.contains("external effects are off")), "{noted:?}");
+        assert_eq!(said(&app, &s.id, "warn").await.len(), 1, "no second fetch was tried");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

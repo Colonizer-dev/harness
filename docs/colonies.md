@@ -184,6 +184,15 @@ a VM snapshot, is in
   the same worktree and branch. The agent is told to continue from what is already there. You can
   resume a colony that is `stopped` or `failed`, as long as its worktree still exists. If the
   parallel limit is full, the resume queues.
+- **Resume does not need GitHub.** The first boot stores the colony's issue in its session
+  directory (`issue.json`), and a resume boots on that copy rather than asking GitHub again, so a
+  suspended account, a rate limit or a network outage cannot fail it. A colony started before
+  issues were stored recovers its issue from its first brief (`vm/session.json`, then its event
+  logs). The resume then tries to refresh the base branch in the local mirror; if the remote is
+  unreachable or refuses, the colony log says `resumed offline: base not refreshed` and the colony
+  carries on with the mirror as it is. With `COLONIZER_NO_EXTERNAL_EFFECTS` set, the refresh is
+  not tried at all. Launching a new colony still needs GitHub, and a suspended account is reported
+  as suspended.
 - **Delete** (the cockpit, or `DELETE /api/sessions/{id}`) removes the colony, its chat and its
   worktree. You can only delete a colony that is not live and not publishing. Its logs go to the
   [log archive](#the-log-archive) first.
