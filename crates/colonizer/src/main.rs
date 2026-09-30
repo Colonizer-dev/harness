@@ -68,6 +68,7 @@ mod orgs;
 mod packages;
 mod path_policy;
 mod plugins;
+mod prescan;
 mod presets;
 mod protocol;
 mod provider_quota;

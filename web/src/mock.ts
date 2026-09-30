@@ -2274,6 +2274,7 @@ export function createMockApi(): Api {
       model: body.model ?? null,
       subagent_model: body.subagent_model ?? null,
       autofix: body.autofix ?? false,
+      preset: body.preset ?? "general",
       cadence: body.cadence,
       enabled: body.enabled ?? true,
       next_run_at: nextRun(body.cadence, new Date()),
@@ -3782,6 +3783,8 @@ export function createMockApi(): Api {
     model: body.model ?? null,
     subagent_model: body.subagent_model ?? null,
     schedule_id: null,
+    preset: body.preset ?? "general",
+    prescan: null,
       };
       redRuns.unshift(run);
       return clone(run);
