@@ -519,6 +519,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
         // The merge train's last tick (issue #671): a watch, like the loops list.
         ["api", "merge-train"] if get => Need::Bare(Scope::Read),
+        ["api", "merge-train", "loop"] if get => Need::Bare(Scope::Read),
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,

@@ -2311,3 +2311,75 @@ export interface MergeTrainRepo {
 export interface MergeTrainStatus {
   repos: MergeTrainRepo[];
 }
+
+/** The merge-train loop's settings (issue #754): off, hourly, and no repository opted in by default. */
+export interface MergeLoopSettings {
+  enabled: boolean;
+  cadence: LoopCadence;
+  /** Opted-in `owner` or `owner/repo` entries; empty merges nowhere. */
+  allow: string[];
+  /** `owner` or `owner/repo` entries never merged in (upstream-review-only forks), whatever `allow` says. */
+  never: string[];
+  max_merges: number;
+  /** Per-repository caps that replace `max_merges` there. */
+  repo_max_merges: Record<string, number>;
+  cooldown_secs: number;
+  ci_wait_minutes: number;
+  ci_poll_secs: number;
+  /** Check names re-run once when they are all that fails; a trailing `*` matches a prefix. */
+  flaky_checks: string[];
+  self_heal: boolean;
+  revert_on_red: boolean;
+  redo_on_conflict: boolean;
+  max_api_calls: number;
+  min_call_gap_ms: number;
+  /** Colony ids held out of the loop. */
+  held: string[];
+}
+
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "waiting" | "skipped";
+
+export interface MergeLoopItem {
+  session: string;
+  pr_url: string;
+  title: string;
+  action: MergeLoopAction;
+  reason: string;
+}
+
+export interface MergeLoopRepoReport {
+  repo: string;
+  /** Main's CI as the run last read it, in words. */
+  main: string;
+  paused: string | null;
+  /** What the run did about a red main. */
+  heal: string[];
+  items: MergeLoopItem[];
+}
+
+/** One run's report: merged, updated (CI running), red, redo dispatched, skipped — each with its reason. */
+export interface MergeLoopReport {
+  started_at: string | null;
+  finished_at: string | null;
+  dry_run: boolean;
+  /** The kill switch (COLONIZER_NO_EXTERNAL_EFFECTS) turned a real run into this dry run. */
+  forced_dry_run: boolean;
+  /** Why the run stopped early: GitHub pushed back (403/429), or the call budget ran out. */
+  stopped: string | null;
+  api_calls: number;
+  summary: string;
+  lines: string[];
+  repos: MergeLoopRepoReport[];
+}
+
+/** GET /api/merge-train/loop. */
+export interface MergeLoopView {
+  settings: MergeLoopSettings;
+  next_run_at: string | null;
+  running: boolean;
+  writes_blocked: boolean;
+  repos: Record<string, { paused: string | null; needs_redo: Record<string, string> }>;
+  last_report: MergeLoopReport | null;
+  /** Newest first. */
+  history: MergeLoopReport[];
+}

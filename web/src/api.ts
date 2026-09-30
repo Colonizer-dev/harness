@@ -94,6 +94,9 @@ import type {
   PushSubscribeBody,
   RemotePairing,
   RemoteStatus,
+  MergeLoopReport,
+  MergeLoopSettings,
+  MergeLoopView,
   MergeTrainStatus,
 } from "./types";
 
@@ -460,6 +463,12 @@ export interface Api {
   loopRuns(id: string): Promise<Session[]>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
+  /** GET /api/merge-train/loop: the merge-train loop's settings, paused repositories and run history (issue #754). */
+  mergeLoop(): Promise<MergeLoopView>;
+  /** PUT /api/merge-train/loop: replaces the settings. */
+  saveMergeLoop(settings: MergeLoopSettings): Promise<MergeLoopView>;
+  /** POST /api/merge-train/loop/run: a dry run answers its report; a real one starts in the background. */
+  runMergeLoop(dryRun: boolean): Promise<{ started: boolean; report?: MergeLoopReport }>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
   createRedTeamSchedule(body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
   updateRedTeamSchedule(id: string, body: NewRedTeamSchedule): Promise<RedTeamSchedule>;
@@ -763,6 +772,9 @@ export const httpApi: Api = {
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
   mergeTrain: () => request("/api/merge-train"),
+  mergeLoop: () => request("/api/merge-train/loop"),
+  saveMergeLoop: (settings) => put("/api/merge-train/loop", settings),
+  runMergeLoop: (dryRun) => post(`/api/merge-train/loop/run${dryRun ? "?dry_run=true" : ""}`),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),
   updateRedTeamSchedule: (id, body) => put(`/api/redteam/schedules/${enc(id)}`, body),

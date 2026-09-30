@@ -426,6 +426,18 @@ const RULES: &[Rule] = &[
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
+    rule(
+        "PUT",
+        "/api/merge-train/loop",
+        "loop.update",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/merge-train/loop/run",
+        "loop.run_now",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
     rule("POST", "/api/redteam/runs", "redteam.start", Target::NewRun),
     rule(
         "POST",

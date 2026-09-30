@@ -3,7 +3,10 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
+import { defaultMergeLoopSettings } from "./cockpit/mergeLoop";
 import type {
+  MergeLoopReport,
+  MergeLoopView,
   ActivityEntry,
   ApiTokenMeta,
   ArchiveEntry,
@@ -2219,6 +2222,7 @@ export function createMockApi(): Api {
 
   const redSchedules: RedTeamSchedule[] = [];
   const loopList: Loop[] = [];
+  let mergeLoop: MergeLoopView = { settings: defaultMergeLoopSettings(), next_run_at: null, running: false, writes_blocked: true, repos: {}, last_report: null, history: [] };
   const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
     id,
     name: body.name,
@@ -3789,6 +3793,20 @@ export function createMockApi(): Api {
     loops: () => later(() => loopList.map(clone)),
     // The mock has no train driving anything; an empty answer keeps the cockpit block hidden.
     mergeTrain: () => later(() => ({ repos: [] })),
+    // The merge-train loop (issue #754): off, like a fresh install; a dry run reports nothing to do.
+    mergeLoop: () => later(() => clone(mergeLoop)),
+    saveMergeLoop: async (settings) => {
+      await sleep(150);
+      mergeLoop = { ...mergeLoop, settings: clone(settings), next_run_at: settings.enabled ? new Date(Date.now() + 60 * 60_000).toISOString() : null };
+      return clone(mergeLoop);
+    },
+    runMergeLoop: async (dryRun) => {
+      await sleep(300);
+      const at = now();
+      const report: MergeLoopReport = { started_at: at, finished_at: at, dry_run: true, forced_dry_run: !dryRun, stopped: null, api_calls: 0, summary: "dry run: would merge 0 · would update 0 · red 0 · would dispatch redo 0 · skipped 0", lines: [], repos: [] };
+      mergeLoop = { ...mergeLoop, last_report: report, history: [report, ...mergeLoop.history] };
+      return { started: false, report: clone(report) };
+    },
     createLoop: async (body) => {
       await sleep(200);
       const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
