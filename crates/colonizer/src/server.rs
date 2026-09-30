@@ -252,6 +252,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::status::routes())
         .merge(crate::stream::routes())
         .merge(crate::telemetry::routes())
+        .merge(crate::ts_any_loop::routes())
         .merge(crate::update::routes())
         .merge(crate::upload::routes())
         .merge(crate::usage::routes())
@@ -293,6 +294,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::remote::start_tasks(app, router);
     crate::summaries::start_tasks(app);
     crate::telemetry::start_tasks(app);
+    crate::ts_any_loop::start_tasks(app);
     crate::usage::start_tasks(app);
     crate::version::start_tasks(app);
     crate::watchdog::start_tasks(app);

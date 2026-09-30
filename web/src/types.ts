@@ -1567,6 +1567,120 @@ export interface NewLoop {
   enabled?: boolean;
 }
 
+// The built-in "TypeScript: remove any" loop (GET/PUT /api/ts-any-loop,
+// POST /api/ts-any-loop/run; ts_any_loop.rs).
+
+export type TsAnyForm = "annotation" | "as" | "angle" | "type_argument" | "array" | "array_generic" | "record" | "generic_default" | "other";
+export type TsAnyMethod = "typescript" | "token_scan";
+
+/** The loop's settings: off, with an empty allowlist, until the operator opts in. */
+export interface TsAnySettings {
+  enabled: boolean;
+  /** Orgs (`acme`) and repositories (`acme/app`) opted in. */
+  allow: string[];
+  /** Daily by default; `interval` no tighter than 60 minutes. */
+  cadence: LoopCadence;
+  /** Occurrences given to one colony (20 by default). */
+  batch_cap: number;
+  max_per_run: number;
+  cooldown_hours: number;
+  /** Also count implicit any (only with the repository's own TypeScript). */
+  implicit: boolean;
+  /** Install from the lockfile, offline, when node_modules is absent. */
+  offline_install: boolean;
+  autopilot: boolean;
+}
+
+export interface TsAnyModuleCount {
+  module: string;
+  explicit: number;
+  files: number;
+}
+
+export interface TsAnyFileCount {
+  path: string;
+  module: string;
+  explicit: number;
+  implicit?: number | null;
+  as_casts: number;
+  suppressions: number;
+}
+
+export interface TsAnyRepoReport {
+  repo: string;
+  sha: string | null;
+  typescript: boolean;
+  method: TsAnyMethod | null;
+  method_note: string | null;
+  ts_version: string | null;
+  total: number;
+  implicit: number | null;
+  as_casts: number;
+  suppressions: number;
+  ts_files: number;
+  forms: Partial<Record<TsAnyForm, number>>;
+  modules: TsAnyModuleCount[];
+  files: TsAnyFileCount[];
+  /** Earlier real runs' totals, newest first. */
+  previous: number[];
+  notes: string[];
+  error: string | null;
+}
+
+export interface TsAnyAttention {
+  repo: string;
+  module: string;
+  session: string;
+  pr_url: string | null;
+  problems: string[];
+  reason: string;
+}
+
+export interface TsAnyReport {
+  id: string;
+  started_at: string;
+  finished_at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "manual";
+  blocked: boolean;
+  repos: TsAnyRepoReport[];
+  total: number;
+  dispatched: { repo: string; module: string; session: string | null; title: string; occurrences: number; module_total: number }[];
+  skipped: { repo: string; module: string | null; reason: string }[];
+  checks: { session: string; repo: string; module: string; pr_url: string | null; flagged: boolean; summary: string }[];
+  attention: TsAnyAttention[];
+  note: string | null;
+}
+
+export interface TsAnyRun {
+  id: string;
+  at: string;
+  trigger: string;
+  total: number;
+  totals: Record<string, number>;
+  dispatched: number;
+  skipped: number;
+  flagged: number;
+  summary: string;
+}
+
+export interface TsAnyLoop {
+  name: string;
+  settings: TsAnySettings;
+  next_run_at: string | null;
+  running: boolean;
+  /** Whether node is on the host (the repository's own TypeScript needs it). */
+  node: boolean;
+  /** Whether COLONIZER_NO_EXTERNAL_EFFECTS holds every dispatch. */
+  blocked: boolean;
+  last_report: TsAnyReport | null;
+  /** Newest first. */
+  history: TsAnyRun[];
+  attention: TsAnyAttention[];
+  /** Totals per repository, oldest first. */
+  trend: Record<string, { at: string; total: number; sha: string | null }[]>;
+}
+
 /** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
 export interface HunterProbe {
   manifest: { id: string; name: string; description: string; homepage: string; licence: string; available: boolean; needs_docker: boolean };
