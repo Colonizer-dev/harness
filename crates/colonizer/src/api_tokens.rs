@@ -1494,13 +1494,13 @@ mod tests {
             "the loop records the token: {made}"
         );
         let mine = made["id"].as_str().unwrap().to_string();
-        // The owner still sees every loop.
+        // The owner still sees every loop: the token's, and the built-in disk cleanup.
         let res = router
             .clone()
             .oneshot(send(Method::GET, "/api/loops", owner, None))
             .await
             .unwrap();
-        assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+        assert_eq!(body_json(res).await.as_array().unwrap().len(), 2);
 
         // Outside the repo limit: 403, the launch refusal's words. A map loop is refused outright:
         // its runs would launch outside the token's caps and marking.
@@ -1543,6 +1543,11 @@ mod tests {
             (Method::DELETE, "/api/loops/owner_loop".to_string()),
             (Method::POST, "/api/loops/owner_loop/run-now".to_string()),
             (Method::GET, "/api/loops/owner_loop/runs".to_string()),
+            // The built-in disk cleanup is the owner's alone: a token can neither switch it on
+            // (nor its host-level category), run it, preview it, nor read it.
+            (Method::PUT, "/api/loops/disk-cleanup".to_string()),
+            (Method::POST, "/api/loops/disk-cleanup/run-now?dry_run=1".to_string()),
+            (Method::GET, "/api/loops/disk-cleanup/runs".to_string()),
         ] {
             let res = router
                 .clone()

@@ -12,6 +12,8 @@ import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } f
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { Page } from "./Page";
+import { DiskCleanupDialog, DiskCleanupRow, type DiskCleanupTab } from "./DiskCleanupLoop";
+import { diskCleanupBody, isDiskCleanup, reportSummary, toggleAction } from "./diskCleanup";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -51,6 +53,7 @@ export function LoopsView({
   const [loops, setLoops] = useState<Loop[] | null>(null);
   const [editing, setEditing] = useState<Loop | "new" | null>(null);
   const [history, setHistory] = useState<Loop | null>(null);
+  const [cleanup, setCleanup] = useState<DiskCleanupTab | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(() => {
@@ -65,10 +68,41 @@ export function LoopsView({
     return () => clearInterval(t);
   }, [load]);
 
+  // The built-in disk cleanup belongs to the host, not an org: it gets its own row above the list.
+  const builtin = useMemo(() => (loops ?? []).find(isDiskCleanup) ?? null, [loops]);
   const shown = useMemo(
-    () => (loops ?? []).filter((l) => !org || l.org.toLowerCase() === org.toLowerCase()).sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name)),
+    () =>
+      (loops ?? [])
+        .filter((l) => !isDiskCleanup(l))
+        .filter((l) => !org || l.org.toLowerCase() === org.toLowerCase())
+        .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name)),
     [loops, org],
   );
+
+  // Turning disk cleanup on for the first time shows what it would remove before anything runs.
+  const toggleCleanup = async (l: Loop, on: boolean) => {
+    if (toggleAction(l, on) === "preview") {
+      setCleanup("preview");
+      return;
+    }
+    try {
+      await api.updateLoop(l.id, diskCleanupBody(l, { enabled: on }));
+      load();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
+
+  const runCleanupNow = async () => {
+    if (!builtin) return;
+    try {
+      const report = await api.runDiskCleanup(builtin.id, false);
+      toast(`Disk cleanup: ${reportSummary(report)}`);
+      load();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
 
   const save = async (id: string | null, body: NewLoop) => {
     const saved = id ? await api.updateLoop(id, body) : await api.createLoop(body);
@@ -120,6 +154,12 @@ export function LoopsView({
             New loop
           </Button>
         </div>
+
+        {builtin && (
+          <ul className="m-0 mt-6 list-none overflow-hidden rounded-xl border border-border p-0" aria-label="Built-in loops">
+            <DiskCleanupRow loop={builtin} now={now} onToggle={(on) => void toggleCleanup(builtin, on)} onOpen={setCleanup} onRunNow={() => void runCleanupNow()} />
+          </ul>
+        )}
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (
@@ -180,6 +220,7 @@ export function LoopsView({
         </div>
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
+      {cleanup && builtin && <DiskCleanupDialog loop={builtin} tab={cleanup} onSaved={load} onClose={() => setCleanup(null)} />}
     </Page>
   );
 }
@@ -238,7 +279,8 @@ function LoopDialog({
   const [name, setName] = useState(loop?.name ?? "");
   // What a run starts: a colony from the prompt, or the repository's architecture map (`owner/*`
   // covers every repository in the org).
-  const [kind, setKind] = useState<"colony" | "map">(loop?.kind ?? "colony");
+  // The built-in disk cleanup never opens this form (it has its own dialog).
+  const [kind, setKind] = useState<"colony" | "map">(loop?.kind === "map" ? "map" : "colony");
   const [allRepos, setAllRepos] = useState(loop?.kind === "map" && loop.repo.endsWith("/*"));
   const [choice, setChoice] = useState<LoopChoice>(loop ? toLocalChoice(loop.cadence) : { every: "daily", time: "09:00" });
   const [model, setModel] = useState(loop?.model ?? "");

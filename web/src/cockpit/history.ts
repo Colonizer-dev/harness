@@ -89,7 +89,8 @@ export function subjectOf(repo: string | null | undefined, issue: number | null 
 }
 
 function actorOf(entry: ActivityEntry): HistoryActor {
-  if (entry.actor === "colony") return "colony";
+  // The mothership's own housekeeping (the disk-cleanup loop) is not something you did.
+  if (entry.actor === "colony" || entry.actor === "mothership") return "colony";
   return entry.via === "api" ? "api" : "you";
 }
 
@@ -152,6 +153,10 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You deleted ${loop}`;
     case "loop.run_now":
       return `You ran ${loop} now`;
+    case "disk_cleanup.run":
+      return "Disk cleanup ran";
+    case "disk_cleanup.attention":
+      return "Disk cleanup could not free enough space";
     case "redteam.start":
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":

@@ -450,6 +450,14 @@ that silently stopped running colonies on upgrade would be a surprise.
   `root_disk` setting bounds. Past the quota the colony is stopped with its worktree kept, because
   removing a colony's work is your call: clean up or raise the quota and press Resume to continue.
 
+**Disk cleanup** is a built-in loop every install has, off until you switch it on (Loops → Disk
+cleanup, or `colonizer loop enable disk-cleanup`). It runs hourly, and early whenever free space
+falls under 15%, removing build output (`target/`, `node_modules/`, `.next/`, `dist/`) from finished
+colonies, reclaimable worktrees and orphan microVMs — never live colonies, uncommitted or unpushed
+work, `.git`, `~/.cargo` or caches. Its preview lists what a run would remove, with sizes, before
+you turn it on; archives and your own build directories are opt-in categories
+([docs/loops.md](docs/loops.md#disk-cleanup)).
+
 An org's own budget or quota beats the sandbox default, and an org set to `0` opts out of a global limit. Routed
 providers need `pricing` — dollars per million tokens for input, output, cached read, cache write and
 thinking — to count toward the budget; an unpriced provider still counts its tokens but contributes $0,

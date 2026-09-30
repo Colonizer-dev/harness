@@ -159,6 +159,9 @@ pub struct App {
     /// every outbound proactive action against it, so the operator's attention is one bounded rate.
     pub ledger: crate::ledger::LedgerStore,
     pub login: crate::claude_login::LoginManager,
+    /// The built-in disk-cleanup loop's in-memory half (disk_cleanup.rs): one run at a time, and
+    /// the scan cache that keeps an hourly run with nothing to clean nearly free.
+    pub disk_cleanup: crate::disk_cleanup::Runtime,
     /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
     pub loops: crate::loops::LoopStore,
     pub memory: crate::memory::MemoryStore,
@@ -254,6 +257,7 @@ impl App {
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
             ledger: crate::ledger::LedgerStore::load(&cfg.data_dir),
             login: Default::default(),
+            disk_cleanup: Default::default(),
             loops: crate::loops::LoopStore::new(&cfg.config_dir),
             memory: crate::memory::MemoryStore::new(cfg.data_dir.join("memory")),
             new_orgs: RwLock::new(BTreeMap::new()),

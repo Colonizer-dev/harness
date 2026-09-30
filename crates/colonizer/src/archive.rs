@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 /// The archive root under the data dir.
-fn archive_root(app: &App) -> PathBuf {
+pub(crate) fn archive_root(app: &App) -> PathBuf {
     app.cfg.data_dir.join("archive")
 }
 
@@ -308,7 +308,7 @@ async fn walk_files(root: &Path) -> Vec<PathBuf> {
 
 /// Every sidecar record under the archive root. Files without a parseable sidecar — temp names,
 /// a reserved-but-unfinished bundle — are invisible here by construction.
-async fn collect_index(root: &Path) -> Vec<IndexRecord> {
+pub(crate) async fn collect_index(root: &Path) -> Vec<IndexRecord> {
     let mut records = Vec::new();
     for path in walk_files(root).await {
         if !path.extension().is_some_and(|e| e == "json") {
@@ -428,7 +428,7 @@ pub(crate) struct RetentionPlan {
 }
 
 /// Removes the bundle and its sidecar; a name already gone is as good as removed.
-async fn remove_with_sidecar(root: &Path, rel: &str) -> Result<(), String> {
+pub(crate) async fn remove_with_sidecar(root: &Path, rel: &str) -> Result<(), String> {
     let bundle = within(root, rel)?;
     let sidecar = sidecar_of(&bundle);
     for path in [bundle, sidecar] {

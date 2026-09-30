@@ -33,6 +33,7 @@ mod config;
 mod deja;
 mod deps;
 mod diagnosis;
+mod disk_cleanup;
 mod egress;
 mod epic;
 mod events;

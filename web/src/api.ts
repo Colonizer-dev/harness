@@ -14,6 +14,7 @@ import type {
   RepoGitSummary,
   RepoLoc,
   RepoTree,
+  DiskCleanupReport,
   Loop,
   NewLoop,
   ChatMessage,
@@ -458,6 +459,8 @@ export interface Api {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** POST /api/loops/disk-cleanup/run-now: a disk-cleanup run, or with `dryRun` a preview that removes nothing. */
+  runDiskCleanup(id: string, dryRun: boolean): Promise<DiskCleanupReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
@@ -762,6 +765,7 @@ export const httpApi: Api = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  runDiskCleanup: (id, dryRun) => post(`/api/loops/${enc(id)}/run-now${dryRun ? "?dry_run=1" : ""}`),
   mergeTrain: () => request("/api/merge-train"),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),

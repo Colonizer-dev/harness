@@ -7,7 +7,9 @@
 //! A map loop instead keeps a repository — or every repository of an org — mapped: each firing
 //! draws one map, exactly as the Map view would. Loops are operator configuration, saved to
 //! `<config_dir>/loops.json`; their runs are ordinary colonies tagged `origin: "loop:<id>"`
-//! (a map loop's: `map:loop:<id>`).
+//! (a map loop's: `map:loop:<id>`). One loop is built in: **Disk cleanup** (`disk_cleanup.rs`,
+//! id `disk-cleanup`), present on every install and off until the owner switches it on; it runs
+//! in-process housekeeping instead of launching a colony.
 
 use crate::schedule::{Cadence, next_run_after};
 use crate::sessions::{self, NewSession, Session, SessionStatus};
@@ -56,14 +58,16 @@ pub struct LastRun {
     pub at: DateTime<Utc>,
 }
 
-/// What a loop launches: an ordinary colony working from its prompt (`colony`), or architecture-map
-/// refreshes (`map`), which ignore the prompt.
+/// What a loop launches: an ordinary colony working from its prompt (`colony`), architecture-map
+/// refreshes (`map`), which ignore the prompt, or — for the one built-in loop only — the
+/// mothership's own disk cleanup (`disk_cleanup`), which launches nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopKind {
     #[default]
     Colony,
     Map,
+    DiskCleanup,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -117,6 +121,10 @@ pub struct Loop {
     #[serde(default)]
     pub ended_reason: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// The built-in disk-cleanup loop's settings, history and attention (disk_cleanup.rs); absent
+    /// on every other loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_cleanup: Option<crate::disk_cleanup::State>,
 }
 
 impl Loop {
@@ -223,6 +231,9 @@ pub fn live_run<'a>(sessions: &'a [Session], loop_id: &str) -> Option<&'a Sessio
 /// `map:loop:<id>`. An org-wide map loop deliberately maps the next repository while the previous
 /// is still drawing, so it is never held by one.
 fn live_run_for<'a>(sessions: &'a [Session], l: &Loop) -> Option<&'a Session> {
+    if l.kind == LoopKind::DiskCleanup {
+        return None; // in-process: its own lock keeps it to one run at a time
+    }
     if l.kind != LoopKind::Map {
         return live_run(sessions, &l.id);
     }
@@ -274,8 +285,17 @@ pub struct LoopStore {
 impl LoopStore {
     pub fn new(config_dir: &FsPath) -> Self {
         let file = config_dir.join("loops.json");
+        let mut loops = load(&file);
+        // Every install has the disk-cleanup loop, off until its owner switches it on. It is saved
+        // on its own, in `disk-cleanup.json`, so `loops.json` never holds a kind an older build
+        // cannot read: a downgrade loses the cleanup's settings, never the operator's loops.
+        loops.retain(|l| l.kind != LoopKind::DiskCleanup);
+        if let Some(saved) = crate::disk_cleanup::load_saved(&config_dir.join(crate::disk_cleanup::FILE)) {
+            loops.push(saved);
+        }
+        crate::disk_cleanup::ensure_builtin(&mut loops, Utc::now());
         Self {
-            loops: RwLock::new(load(&file)),
+            loops: RwLock::new(loops),
             file,
             persist: Mutex::new(()),
         }
@@ -283,8 +303,21 @@ impl LoopStore {
 
     async fn save(&self) -> Result<()> {
         let _guard = self.persist.lock().await;
-        let data = serde_json::to_vec_pretty(&*self.loops.read().await)?;
-        write_atomic(&self.file, &data).await
+        let (builtin, data) = {
+            let loops = self.loops.read().await;
+            let (builtin, rest): (Vec<&Loop>, Vec<&Loop>) = loops.iter().partition(|l| l.kind == LoopKind::DiskCleanup);
+            (
+                builtin.first().map(serde_json::to_vec_pretty).transpose()?,
+                serde_json::to_vec_pretty(&rest)?,
+            )
+        };
+        write_atomic(&self.file, &data).await?;
+        if let Some(builtin) = builtin
+            && let Some(dir) = self.file.parent()
+        {
+            write_atomic(&dir.join(crate::disk_cleanup::FILE), &builtin).await?;
+        }
+        Ok(())
     }
 
     pub async fn get(&self, id: &str) -> Option<Loop> {
@@ -292,7 +325,7 @@ impl LoopStore {
     }
 
     /// Applies `f` to the loop named `id`, then saves. `None` when there is no such loop.
-    async fn update<R>(&self, id: &str, f: impl FnOnce(&mut Loop) -> R) -> Option<(Loop, R)> {
+    pub(crate) async fn update<R>(&self, id: &str, f: impl FnOnce(&mut Loop) -> R) -> Option<(Loop, R)> {
         let out = {
             let mut loops = self.loops.write().await;
             let l = loops.iter_mut().find(|l| l.id == id)?;
@@ -345,6 +378,10 @@ pub struct NewLoop {
     end_at: Option<DateTime<Utc>>,
     #[serde(default)]
     enabled: Option<bool>,
+    /// The built-in disk-cleanup loop's settings; ignored on every other loop, and when absent the
+    /// built-in keeps the ones it has.
+    #[serde(default)]
+    disk_cleanup: Option<crate::disk_cleanup::Settings>,
 }
 
 /// `owner/*`: every repository of the org, which only a map loop may hold. The owner part must
@@ -362,6 +399,11 @@ fn loop_from(
     now: DateTime<Utc>,
 ) -> Result<Loop, crate::AppError> {
     let bad = |m: &str| client_error(StatusCode::BAD_REQUEST, m);
+    if req.kind == LoopKind::DiskCleanup {
+        return Err(bad(
+            "the disk cleanup loop is built in: switch it on or edit it (id disk-cleanup) instead of making another",
+        ));
+    }
     let name = req.name.trim().to_string();
     if name.is_empty() || name.chars().count() > 80 {
         return Err(bad("a loop needs a name of 1 to 80 characters"));
@@ -418,6 +460,7 @@ fn loop_from(
         last_note: None,
         ended_reason: None,
         created_at,
+        disk_cleanup: None,
     })
 }
 
@@ -425,9 +468,11 @@ fn loop_from(
 /// colony list is filtered (issue #627).
 pub async fn list(State(app): State<Shared>, scoped: Option<axum::Extension<ScopedToken>>) -> Json<Vec<Loop>> {
     let loops = app.loops.loops.read().await;
+    // The built-in disk cleanup is the host's housekeeping, not a token's business: owner only.
     Json(
         loops
             .iter()
+            .filter(|l| scoped.is_none() || l.kind != LoopKind::DiskCleanup)
             .filter(|l| scoped.as_ref().is_none_or(|axum::Extension(t)| t.covers(&l.org, &l.repo)))
             .cloned()
             .collect(),
@@ -496,7 +541,32 @@ pub async fn update(
             "a loop created by an API token cannot become a map loop; delete it and create the map loop as the owner",
         ));
     }
-    let mut l = loop_from(&app, req, id.clone(), existing.created_at, now)?;
+    let mut l = if existing.kind == LoopKind::DiskCleanup {
+        // The built-in loop: only its switch, cadence and settings change. A scoped token never
+        // gets here (the check above reads it as unknown), so enabling it — and its host-level
+        // category — is the owner's alone.
+        crate::disk_cleanup::apply_update(
+            &existing,
+            req.enabled,
+            req.cadence,
+            req.tz_offset_minutes,
+            req.disk_cleanup,
+            now,
+        )?
+    } else {
+        loop_from(&app, req, id.clone(), existing.created_at, now)?
+    };
+    if existing.kind == LoopKind::DiskCleanup {
+        {
+            let mut loops = app.loops.loops.write().await;
+            let Some(slot) = loops.iter_mut().find(|x| x.id == id) else {
+                return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
+            };
+            *slot = l.clone();
+        }
+        app.loops.save().await?;
+        return Ok(Json(l));
+    }
     l.runs = existing.runs;
     l.last_run = existing.last_run;
     l.last_note = existing.last_note;
@@ -541,6 +611,12 @@ pub async fn delete(
             return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
         }
     }
+    if id == crate::disk_cleanup::LOOP_ID {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "the disk cleanup loop is built in: switch it off instead of deleting it",
+        ));
+    }
     let removed = {
         let mut loops = app.loops.loops.write().await;
         let before = loops.len();
@@ -554,12 +630,30 @@ pub async fn delete(
     Ok(Json(json!({"deleted": id})))
 }
 
-/// Starts the loop's next run now, whatever its schedule — still one run at a time.
+/// `?dry_run=1` on run-now: the disk-cleanup loop's preview.
+#[derive(Deserialize, Default)]
+pub struct RunNowQuery {
+    #[serde(default)]
+    dry_run: Option<String>,
+}
+
+impl RunNowQuery {
+    fn dry_run(&self) -> bool {
+        self.dry_run
+            .as_deref()
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on" | ""))
+    }
+}
+
+/// Starts the loop's next run now, whatever its schedule — still one run at a time. A colony or map
+/// loop answers the colony it started; the disk-cleanup loop answers its run report, and with
+/// `?dry_run=1` a preview of what a run would remove that removes nothing.
 pub async fn run_now(
     State(app): State<Shared>,
     Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<RunNowQuery>,
     scoped: Option<axum::Extension<ScopedToken>>,
-) -> ApiResult<Session> {
+) -> ApiResult<Value> {
     let l = app
         .loops
         .get(&id)
@@ -572,6 +666,16 @@ pub async fn run_now(
     {
         return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
     }
+    if l.kind == LoopKind::DiskCleanup {
+        let report = crate::disk_cleanup::run(&app, "manual", query.dry_run(), crate::disk_cleanup::DiskProbe::Df).await?;
+        return Ok(Json(serde_json::to_value(report).unwrap_or(Value::Null)));
+    }
+    if query.dry_run() {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "only the disk cleanup loop has a dry run; a colony loop's run is a colony",
+        ));
+    }
     if let Some(live) = live_run_for(&app.sessions.read().await, &l) {
         return Err(client_error(
             StatusCode::CONFLICT,
@@ -580,10 +684,10 @@ pub async fn run_now(
     }
     let started = match l.kind {
         LoopKind::Map => fire_map(&app, &l, Utc::now()).await,
-        LoopKind::Colony => launch(&app, &l, Utc::now()).await.map(Some),
+        LoopKind::Colony | LoopKind::DiskCleanup => launch(&app, &l, Utc::now()).await.map(Some),
     };
     match started? {
-        Some(session) => Ok(Json(session)),
+        Some(session) => Ok(Json(serde_json::to_value(session).unwrap_or(Value::Null))),
         None => Err(client_error(
             StatusCode::CONFLICT,
             "nothing to map right now; the loop's note says why",
@@ -604,7 +708,7 @@ pub async fn runs(
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such loop"))?;
     if let Some(axum::Extension(token)) = &scoped
-        && !token.covers(&l.org, &l.repo)
+        && (!token.covers(&l.org, &l.repo) || l.kind == LoopKind::DiskCleanup)
     {
         return Err(client_error(StatusCode::NOT_FOUND, "no such loop"));
     }
@@ -781,15 +885,26 @@ pub(crate) async fn note_refresh(app: &App, loop_id: &str, note: &str) {
 
 /// Fires every due loop: launches it, or skips while its previous run is still live.
 pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
+    // The disk-cleanup loop's free-space trigger books it for now when the disk runs low.
+    crate::disk_cleanup::check_trigger(app, now).await;
     let due_ids = due(&app.loops.loops.read().await, now);
     for id in due_ids {
         let Some(l) = app.loops.get(&id).await else { continue };
+        if l.kind == LoopKind::DiskCleanup {
+            // In the background: a big cleanup must not hold every other loop's minute tick.
+            app.loops
+                .update(&id, |x| x.next_run_at = Some(next_run_after(&x.cadence, now)))
+                .await;
+            let app = app.clone();
+            tokio::spawn(async move { crate::disk_cleanup::fire(&app, now).await });
+            continue;
+        }
         let live = live_run_for(&app.sessions.read().await, &l).map(|s| s.id.clone());
         match plan_tick(&l, live.as_deref(), now) {
             Tick::Launch => {
                 let started = match l.kind {
                     LoopKind::Map => fire_map(app, &l, now).await,
-                    LoopKind::Colony => launch(app, &l, now).await.map(Some),
+                    LoopKind::Colony | LoopKind::DiskCleanup => launch(app, &l, now).await.map(Some),
                 };
                 if let Err(e) = started {
                     let message = e.message().to_string();
@@ -952,6 +1067,7 @@ mod tests {
             last_note: None,
             ended_reason: None,
             created_at: utc(2026, 9, 1, 0, 0),
+            disk_cleanup: None,
         }
     }
 
@@ -984,6 +1100,7 @@ mod tests {
             max_runs: None,
             end_at: None,
             enabled: None,
+            disk_cleanup: None,
         };
         let map = loop_from(&app, req("acme/*", LoopKind::Map, ""), "loop_m".into(), now, now).unwrap();
         assert_eq!(
@@ -1293,10 +1410,41 @@ mod tests {
             })
         );
         let raw: Value = serde_json::from_slice(&std::fs::read(dir.join("loops.json")).unwrap()).unwrap();
+        let saved = raw.as_array().unwrap().iter().find(|l| l["id"] == "loop_a").unwrap();
         assert_eq!(
-            raw[0]["cadence"],
+            raw.as_array().unwrap().len(),
+            1,
+            "loops.json holds only the operator's loops, so an older build still reads it: {raw}"
+        );
+        assert_eq!(
+            again.get(crate::disk_cleanup::LOOP_ID).await.map(|l| l.kind),
+            Some(LoopKind::DiskCleanup),
+            "the built-in loop comes back too"
+        );
+        assert_eq!(
+            saved["cadence"],
             json!({"every": "weekly", "weekday": 3, "hour": 9, "minute": 30})
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn the_builtin_disk_cleanup_keeps_its_switch_in_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("colonizer-loops-builtin-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = LoopStore::new(&dir);
+        assert!(!dir.join("loops.json").exists(), "a fresh install writes nothing");
+        store
+            .update(crate::disk_cleanup::LOOP_ID, |l| l.enabled = true)
+            .await
+            .unwrap();
+        assert!(dir.join(crate::disk_cleanup::FILE).exists());
+        let raw: Value = serde_json::from_slice(&std::fs::read(dir.join("loops.json")).unwrap()).unwrap();
+        assert_eq!(raw, json!([]), "the built-in never lands in loops.json");
+        let again = LoopStore::new(&dir);
+        let builtin = again.get(crate::disk_cleanup::LOOP_ID).await.unwrap();
+        assert!(builtin.enabled, "its switch survives a restart");
+        assert_eq!(again.loops.read().await.len(), 1, "and there is only one");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -57,6 +57,7 @@ import type {
   Question,
   RedTeamRun,
   RedTeamSchedule,
+  DiskCleanupReport,
   Loop,
   NewLoop,
   NewRedTeamSchedule,
@@ -2218,7 +2219,60 @@ export function createMockApi(): Api {
   ];
 
   const redSchedules: RedTeamSchedule[] = [];
-  const loopList: Loop[] = [];
+  // The built-in disk cleanup (disk_cleanup.rs): every install has it, off until switched on.
+  const loopList: Loop[] = [
+    {
+      id: "disk-cleanup",
+      name: "Disk cleanup",
+      org: "",
+      repo: "",
+      prompt: "",
+      cadence: { every: "interval", minutes: 60 },
+      kind: "disk_cleanup",
+      tz_offset_minutes: 0,
+      model: null,
+      subagent_model: null,
+      autopilot: false,
+      max_runs: null,
+      end_at: null,
+      enabled: false,
+      next_run_at: null,
+      runs: 0,
+      last_run: null,
+      last_note: null,
+      ended_reason: null,
+      created_at: now(),
+      disk_cleanup: {
+        settings: { trigger_free_pct: 15, build_output: true, stopped_after_days: 7, worktrees: true, microvms: true, archives: false, archive_keep_days: 30, archive_max_gb: null, host_paths: false, extra_paths: [], host_min_age_days: 3 },
+        history: [],
+        attention: null,
+        previewed_at: null,
+      },
+    },
+  ];
+  const cleanupReport = (dryRun: boolean): DiskCleanupReport => ({
+    at: now(),
+    dry_run: dryRun,
+    trigger: "manual",
+    bytes: 3_435_973_837,
+    categories: [
+      {
+        category: "build_output",
+        enabled: true,
+        items: [
+          { path: "/var/lib/colonizer/worktrees/acme/webshop/old98765/target", bytes: 2_899_102_924, colony: "old98765" },
+          { path: "/var/lib/colonizer/worktrees/acme/design-system/merge5678/node_modules", bytes: 536_870_913, colony: "merge5678" },
+        ],
+        count: 2,
+        bytes: 3_435_973_837,
+        held: [{ path: "/var/lib/colonizer/worktrees/acme/api/stop4321", reason: "unpushed-commits" }],
+      },
+      { category: "worktrees", enabled: true, items: [], count: 0, bytes: 0 },
+      { category: "microvms", enabled: true, items: [], count: 0, bytes: 0, note: "microVM images are kept: msb has no prune that can tell which images a colony still needs" },
+      { category: "archives", enabled: false, items: [], count: 0, bytes: 0 },
+      { category: "host_paths", enabled: false, items: [], count: 0, bytes: 0 },
+    ],
+  });
   const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
     id,
     name: body.name,
@@ -3799,6 +3853,18 @@ export function createMockApi(): Api {
       await sleep(150);
       const at = loopList.findIndex((l) => l.id === id);
       if (at < 0) throw new ApiError("no such loop", 404);
+      if (loopList[at].kind === "disk_cleanup") {
+        const was = loopList[at];
+        const enabled = body.enabled ?? was.enabled;
+        loopList[at] = {
+          ...was,
+          cadence: body.cadence,
+          enabled,
+          next_run_at: enabled ? new Date(Date.now() + (body.cadence.every === "interval" ? body.cadence.minutes : 60) * 60_000).toISOString() : null,
+          disk_cleanup: { ...was.disk_cleanup!, settings: body.disk_cleanup ?? was.disk_cleanup!.settings },
+        };
+        return clone(loopList[at]);
+      }
       loopList[at] = { ...loopOf(body, id, loopList[at].created_at, loopList[at].runs), last_run: loopList[at].last_run };
       return clone(loopList[at]);
     },
@@ -3812,6 +3878,18 @@ export function createMockApi(): Api {
       const l = loopList.find((x) => x.id === id);
       if (!l) throw new ApiError("no such loop", 404);
       throw new ApiError("the mock mothership does not launch colonies from loops", 409);
+    },
+    runDiskCleanup: async (id, dryRun) => {
+      await sleep(300);
+      const l = loopList.find((x) => x.id === id);
+      if (!l?.disk_cleanup) throw new ApiError("no such loop", 404);
+      const report = cleanupReport(dryRun);
+      if (dryRun) l.disk_cleanup.previewed_at = report.at;
+      else {
+        l.runs += 1;
+        l.disk_cleanup.history.unshift(report);
+      }
+      return clone(report);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),

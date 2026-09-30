@@ -770,7 +770,7 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
             };
             entry = entry.target(before.name.clone()).section("loops");
             entry.org = owner_of(&before.repo);
-            entry.repo = Some(before.repo.clone());
+            entry.repo = Some(before.repo.clone()).filter(|r| !r.is_empty());
             if rule.kind == "loop.update"
                 && let Some(after) = app.loops.get(&before.id).await
             {

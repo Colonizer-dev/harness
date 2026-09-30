@@ -133,7 +133,14 @@ colonizer loop run loop_x1                                       # start the nex
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
+colonizer loop run disk-cleanup --dry-run                         # what the built-in disk cleanup would remove
+colonizer loop enable disk-cleanup                                # switch it on (disable switches it off)
 ```
+
+`enable` and `disable` are `start` and `stop` under other names. The built-in **Disk cleanup** loop
+([loops.md](loops.md#disk-cleanup)) lists as `(this host)`; `loop run disk-cleanup` prints what it
+freed per category, and `--dry-run` what a run would free, path by path, removing nothing. Its
+settings are changed in the cockpit or through `PUT /api/loops/disk-cleanup`.
 
 `loop create` takes the repository as `owner/repo` (`owner/*` for a map loop: every repository
 of the org), the cadence as its last argument — `30m`/`2h` (every N minutes), `1d`–`7d` (whole
