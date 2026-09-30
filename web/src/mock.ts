@@ -3,6 +3,7 @@ import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
+import { mockDocsLoop } from "./cockpit/docsLoopMock";
 import type {
   ActivityEntry,
   ApiTokenMeta,
@@ -3814,6 +3815,7 @@ export function createMockApi(): Api {
       throw new ApiError("the mock mothership does not launch colonies from loops", 409);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
+    ...mockDocsLoop(now),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);

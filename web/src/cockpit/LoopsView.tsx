@@ -11,6 +11,7 @@ import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DocsLoopCard } from "./DocsLoopCard";
 import { Page } from "./Page";
 
 export const LOOP_ORIGIN = "loop:";
@@ -178,6 +179,7 @@ export function LoopsView({
             </ul>
           )}
         </div>
+      <DocsLoopCard onOpenColony={onOpenColony} />
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
     </Page>

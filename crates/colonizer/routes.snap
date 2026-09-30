@@ -31,6 +31,11 @@
 /api/colonize/draft                                  POST   unauth=401    token=owner            activity=-
 /api/deja                                            GET    unauth=401    token=owner            activity=-
 /api/deja/search                                     GET    unauth=401    token=owner            activity=-
+/api/docs-loop                                       GET    unauth=401    token=owner            activity=-
+/api/docs-loop                                       PUT    unauth=401    token=owner            activity=-
+/api/docs-loop/disable                               POST   unauth=401    token=owner            activity=-
+/api/docs-loop/enable                                POST   unauth=401    token=owner            activity=-
+/api/docs-loop/run                                   POST   unauth=401    token=owner            activity=-
 /api/editor/settings                                 GET    unauth=401    token=owner            activity=-
 /api/editor/settings                                 PUT    unauth=401    token=owner            activity=-
 /api/findings                                        GET    unauth=401    token=owner            activity=-

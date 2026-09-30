@@ -91,6 +91,7 @@ pub(crate) const KINDS: &[&str] = &[
     "loop.resume",
     "loop.delete",
     "loop.run_now",
+    "loop.docs",
     "redteam.start",
     "redteam.stop",
     "redteam.schedule",

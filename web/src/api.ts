@@ -1,5 +1,6 @@
 // Typed client for the harness browser API (docs/protocol.md §4, §6.3).
 import { DEMO } from "./demo";
+import type { DocsLoopSettings, DocsLoopView, DocsReport } from "./cockpit/docsLoop";
 import type {
   ActivityPage,
   ActivityQuery,
@@ -458,6 +459,13 @@ export interface Api {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** GET /api/docs-loop: the built-in Docs & README loop — settings, next run, last report, history. */
+  docsLoop(): Promise<DocsLoopView>;
+  saveDocsLoop(settings: DocsLoopSettings): Promise<DocsLoopView>;
+  /** POST /api/docs-loop/enable|disable: add or remove a repository or org. */
+  setDocsLoopTarget(target: string, enabled: boolean): Promise<DocsLoopView>;
+  /** POST /api/docs-loop/run: a run now; a dry run launches and records nothing. */
+  runDocsLoop(dryRun: boolean): Promise<DocsReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
   redTeamSchedules(): Promise<RedTeamSchedule[]>;
@@ -762,6 +770,10 @@ export const httpApi: Api = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  docsLoop: () => request("/api/docs-loop"),
+  saveDocsLoop: (settings) => put("/api/docs-loop", settings),
+  setDocsLoopTarget: (target, enabled) => post(`/api/docs-loop/${enabled ? "enable" : "disable"}`, { target }),
+  runDocsLoop: (dryRun) => post("/api/docs-loop/run", { dry_run: dryRun }),
   mergeTrain: () => request("/api/merge-train"),
   redTeamSchedules: () => request("/api/redteam/schedules"),
   createRedTeamSchedule: (body) => post("/api/redteam/schedules", body),

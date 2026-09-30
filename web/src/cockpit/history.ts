@@ -152,6 +152,8 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You deleted ${loop}`;
     case "loop.run_now":
       return `You ran ${loop} now`;
+    case "loop.docs":
+      return you ? "You changed the Docs & README loop" : `The Docs & README loop checked ${entry.repo ?? entry.org ?? "a repository"}`;
     case "redteam.start":
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":
