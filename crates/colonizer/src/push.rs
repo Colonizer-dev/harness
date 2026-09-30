@@ -765,7 +765,14 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
     let urgency = if event == "question" { "high" } else { "normal" };
     let mut sent = false;
     for subscription in recipients {
-        let Ok(body) = serde_json::to_vec(&device_payload(event, text, colony, &subscription.prefs, answer, Some(badge))) else {
+        let Ok(body) = serde_json::to_vec(&device_payload(
+            event,
+            text,
+            colony,
+            &subscription.prefs,
+            answer,
+            push_prefs::badge(&subscription.prefs, badge),
+        )) else {
             continue;
         };
         sent |= send_one(app, client, &key, subscription, &body, urgency, colony).await;
@@ -786,7 +793,8 @@ fn recipients<'a>(list: &'a [Subscription], event: &str, session: Option<&Sessio
 
 /// One device's payload: its prefs decide whether it sounds (push_prefs::silent) and, for a
 /// question, whether it carries the answer buttons (push_prefs::answer_actions). A device with
-/// the buttons off gets the question's empty answer, which opens the cockpit instead.
+/// the buttons off gets the question's empty answer, which opens the cockpit instead. `badge` is
+/// already this device's own (push_prefs::badge): `None` leaves the key out.
 fn device_payload(
     event: &str,
     text: &str,
@@ -894,25 +902,51 @@ pub async fn resolved(app: &App, session: &str) {
             return;
         }
     };
-    let badge = attention_count_without(&app.sessions.read().await, session);
-    let Ok(body) = serde_json::to_vec(&json!({ "type": "resolved", "colony": session, "badge": badge })) else {
+    // The badge and each device's scope both read the colony list, so it is read once.
+    let (count, colony) = {
+        let sessions = app.sessions.read().await;
+        let colony = sessions.iter().find(|s| s.id == session).cloned();
+        (attention_count_without(&sessions, session), colony)
+    };
+    // A device only hears about a colony its preferences could have announced; with the colony
+    // gone there is nothing left to scope against, and nothing is sent.
+    let Some(colony) = colony else {
         return;
     };
     let Some(client) = push_client() else {
         eprintln!("push: could not build an HTTP client; the resolution was not sent");
         return;
     };
-    for subscription in &list {
-        if is_apple(&subscription.endpoint) {
-            // Safari/iOS revoke a web push subscription that receives a push without a visible
-            // notification, and this one is never visible — so Apple endpoints are skipped and
-            // that device's badge catches up on its next regular push instead.
+    for subscription in resolved_recipients(&list, &colony) {
+        let Ok(body) = serde_json::to_vec(&resolved_payload(session, &subscription.prefs, count)) else {
             continue;
-        }
+        };
         // The same report-and-prune `deliver` does: 404/410 is an unsubscription the browser
         // could not report.
         send_one(app, &client, &key, subscription, &body, "normal", Some(session)).await;
     }
+}
+
+/// The devices a colony's "resolved" push goes to: never an Apple endpoint — Safari/iOS revoke a
+/// web push subscription that receives a push without a visible notification, and this one is
+/// never visible, so that device's badge catches up on its next regular push instead — and only
+/// the devices [`push_prefs::wants_resolved`] lets hear about this colony. Quiet hours and presence
+/// deliberately do not apply: the push only clears what is already there.
+fn resolved_recipients<'a>(list: &'a [Subscription], colony: &Session) -> Vec<&'a Subscription> {
+    list.iter()
+        .filter(|subscription| !is_apple(&subscription.endpoint))
+        .filter(|subscription| push_prefs::wants_resolved(&subscription.prefs, colony))
+        .collect()
+}
+
+/// The silent "resolved" payload for one device: the colony to close and, where the device keeps
+/// the badge on ([`push_prefs::badge`]), the count to set it to.
+fn resolved_payload(session: &str, prefs: &Prefs, count: usize) -> Value {
+    let mut value = json!({ "type": "resolved", "colony": session });
+    if let Some(badge) = push_prefs::badge(prefs, count) {
+        value["badge"] = json!(badge);
+    }
+    value
 }
 
 /// Whether the endpoint is Apple's push service, which [`resolved`] must not wake (see the skip
@@ -1635,5 +1669,109 @@ pub(crate) mod tests {
         resolved(&app, "abc").await;
         assert_eq!(captures.lock().unwrap().len(), 1, "notify on: the device hears it");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- the three together: #743's preferences shaping #742's buttons and #744's badge/resolved ----
+
+    /// One question, then its resolution, across five devices with their own preferences: answer
+    /// buttons only where `answer_actions` allows, quiet hours holding the question back unless
+    /// questions break through while the resolution still sets the badge where the badge is on, and
+    /// the resolution skipped wherever `wants_resolved` says the device never heard of the colony.
+    #[test]
+    fn preferences_shape_answer_buttons_quiet_hours_badge_and_resolved_per_device() {
+        use crate::push_prefs::QuietHours;
+        let colony = colony();
+        let sub = |label: &str, f: fn(&mut Prefs)| {
+            let mut subscription = device(&format!("https://fcm.googleapis.com/{label}"), [1u8; 16]).subscription;
+            subscription.label = label.into();
+            f(&mut subscription.prefs);
+            subscription
+        };
+        // 03:00 UTC; every quiet device sleeps 22:00–07:00 at UTC+0.
+        let now = 1_767_236_400;
+        const NIGHT: Option<QuietHours> = Some(QuietHours {
+            start: 22 * 60,
+            end: 7 * 60,
+        });
+        let list = [
+            sub("buttons", |_| {}),
+            sub("no-buttons", |p| p.answer_actions = false),
+            sub("asleep", |p| p.quiet = NIGHT),
+            sub("asleep-no-badge", |p| {
+                p.quiet = NIGHT;
+                p.badge = false;
+            }),
+            sub("asleep-breakthrough", |p| {
+                p.quiet = NIGHT;
+                p.questions_break_quiet = true;
+            }),
+            sub("other-org", |p| p.scope = vec!["globex".into()]),
+        ];
+        let labels = vec!["Push now".to_string(), "Wait".to_string()];
+        let answer = Some(("tok123", labels.as_slice()));
+        let text = "acme/webshop #42 needs an answer";
+
+        // The question push: quiet hours hold back the sleeping devices, except the one that lets
+        // questions break through, and scope holds back the other org.
+        let asked = recipients(&list, "question", Some(&colony), now);
+        let names: Vec<&str> = asked.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(names, ["buttons", "no-buttons", "asleep-breakthrough"]);
+        let pushed: Vec<Value> = asked
+            .iter()
+            .map(|s| {
+                device_payload(
+                    "question",
+                    text,
+                    Some(&colony.id),
+                    &s.prefs,
+                    answer,
+                    push_prefs::badge(&s.prefs, 2),
+                )
+            })
+            .collect();
+        // Buttons on: the labels with the token. Buttons off: the same notification, its labels
+        // (title and body) intact, but an empty answer — no token, so no action buttons.
+        assert_eq!(
+            pushed[0]["answer"],
+            json!({"token": "tok123", "choices": ["Push now", "Wait"]})
+        );
+        assert_eq!(pushed[1]["answer"], json!({"choices": []}));
+        assert_eq!(pushed[1]["title"], "Colony asks a question");
+        assert_eq!(pushed[1]["body"], text);
+        assert_eq!(pushed[2]["answer"], pushed[0]["answer"]);
+        for payload in &pushed {
+            assert_eq!(payload["badge"], 2);
+        }
+
+        // The resolution: quiet hours do not apply, so the sleeping devices' badges catch up —
+        // but only where the badge is on; the other org never heard of the colony, so it hears
+        // nothing now either.
+        let resolved: Vec<(&str, Value)> = resolved_recipients(&list, &colony)
+            .into_iter()
+            .map(|s| (s.label.as_str(), resolved_payload(&colony.id, &s.prefs, 1)))
+            .collect();
+        let names: Vec<&str> = resolved.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            names,
+            ["buttons", "no-buttons", "asleep", "asleep-no-badge", "asleep-breakthrough"]
+        );
+        let of = |name: &str| resolved.iter().find(|(n, _)| *n == name).unwrap().1.clone();
+        assert_eq!(of("asleep"), json!({"type": "resolved", "colony": "abc123", "badge": 1}));
+        assert_eq!(
+            of("asleep-no-badge"),
+            json!({"type": "resolved", "colony": "abc123"}),
+            "badge off: no badge key"
+        );
+
+        // A device with every colony event off could never have been told about the colony, so
+        // wants_resolved is false and the resolution skips it, like an Apple endpoint.
+        let mut muted = sub("muted", |_| {});
+        for (name, _) in crate::push_prefs::EVENTS {
+            muted.prefs.events.insert((*name).to_string(), false);
+        }
+        let mut apple = sub("apple", |_| {});
+        apple.endpoint = "https://web.push.apple.com/abc".into();
+        assert!(!push_prefs::wants_resolved(&muted.prefs, &colony));
+        assert!(resolved_recipients(&[muted, apple], &colony).is_empty());
     }
 }

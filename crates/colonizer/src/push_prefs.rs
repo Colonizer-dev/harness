@@ -264,7 +264,6 @@ pub fn answer_actions(prefs: &Prefs, event: &str) -> bool {
 /// Issue #744's hook: whether this device takes the silent "resolved" push for a colony — only
 /// when it could have been told about that colony at all (in scope, and at least one colony event
 /// on). Quiet hours and presence do not apply: the push only clears what is already there.
-#[cfg_attr(not(test), expect(dead_code, reason = "a hook for #744; drop this line once it calls it"))]
 pub fn wants_resolved(prefs: &Prefs, session: &Session) -> bool {
     prefs.in_scope(session)
         && EVENTS
@@ -274,7 +273,6 @@ pub fn wants_resolved(prefs: &Prefs, session: &Session) -> bool {
 
 /// Issue #744's hook: the app-badge count to put in a push to this device, or `None` to leave the
 /// badge key out when the device turned the badge off.
-#[cfg_attr(not(test), expect(dead_code, reason = "a hook for #744; drop this line once it calls it"))]
 pub fn badge(prefs: &Prefs, count: usize) -> Option<usize> {
     prefs.badge.then_some(count)
 }
