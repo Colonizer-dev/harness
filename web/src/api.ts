@@ -92,6 +92,7 @@ import type {
   RetentionRequest,
   SaveProviderRequest,
   Session,
+  SessionDiff,
   SessionStatus,
   SpendHistory,
   StartRedTeamRunRequest,
@@ -348,6 +349,8 @@ export interface Api {
   findings(id: string): Promise<FindingRecord[]>;
   /** GET /api/sessions/{id}/commits (issue #765): the colony's recorded commits, oldest first. */
   sessionCommits(id: string): Promise<{ commits: CommitLink[] }>;
+  /** GET /api/sessions/{id}/diff (issue #611): the colony's changed files with per-file +/- counts, plus the unified diff. */
+  sessionDiff(id: string): Promise<SessionDiff>;
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
@@ -764,6 +767,7 @@ export const httpApi: Api = {
   session: (id) => request(`/api/sessions/${enc(id)}`),
   findings: (id) => request(`/api/sessions/${enc(id)}/findings`),
   sessionCommits: (id) => request(`/api/sessions/${enc(id)}/commits`),
+  sessionDiff: (id) => request(`/api/sessions/${enc(id)}/diff`),
   createSession: (body) => post("/api/sessions", body),
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
