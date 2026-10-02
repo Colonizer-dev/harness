@@ -1,0 +1,11 @@
+{
+  "name": "colony-node-test-bun",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "colony-node-test-dep": "file:./dep"
+  },
+  "scripts": {
+    "test": "node -e \"process.exit(0)\""
+  }
+}
