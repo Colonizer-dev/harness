@@ -90,6 +90,7 @@ mod queue;
 mod quota_cards;
 mod rebase;
 mod reclaim;
+mod recovery;
 mod redact;
 mod redteam;
 mod remote;

@@ -86,6 +86,15 @@ pub const ROUTING_TIER: Point = Point {
     budget: Duration::from_millis(1800),
 };
 
+/// The recovery-path point (recovery.rs): what to do when a step fails — a provider error, a tool
+/// failure, a watchdog stall or an `autopilot_held`. Its options are built per failure class by
+/// `recovery::options`, and the point is the same 1800 ms ceiling the routing point uses.
+pub const RECOVERY_PATH: Point = Point {
+    id: "recovery.path",
+    question: "recovery",
+    budget: Duration::from_millis(1800),
+};
+
 /// Point-id prefixes the harness refuses outright: a destructive, security or publish decision is
 /// never handed to an external classifier, whatever a future point is called. Checked in [`decide`]
 /// before any network call, so a refused point costs nothing.
@@ -221,8 +230,9 @@ async fn decide_at<C: Serialize>(
 
 /// One `decisions.jsonl` row: what one point asked, what came back, and what the harness did about
 /// it. `did` is the point's own word for the end state — routing writes `jev` when the answer was
-/// applied and `rule` otherwise. `outcome` is reserved for later per-point work that grades a
-/// decision against what actually happened; it is null today.
+/// applied and `rule` otherwise. `outcome` grades a decision against what actually happened; only
+/// the recovery point fills it today (a second, `kind: "outcome"` row), so it is null wherever a
+/// point does not grade.
 #[derive(Clone, Debug, Serialize)]
 pub struct Row {
     pub kind: &'static str,
@@ -240,9 +250,11 @@ pub struct Row {
     pub latency_ms: u64,
     /// Why there was no pick, when there was none.
     pub miss: Option<Miss>,
-    /// What the harness did in the end: the point's word for it (`jev` or `rule` for routing).
+    /// What the harness did in the end: the point's word for it (`jev` or `rule` for routing;
+    /// `rule`, `jev` or `cap` for recovery).
     pub did: &'static str,
-    /// Reserved: the outcome that grades this decision, filled by later per-point work. Null now.
+    /// How the decision actually turned out, graded by the point that fills it (recovery writes it
+    /// to a later `kind: "outcome"` row). Null unless a point grades.
     pub outcome: Option<Value>,
 }
 

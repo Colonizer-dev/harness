@@ -38,10 +38,18 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    union does not cover is refused at discovery. A test walks every `modules/agents/*/module.json`
    and fails with "missing egress declaration" if the section is absent.
 
-   The declaration is recorded, not enforced: nothing derives a colony's network allowlist from it
-   yet ([boundaries.md](boundaries.md)). A colony in the default `open` egress mode reaches the
-   public internet anyway; one in `allowlist` mode reaches only what the operator lists, and the
-   module's declared hosts are not added for it ([sandbox-network.md](sandbox-network.md#egress-policy-303)).
+   The declaration is enforced in `allowlist` mode (#601): the running module's `api`, `auth` and
+   `extra` hosts join the colony's allow list (the union with the operator's `egress_allow`), so
+   the agent reaches the hosts you capture below without the operator restating them. Keep
+   `telemetry` out of the fence — it is recorded but never added, because there is no opt-in for
+   telemetry; the operator lists a telemetry host in `egress_allow` if they want it. A host you
+   declare is lowercased and must still parse as an operator entry (at least two labels); one that
+   does not is dropped, which can only narrow reach. A declared host never reopens a blocked
+   destination: the always-blocked deny set and the operator's `egress_block` compile ahead of every
+   allow. Each boot records `module: {agent, allow}` — what the module contributed — in
+   `<session dir>/egress.json` ([sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares)).
+   A colony in the default `open` egress mode reaches the public internet anyway; the declaration
+   there changes nothing, because the `public` profile already covers it.
 
    **Capture procedure.** The declaration should come from observation, not memory:
 
