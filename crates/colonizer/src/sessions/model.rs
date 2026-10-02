@@ -427,6 +427,13 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// Set by the claim that sends a colony to boot (lifecycle's resume, the queue's restore):
+    /// whether the colony was suspended when it was claimed (issue #700). The boot reads it for
+    /// session.json's `restore` key, so the guest can tell a suspension's restore from a plain
+    /// resume — the claim itself has just cleared `suspended`. Transient on purpose: not
+    /// persisted, and a harness restart between claim and boot only ever loses it towards "no".
+    #[serde(skip)]
+    pub was_suspended: bool,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -527,6 +534,7 @@ impl Default for Session {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            was_suspended: false,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,

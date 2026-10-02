@@ -721,6 +721,8 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
                     return None;
                 }
                 x.status = SessionStatus::Starting;
+                // Told to the boot for session.json's `restore` (issue #700) before the flag goes.
+                x.was_suspended = x.suspended.is_some();
                 x.suspended = None;
                 x.error = None;
                 x.attention = None;
