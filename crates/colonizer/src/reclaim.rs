@@ -305,7 +305,9 @@ async fn classify_orphan(wt: &Path, retention_secs: u64) -> OrphanVerdict {
 /// `need_pushed`, commits no remote-tracking ref has), `unreadable-git` when git cannot say. Shared
 /// by the orphan sweep and the disk-cleanup loop.
 pub(crate) async fn work_held(wt: &Path, need_pushed: bool) -> Option<&'static str> {
-    let mut cmd = tokio::process::Command::new("git");
+    // The clean host default: the orphan's worktree is colony content, so no credential and no
+    // config a repository could hang code on (`status` can run content filters).
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C").arg(wt).args(["status", "--porcelain"]);
     match exec(&mut cmd).await {
         Ok(out) if out.trim().is_empty() => {}
@@ -315,7 +317,7 @@ pub(crate) async fn work_held(wt: &Path, need_pushed: bool) -> Option<&'static s
     if !need_pushed {
         return None;
     }
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C")
         .arg(wt)
         .args(["rev-list", "--count", "HEAD", "--not", "--remotes"]);

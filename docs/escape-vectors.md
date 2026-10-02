@@ -202,22 +202,30 @@ are **KVM-verified**.
 fsmonitor, a non-regular `pr.md`, and FIFOs/sockets/devices in the worktree.
 
 *Result / mechanism.* At publish (`crates/colonizer/src/github.rs::publish`,
-`:1920-1946`) the kill-switch is checked first (`:1923`), then `restore_gitfile`
-(`:1928`, `:1960-1975`) replaces the worktree `.git` with a regular 0644 file
-holding the pre-VM recorded `gitdir:`, and `strip_nested_git` (`:1929`,
-`:1978-2002`) removes every non-root `.git`. Host git always runs with
-`HOST_GIT_NO_EXEC` (`github.rs:153-162`, applied in `git_plain` `:122-132`):
-`core.hooksPath=/dev/null core.fsmonitor=false gc.auto=0 maintenance.auto=false`,
-plus `--no-verify` on commit (`:1616`). `pr.md` (in the session dir, not the
+`:2108-2136`) the kill-switch is checked first (`:2115`), then `restore_gitfile`
+(`:2121`, `:2218-2233`) replaces the worktree `.git` with a regular 0644 file
+holding the pre-VM recorded `gitdir:`, and `strip_nested_git` (`:2122`,
+`:2236-2265`) removes every non-root `.git`. Host git always runs with a clean
+config and a scrubbed environment (`git_hardened` `github.rs:222-237`, applied in
+`git_plain` `:125-128`): `GIT_CONFIG_GLOBAL=/dev/null` and
+`GIT_CONFIG_NOSYSTEM=1` so no filter driver or credential helper is defined for a
+worktree `.gitattributes` to select, an environment allowlist (`GIT_ENV_KEEP`
+`:193-216`) that keeps tokens and `GIT_*` overrides out, and `HOST_GIT_NO_EXEC`
+(`:164-173`): `core.hooksPath=/dev/null core.fsmonitor=false gc.auto=0
+maintenance.auto=false`, plus `--no-verify` on commit (`:1780`). Only `fetch`,
+`push`, `ls-remote` and `clone` run the authenticated variant
+(`git_remote`/`git_authed` `:139-155`), and they read no worktree content, so no
+credential rides on a command that does. `pr.md` (in the session dir, not the
 worktree) is read through `read_regular_file` with `O_NOFOLLOW|O_NONBLOCK` + fstat
-(`github.rs:2011-2027`); a symlink/FIFO/dir/oversized file falls back to the
-default title (tested `github.rs:3034-3078`). Placeholders are stripped before
-`git add -A` (`path_policy::remove_leftovers`, `github.rs:1560-1568`). Special
+(`github.rs:2269-2290`); a symlink/FIFO/dir/oversized file falls back to the
+default title (tested `github.rs:3272-3330`). Placeholders are stripped before
+`git add -A` (`path_policy::remove_leftovers`, `github.rs:1717-1721`). Special
 files (FIFO/socket/device) planted in the worktree are handled by `git add -A`,
 which does not stage non-regular files.
 
 *Verdict.* **Blocked**. Regression tests added for the `.git` rewrite, nested-repo
-stripping and the `HOST_GIT_NO_EXEC` contents (see `github.rs` tests); the `pr.md`
+stripping, the `HOST_GIT_NO_EXEC` contents and the clean config/environment (see
+`github.rs` tests); the `pr.md`
 and blocked-publish paths were already covered. The worktree special-file case
 relies on `git add -A` ignoring non-regular files — spot-checked in the manual
 procedure.

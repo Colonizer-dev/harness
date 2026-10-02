@@ -134,6 +134,23 @@ colony question (Allow / Deny) that the operator — or the autonomy judge, with
 answers. Every decision leaves one `exec policy: <decision> rule=… layer=… command=…` line in the
 harness log.
 
+The question event carries `kind: "exec_policy"` (issue #759). The Bash call that asked is blocked in
+flight until the answer, so the mothership never suspends a colony while such a question waits — a
+suspension would kill the call and the agent that made it. An **Allow** is remembered for the rest
+of the colony's run, keyed on the rule, its layer and the command with its whitespace collapsed:
+the same command is not asked about again, whether the same agent retries it or a subagent spawned
+later runs it. A different command, or the same one under another rule, still asks; a **Deny** is
+never remembered, and a `deny` rule is refused before the memory is consulted. The memory lives
+only in the runner process, never on disk where the agent could write itself an approval, so a
+colony restarted in a fresh microVM asks again. The ACP runner does the same.
+
+A question the runner puts to the colony while a tool call is blocked on the answer inside a live
+agent also carries `blocking: true`: every exec-policy ask, and an `AskUserQuestion` asked by a
+**subagent** — named by canUseTool's `agentID`, or by the tool_use having arrived in a message with a
+`parent_tool_use_id`. The mothership does not suspend such a colony (up to a two-hour cap): the
+subagent is blocked in its Task call, and a resumed lead transcript would get an answer to a question
+it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly, so it still suspends.
+
 ```json
 { "rules": [ { "id": "no-deploys", "decision": "deny", "reason": "deploys go through CI",
                "script": ["\\bkubectl\\s", "\\bterraform\\s"] },

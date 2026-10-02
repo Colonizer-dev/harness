@@ -62,7 +62,10 @@ never claimed). The `answer` command resolves the request: the option whose labe
 chosen answer is replied as `{outcome: {outcome: "selected", optionId}}`; an unmatched label or a
 free-text `response` replies `{outcome: {outcome: "cancelled"}}` — ACP has no free-text answer —
 and a `question_answered` event travels back like the Claude module's. An interrupt replies
-`cancelled` and answers nothing.
+`cancelled` and answers nothing. Every such question carries `blocking: true` (issue #759): the
+agent's tool call waits in flight on the reply, and a `session/load` after a suspension would have
+no request left to answer, so the mothership keeps the colony running while it waits, up to a
+two-hour cap.
 
 ## Workspace confinement
 
@@ -97,7 +100,10 @@ setting is carried over here) and `.colonizer/exec-policy.json` in the worktree.
 `deny` answers the request with the agent's `reject_once` option (any other `reject*` kind, else
 `cancelled`) and no question is shown; an `allow` answers with `allow_once` (any other `allow*`
 kind — with neither, the question surfaces as usual); an `ask` surfaces the question with the rule
-and its reason on the card, answered like any other.
+and its reason on the card, answered like any other. That question carries `kind: "exec_policy"`,
+so the mothership does not suspend the colony while the call waits on it, and an answer with one of
+the agent's `allow*` options is remembered for the run: the same command under the same rule is
+answered with the allow option without asking again (issue #759).
 
 The fence only sees commands the agent asks permission for: calls the agent runs without asking are
 not checked, so the policy is guidance, and the microVM is the boundary.

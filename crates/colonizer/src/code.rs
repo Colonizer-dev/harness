@@ -105,7 +105,7 @@ pub(crate) async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::P
         let url = format!("https://github.com/{repo}.git");
         exec_within(
             Duration::from_secs(300),
-            app.git_plain().args(["clone", "--bare", "--quiet"]).arg(&url).arg(&bare),
+            app.git_remote().args(["clone", "--bare", "--quiet"]).arg(&url).arg(&bare),
         )
         .await
         .with_context(|| format!("could not clone {repo}"))?;
@@ -125,7 +125,11 @@ pub(crate) async fn ensure_bare(app: &Shared, repo: &str) -> Result<std::path::P
         move |app| {
             let bare = bare.clone();
             async move {
-                exec_within(GIT_LIMIT, app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+                exec_within(
+                    GIT_LIMIT,
+                    app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"]),
+                )
+                .await?;
                 Ok(Value::Bool(true))
             }
         }
@@ -998,7 +1002,7 @@ async fn open_edit_pr(
     let wt = std::env::temp_dir().join(format!("colonizer-edit-{}", crate::util::short_id()));
     let result = async {
         commit_edit(app, bare, &wt, base_sha, branch, files, name, &email, req.message.trim()).await?;
-        let mut push = app.git_plain();
+        let mut push = app.git_remote();
         push.arg("-C")
             .arg(&wt)
             .args(["push", "--quiet", "origin", &format!("HEAD:refs/heads/{branch}")]);

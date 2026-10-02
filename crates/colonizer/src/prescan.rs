@@ -329,17 +329,12 @@ impl Tree {
 /// A host git with every repository-controlled execution turned off, no credentials, and no lazy
 /// fetch from a promisor remote: the pre-scan reads what is on disk and nothing else.
 fn git(git_dir: &Path) -> Command {
-    let mut c = Command::new("git");
-    c.args(crate::github::HOST_GIT_NO_EXEC)
-        .arg("--git-dir")
+    // `git_clean` already carries the clean config, the environment allowlist (no tokens, no
+    // `GIT_*`), the no-exec overrides and no prompt.
+    let mut c = crate::github::git_clean();
+    c.arg("--git-dir")
         .arg(git_dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_LAZY_FETCH", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

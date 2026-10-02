@@ -195,6 +195,18 @@ Two Sandbox settings control this. Both are mothership-wide, with no per-org ove
 - Only an agent that can resume its own session is suspended. Today that is Claude Code, Codex and
   ACP agents that advertise session loading. Any
   other agent keeps its microVM, and the colony log says so once.
+- A colony waiting on an exec-policy approval (an `ask` rule, such as `writes-outside-repo`) is
+  never suspended. Its agent — often a subagent — is blocked on the command in flight, and a
+  resumed transcript cannot continue that call, so the agent would be lost. The question carries
+  `kind: "exec_policy"`, and the colony keeps its microVM and its slot until you answer.
+- The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
+  permission request: the tool call that asked is blocked in flight, and suspending the colony
+  would kill the agent and leave the answer with nobody to receive it. The question carries
+  `blocking: true`. The lead agent's own questions still suspend as usual.
+- Such a colony is not held for ever. After **two hours** without an answer it is suspended anyway,
+  so it stops holding a microVM and a parallel slot. The colony log says so at `warn`, and says what
+  it costs: the agent that asked is lost with the microVM, and your answer, when it comes, reaches
+  the lead agent when the colony resumes. The cap is never shorter than `suspend_after_minutes`.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
   such as a dev server, are gone after the resume. Services the colony declares or registers come
   back — see [Services that come back after a resume](#services-that-come-back-after-a-resume).

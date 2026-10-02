@@ -212,6 +212,12 @@ Rules:
   runner assigns the class; the Mothership's autonomy judge enforces it against its ceiling
   (§6.2b). A question with no `risk` — an older runner's — counts as `workspace_write`; a value
   outside the vocabulary counts as above every ceiling and is never answered automatically.
+- A question whose answer a tool call is blocked on, in flight inside a live agent, carries
+  `blocking: true`: a subagent's `AskUserQuestion`, an ACP permission request, an exec-policy ask
+  (which also carries `kind: "exec_policy"`). A resumed transcript cannot finish that call, so the
+  Mothership does not suspend such a colony while it waits, up to a two-hour cap
+  ([#759](https://github.com/Colonizer-dev/harness/issues/759); docs/colonies.md). The lead agent's
+  own question omits the field: its turn resumes with the answer as the next message.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `agent_session` names the runner's own conversation id, so the harness can have it continued later
   (§1's `COLONIZER_RESUME_SESSION`). Emit it as soon as the runner knows its conversation id, the

@@ -733,7 +733,8 @@ async fn git_ignored(worktree: &Path, dirs: &[PathBuf]) -> Vec<bool> {
             out.push(false);
             continue;
         };
-        let mut cmd = tokio::process::Command::new("git");
+        // The clean host default (as in reclaim::work_held): the worktree is colony content.
+        let mut cmd = crate::github::git_clean();
         cmd.arg("-C")
             .arg(worktree)
             .args(["check-ignore", "-q", "--"])
