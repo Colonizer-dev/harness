@@ -157,6 +157,8 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return "Disk cleanup ran";
     case "disk_cleanup.attention":
       return "Disk cleanup could not free enough space";
+    case "loop.docs":
+      return you ? "You changed the Docs & README loop" : `The Docs & README loop checked ${entry.repo ?? entry.org ?? "a repository"}`;
     case "redteam.start":
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":

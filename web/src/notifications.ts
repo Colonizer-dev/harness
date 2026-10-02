@@ -65,6 +65,8 @@ export function needsYou(session: Session): boolean {
     // answer is stored and it is queued for a parallelism slot. Nothing here is left to do.
     return !isAnsweredWaiting(session);
   }
+  // A warm-up (issue #701) is the still-open question being booted on your behalf.
+  if (session.prewarm && !session.pending_answer) return true;
   if (!session.attention) return false;
   // A provider error on a colony that is still working is not yours to act on yet: its next
   // request may succeed (the gateway then lifts the flag). It needs you once the turn has stopped.

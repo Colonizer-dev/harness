@@ -218,6 +218,57 @@ pub async fn answer(
     }
 }
 
+/// `POST /api/sessions/{id}/prewarm` (issue #701): the caller has a suspended colony's question
+/// open, so the queue may bring the colony back for the answer ahead of its timeout, and the answer
+/// lands in an already-running VM. Marking the record is all the route does — the queue applies the
+/// admission, the slot rules and the timeout on its own ticks — so a colony that is not a suspended
+/// one still waiting on its question (live, already holding an answer) reads **204**: a no-op, not
+/// an error. A marked or already-marked colony reads **202**; the queue never takes a slot ahead of
+/// a colony that holds an answer.
+pub async fn prewarm(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    via: Option<axum::Extension<crate::auth::Via>>,
+) -> Result<StatusCode, crate::AppError> {
+    let Some(s) = app.session(&id).await else {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
+    };
+    // Issue #673: a colony a merge superseded is held until kept, so there is nothing to warm.
+    if !suspended_waiting(&s) || s.pending_answer.is_some() || crate::supersede::blocks_start(&s) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    // Conditional on purpose: a restore or a stop that claimed the colony between the snapshot and
+    // this write must not hang a warm-up request on it. `false` here is an already-marked colony —
+    // idempotent, so still a 202.
+    let marked = app
+        .update_session(&id, |x| {
+            if !suspended_waiting(x) || x.pending_answer.is_some() || x.prewarm.is_some() || crate::supersede::blocks_start(x) {
+                return false;
+            }
+            x.prewarm = Some(Prewarm {
+                requested_at: Utc::now(),
+                started_at: None,
+                ready_at: None,
+            });
+            x.updated_at = Utc::now();
+            true
+        })
+        .await
+        .is_some_and(|(_, landed)| landed);
+    if marked {
+        app.session_log(
+            &id,
+            "info",
+            "question opened; the queue brings the colony back when a slot frees".into(),
+        )
+        .await;
+        if let Some(s) = app.session(&id).await {
+            crate::activity::record_prewarm(&app, &s, via.map(|axum::Extension(via)| via)).await;
+        }
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// `POST /api/sessions/{id}/seen` (issue #744): someone is looking at this colony now, so a
 /// failure it moved into is no longer unseen — the flag the app badge counts is cleared here, and
 /// the silent `resolved` push lets every other device close its notification and lower the badge.
@@ -1072,6 +1123,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}/commits", routing::get(crate::commit_links::api_commits))
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
+        .route("/api/sessions/{id}/prewarm", routing::post(prewarm))
         .route("/api/sessions/{id}/seen", routing::post(seen))
         .route("/api/sessions/{id}/messages", routing::post(message))
         .route("/api/sessions/{id}/events", routing::get(events_ws))

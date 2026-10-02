@@ -662,6 +662,7 @@ pub async fn create(
         parked: None,
         agent_session: None,
         pending_answer: None,
+        prewarm: None,
         supply_chain,
         superseded: None,
         // A fresh colony has no suspension behind it for the boot's `restore` to name (issue #700).

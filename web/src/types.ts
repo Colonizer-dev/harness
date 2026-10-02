@@ -247,6 +247,13 @@ export interface Session {
    * whole field.
    */
   pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
+  /**
+   * A warm-up of this suspended colony's question is under way (issue #701): the mothership is
+   * booting it ahead of your answer. `suspended` stays set while warming, so an answer still holds
+   * as for any suspended colony; all three fields clear once the answer is delivered. Older
+   * mothership builds omit the whole field.
+   */
+  prewarm?: { requested_at: string; started_at?: string | null; ready_at?: string | null } | null;
   /** The supply-chain target this colony was launched to fix (issue #673); absent for a colony launched against none. */
   supply_chain?: { package: string; advisory: string } | null;
   /**
@@ -2822,6 +2829,7 @@ export type ActivityKind =
   | "loop.resume"
   | "loop.delete"
   | "loop.run_now"
+  | "loop.docs"
   | "redteam.start"
   | "redteam.stop"
   | "redteam.schedule"

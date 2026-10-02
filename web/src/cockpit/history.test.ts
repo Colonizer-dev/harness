@@ -126,6 +126,8 @@ describe("filters and words", () => {
     expect(sentence({ kind: "outcome.stopped", actor: "colony", repo: "acme/web", issue: 3 })).toBe("web#3 stopped");
     expect(sentence({ kind: "settings.save", actor: "you", target: "secret provider-keys:x" })).toBe("You saved the secret provider-keys:x");
     expect(sentence({ kind: "loop.pause", actor: "you", target: "Nightly" })).toBe("You paused the loop “Nightly”");
+    expect(sentence({ kind: "loop.docs", actor: "colony", repo: "acme/app", target: "Docs & README" })).toBe("The Docs & README loop checked acme/app");
+    expect(sentence({ kind: "loop.docs", actor: "you", target: "Docs & README" })).toBe("You changed the Docs & README loop");
     expect(sentence({ kind: "outcome.question", actor: "colony", repo: "acme/web", issue: 3 }, true)).toBe("web#3 is waiting on your answer");
     expect(sentence({ kind: "colonize.issue", actor: "you", repo: "acme/web", issue: 100 })).toBe("You created web#100 from Colonize");
     expect(sentence({ kind: "colonize.colony", actor: "you", repo: "acme/web", issue: 100 })).toBe("You dispatched a colony on web#100 from Colonize");
