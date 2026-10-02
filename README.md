@@ -102,7 +102,7 @@ mothership from a terminal, scoped API tokens included — is in
 | | What it is | Status |
 | :--- | :--- | :--- |
 | **Harness** | This repository: the mothership, the in-VM daemon, the agent modules, the web UI, the bundled mesh. Runnable today on your own machine. | `SHIPPING` |
-| **Colonizer** | Anything beyond one machine: remote outposts, a fleet view, a hosted offering. | `PLANNED` |
+| **Colonizer** | Anything beyond one machine that the harness does not do yet: remote outposts that host colonies, a hosted offering. Motherships can already pair into a [fleet](docs/fleet.md) with a shared view. | `PLANNED` |
 
 Two labels are used everywhere below, and they set the tense of the sentence around them:
 
@@ -339,7 +339,7 @@ Stated here rather than buried.
 | Shared memory with review ([#3](https://github.com/Colonizer-dev/harness/issues/3)) | `SHIPPING` |
 | Watchdog for stalled colonies ([#4](https://github.com/Colonizer-dev/harness/issues/4)) | `SHIPPING` |
 | Provider gateway: private-network models, queues, long timeouts, health, Claude fallback ([#5](https://github.com/Colonizer-dev/harness/issues/5)) | `SHIPPING` |
-| CI running the Rust, runner and UI test suites | `PLANNED` |
+| CI running the Rust, runner and UI test suites | `SHIPPING` |
 | Local Claude Code plugins mounted read-only into colonies, with ECC's skills and agents vendored ([#6](https://github.com/Colonizer-dev/harness/issues/6)) | `SHIPPING` |
 | Skillsets switched on and off in Settings, globally and per org ([#46](https://github.com/Colonizer-dev/harness/issues/46)) | `SHIPPING` |
 | superpowers vendored, with its bootstrap in the system prompt instead of a hook ([#44](https://github.com/Colonizer-dev/harness/issues/44)) | `SHIPPING` |
@@ -356,7 +356,9 @@ Stated here rather than buried.
 | Per-colony budgets and host-disk quotas ([#86](https://github.com/Colonizer-dev/harness/issues/86)) | `SHIPPING` |
 | Red-team raids: hunters with distinct briefs raiding one repo while the nest is empty ([docs/red-team.md](docs/red-team.md), [#212](https://github.com/Colonizer-dev/harness/issues/212)) | `SHIPPING` |
 | Burn-down mode: weekly token plan spent to a reserve by paced bug-hunt colonies ([docs/burn-down.md](docs/burn-down.md), [#210](https://github.com/Colonizer-dev/harness/issues/210)) | `SHIPPING` |
-| Fleet view and network policies | `PLANNED` |
+| Fleets: motherships that pair with an invite and a confirmation code, share one fleet view, and sync finished-colony history to the owner once each member opts in ([docs/fleet.md](docs/fleet.md), [#686](https://github.com/Colonizer-dev/harness/issues/686), [#762](https://github.com/Colonizer-dev/harness/issues/762)) | `SHIPPING` |
+| Merge train, off by default: green, clean colony pull requests squash-merged one at a time and rebased when behind, with an opt-in loop that drives it ([docs/architecture.md](docs/architecture.md#merge-train), [docs/loops.md](docs/loops.md#merge-train), [#671](https://github.com/Colonizer-dev/harness/issues/671), [#754](https://github.com/Colonizer-dev/harness/issues/754)) | `SHIPPING` |
+| Network policies as a module of their own | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
 
 The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit

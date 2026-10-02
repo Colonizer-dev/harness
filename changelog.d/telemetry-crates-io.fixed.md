@@ -1,1 +1,0 @@
-**`colonizer-harness` publishes to crates.io again.** It depended on `cratefield-module-telemetry` through a git pin, which crates.io refuses, so the v0.1.10 crates job failed after the GitHub release had shipped. It now uses the published `cratefield-module-telemetry` 0.2 (on `cratefield-core` 0.6).
