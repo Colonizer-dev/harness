@@ -380,6 +380,22 @@ host-disk checks and are deleted with the colony. The same would hold for a snap
 is `<session dir>/snapshots/`, so it would be counted and cleaned up with the colony, with `msb snapshot remove`
 run before the directory goes away.
 
+The host side of that artifact is built behind the same false gate (issue #702,
+`crates/colonizer/src/snapshot.rs`), waiting only on an `msb` pin that can restore a secret-carrying sandbox. A
+snapshot lives in `<session dir>/snapshots/` and is sealed at rest with ChaCha20-Poly1305 under a per-colony
+random 256-bit key, in 1 MiB chunks so a multi-gigabyte image is never held whole in memory (each chunk's nonce
+is a random prefix plus a counter, its flags and length are authenticated, and a missing final chunk reads as
+truncated). The key is kept under the mothership's private state (`<data dir>/snapshot-keys/<id>`, 0600), never
+in or beside the snapshot directory, so a copy of that directory alone opens nothing; the plaintext image is
+removed once it is sealed, and a restore decrypts into a staging file that is removed afterwards. A snapshot is
+kept only below an 8 GiB resident-memory cap and is dropped after 48 h; past either, or with a missing key, or
+on a corrupt, truncated or unreadable file, the colony falls back to the transcript resume — the fallback is a
+pure decision over those facts. The credential rotation such a restore needs is built: it re-mints the colony's
+gateway token (overwriting the file the gateway validates against per request, so the old one stops working) and
+its tailnet VM key with the old node dropped. But the `msb snapshot restore` call and the delivery of those
+credentials into a live guest are not — the thaw is a stub that always fails, so a restore falls back today —
+and that stub is the one piece left for the gate.
+
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
 whose contract — atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session —
