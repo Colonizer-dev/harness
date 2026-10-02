@@ -641,6 +641,7 @@ async fn hold_answer(
             )
             .await;
             *rt.open_question.lock().await = None;
+            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
             rt.activity.lock().await.question_since = None;
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;

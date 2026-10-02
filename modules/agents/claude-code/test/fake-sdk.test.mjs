@@ -460,6 +460,46 @@ test('free-text response is passed to Claude and echoed', async () => {
   assert.equal(events.find((e) => e.type === 'question_answered').response, 'Use markdown');
 });
 
+// Issue #759: a subagent's AskUserQuestion blocks the subagent's Task call in flight, and a resumed
+// transcript cannot finish it, so the mothership must keep the colony running while it waits. The
+// runner marks such a question `blocking: true` — from canUseTool's `agentID`, or, when the SDK
+// leaves that out, from the tool_use having arrived in a subagent's message. The lead's own
+// question carries no mark: its turn resumes cleanly with the answer as the next message.
+test("a subagent's question is marked blocking and the lead's is not", async () => {
+  const subagentMessage = (id, content) => ({ ...assistant(id, content), parent_tool_use_id: 'toolu_task' });
+  const { query, calls } = fakeQuery(async function* (options, c) {
+    const ask = (toolUseID, extra = {}) =>
+      options.canUseTool('AskUserQuestion', askInput, { signal: new AbortController().signal, toolUseID, ...extra });
+    yield assistant('msg_lead', [{ type: 'tool_use', id: 'toolu_task', name: 'Task', input: { subagent_type: 'general-purpose', description: 'Look around' } }]);
+    yield subagentMessage('msg_sub', [{ type: 'tool_use', id: 'toolu_sub', name: 'AskUserQuestion', input: askInput }]);
+    c.decisions.push(await ask('toolu_sub', { agentID: 'agent_01' }));
+    // No agentID from the SDK: the tool_use's own message still says a subagent asked.
+    yield subagentMessage('msg_sub2', [{ type: 'tool_use', id: 'toolu_sub2', name: 'AskUserQuestion', input: askInput }]);
+    c.decisions.push(await ask('toolu_sub2'));
+    yield assistant('msg_lead2', [{ type: 'tool_use', id: 'toolu_lead', name: 'AskUserQuestion', input: askInput }]);
+    c.decisions.push(await ask('toolu_lead'));
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, duration_ms: 1 };
+  });
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (event) => {
+    events.push(event);
+    if (event.type === 'question') commands.push({ type: 'answer', question_id: event.question_id, answers: { 'Which file name?': 'hello.txt' } });
+    if (event.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', text: 'go' });
+
+  await runAgent({ query, commands, emit, graceMs: 100 });
+
+  const questions = Object.fromEntries(events.filter((e) => e.type === 'question').map((e) => [e.question_id, e]));
+  assert.equal(questions.toolu_sub.blocking, true, 'a subagent asked (agentID)');
+  assert.equal(questions.toolu_sub2.blocking, true, 'a subagent asked (its message had a parent)');
+  assert.ok(!('blocking' in questions.toolu_lead), "the lead's question keeps its shape");
+  assert.ok(!('kind' in questions.toolu_sub), 'the agent asked of its own accord: no kind');
+  assert.equal(calls.decisions.length, 3);
+  assert.ok(calls.decisions.every((d) => d.behavior === 'allow'));
+});
+
 test('a plain-text question ending a turn is re-asked as a choice card once', async () => {
   const { query, calls } = fakeQuery(async function* (options, c) {
     const result = c.prompts.length === 1 ? 'Which database should I use?' : 'Still unsure, which one?';
