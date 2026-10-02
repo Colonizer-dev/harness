@@ -780,6 +780,9 @@ impl Drop for Cleanup {
 
 impl Conn {
     /// Takes one of the [`MAX_STREAMS`] slots, or `None` when they are all busy.
+    // `fetch_update` is deprecated as `try_update` on the newest stable Rust; the old name still
+    // builds on every toolchain we support, the new one only on the newest.
+    #[allow(deprecated)]
     fn admit(&self) -> Option<Slot> {
         self.live
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < MAX_STREAMS).then_some(n + 1))
