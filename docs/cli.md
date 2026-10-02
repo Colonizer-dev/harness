@@ -86,9 +86,12 @@ agent finishes cleanly and has written its PR description. The two flags refuse 
 neither, the publish module's `autopilot` setting decides (on by default). Who answers a colony's
 questions is a separate setting, the `autonomy` module ([colonies.md](colonies.md#questions-and-who-answers-them)).
 
-`launch` cannot override the launch guards the cockpit can: an issue another colony already holds,
-or an epic (an issue with sub-issues), is refused with a 409 (exit 5). Launch those from the
-cockpit ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
+`launch` takes the same claim and epic overrides the cockpit offers, so a script can get past a
+launch guard: `--allow-duplicate` starts a second colony on an issue another colony already holds,
+`--queue-behind-holder` waits behind the holder instead (the colony comes back `queued` and starts
+when the issue is its own), and `--allow-epic` starts one on an epic (an issue with sub-issues).
+Without them, an issue another colony holds or an epic is refused with a 409 (exit 5) that names
+the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
 client-side: `--org` by repository owner, `--status` by the API's state names, case-insensitively.
 `answer` matches its argument against the pending question: a 1-based option number wins, then a
 whole-label match case-insensitively, and anything else goes to the agent as a free-text note —

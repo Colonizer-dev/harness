@@ -147,7 +147,9 @@ fn duplicate_message(held: &Session, issue: u64) -> String {
     };
     format!(
         "colony {} is already on #{issue} and {where_it_is}. Starting a second one duplicates its \
-         work: read that colony first, or pass allow_duplicate to start another anyway.",
+         work: read that colony first, or pass allow_duplicate (`colonizer launch --allow-duplicate`) \
+         to start another anyway, or queue_behind_holder (`colonizer launch --queue-behind-holder`) \
+         to wait for it.",
         held.id
     )
 }

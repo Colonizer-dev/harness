@@ -55,9 +55,10 @@ a slot frees. The limits are the Sandbox settings `max_parallel` (default 3) and
 [architecture.md, Session lifecycle](architecture.md#session-lifecycle) for every state a colony
 passes through.
 
-**Limits.** The CLI and the MCP tool cannot pass `allow_duplicate`, `queue_behind_holder` or
-`allow_epic`. A launch from either one on a held issue or an epic is refused with a 409 (CLI exit
-code 5). Use the cockpit, or call the API directly, to override.
+**Overrides.** The CLI (`colonizer launch --allow-duplicate`, `--queue-behind-holder`,
+`--allow-epic`) and the MCP `launch_colony` tool (`allow_duplicate`, `queue_behind_holder`,
+`allow_epic`) take the same overrides the cockpit's checkboxes and `POST /api/sessions` do. Without
+one, a launch on a held issue or an epic is refused with a 409 (CLI exit code 5).
 
 ## Claims: one colony per issue
 

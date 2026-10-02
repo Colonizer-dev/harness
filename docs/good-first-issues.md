@@ -25,10 +25,6 @@ no KVM and no running colony, and checks out with the commands in
 
   **Start here:** the total renders in `web/src/cockpit/OverviewView.tsx` from the per-org rollups; sum today's rows from the spend journal instead (`web/src/spend.ts`, covered by `spend.test.ts`).
 
-- [#600](https://github.com/Colonizer-dev/harness/issues/600) CLI and MCP launch cannot pass the claim and epic overrides (allow_duplicate, queue_behind_holder, allow_epic) — Rust
-
-  **Start here:** add the three optional bools to `Command::Launch` in `crates/colonizer/src/cli.rs` and `LaunchColony` in `crates/colonizer/src/mcp.rs`, pass them through, and document them in `docs/cli.md` and `docs/mcp.md`.
-
 - [#603](https://github.com/Colonizer-dev/harness/issues/603) ACP module: the Model setting is parsed but ignored — agent module (Node)
 
   **Start here:** `modules/agents/acp/runner.mjs` never reads `COLONIZER_MODEL`; send `session/set_model` after `session/new` when the agent advertised model selection (the cockpit `set_model` handler in the same file already does this). Test with the fake agent in `modules/agents/acp/test/` (`npm test`).
@@ -58,7 +54,7 @@ Still no microVM, but more to read:
 - Label the ones on the list when triaging. `gh issue edit` takes several numbers at once:
 
   ```sh
-  gh issue edit 600 601 603 604 608 611 613 620 621 622 --add-label "good first issue"
+  gh issue edit 601 603 604 608 611 613 620 621 622 --add-label "good first issue"
   ```
 
 - Enable Discussions (Settings → General → Features → Discussions), keeping the default Q&A and
