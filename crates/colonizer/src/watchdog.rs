@@ -2,9 +2,10 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
-use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus, util::short_id};
+use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WatchdogSettings {
@@ -31,6 +32,10 @@ pub struct Activity {
     /// The question id whose above-the-ceiling note is already in the log, so the judge's
     /// once-per-question "left for you" line does not repeat every half-minute tick.
     pub risk_announced: Option<String>,
+    /// Automatic recoveries the recovery point (`recovery.rs`) has chosen for this colony, against
+    /// its own per-colony cap (issue #586). In memory like the rest of `Activity`: a restart resets
+    /// it, which at worst allows a few more automatic recoveries than the cap names.
+    pub recoveries: u32,
 }
 
 impl Activity {
@@ -43,6 +48,7 @@ impl Activity {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
         }
     }
 }
@@ -186,32 +192,73 @@ async fn check_all(app: &Shared) {
         match decide(&settings, now, state, &activity, attention.as_deref()) {
             Decision::Nothing => {}
             Decision::Nudge => {
+                // The recovery point (issue #586): nudging is the rule, and when the point is on Jev
+                // may answer with another option. Off leaves this branch exactly as it was.
+                let (action, did) = crate::recovery::handle(app, &s, crate::recovery::Failure::Stall, "nudge_agent", false).await;
                 let nudges = activity.nudges + 1;
                 {
                     let mut current = rt.activity.lock().await;
                     current.nudges = nudges;
                     current.last_nudge = Some(now);
                 }
-                let command = json!({
-                    "type": "user_message",
-                    "id": format!("watchdog-{}", short_id()),
-                    "text": nudge_text(settings.stall_minutes),
-                });
-                rt.send_command(command);
-                app.session_log_as(
-                    Origin::Watchdog,
-                    &s.id,
-                    "info",
-                    format!(
-                        "watchdog: no progress for {} min, nudged the agent ({nudges}/{})",
-                        settings.stall_minutes, settings.max_nudges
-                    ),
-                )
-                .await;
-                app.update_session(&s.id, |x| {
-                    x.attention = Some(json!({"reason": "stalled", "since": activity.last, "nudges": nudges}));
-                })
-                .await;
+                match action {
+                    // `ask_human` and `stop` hand the colony to a person: no message to the agent,
+                    // the "needs you" flag instead. `stop` also interrupts the turn through the
+                    // existing, non-destructive interrupt, so nothing further is pushed.
+                    crate::recovery::Action::AskHuman | crate::recovery::Action::Stop => {
+                        if action == crate::recovery::Action::Stop {
+                            rt.send_command(json!({"type": "interrupt"}));
+                            rt.interrupted.store(true, Ordering::SeqCst);
+                        }
+                        // The `stalled` flag the nudge sets, so the colony reads as needing you the
+                        // same way; the log says whether Jev chose it or the cap forced it.
+                        let why = if did == "cap" {
+                            "the recovery cap was reached".to_string()
+                        } else {
+                            format!("Jev chose {}", action.as_str())
+                        };
+                        flag(
+                            app,
+                            &s.id,
+                            "stalled",
+                            activity.last,
+                            nudges,
+                            format!(
+                                "watchdog: {why} after {} min of no progress; this colony needs you",
+                                settings.stall_minutes
+                            ),
+                        )
+                        .await;
+                    }
+                    other => {
+                        // The nudge is the watchdog's own message, with the stall span in it; an
+                        // option with no message of its own falls back to it, as the rule would.
+                        let text = match other.agent_message() {
+                            Some(text) => text.to_string(),
+                            None => nudge_text(settings.stall_minutes),
+                        };
+                        crate::recovery::send_user_message(&rt, "watchdog", &text);
+                        // A nudge keeps the log line it has always had; any other pick says which.
+                        let message = if other == crate::recovery::Action::NudgeAgent {
+                            format!(
+                                "watchdog: no progress for {} min, nudged the agent ({nudges}/{})",
+                                settings.stall_minutes, settings.max_nudges
+                            )
+                        } else {
+                            format!(
+                                "watchdog: no progress for {} min, sent the agent the {} recovery ({nudges}/{})",
+                                settings.stall_minutes,
+                                other.as_str(),
+                                settings.max_nudges
+                            )
+                        };
+                        app.session_log_as(Origin::Watchdog, &s.id, "info", message).await;
+                        app.update_session(&s.id, |x| {
+                            x.attention = Some(json!({"reason": "stalled", "since": activity.last, "nudges": nudges}));
+                        })
+                        .await;
+                    }
+                }
             }
             Decision::Flag(reason) => {
                 let message = match reason {
@@ -316,6 +363,7 @@ mod tests {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -334,6 +382,7 @@ mod tests {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),
@@ -404,6 +453,28 @@ mod tests {
             app.session("w1").await.unwrap().attention.unwrap()["reason"],
             "nudges_exhausted",
             "the flag stays up"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With the recovery point off, a nudge is byte-for-byte the log line it always was (issue #586):
+    /// the decision point must not change what a colony sees when it is not switched on.
+    #[tokio::test]
+    async fn an_off_recovery_point_nudges_with_the_original_log_line() {
+        let (app, root) = stalled_app("nudge-line", SessionStatus::Running).await;
+        {
+            let rt = app.runtime("w1").await;
+            let mut activity = rt.activity.lock().await;
+            activity.nudges = 0;
+            activity.last_nudge = None;
+        }
+        check_all(&app).await;
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter().any(|l| l["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("no progress for 15 min, nudged the agent (1/2)"))),
+            "the off-mode nudge line is unchanged: {logs:?}"
         );
         let _ = std::fs::remove_dir_all(root);
     }

@@ -1,0 +1,11 @@
+# The Gemini CLI build the gemini preset runs, pinned so every install of the same Colonizer
+# release gets the same agent. Same six columns as opencode.lock: name, version, platform, kind,
+# sha256, url.
+#
+# Like crates/colonizer/claude-code.lock this file is read where the agent is fetched (here the
+# runner itself, at colony boot) rather than bundled: a release carries no Gemini CLI code. The
+# @google/gemini-cli tarball is a platform-independent JS bundle (engines node >= 20), so there is
+# one row and the platform column reads `any`; the runner downloads it from registry.npmjs.org into
+# the cache dir, checks the sha256, and only then extracts `package/bundle`. It matches the pin in
+# module.json (`requires.pins`), which carries the npm version and its sha512 integrity.
+gemini-cli  0.61.0  any  agent  bc4efa5c925c4430105b552820ed3164bbeffa9dc227990fc922f954733bcd7d  https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.61.0.tgz

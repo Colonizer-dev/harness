@@ -4,7 +4,7 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -57,15 +57,62 @@ export const ENFORCE_PROMPT_APPEND = [
   '- Every other tool you can see — Bash and Read included — belongs to your subagents. Calling one yourself is refused and costs a turn, so hand that work to a subagent instead.',
 ].join('\n');
 
+/** Lockfile -> package manager, in the order trusted when a repo carries several (verify.rs's JS_LOCKFILES). */
+export const JS_LOCKFILES = [
+  ['bun.lock', 'bun'],
+  ['bun.lockb', 'bun'],
+  ['pnpm-lock.yaml', 'pnpm'],
+  ['yarn.lock', 'yarn'],
+  ['package-lock.json', 'npm'],
+  ['npm-shrinkwrap.json', 'npm'],
+];
+
+/** package.json's `packageManager` field (corepack's `name@version`), limited to the managers verify.rs knows. */
+function pinnedManager(packageJson) {
+  let value;
+  try {
+    value = JSON.parse(packageJson).packageManager;
+  } catch {
+    return null; // unreadable/invalid package.json just means the field cannot settle it
+  }
+  if (typeof value !== 'string') return null;
+  const pinned = value.trim();
+  const at = pinned.indexOf('@');
+  if (at < 0) return null; // corepack's form always carries a version; verify.rs's split_once('@') requires one
+  const name = pinned.slice(0, at);
+  return ['npm', 'pnpm', 'yarn', 'bun'].includes(name) ? name : null;
+}
+
+/**
+ * The package manager of the repository checkout `dir`, decided as the done-claim verifier decides it (verify.rs):
+ * package.json's `packageManager` field, else the first lockfile of [`JS_LOCKFILES`], else npm. Returns
+ * `{ name, source }`, or null when there is no package.json — a lockfile alone is not a JavaScript repo, as verify.rs
+ * reads it. Sync and failure-tolerant: never throws.
+ */
+export function packageManager(dir) {
+  const packageJson = readText(join(dir, 'package.json'));
+  if (packageJson === null) return null;
+  const pinned = pinnedManager(packageJson);
+  if (pinned) return { name: pinned, source: 'packageManager' };
+  const lock = JS_LOCKFILES.find(([file]) => existsSync(join(dir, file)));
+  return lock ? { name: lock[1], source: lock[0] } : { name: 'npm', source: 'package.json' };
+}
+
 /**
  * What the colony can and cannot reach, so no model spends a turn discovering it. `image` is the container image the
- * mothership booted (COLONIZER_IMAGE).
+ * mothership booted (COLONIZER_IMAGE); `manager` is [`packageManager`] for the checkout, when one was found.
  */
-export function environmentPrompt(image) {
-  return [
+export function environmentPrompt(image, manager = null) {
+  const bullets = [
     '- This colony has no GitHub access: there is no gh CLI and no GitHub credentials, so the GitHub API and private repositories are out of reach. The issue is already in your brief, and the harness publishes the pull request.',
     `- The colony runs the container image \`${image}\`. Toolchains it does not include (a Rust or Swift toolchain in a Node image, for example) are not installed. Check once with \`command -v\` before relying on one. Install a toolchain only when the task genuinely needs it to build or test; otherwise say in your report what could not be run.`,
-  ].join('\n');
+  ];
+  if (manager) {
+    bullets.push(
+      `- This repository uses ${manager.name} (from \`${manager.source}\`): install and test with \`${manager.name}\` rather than another package manager; done-claim verification runs it the same way.`,
+    );
+  }
+  return bullets.join('\n');
 }
 
 /**
@@ -456,7 +503,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
     .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
   if (waitServer) appended.push(WAIT_PROMPT_APPEND);
-  if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
+  if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);

@@ -1,7 +1,9 @@
 //! The local log archive (issue #496): when a colony ends, its session directory is tarred and
 //! zstd-compressed to `<data_dir>/archive/<org>/<repo>/<yyyy>/<mm>/`, one revision per distinct
-//! content. The terminal edge archives off-path, delete archives first, retention only runs
-//! through `POST /api/archive/retention` — a dry run plans, applying needs the preview's own list.
+//! content. The terminal edge archives off-path and delete archives first. Retention runs on
+//! request through `POST /api/archive/retention` — a dry run plans, applying needs the preview's
+//! own list — and automatically through the Disk cleanup loop's `archives` category
+//! (`disk_cleanup::plan_archives`), which is off by default.
 
 use crate::sessions::Session;
 use crate::store::SessionStore;

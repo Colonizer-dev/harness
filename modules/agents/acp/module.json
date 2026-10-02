@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "acp",
   "name": "ACP",
-  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Presets: Google's Gemini CLI (`gemini --experimental-acp`), handshake verified, and xAI's Grok Build (`grok agent stdio`), handshake verified against grok 1.0.34 but not yet driven through a turn with a real XAI_API_KEY; other ACP agents run through a custom command. Nothing stages the gemini or grok binary into the colony image yet. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
+  "description": "Any Agent Client Protocol agent (Zed's ACP: JSON-RPC 2.0 over stdio), mapped onto the runner protocol. Presets: Google's Gemini CLI (`gemini --experimental-acp`), handshake verified — the runner fetches the pinned @google/gemini-cli bundle on first boot, since nothing stages it into the colony image; and xAI's Grok Build (`grok agent stdio`), handshake verified against grok 1.0.34 but not yet driven through a turn with a real XAI_API_KEY — nothing stages the grok binary either. Other ACP agents run through a custom command. Questions ride session/request_permission, file paths resolve inside the workspace, and terminal commands are only started with a workspace cwd.",
   "protocol": "colonizer-runner/1",
   "entry": [
     "node",
@@ -12,7 +12,10 @@
     "binaries": [
       "gemini"
     ],
-    "image": "glibc + node >= 20 + the pinned @google/gemini-cli on PATH (npm install -g @google/gemini-cli) for the gemini preset",
+    "fetched_by_runner": [
+      "gemini"
+    ],
+    "image": "glibc + node >= 20; the gemini preset needs no gemini on PATH (the runner fetches the pinned @google/gemini-cli bundle on first boot), while the grok preset still needs the grok binary, which nothing stages",
     "pins": {
       "@google/gemini-cli": {
         "version": "0.61.0",
@@ -48,7 +51,7 @@
     "api": ["generativelanguage.googleapis.com", "api.x.ai"],
     "auth": [],
     "telemetry": [],
-    "extra": []
+    "extra": ["registry.npmjs.org"]
   },
   "settings": {
     "type": "object",
@@ -71,7 +74,7 @@
       "model": {
         "type": "string",
         "title": "Model",
-        "description": "Model id meant for session/set_model after session/new. Not applied yet: the runner does not read this setting, so the agent runs on its own default model. Switching the model on a running colony works when the agent advertises model selection at session/new; otherwise it is a logged warning.",
+        "description": "Model id applied with session/set_model after session/new, when the agent advertises model selection there (the gemini and grok presets do). An agent that advertises no models cannot select one: it keeps its own default and the runner logs a warning. Switching the model on a running colony works the same way.",
         "default": "",
         "env": "COLONIZER_MODEL"
       },

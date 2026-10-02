@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,7 +13,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { CODEX_HOME, createBridge, mcpArgs, parseRoutes, parseVersion, resolveModel, turnArgs } from '../runner.mjs';
+import { CODEX_HOME, archPlatform, createBridge, defaultCacheDir, mcpArgs, parseRoutes, parseVersion, resolveCodex, resolveModel, turnArgs } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -93,9 +94,10 @@ const count = (type, n) => (events) => {
   return matches.length >= n ? matches[n - 1] : undefined;
 };
 
-test('module.json persists CODEX_HOME itself as the session_resume dir', () => {
+test('module.json declares the codex binary as runner-fetched, and persists CODEX_HOME as the session_resume dir', () => {
   const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
   assert.equal(manifest.session_resume.dir, CODEX_HOME, 'the mounted dir and the runner’s CODEX_HOME must not drift');
+  assert.deepEqual(manifest.requires.fetched_by_runner, ['codex'], 'the harness must not refuse a stock-image launch for a binary the runner fetches');
 });
 
 // The routes a boot would push (docs/protocol.md §6.5), one per wire; keys are obviously fake.
@@ -125,6 +127,42 @@ test('parseVersion takes the first semver, wherever it sits', () => {
   assert.equal(parseVersion('1.2.3'), '1.2.3');
   assert.equal(parseVersion('no digits here'), null);
   assert.equal(parseVersion(undefined), null);
+});
+
+test('resolveCodex prefers env and PATH, fetches and caches the pinned build, refuses a bad sha256', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-test-fetch-'));
+  const fakeBytes = Buffer.from('fake-tgz-bytes');
+  const good = createHash('sha256').update(fakeBytes).digest('hex');
+  const lock = (sha) => `codex  0.156.1  linux-arm64  agent  ${sha}  https://example.invalid/codex-aarch64-unknown-linux-musl.tar.gz`;
+  let fetched = 0;
+  const fetchImpl = async () => { fetched++; return { ok: true, arrayBuffer: async () => fakeBytes }; };
+  let tarCalled = 0;
+  const runTar = async (args) => { tarCalled++; const dest = args[args.indexOf('-C') + 1]; writeFileSync(join(dest, args.at(-1)), '#!/bin/sh\n'); }; // the single binary at the archive root
+  assert.equal(await resolveCodex({ env: { COLONIZER_CODEX_BIN: '/custom/codex' }, lockText: '' }), '/custom/codex');
+  mkdirSync(join(dir, 'pathdir'), { recursive: true });
+  writeFileSync(join(dir, 'pathdir', 'codex'), 'x');
+  assert.equal(await resolveCodex({ env: { PATH: join(dir, 'pathdir') }, lockText: '', arch: 'arm64' }), join(dir, 'pathdir', 'codex'));
+  assert.equal(await resolveCodex({ env: { PATH: join(dir, 'pathdir'), COLONIZER_CODEX_BIN: '   ' }, lockText: '', arch: 'arm64' }), join(dir, 'pathdir', 'codex'), 'an all-whitespace override counts as unset and falls through to the PATH');
+  await assert.rejects(resolveCodex({ env: {}, lockText: lock('0'.repeat(64)), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'bad') }), /sha256 mismatch/);
+  assert.equal(tarCalled, 0, 'nothing is extracted before the hash checks out');
+  const bin = await resolveCodex({ env: {}, lockText: lock(good), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'good') });
+  assert.equal(bin, join(dir, 'good', '0.156.1', 'linux-arm64', 'codex'));
+  assert.ok(existsSync(bin), 'the extracted binary is where the next boot looks for it');
+  assert.ok(!existsSync(join(dir, 'good', '0.156.1', 'linux-arm64', 'pkg.tgz')), 'the tarball is not left behind on the tmpfs');
+  assert.equal(fetched, 2, 'the bad hash fetched once, the good build once');
+  // A second call reuses the cache: the binary is present, so nothing is fetched or extracted again.
+  assert.equal(await resolveCodex({ env: {}, lockText: lock(good), arch: 'arm64', fetchImpl, runTar, cacheDir: join(dir, 'good') }), bin);
+  assert.equal(fetched, 2);
+  assert.equal(tarCalled, 1);
+  // A platform with no lock row is refused by name, and nothing is downloaded.
+  await assert.rejects(resolveCodex({ env: {}, lockText: lock(good), arch: 'riscv64', fetchImpl, runTar, cacheDir: join(dir, 'other') }), /no pinned Codex 0\.156\.1 build for platform riscv64/);
+  assert.equal(fetched, 2);
+  assert.equal(archPlatform('x64'), 'linux-x64');
+  assert.equal(archPlatform('arm64'), 'linux-arm64');
+  assert.equal(archPlatform('ia32'), null);
+  assert.equal(defaultCacheDir({ XDG_CACHE_HOME: '/x' }), '/x/colonizer/codex');
+  assert.equal(defaultCacheDir({ HOME: '/h' }), '/h/.cache/colonizer/codex');
+  assert.ok(defaultCacheDir({ PATH: '/bin' }).endsWith('colonizer-codex'));
 });
 
 test('resolveModel accepts openai and bare ids, keeps empties for the CLI default, and refuses other providers by name', () => {

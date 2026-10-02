@@ -112,6 +112,11 @@ Two options:
   is covered by `scripts/test/install.test.sh`; a full build followed by `--install` is not exercised
   in CI.
 
+The image is the stock `node:24-bookworm`. A colony-node image — that base plus bun and pnpm, each
+pinned and checksum-verified at build time — is built and scanned by
+`.github/workflows/colony-image.yml`; the node preset keeps using the stock image until the built one
+is published to `ghcr.io` and its digest is pinned in `crates/colonizer/images.lock`.
+
 A third option, `--bundle`, is what the release workflow uses to build a release tarball; you don't
 need it.
 

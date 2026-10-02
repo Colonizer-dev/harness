@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "codex",
   "name": "Codex",
-  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It can ask the user questions through the colonizer MCP server, and nothing stages the codex binary into the colony image.",
+  "description": "OpenAI's Codex CLI, headless: one codex exec process per turn, resumed into a single thread. It can ask the user questions through the colonizer MCP server; the runner fetches the pinned codex binary into its cache on first boot, so nothing needs to be staged into the colony image.",
   "protocol": "colonizer-runner/1",
   "loop_tools": true,
   "entry": [
@@ -13,7 +13,10 @@
     "binaries": [
       "codex"
     ],
-    "image": "glibc + node >= 20 + the pinned @openai/codex CLI on PATH (npm install -g @openai/codex)",
+    "fetched_by_runner": [
+      "codex"
+    ],
+    "image": "glibc + node >= 20; the runner fetches the pinned @openai/codex CLI itself",
     "pins": {
       "codex": {
         "version": "0.156.1",
@@ -39,7 +42,7 @@
     "api": ["api.openai.com"],
     "auth": [],
     "telemetry": [],
-    "extra": []
+    "extra": ["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]
   },
   "settings": {
     "type": "object",
