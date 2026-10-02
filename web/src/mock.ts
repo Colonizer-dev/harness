@@ -1899,6 +1899,8 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["deepseek-flash", "deepseek-v4-pro"],
       preset: "deepseek",
+      // Vetted for restricted-sensitivity work, so the Trusted switch shows on (#472).
+      trusted: true,
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
       // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
@@ -1921,6 +1923,7 @@ export function createMockApi(): Api {
       has_key: false,
       models: ["ds4-flash"],
       preset: "local",
+      trusted: false,
       timeout_secs: 900,
       max_concurrent: 1,
       queue_timeout_secs: null,
@@ -1950,6 +1953,7 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["qwen3-coder"],
       preset: "custom",
+      trusted: false,
       ...DEFAULT_LIMITS,
       max_concurrent: 4,
       in_flight: 0,
@@ -3606,6 +3610,10 @@ export function createMockApi(): Api {
         : body.quota.url.trim()
           ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim() }
           : null,
+    // Omitted keeps the saved mark; the model map and disabled tools follow the same convention.
+    trusted: body.trusted ?? existing?.trusted ?? false,
+    model_map: body.model_map ?? existing?.model_map ?? {},
+    disabled_tools: body.disabled_tools ?? existing?.disabled_tools ?? [],
     in_flight: existing?.in_flight ?? 0,
     queued: existing?.queued ?? 0,
     usage: existing?.usage ?? zeroUsage(),

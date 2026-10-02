@@ -894,6 +894,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "pricing": provider.pricing,
         "model_map": provider.model_map,
         "disabled_tools": provider.disabled_tools,
+        "trusted": provider.trusted,
         "quota": provider.quota,
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
@@ -2215,6 +2216,40 @@ mod tests {
         let stored = &app.providers()[0];
         assert!(!stored.vetted);
         assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `trusted` and the connection policy ride the same GET as pricing and the key state (#605):
+    /// the cockpit form prefills from it, and an unmarked provider reports `false` rather than being
+    /// omitted, so the Trusted switch has a value to sit on.
+    #[tokio::test]
+    async fn the_list_returns_trusted_and_the_connection_policy() {
+        let (app, root) = providers_app();
+        let mut marked = put_req("Marked");
+        marked.trusted = Some(true);
+        marked.model_map = Some(BTreeMap::from([("sonnet".into(), "claude-wire-sonnet".into())]));
+        marked.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _ = put(State(app.clone()), Path("marked".into()), Json(marked)).await.unwrap();
+        let _ = put(State(app.clone()), Path("plain".into()), Json(put_req("Plain")))
+            .await
+            .unwrap();
+
+        let Json(listed) = list(State(app.clone())).await;
+        let by_id = |id: &str| {
+            listed
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} in {listed:?}"))
+        };
+        let marked = by_id("marked");
+        assert_eq!(marked["trusted"], json!(true));
+        assert_eq!(marked["model_map"]["sonnet"], json!("claude-wire-sonnet"));
+        assert_eq!(marked["disabled_tools"], json!(["WebSearch"]));
+        assert_eq!(
+            by_id("plain")["trusted"],
+            json!(false),
+            "an unmarked provider reports trusted: false"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

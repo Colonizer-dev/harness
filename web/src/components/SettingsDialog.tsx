@@ -37,6 +37,7 @@ import type {
   ProviderWire,
   QuotaActionReply,
   QuotaCard,
+  SaveProviderRequest,
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
@@ -3479,7 +3480,85 @@ export function sameWireFallbacks(ownId: string, wire: ProviderWire, peers: Mode
     .flatMap((p) => p.models.map((m) => `${p.id}/${m}`));
 }
 
-function ProviderForm({
+/** One row of the canonical → wire model map editor (#295): the name picked and the name sent. */
+export interface ModelMapRow {
+  canonical: string;
+  wire: string;
+}
+
+/** The canonical names the rows would save: trimmed, blanks dropped. */
+export function modelMapCanonicals(rows: ModelMapRow[]): string[] {
+  return rows.map((row) => row.canonical.trim()).filter(Boolean);
+}
+
+/** Names set on more than one row. A saved map collapses duplicates last-wins, so the form refuses them. */
+export function duplicateModelMapCanonicals(rows: ModelMapRow[]): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const name of modelMapCanonicals(rows)) {
+    if (seen.has(name)) duplicates.add(name);
+    seen.add(name);
+  }
+  return [...duplicates];
+}
+
+/** The form's fields that decide the PUT body, as the form holds them — untrimmed, blanks included. */
+export interface ProviderSaveInput {
+  name: string;
+  base_url: string;
+  auth: ProviderAuth;
+  wire: ProviderWire;
+  models: string[];
+  preset: ProviderPreset;
+  api_key?: string;
+  pricing?: ProviderPricing;
+  quota: { url: string; pointer: string };
+  timeout_secs: number | null;
+  max_concurrent: number | null;
+  queue_timeout_secs: number | null;
+  context_tokens: number | null;
+  fallback_model: string | null;
+  /** The connection policy (#295, #472): trusted, the model map and the disabled tools. */
+  trusted: boolean;
+  model_map: ModelMapRow[];
+  disabled_tools: string[];
+}
+
+/**
+ * The PUT /api/providers/{id} body the form saves (#605). Pure, so the round-trip of the connection
+ * policy — trusted, the model map and the disabled tools — is testable without a DOM. A row is dropped
+ * only when its canonical name is blank; a blank wire name is kept as `""`, which the gateway reads as
+ * "send the canonical name as it is" and still counts as an entry in the map's allowlist. An editor
+ * left empty sends `{}`, which clears the saved map, like the key and pricing. `ChipsInput` has already
+ * trimmed and deduped the disabled tools.
+ */
+export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest {
+  return {
+    name: input.name.trim(),
+    base_url: input.base_url.trim(),
+    auth: input.auth,
+    wire: input.wire,
+    models: input.models,
+    preset: input.preset,
+    api_key: input.api_key,
+    pricing: input.pricing,
+    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim() },
+    timeout_secs: input.timeout_secs,
+    max_concurrent: input.max_concurrent,
+    queue_timeout_secs: input.queue_timeout_secs,
+    context_tokens: input.context_tokens,
+    fallback_model: input.fallback_model,
+    trusted: input.trusted,
+    model_map: Object.fromEntries(
+      input.model_map
+        .map((row) => [row.canonical.trim(), row.wire.trim()] as const)
+        .filter(([canonical]) => canonical),
+    ),
+    disabled_tools: input.disabled_tools,
+  };
+}
+
+export function ProviderForm({
   initial,
   preset,
   peers = [],
@@ -3523,6 +3602,13 @@ function ProviderForm({
   // key string removes the key, so no keep/clear dance is needed for two plain text fields.
   const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
   const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
+  // The connection policy (#295, #472): all three prefill from GET /api/providers and go on the save
+  // as given; the model map's blank rows are dropped by `providerSaveBody`.
+  const [trusted, setTrusted] = useState(initial?.trusted ?? false);
+  const [modelMapRows, setModelMapRows] = useState<ModelMapRow[]>(() =>
+    Object.entries(initial?.model_map ?? {}).map(([canonical, wire]) => ({ canonical, wire })),
+  );
+  const [disabledTools, setDisabledTools] = useState<string[]>(initial?.disabled_tools ?? []);
   // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
   const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
   const [vars, setVars] = useState<Record<string, string>>(() =>
@@ -3542,6 +3628,9 @@ function ProviderForm({
     fallback: useId(),
     quotaUrl: useId(),
     quotaPointer: useId(),
+    trusted: useId(),
+    modelMap: useId(),
+    disabledTools: useId(),
   };
   const limits = {
     timeout_secs: parseLimit("timeout_secs", limitDraft.timeout_secs),
@@ -3574,6 +3663,24 @@ function ProviderForm({
     fallback_model: fallback || null,
   });
   const pricingSummary = pricingSummaryOf(pricing);
+  const setModelMapRow = (index: number, patch: Partial<ModelMapRow>) =>
+    setModelMapRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const addModelMapRow = () => setModelMapRows((rows) => [...rows, { canonical: "", wire: "" }]);
+  const removeModelMapRow = (index: number) => setModelMapRows((rows) => rows.filter((_, i) => i !== index));
+  const mappingCount = new Set(modelMapCanonicals(modelMapRows)).size;
+  const duplicateCanonicals = duplicateModelMapCanonicals(modelMapRows);
+  // A saved map collapses duplicate canonical names last-wins, silently dropping the earlier wire name.
+  const mapError = duplicateCanonicals.length
+    ? `Duplicate canonical name${duplicateCanonicals.length === 1 ? "" : "s"}: ${duplicateCanonicals.join(", ")}`
+    : null;
+  const policySummary =
+    [
+      trusted ? "Trusted" : null,
+      mappingCount ? `${mappingCount} model mapping${mappingCount === 1 ? "" : "s"}` : null,
+      disabledTools.length ? `${disabledTools.length} disabled tool${disabledTools.length === 1 ? "" : "s"}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "Trusted routing, model map, disabled tools";
 
   const isNew = !initial;
   const idError = !isNew
@@ -3602,7 +3709,7 @@ function ProviderForm({
     originMoved && (keyMode === "keep" || auth === "none")
       ? "Changing the base URL to another origin requires entering the API key again — or removing the saved key"
       : null;
-  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || !name.trim());
+  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || mapError || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
@@ -3615,29 +3722,35 @@ function ProviderForm({
       else if (keyMode === "replace" && key.trim()) api_key = key.trim();
     }
     try {
-      const saved = await api.saveProvider(id, {
-        name: name.trim(),
-        base_url: url.trim(),
-        auth,
-        wire,
-        models,
-        preset: initial?.preset ?? preset,
-        api_key,
-        pricing: pricingChanged
-          ? {
-              input_per_mtok: pricing.input_per_mtok.value ?? 0,
-              output_per_mtok: pricing.output_per_mtok.value ?? 0,
-              cache_read_per_mtok: pricing.cache_read_per_mtok.value ?? 0,
-              cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
-            }
-          : undefined,
-        quota: { url: quotaUrl.trim(), pointer: quotaPointer.trim() },
-        timeout_secs: limits.timeout_secs.value,
-        max_concurrent: limits.max_concurrent.value,
-        queue_timeout_secs: limits.queue_timeout_secs.value,
-        context_tokens: limits.context_tokens.value,
-        fallback_model: fallback || null,
-      });
+      const saved = await api.saveProvider(
+        id,
+        providerSaveBody({
+          name,
+          base_url: url,
+          auth,
+          wire,
+          models,
+          preset: initial?.preset ?? preset,
+          api_key,
+          pricing: pricingChanged
+            ? {
+                input_per_mtok: pricing.input_per_mtok.value ?? 0,
+                output_per_mtok: pricing.output_per_mtok.value ?? 0,
+                cache_read_per_mtok: pricing.cache_read_per_mtok.value ?? 0,
+                cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
+              }
+            : undefined,
+          quota: { url: quotaUrl, pointer: quotaPointer },
+          timeout_secs: limits.timeout_secs.value,
+          max_concurrent: limits.max_concurrent.value,
+          queue_timeout_secs: limits.queue_timeout_secs.value,
+          context_tokens: limits.context_tokens.value,
+          fallback_model: fallback || null,
+          trusted,
+          model_map: modelMapRows,
+          disabled_tools: disabledTools,
+        }),
+      );
       toast(`${saved.name} saved`);
       onSaved(saved);
     } catch (e) {
@@ -3877,6 +3990,91 @@ function ProviderForm({
                   </option>
                 ))}
               </select>
+            </FormField>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Connection policy</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{policySummary}</span>
+          </summary>
+          <div className="space-y-3 border-t border-border px-3 pb-3 pt-3">
+            <Row
+              id={ids.trusted}
+              label="Trusted"
+              inline
+              info={
+                <p>
+                  Marks the connection as vetted to carry restricted-sensitivity work — secrets, .env files, infra config.
+                  Left off, the security-aware routing gate keeps those paths away from this provider.
+                </p>
+              }
+            >
+              <Switch id={ids.trusted} labelledBy={`${ids.trusted}-label`} label="Trusted" checked={trusted} onChange={setTrusted} />
+            </Row>
+            <div className="min-w-0 space-y-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-[12.5px] font-medium text-muted">Model map</span>
+                <InfoButton label="Model map">
+                  <p>
+                    Canonical model name → the name sent on the wire. A <Code>provider/model</Code> picked anywhere goes
+                    out as the wire name on the right; a canonical with no row is sent as it is. A blank wire name sends
+                    the canonical name.
+                  </p>
+                </InfoButton>
+              </div>
+              {modelMapRows.length === 0 && <p className="text-[12px] text-faint">No mappings — every model name goes out as it is.</p>}
+              {modelMapRows.map((row, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <input
+                    value={row.canonical}
+                    onChange={(e) => setModelMapRow(index, { canonical: e.target.value })}
+                    placeholder="canonical name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Canonical model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-[13px]")}
+                  />
+                  <span aria-hidden="true" className="shrink-0 text-faint">
+                    →
+                  </span>
+                  <input
+                    value={row.wire}
+                    onChange={(e) => setModelMapRow(index, { wire: e.target.value })}
+                    placeholder="wire name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Wire model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-[13px]")}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeModelMapRow(index)}
+                    aria-label={`Remove model mapping ${index + 1}`}
+                    className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-faint hover:bg-panel-2 hover:text-text"
+                  >
+                    <IconX size={13} />
+                  </button>
+                </div>
+              ))}
+              <Button size="sm" variant="ghost" onClick={addModelMapRow}>
+                Add mapping
+              </Button>
+              {mapError && <span className="block text-[12px] text-err">{mapError}</span>}
+            </div>
+            <FormField
+              id={ids.disabledTools}
+              label="Disabled tools"
+              info={<p>Claude Code tool names stripped from every request through this connection, so an agent cannot call them here.</p>}
+              hint="Enter or a comma adds one."
+            >
+              <ChipsInput
+                id={ids.disabledTools}
+                values={disabledTools}
+                onChange={setDisabledTools}
+                placeholder={disabledTools.length ? "Add another" : "WebSearch, Bash, …"}
+              />
             </FormField>
           </div>
         </details>
