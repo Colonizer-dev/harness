@@ -691,7 +691,9 @@ of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspe
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
-(§6.1b), `verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
+(§6.1b), `model_substitutions` (§6.1b — the models the boot resolved away from because the gateway
+would have refused them for the task's sensitivity class, as `[{setting, from, to, reason}]`),
+`verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
 colony moves into `failed` and cleared by the `seen` route above, so a failure stays in the
 needs-you count (the app badge's) until a person has opened the colony; colonies from before the
 field existed load as seen.
@@ -1857,6 +1859,22 @@ models resolve through the same provider routes as `model` (§6.5's `used_by` co
 env variables are stripped from the colony's environment once the tier is chosen, so only the
 provider actually in use is probed at boot.
 
+Every model the boot settles on — the orchestrator (a tier pick or the operator's `model_override`),
+`subagent_model`, `background_model` and `small_model` — is then resolved against the task's
+sensitivity class before it is used (issue #704). The gateway refuses a class more sensitive than the
+provider's mark (§6.5), so a subagent model on a provider the class will not trust, or a `low`-tier
+model on one, would fail every call: the colony could not work. A model that fails the gate is
+replaced with the effective orchestrator model (for a subagent, background or small setting) or the
+module's `model` (for the orchestrator itself — what `medium` would run on if routing had not moved
+it); an operator's named `model_override`/`subagent_model_override` is resolved the same way. The
+fallback must itself be eligible, and the boot never invents a model name: when the fallback is blank
+— the default setup, where the module names no `model` — the setting is cleared, so the task inherits
+the harness default, and recorded as "the orchestrator's model"; when no eligible model exists at all
+the setting is left exactly as it is and the boot logs a `warn` that the gateway will refuse it. Each
+substitution is one `info` line in the colony's session log — not repeated by a resume, which resolves
+the same models again — and recorded as a `model_substitutions` entry on the session record (below),
+so the cockpit can show what the colony is really running on.
+
 Routing down is not always the cheaper run: the cheaper model reloads the task's context from
 scratch at its input price, which sometimes costs more than the output saved. When all three token
 estimates are set and both models have pricing on file, the cost gate prices the two ways of running
@@ -2634,7 +2652,10 @@ character set plus `=` and `&`):
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
   provider; `403` `sensitivity_error` when the task's sensitivity class exceeds the provider's mark —
   `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted`
-  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md);
+  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md).
+  The launch resolves the orchestrator, subagent and background models against this class first
+  (§6.1b), substituting an eligible model rather than letting a colony boot into calls this gate can
+  only refuse; what it substituted is on the session's `model_substitutions`;
   `502` `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend
   plus in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body
   the wire cannot carry.

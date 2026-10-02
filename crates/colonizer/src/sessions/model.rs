@@ -227,6 +227,19 @@ pub struct Prewarm {
 /// sweeping change cannot bloat sessions.json.
 pub const CHANGED_PATHS_CAP: usize = 500;
 
+/// One model setting the boot resolved away from what it started with because the gateway would have
+/// refused it for the task's sensitivity class (issue #704): `setting` is the model setting's name
+/// (`model`, `subagent_model`, `background_model`), `from` the model the setting named, `to` the
+/// eligible one it was replaced with, and `reason` why the gateway would refuse the first. Recorded
+/// on the session so the cockpit can say what the colony is really running on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSubstitution {
+    pub setting: String,
+    pub from: String,
+    pub to: String,
+    pub reason: String,
+}
+
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
 /// making every existing file unparseable on upgrade. New fields need no annotation of their own.
@@ -411,6 +424,11 @@ pub struct Session {
     /// booted before this field existed, or whose task named no sensitive path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitivity: Option<String>,
+    /// Model settings the boot replaced with an eligible model because the gateway would have refused
+    /// the one they named for this colony's sensitivity class (issue #704). Empty for a colony whose
+    /// task named no sensitive path, or whose models all cleared the class's bar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_substitutions: Vec<ModelSubstitution>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -562,6 +580,7 @@ impl Default for Session {
             allowed_providers: None,
             allowed_models: None,
             sensitivity: None,
+            model_substitutions: Vec::new(),
             routed_cost_usd: None,
             routed_tokens: None,
             host_disk_bytes: None,

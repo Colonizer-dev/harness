@@ -652,6 +652,7 @@ pub async fn create(
         allowed_providers: None,
         allowed_models: None,
         sensitivity: None,
+        model_substitutions: Vec::new(),
         routed_cost_usd: None,
         routed_tokens: None,
         host_disk_bytes: None,

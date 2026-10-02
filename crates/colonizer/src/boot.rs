@@ -14,8 +14,8 @@ use crate::{
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     sessions::{
-        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, Session, SessionLogger, SessionStatus, agent_env, agent_needs_node, agentd_http,
-        apply_exec_policy, colony_image, findings_enabled,
+        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, Session, SessionLogger, SessionStatus, agent_env,
+        agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
     },
     stack,
     util::{append_line, random_token, truncate, write_private},
@@ -506,6 +506,69 @@ fn tls_edge_hosts(secrets: &[sandbox::Secret]) -> Vec<String> {
 /// mothership's patience with it.
 const MAX_RESTORE_WAIT_SECS: u64 = 600;
 
+/// Resolve one model setting on the runner env against the colony's sensitivity class (issue #704):
+/// when the gateway would refuse the model the setting names, substitute `fallback`, log it (only
+/// when `announce` — a resume reruns this) and record it. A blank `fallback` clears the setting to
+/// inherit the harness default; with no eligible fallback the value is left and the boot warns.
+/// Returns the effective model, empty for an unset or cleared one.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_sensitivity_model(
+    log: &SessionLogger,
+    setting: &str,
+    var: &str,
+    inherit_label: &str,
+    runner_env: &mut Map<String, Value>,
+    sensitivity: crate::sensitivity::Sensitivity,
+    overrides: Option<&crate::sensitivity::SensitivityOverrides>,
+    providers: &[providers::Provider],
+    fallback: &str,
+    announce: bool,
+    substitutions: &mut Vec<ModelSubstitution>,
+) -> String {
+    let Some(value) = runner_env.get(var).and_then(Value::as_str).map(String::from) else {
+        return String::new();
+    };
+    let display = setting.replace('_', " ");
+    match providers::model_fix(sensitivity, overrides, providers, &value, fallback) {
+        providers::ModelFix::Keep => value,
+        providers::ModelFix::Substitute { model, reason } => {
+            let to = model.clone().unwrap_or_else(|| inherit_label.to_string());
+            match &model {
+                Some(model) => {
+                    runner_env.insert(var.to_string(), Value::String(model.clone()));
+                }
+                None => {
+                    runner_env.remove(var);
+                }
+            }
+            if announce {
+                log.info(format!(
+                    "{display} {value} is not eligible for this {}-sensitivity task ({reason}); using {to} instead",
+                    sensitivity.as_str()
+                ))
+                .await;
+            }
+            substitutions.push(ModelSubstitution {
+                setting: setting.to_string(),
+                from: value,
+                to,
+                reason,
+            });
+            model.unwrap_or_default()
+        }
+        providers::ModelFix::NoFallback { reason } => {
+            if announce {
+                log.warn(format!(
+                    "{display} {value} is not eligible for this {}-sensitivity task ({reason}) and no eligible model is configured to fall back to; the gateway will refuse it",
+                    sensitivity.as_str()
+                ))
+                .await;
+            }
+            value
+        }
+    }
+}
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -873,6 +936,61 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(model) = s.subagent_model_override.as_deref() {
         runner_env.insert("COLONIZER_SUBAGENT_MODEL".into(), Value::String(model.into()));
     }
+    // Sensitivity fallback (issue #704): the gateway refuses a task's class any provider that does
+    // not meet its mark, so a subagent/background/small model routed to such a provider would fail
+    // every call — a restricted colony whose subagents ran on an untrusted provider simply could not
+    // work. Resolve them here with the gateway's own rule instead of booting into calls that can only
+    // 403. The orchestrator goes first: it is the fallback the others land on, and a blank fallback
+    // clears the setting to inherit the harness default. An operator's named model is resolved the
+    // same way — the alternative is a colony that cannot work — but never silently.
+    let configured = app.providers();
+    let overrides = org_settings.sensitivity.as_ref();
+    let mut substitutions: Vec<ModelSubstitution> = Vec::new();
+    resolve_sensitivity_model(
+        &log,
+        "model",
+        "COLONIZER_MODEL",
+        "the agent module's default model",
+        &mut runner_env,
+        sensitivity,
+        overrides,
+        &configured,
+        &model,
+        !resume,
+        &mut substitutions,
+    )
+    .await;
+    let orchestrator = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    for (setting, var) in [
+        ("subagent_model", "COLONIZER_SUBAGENT_MODEL"),
+        ("background_model", "COLONIZER_BACKGROUND_MODEL"),
+        ("small_model", "COLONIZER_SMALL_MODEL"),
+    ] {
+        resolve_sensitivity_model(
+            &log,
+            setting,
+            var,
+            "the orchestrator's model",
+            &mut runner_env,
+            sensitivity,
+            overrides,
+            &configured,
+            &orchestrator,
+            !resume,
+            &mut substitutions,
+        )
+        .await;
+    }
+    // The effective model is what the runner will really use, so routing's record says it (#704).
+    effective_model = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     // Conditional instructions (issue #473): the agent's instruction rules can be conditioned on the
     // task's labels, which only the mothership knows at boot; they travel as a comma-separated list.
     if !task_labels.is_empty() {
@@ -993,6 +1111,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect());
         x.allowed_models = Some(routing.used_models(&runner_env));
+        // What the sensitivity resolution above settled on, for the cockpit to show (issue #704).
+        x.model_substitutions = substitutions.clone();
     })
     .await;
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
@@ -1893,6 +2013,168 @@ mod tests {
             .filter(|e| e["level"] == level)
             .filter_map(|e| e["message"].as_str().map(String::from))
             .collect()
+    }
+
+    fn provider(id: &str, trusted: bool) -> providers::Provider {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "base_url": "http://127.0.0.1:9", "auth": "none", "trusted": trusted,
+        }))
+        .unwrap()
+    }
+
+    /// One `resolve_sensitivity_model` call for a restricted colony, with the long argument list
+    /// (and the sensitivity bit every test here shares) spelled out once; the setting name is derived
+    /// from the variable, as the boot's own call sites do.
+    async fn resolve(
+        log: &SessionLogger,
+        var: &str,
+        env: &mut Map<String, Value>,
+        all: &[providers::Provider],
+        fallback: &str,
+        announce: bool,
+        substitutions: &mut Vec<ModelSubstitution>,
+    ) -> String {
+        let setting = var.strip_prefix("COLONIZER_").unwrap_or(var).to_lowercase();
+        resolve_sensitivity_model(
+            log,
+            &setting,
+            var,
+            "the orchestrator's model",
+            env,
+            crate::sensitivity::Sensitivity::Restricted,
+            None,
+            all,
+            fallback,
+            announce,
+            substitutions,
+        )
+        .await
+    }
+
+    /// The bug of issue #704: a restricted colony's subagent model on an untrusted provider is
+    /// rerouted onto the orchestrator's eligible model at boot, logged once, recorded for the cockpit,
+    /// and the gateway carries what it was substituted with.
+    #[tokio::test]
+    async fn a_restricted_colony_reroutes_an_untrusted_subagent_model() {
+        use crate::sensitivity::Sensitivity;
+        let root = std::env::temp_dir().join(format!("colonizer-subst-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst1";
+        let log = app.logger(id);
+        let all = vec![provider("trustedai", true), provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("trustedai/claude-sonnet-5"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        let orchestrator = resolve(&log, "COLONIZER_MODEL", &mut env, &all, "sonnet", true, &mut substitutions).await;
+        assert_eq!(orchestrator, "trustedai/claude-sonnet-5");
+        assert!(substitutions.is_empty(), "the orchestrator model already clears the bar");
+
+        let subagent = resolve(
+            &log,
+            "COLONIZER_SUBAGENT_MODEL",
+            &mut env,
+            &all,
+            &orchestrator,
+            true,
+            &mut substitutions,
+        )
+        .await;
+        assert_eq!(subagent, "trustedai/claude-sonnet-5");
+        assert_eq!(env["COLONIZER_SUBAGENT_MODEL"], json!("trustedai/claude-sonnet-5"));
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].setting, "subagent_model");
+        assert_eq!(substitutions[0].from, "zai/glm-5.3-flash");
+        assert_eq!(substitutions[0].to, "trustedai/claude-sonnet-5");
+        assert!(substitutions[0].reason.contains("trusted"), "{}", substitutions[0].reason);
+        // The gateway would carry the substituted model: the fix and the gate share one rule.
+        assert!(providers::model_eligible(Sensitivity::Restricted, None, &all, &subagent));
+        // Logged exactly once, for the substitution alone.
+        let info = said(&app, id, "info").await;
+        assert_eq!(info.len(), 1, "{info:?}");
+        assert!(
+            info[0].contains("subagent model zai/glm-5.3-flash is not eligible")
+                && info[0].contains("using trustedai/claude-sonnet-5 instead"),
+            "{}",
+            info[0]
+        );
+        assert!(said(&app, id, "warn").await.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With nothing eligible to fall back to, the value is left alone and the boot warns that the
+    /// gateway will refuse it, rather than inventing a model name (issue #704).
+    #[tokio::test]
+    async fn a_restricted_colony_leaves_a_model_it_cannot_replace_and_warns() {
+        let root = std::env::temp_dir().join(format!("colonizer-subst-none-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst2";
+        let log = app.logger(id);
+        let all = vec![provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        // The module's own model is the same untrusted one, so no fallback is eligible.
+        let value = resolve(
+            &log,
+            "COLONIZER_MODEL",
+            &mut env,
+            &all,
+            "zai/glm-5.3-flash",
+            true,
+            &mut substitutions,
+        )
+        .await;
+        assert_eq!(value, "zai/glm-5.3-flash");
+        assert_eq!(env["COLONIZER_MODEL"], json!("zai/glm-5.3-flash"));
+        assert!(substitutions.is_empty(), "nothing was substituted");
+        let warn = said(&app, id, "warn").await;
+        assert_eq!(warn.len(), 1, "{warn:?}");
+        assert!(
+            warn[0].contains("the gateway will refuse it") && warn[0].contains("zai/glm-5.3-flash"),
+            "{}",
+            warn[0]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The default setup, where the module setting `model` is blank: a subagent model on an untrusted
+    /// provider is cleared instead — subagents inherit the orchestrator, on the harness default and
+    /// eligible — recorded, logged once, not repeated by a resume (issue #704).
+    #[tokio::test]
+    async fn a_restricted_colony_clears_a_subagent_model_it_cannot_replace() {
+        let root = std::env::temp_dir().join(format!("colonizer-subst-blank-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst3";
+        let log = app.logger(id);
+        let all = vec![provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        // COLONIZER_MODEL is absent because the module's `model` is blank, so the fallback is the
+        // harness default: eligible, with no model name to record.
+        let subagent = resolve(&log, "COLONIZER_SUBAGENT_MODEL", &mut env, &all, "", true, &mut substitutions).await;
+        assert_eq!(subagent, "", "cleared, so subagents inherit the orchestrator");
+        assert!(
+            !env.contains_key("COLONIZER_SUBAGENT_MODEL"),
+            "the variable is removed, not blanked"
+        );
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].to, "the orchestrator's model");
+        assert!(said(&app, id, "warn").await.is_empty());
+        assert_eq!(said(&app, id, "info").await.len(), 1);
+
+        // A resume runs the same resolution again, but does not repeat the line.
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut again = Vec::new();
+        resolve(&log, "COLONIZER_SUBAGENT_MODEL", &mut env, &all, "", false, &mut again).await;
+        assert_eq!(again.len(), 1, "still recorded");
+        assert!(!env.contains_key("COLONIZER_SUBAGENT_MODEL"));
+        assert_eq!(said(&app, id, "info").await.len(), 1, "a resume does not repeat the line");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The observed outage: GitHub refusing (403, account suspended) or unreachable. A resume with
