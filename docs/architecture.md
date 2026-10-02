@@ -330,6 +330,18 @@ Two sandbox module settings drive this, global with no per-org override: `suspen
 reported its session id is suspended; anything else keeps its microVM, said once in the colony log. A suspension
 lasts until answered, stopped or deleted — stopping clears the suspension and any held answer — and the sandbox
 watchdog and restart recovery both leave a suspended colony alone: its microVM is gone by design, not by crash.
+A colony whose open question is an exec-policy `ask` (the question event's `kind` is `exec_policy`, issue #759)
+is never suspended: the tool call that asked is blocked in flight inside a live agent — often a subagent — and a
+resumed transcript cannot pick that call back up, so suspending it killed the agent and the lead only spawned
+another that asked again. The same holds for any question the runner marks `blocking: true` — a subagent's
+`AskUserQuestion` (Claude Code reports the subagent in canUseTool's `agentID`, and the runner also recognises the
+tool_use arriving in a subagent's message), and every ACP `session/request_permission` — since a resumed session
+has no pending call to hand the answer to. The runtime keeps the flag beside the open question and restores it
+from the saved events the same way. The exemption is capped: a blocking question unanswered for
+`BLOCKING_QUESTION_CAP` (two hours, never shorter than the grace) is suspended anyway, with a `warn` log line
+saying the agent that asked is lost and the answer will reach the lead on resume. Nothing else bounds that
+wait — budgets count spend, and a colony blocked on its user spends nothing — so without the cap an unanswered
+question would hold a microVM and a slot indefinitely.
 Suspension also requires the question to still be open in the runtime: the live answer path and the suspension
 claim take the same open-question lock, so an answer and a claim cannot interleave and an answer is never lost
 in between.
@@ -396,7 +408,9 @@ Five `publish` settings drive it (all off/empty by default, shown in the cockpit
 
 A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
 no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
-branch's own CI is green. The merge is a squash with `--match-head-commit` that deletes the branch — never
+branch's own CI is green. A colony another merge superseded (issue #673; see
+[colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
+never lands a second copy of work that is already in main. The merge is a squash with `--match-head-commit` that deletes the branch — never
 a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
 to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
 for exactly those readings. The one case the watcher never sees — a pull request whose head does not

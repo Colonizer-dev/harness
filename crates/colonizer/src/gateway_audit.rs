@@ -254,7 +254,8 @@ impl GatewayAudit {
         if let Ok(line) = serde_json::to_string(&*record)
             && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.inner.log)
         {
-            let _ = writeln!(file, "{line}");
+            // #761: a request path can carry a key in its query string.
+            let _ = writeln!(file, "{}", crate::redact::redact_line(&line));
         }
     }
 }

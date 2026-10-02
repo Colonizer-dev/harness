@@ -455,6 +455,16 @@ pub struct Session {
     /// `None` unless a request is live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prewarm: Option<Prewarm>,
+    /// The supply-chain target this colony was launched against (issue #673): a package and the
+    /// advisory it was launched to fix. A live colony for one target refuses a second, like an
+    /// issue hold. `None` for everything not launched against one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
+    /// Set when a same-repo colony's pull request merged over this colony's work (issue #673): what
+    /// covered it, why, and whether the operator kept it running anyway. While it stands unkept the
+    /// queue and the resume route leave the colony where it is. `None` for a colony no merge covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<crate::supersede::Supersession>,
     /// Set by the claim that sends a colony to boot (lifecycle's resume, the queue's restore):
     /// whether the colony was suspended when it was claimed (issue #700). The boot reads it for
     /// session.json's `restore` key, so the guest can tell a suspension's restore from a plain
@@ -563,6 +573,8 @@ impl Default for Session {
             agent_session: None,
             pending_answer: None,
             prewarm: None,
+            supply_chain: None,
+            superseded: None,
             was_suspended: false,
             last_activity_at: None,
             boot_timing: None,

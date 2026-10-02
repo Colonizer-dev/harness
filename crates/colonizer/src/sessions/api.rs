@@ -233,7 +233,8 @@ pub async fn prewarm(
     let Some(s) = app.session(&id).await else {
         return Err(client_error(StatusCode::NOT_FOUND, "no such session"));
     };
-    if !suspended_waiting(&s) || s.pending_answer.is_some() {
+    // Issue #673: a colony a merge superseded is held until kept, so there is nothing to warm.
+    if !suspended_waiting(&s) || s.pending_answer.is_some() || crate::supersede::blocks_start(&s) {
         return Ok(StatusCode::NO_CONTENT);
     }
     // Conditional on purpose: a restore or a stop that claimed the colony between the snapshot and
@@ -241,7 +242,7 @@ pub async fn prewarm(
     // idempotent, so still a 202.
     let marked = app
         .update_session(&id, |x| {
-            if !suspended_waiting(x) || x.pending_answer.is_some() || x.prewarm.is_some() {
+            if !suspended_waiting(x) || x.pending_answer.is_some() || x.prewarm.is_some() || crate::supersede::blocks_start(x) {
                 return false;
             }
             x.prewarm = Some(Prewarm {
@@ -691,6 +692,7 @@ async fn hold_answer(
             )
             .await;
             *rt.open_question.lock().await = None;
+            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
             rt.activity.lock().await.question_since = None;
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;

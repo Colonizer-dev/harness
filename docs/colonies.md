@@ -11,6 +11,7 @@ read by the mothership when it starts.
 
 - [Launching a colony](#launching-a-colony)
 - [Claims: one colony per issue](#claims-one-colony-per-issue)
+- [When a merge supersedes a colony](#when-a-merge-supersedes-a-colony)
 - [Epics are refused](#epics-are-refused)
 - [Questions, and who answers them](#questions-and-who-answers-them)
 - [Suspending a colony that waits for you](#suspending-a-colony-that-waits-for-you)
@@ -81,6 +82,33 @@ left behind for colonies that are gone.
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
 seen only through the GitHub label and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
+[protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
+
+## When a merge supersedes a colony
+
+When one colony's pull request merges, other colonies of the same repository whose work it covered
+are marked **superseded**. One covers another when the two carry the same supply-chain target (the
+package and advisory a colony was launched to fix), are on the same issue, or changed largely the
+same files — at least three files in common (lockfiles don't count, so two dependency bumps sharing
+a manifest and its lockfile stay two pieces of work), making up at least 80% of the smaller side's
+changed-file list. A colony waiting for another to release its issue, and one stacked on the merging
+colony, are left alone: that merge is what releases them.
+
+A superseded colony is not deleted. One that is queued, parked or suspended is held exactly where it
+is: it does not start — a quota-parked colony stays parked even when its provider recovers — and
+Resume refuses, until you keep it. A running colony is told in its chat that the changes are now in
+main, and it rebases and continues — or finishes with no changes if main already covers the task. A
+superseded colony with an open pull request has that pull request closed with a note, but only for
+repositories listed in the org's **Close superseded PRs** workspace setting; otherwise it is left
+open for you — and the publish module's merge train skips it until you keep it.
+
+In the cockpit a superseded colony wears a "Superseded by #N" badge, and while it is held a banner
+offers **Keep** (run it anyway), with **Stop** beside it for a live or queued colony. Launching a
+second colony for a supply-chain target one already holds is refused, not queued behind the holder,
+unless the launch passes `allow_duplicate`.
+
+**Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
+at 500 paths. The API shapes are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
 
 ## Epics are refused
@@ -175,6 +203,18 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
 - Only an agent that can resume its own session is suspended. Today that is Claude Code, Codex and
   ACP agents that advertise session loading. Any
   other agent keeps its microVM, and the colony log says so once.
+- A colony waiting on an exec-policy approval (an `ask` rule, such as `writes-outside-repo`) is
+  never suspended. Its agent — often a subagent — is blocked on the command in flight, and a
+  resumed transcript cannot continue that call, so the agent would be lost. The question carries
+  `kind: "exec_policy"`, and the colony keeps its microVM and its slot until you answer.
+- The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
+  permission request: the tool call that asked is blocked in flight, and suspending the colony
+  would kill the agent and leave the answer with nobody to receive it. The question carries
+  `blocking: true`. The lead agent's own questions still suspend as usual.
+- Such a colony is not held for ever. After **two hours** without an answer it is suspended anyway,
+  so it stops holding a microVM and a parallel slot. The colony log says so at `warn`, and says what
+  it costs: the agent that asked is lost with the microVM, and your answer, when it comes, reaches
+  the lead agent when the colony resumes. The cap is never shorter than `suspend_after_minutes`.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
   such as a dev server, are gone after the resume. Services the colony declares or registers come
   back — see [Services that come back after a resume](#services-that-come-back-after-a-resume).

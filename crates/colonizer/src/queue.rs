@@ -49,6 +49,14 @@ pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
 /// requeueing these: it only matches its own reason.
 pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 
+/// How long a question that holds a tool call in flight (issue #759) keeps its colony's microVM
+/// before the colony is suspended anyway. Such a question is exempt from the ordinary grace, since
+/// suspending it loses the agent that asked; without a ceiling, a question nobody answers would hold
+/// a microVM and a parallel slot for ever. Nothing else bounds that wait: budgets count spend, and
+/// a colony blocked on its user spends nothing. Two hours is generous for a human and still frees
+/// the slot the same day; never shorter than the ordinary grace.
+pub(crate) const BLOCKING_QUESTION_CAP: chrono::Duration = chrono::Duration::minutes(120);
+
 /// Whether this colony's autopilot hold has outlasted its slot (issue #217).
 ///
 /// Slot policy: a colony waiting on a human is not using the CPU, so within the timeout it keeps its
@@ -154,6 +162,12 @@ enum Gate {
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
+    // Issue #673: a colony a merge superseded stays put — held, not retired — until the operator
+    // keeps it. Ahead of the resume fast-path below, which would otherwise admit a resumed-queued
+    // colony the marker must hold; looked past this tick like any other wait.
+    if crate::supersede::blocks_start(s) {
+        return Gate::Hold;
+    }
     // A colony with a kept worktree came from Resume, and resuming reuses the base it recorded at
     // its first boot: `boot_inner` never consults its parent again, because the branch already
     // exists on top of that base. The parent rule below is for fresh boots only — applied to a
@@ -572,6 +586,7 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         if now - since < grace {
             continue;
         }
+        let cap = BLOCKING_QUESTION_CAP.max(grace);
         let lifecycle = app.session_lock(&id).await;
         let _lifecycle = lifecycle.lock().await;
         // The answer gate (issue #562): the open question's lock, held across the claim below. The
@@ -583,6 +598,19 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         let open_question = rt.open_question.lock().await;
         let Some(s) = app.session(&id).await else { continue };
         if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_some() || open_question.is_none() {
+            continue;
+        }
+        // A question that holds a tool call (issue #759) — an exec-policy `ask`, a subagent's
+        // AskUserQuestion, an ACP permission request — is not the lead waiting between turns: its
+        // tool call is blocked in flight on the answer, inside a live agent. Tearing the microVM
+        // down kills that call and the agent that made it, and a resumed transcript cannot pick it
+        // back up, so the lead only spawns another agent that asks again, or the answer reaches
+        // nobody. Such a colony keeps its microVM (and its slot) until the question is answered, or
+        // until [`BLOCKING_QUESTION_CAP`], past which it is suspended anyway and the log says what
+        // that costs. Read under the gate: the flag is set before the question opens and cleared
+        // with its answer.
+        let blocking = rt.question_holds_tool_call.load(std::sync::atomic::Ordering::SeqCst);
+        if blocking && now - since < cap {
             continue;
         }
         // How the colony comes back. Today's sandbox has no memory snapshot (the seam in
@@ -615,16 +643,21 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         // Claimed: the answer path can no longer forward into this runtime — it reads suspended
         // under the gate and holds instead — so the link may go.
         drop(open_question);
-        let minutes = grace.num_minutes();
-        app.session_log(
-            &id,
-            "info",
+        let minutes = if blocking { cap.num_minutes() } else { grace.num_minutes() };
+        let message = if blocking {
+            format!(
+                "no answer for {minutes} min to a question a tool call is blocked on; suspending anyway, \
+                 so the colony stops holding a microVM and a slot — the agent that asked is lost with the \
+                 microVM, the question stays answerable, and the answer reaches the lead agent when the \
+                 colony resumes"
+            )
+        } else {
             format!(
                 "no answer for {minutes} min; suspending — the microVM is removed, the worktree and the \
                  agent's session transcript are kept, and the question stays answerable"
-            ),
-        )
-        .await;
+            )
+        };
+        app.session_log(&id, if blocking { "warn" } else { "info" }, message).await;
         let mut entry = crate::activity::Entry::new("outcome.suspended", "colony").colony(&s);
         entry.detail = Some(format!(
             "waiting {minutes} min for an answer; the worktree and the agent's session are kept"
@@ -656,6 +689,8 @@ fn answered_ahead(sessions: &[Session], s: &Session) -> usize {
             other.suspended.is_some()
                 && other.pending_answer.is_some()
                 && other.status == SessionStatus::WaitingForAnswer
+                // Issue #673: a superseded colony that is not kept is out of the line altogether.
+                && !crate::supersede::blocks_start(other)
                 && (restore_key(other), other.id.as_str()) < key
         })
         .count()
@@ -675,6 +710,11 @@ pub(crate) fn restore_line_note(
     repo_limit: u64,
     paused: bool,
 ) -> String {
+    // Issue #673: the restore pass skips a colony a merge superseded until it is kept, so the note
+    // must not promise a resume — it says what the colony is waiting on instead.
+    if crate::supersede::blocks_start(s) {
+        return "a merged pull request superseded this colony, so it waits until it is kept".into();
+    }
     let ahead = answered_ahead(sessions, s);
     let room = has_room(sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit);
     match (ahead, room, paused) {
@@ -750,6 +790,8 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .await
             .iter()
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
+            // Issue #673: a merge covered this colony's work — the answer can wait until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
             .map(|s| (restore_key(s), s.id.clone()))
             .collect()
     };
@@ -770,7 +812,12 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
         let lifecycle = app.session_lock(&id).await;
         let _lifecycle = lifecycle.lock().await;
         let Some(s) = app.session(&id).await else { continue };
-        if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_none() || s.pending_answer.is_none() {
+        // Issue #673 re-checked under the lifecycle lock: a merge seen since the snapshot holds it.
+        if s.status != SessionStatus::WaitingForAnswer
+            || s.suspended.is_none()
+            || s.pending_answer.is_none()
+            || crate::supersede::blocks_start(&s)
+        {
             continue;
         }
         let suspension = s.suspended.clone();
@@ -843,6 +890,9 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
                     && s.suspended.is_some()
                     && s.pending_answer.is_none()
                     && s.prewarm.as_ref().is_some_and(|p| p.started_at.is_none())
+                    // Issue #673: a merge covered this colony's work — like the restore pass, no
+                    // warm-up until it is kept.
+                    && !crate::supersede::blocks_start(s)
             })
             .map(|s| (s.prewarm.as_ref().map(|p| p.requested_at).unwrap_or(now), s.id.clone()))
             .collect()
@@ -879,6 +929,7 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
             || s.suspended.is_none()
             || s.pending_answer.is_some()
             || s.prewarm.as_ref().is_none_or(|p| p.started_at.is_some())
+            || crate::supersede::blocks_start(&s)
         {
             continue;
         }
@@ -902,6 +953,7 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
                     || x.suspended.is_none()
                     || x.pending_answer.is_some()
                     || x.prewarm.as_ref().is_none_or(|p| p.started_at.is_some())
+                    || crate::supersede::blocks_start(x)
                 {
                     return None;
                 }
@@ -1145,6 +1197,9 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         for s in sessions
             .iter()
             .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked) && recovered(s))
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            .filter(|s| !crate::supersede::blocks_start(s))
         {
             // A kept-VM park takes the resume route; everything else is a plain requeue.
             if s.parked.as_ref().is_some_and(|p| p.vm_kept) {
@@ -2204,6 +2259,12 @@ mod tests {
         asked(&app, "past-grace", 20).await;
         asked(&app, "within-grace", 1).await;
         asked(&app, "no-timestamp", 20).await;
+        // An exec-policy ask (issue #759) waited just as long, but its tool call is in flight.
+        asked(&app, "exec-policy", 20).await;
+        app.runtime("exec-policy")
+            .await
+            .question_holds_tool_call
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         app.runtime("no-timestamp").await.activity.lock().await.question_since = None;
         app.sessions
             .write()
@@ -2235,7 +2296,7 @@ mod tests {
             "the status is untouched, so the question stays answerable"
         );
         assert!(!suspended.holds_slot(), "the slot is back");
-        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent"] {
+        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent", "exec-policy"] {
             assert!(by_id(id).suspended.is_none(), "{id} must keep its microVM and its slot");
         }
         drop(sessions);
@@ -2282,8 +2343,85 @@ mod tests {
             by_id("other-agent").suspended.is_none(),
             "the agent cannot resume, never suspended"
         );
+        assert!(
+            by_id("exec-policy").suspended.is_none(),
+            "an exec-policy ask holds a tool call in flight: not suspended within the cap, however short the grace"
+        );
         assert!(by_id("past-grace").suspended.is_some(), "already suspended, left as it is");
         drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #759, the follow-up: a subagent's AskUserQuestion blocks the subagent's tool call just
+    /// as an exec-policy ask does, and the runner says so with `blocking: true`. Fed through the live
+    /// event path, such a colony keeps its microVM past the grace, while the lead's own question —
+    /// its turn ended, a resume delivers the answer — is still suspended. Past the cap every
+    /// question is suspended, blocking or not, so no colony holds a slot for ever.
+    #[tokio::test]
+    async fn a_question_a_tool_call_is_blocked_on_keeps_its_colony_until_the_cap() {
+        async fn asked(app: &Shared, id: &str, question: &str, minutes_ago: i64) {
+            app.sessions.write().await.push(waiting_colony(id, "claude-code", Some("s1")));
+            std::fs::create_dir_all(app.session_dir(id)).unwrap();
+            let rt = app.runtime(id).await;
+            crate::events::handle_agent_event(app, id, &rt, question).await;
+            assert!(rt.open_question.lock().await.is_some(), "{id}: the question is open");
+            rt.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(minutes_ago));
+        }
+        const SUBAGENT: &str =
+            r#"{"seq":1,"type":"question","question_id":"toolu_sub","blocking":true,"risk":"read_only","questions":[]}"#;
+        const LEAD: &str = r#"{"seq":1,"type":"question","question_id":"toolu_lead","risk":"read_only","questions":[]}"#;
+        const EXEC: &str =
+            r#"{"seq":1,"type":"question","question_id":"toolu_bash","kind":"exec_policy","blocking":true,"questions":[]}"#;
+
+        let root = std::env::temp_dir().join(format!("colonizer-suspend-blocking-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![agent_module("claude-code", Some("/root/.claude/projects"))],
+            |_| {},
+        );
+        let modules = app.modules.read().await.clone();
+        let cap = BLOCKING_QUESTION_CAP.num_minutes();
+        asked(&app, "subagent", SUBAGENT, 20).await;
+        asked(&app, "subagent-near-cap", SUBAGENT, cap - 1).await;
+        asked(&app, "exec-policy", EXEC, 20).await;
+        asked(&app, "lead", LEAD, 20).await;
+        asked(&app, "subagent-past-cap", SUBAGENT, cap + 1).await;
+        asked(&app, "exec-policy-past-cap", EXEC, cap + 1).await;
+
+        suspend_waiting_colonies(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        for id in ["subagent", "subagent-near-cap", "exec-policy"] {
+            assert!(
+                by_id(id).suspended.is_none(),
+                "{id}: a tool call is blocked on the question, so the colony keeps its microVM within the cap"
+            );
+        }
+        assert!(
+            by_id("lead").suspended.is_some(),
+            "the lead's own question past the grace is still suspended: that saving stays"
+        );
+        for id in ["subagent-past-cap", "exec-policy-past-cap"] {
+            let s = by_id(id);
+            assert!(s.suspended.is_some(), "{id}: past the cap it is suspended anyway");
+            assert_eq!(
+                s.status,
+                SessionStatus::WaitingForAnswer,
+                "{id}: the question stays answerable"
+            );
+        }
+        drop(sessions);
+        let log = std::fs::read_to_string(&app.runtime("subagent-past-cap").await.logs_path).unwrap();
+        assert!(
+            log.contains("suspending anyway") && log.contains("the agent that asked is lost"),
+            "the capped suspension says what it costs: {log}"
+        );
+        let log = std::fs::read_to_string(&app.runtime("lead").await.logs_path).unwrap();
+        assert!(
+            !log.contains("suspending anyway"),
+            "the ordinary suspension keeps its own line: {log}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2680,6 +2818,97 @@ mod tests {
         assert!(
             kept.suspended.is_some() && kept.pending_answer.is_some() && kept.status == SessionStatus::WaitingForAnswer,
             "stays suspended with its answer, one step back in the line"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #673 meets the restore line (#667): an answered suspension a merge superseded is out
+    /// of the line until it is kept — the slot goes to the later answer instead, the held colony
+    /// keeps its suspension and its answer, nobody counts it as ahead of them, and its own note
+    /// says it waits for a Keep rather than promising a resume.
+    #[tokio::test]
+    async fn a_superseded_answered_suspension_is_held_out_of_the_restore_line_until_kept() {
+        let root = std::env::temp_dir().join(format!("colonizer-restore-supersede-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        let answered = |id: &str, answered_at: DateTime<Utc>| {
+            let mut s = waiting_colony(id, "claude-code", Some("s1"));
+            s.suspended = Some(Suspension {
+                at: Utc::now() - chrono::Duration::minutes(10),
+                snapshot: None,
+                reason: WAITING_FOR_ANSWER.into(),
+                path: SESSION_RESUME.into(),
+            });
+            s.pending_answer = Some(PendingAnswer {
+                question_id: "q1".into(),
+                prompt: "Q: Ship it?\nA: yes".into(),
+                answered_at: Some(answered_at),
+            });
+            s
+        };
+        let mut held = answered("held", Utc::now() - chrono::Duration::minutes(5));
+        held.superseded = Some(crate::supersede::Supersession {
+            by: "merged".into(),
+            pr_url: "https://github.com/acme/repo/pull/9".into(),
+            pr: Some(9),
+            title: "Fix the login".into(),
+            reason: crate::supersede::OverlapReason::Issue,
+            at: Utc::now(),
+            kept: false,
+        });
+        let later = answered("later", Utc::now() - chrono::Duration::minutes(1));
+
+        // The note, before anything moves: the held one waits for a Keep, and the later answer
+        // does not count it as ahead.
+        let snapshot = vec![held.clone(), later.clone()];
+        assert!(
+            restore_line_note(&snapshot, &held, 1, None, 1, false).contains("waits until it is kept"),
+            "the held colony's note promises no resume"
+        );
+        assert_eq!(
+            restore_line_note(&snapshot, &later, 1, None, 1, false),
+            "a slot is free, so it resumes on the next queue tick",
+            "a held colony stands in nobody's way"
+        );
+
+        *app.sessions.write().await = snapshot;
+        std::fs::create_dir_all(app.session_dir("held")).unwrap();
+        std::fs::create_dir_all(app.session_dir("later")).unwrap();
+        restore_suspended(&app, &modules).await;
+        {
+            let sessions = app.sessions.read().await;
+            let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+            assert_eq!(
+                by_id("later").status,
+                SessionStatus::Starting,
+                "the slot went past the held colony"
+            );
+            let h = by_id("held");
+            assert!(
+                h.suspended.is_some() && h.pending_answer.is_some() && h.status == SessionStatus::WaitingForAnswer,
+                "the held colony keeps its suspension and its answer"
+            );
+        }
+
+        // Kept, it is back in the line: with the slot freed, the next pass restores it.
+        app.update_session("later", |x| x.status = SessionStatus::Stopped).await;
+        app.update_session("held", |x| {
+            x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
+        })
+        .await;
+        restore_suspended(&app, &modules).await;
+        assert_eq!(
+            app.session("held").await.unwrap().status,
+            SessionStatus::Starting,
+            "kept: restored like any answered suspension"
         );
         let _ = std::fs::remove_dir_all(root);
     }

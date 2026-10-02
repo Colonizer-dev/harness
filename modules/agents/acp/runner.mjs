@@ -11,13 +11,13 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { mkdtempSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
-import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
+import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
@@ -169,22 +169,15 @@ function optionByKind(options, prefix) {
   return real.find((option) => option.kind === `${prefix}_once`) ?? real.find((option) => option.kind.startsWith(prefix));
 }
 
-/** The workspace-confined absolute path for `target`, or null when it escapes: symlinks resolve
- * through the longest existing ancestor, so a link out of the tree cannot hide an escape. */
+/** The workspace-confined absolute path for `target`, or null when it escapes. Every symlink on
+ * the way resolves, component by component — a dangling one too, to where a write through it
+ * would land — so a link out of the tree cannot hide an escape (pathpolicy.mjs `resolveInWorkspace`).
+ * The result keeps the caller's spelling of the workspace root. */
 export function confine(workspace, target) {
-  let abs = resolve(workspace, String(target ?? ''));
-  const tail = [];
-  for (;;) {
-    try {
-      const resolved = join(realpathSync(abs), ...tail);
-      return resolved === workspace || resolved.startsWith(workspace + sep) ? resolved : null;
-    } catch {
-      tail.unshift(basename(abs));
-      const parent = dirname(abs);
-      if (parent === abs) return null;
-      abs = parent;
-    }
-  }
+  const inside = resolveInWorkspace(workspace, target);
+  if (!inside) return null;
+  const rel = relative(inside.root, inside.full);
+  return rel === '' ? workspace : join(workspace, rel);
 }
 
 // §2 caps tool_result output; file reads refuse anything over READ_CAP instead of buffering it.
@@ -342,6 +335,9 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // before the agent can run anything. Warnings ride stderr; agentd turns those into `log` events.
   const execPolicy = loadExecPolicy(env, { cwd: workspace });
   for (const warning of execPolicy.warnings) process.stderr.write(`${warning}\n`);
+  // The operator's Allows of exec-policy asks, kept for this run (issue #759): the same command
+  // under the same rule is not asked about twice. In memory only, so the agent cannot forge one.
+  const execAllowCache = createExecAllowCache();
   // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
   // the runtime reports against. Absent (an older harness) means the feature is off, silently.
   const pathPolicy = loadPathPolicy(env).policy;
@@ -415,12 +411,21 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
       }
       const allow = optionByKind(options, 'allow');
       if (hit.decision === 'allow' && allow) return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      if (execAllowCache.has(hit, command) && allow) {
+        process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
+        return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      }
     }
     const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
     emit({
       type: 'question', question_id: questionId, message_id: turn?.messageId ?? null, risk: riskForKind(call.kind),
+      // Every permission request holds the agent's tool call in flight, blocked on this reply
+      // (issue #759): a session/load after a suspension has no request left to answer, so the
+      // mothership must not suspend the colony while it waits. An exec-policy ask also says why.
+      blocking: true,
+      ...(hit ? { kind: EXEC_POLICY_QUESTION_KIND } : {}),
       questions: [{ question: text, header: 'Permission', multi_select: false, options: options.map((o) => ({ label: o.name, description: o.kind })) }],
     });
     emit({ type: 'status', state: 'waiting_for_answer' });
@@ -433,6 +438,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (!chosen && answer.response) {
       emit({ type: 'log', level: 'info', message: `a free-text reply cannot select one of the agent's options; answered cancelled for ${questionId}` });
     }
+    if (hit && chosen && !chosen.synthetic && chosen.kind?.startsWith('allow')) execAllowCache.remember(hit, command);
     reply({ outcome: chosen && !chosen.synthetic ? { outcome: 'selected', optionId: chosen.optionId } : { outcome: 'cancelled' } });
   };
 

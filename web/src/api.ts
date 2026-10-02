@@ -98,6 +98,9 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  TsAnyLoop,
+  TsAnyReport,
+  TsAnySettings,
   LoginItemStatus,
   PushSubscriptionSummary,
   PushSubscribeBody,
@@ -346,6 +349,8 @@ export interface Api {
   stopSession(id: string): Promise<StopReply>;
   /** POST /api/sessions/{id}/prewarm (issue #701): boot a suspended colony's question ahead of its answer. Answers 202 when requested, 204 when it is a no-op. */
   prewarmSession(id: string): Promise<unknown>;
+  /** POST /api/sessions/{id}/keep (issue #673): release a superseded colony to start again. 409 when it is not superseded. */
+  keepSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
   /** POST /api/sessions/{id}/seen: the colony was looked at — clears `unseen_failure` and has the mothership push "resolved" to every device (issue #744). */
   seenSession(id: string): Promise<void>;
@@ -510,6 +515,12 @@ export interface Api {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** GET /api/ts-any-loop: the built-in "TypeScript: remove any" loop. */
+  tsAnyLoop(): Promise<TsAnyLoop>;
+  /** PUT /api/ts-any-loop: replaces its settings (off, with an empty allowlist, by default). */
+  saveTsAnyLoop(settings: TsAnySettings): Promise<TsAnyLoop>;
+  /** POST /api/ts-any-loop/run: a run now, or a dry run that writes nothing. 409 while one runs. */
+  runTsAnyLoop(body: { dry_run: boolean; repo?: string }): Promise<TsAnyReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
   /** GET /api/merge-train/loop: the merge-train loop's settings, paused repositories and run history (issue #754). */
@@ -738,6 +749,7 @@ export const httpApi: Api = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   prewarmSession: (id) => post(`/api/sessions/${enc(id)}/prewarm`),
+  keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   seenSession: (id) => post(`/api/sessions/${enc(id)}/seen`),
   storageSummary: () => request("/api/storage"),
@@ -845,6 +857,9 @@ export const httpApi: Api = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  tsAnyLoop: () => request("/api/ts-any-loop"),
+  saveTsAnyLoop: (settings) => put("/api/ts-any-loop", settings),
+  runTsAnyLoop: (body) => post("/api/ts-any-loop/run", body),
   mergeTrain: () => request("/api/merge-train"),
   mergeLoop: () => request("/api/merge-train/loop"),
   saveMergeLoop: (settings) => put("/api/merge-train/loop", settings),

@@ -21,7 +21,7 @@ import {
   IconTerminal,
   IconTrash,
 } from "./icons";
-import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel } from "./ui";
+import { AttentionBadge, Badge, Button, Spinner, StatusBadge, SESSION_STATUS, attentionText, buttonClass, canPublish, cx, isAnsweredWaiting, isLive, minutesAgo, orgOf, parkedLabel, supersededTitle } from "./ui";
 
 // xterm is the largest dependency; load it only when a session view opens.
 const TerminalPanel = lazy(() => import("./TerminalPanel").then((m) => ({ default: m.TerminalPanel })));
@@ -113,6 +113,11 @@ export function SessionView({
   }
 
   const live = isLive(session.status);
+  /** Issue #673: a merge covered this colony's work. While it stands unkept the queue and the resume route hold it. */
+  const superseded = session.superseded ?? null;
+  // Parked counts too: a quota-parked colony stays parked until Keep — the recovery tick holds it.
+  const supersededHeld =
+    superseded != null && !superseded.kept && (live || session.status === "queued" || session.status === "pr_opened" || session.status === "parked");
   /** A publish that already got somewhere is finished, not started over. */
   const finishing = session.publish_stage != null || session.status === "failed" || session.status === "no_changes";
   /** How far the last publish got, when it never reached a pull request. */
@@ -220,6 +225,17 @@ export function SessionView({
               </span>
               <StatusBadge session={session} />
               <AttentionBadge attention={attention} />
+              {superseded && (
+                <a
+                  href={superseded.pr_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`Superseded: ${supersededTitle(superseded)} — its work is in main${superseded.kept ? "; kept anyway" : ""}`}
+                  className="inline-flex"
+                >
+                  <Badge tone="warn">Superseded by {superseded.pr != null ? `#${superseded.pr}` : "a merged PR"}</Badge>
+                </a>
+              )}
               {session.issue == null && <Badge>No issue</Badge>}
               {session.autopilot && <Badge>Autopilot</Badge>}
               {session.origin === "burn_down" && <Badge tone="accent">Burn-down</Badge>}
@@ -286,6 +302,11 @@ export function SessionView({
                 </span>
               )}
               <span>{session.agent}</span>
+              {session.supply_chain && (
+                <span title="The supply-chain target this colony was launched to fix (package · advisory)">
+                  {session.supply_chain.package} · {session.supply_chain.advisory}
+                </span>
+              )}
               <CostSummary session={session} />
               <HostDiskSummary session={session} />
               {live && session.last_activity_at && !attention && <span>Last activity {minutesAgo(session.last_activity_at)}</span>}
@@ -421,6 +442,44 @@ export function SessionView({
           <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
             <span className="font-semibold">Status: </span>
             <span className="text-muted">{diagnosis.text}</span>
+          </div>
+        )}
+        {supersededHeld && superseded && (
+          <div role="status" className="mt-3 rounded-lg bg-warn-soft px-3 py-2 text-[13px] text-warn">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <IconAlert size={14} className="shrink-0" />
+              <span className="font-semibold">
+                Superseded by {superseded.pr != null ? `#${superseded.pr}` : "a merged pull request"} — {supersededTitle(superseded)}
+              </span>
+              <span className="opacity-80">That merge covers this colony's work — Keep runs it anyway.</span>
+              <span className="ml-auto flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy !== null}
+                  onClick={() => act("keep", (a, id) => a.keepSession(id))}
+                  title="You read the supersession and want this colony to run anyway; it starts as soon as a slot frees"
+                >
+                  {busy === "keep" ? <Spinner /> : null} Keep
+                </Button>
+                {(live || session.status === "queued") && (
+                  <Button
+                    size="sm"
+                    disabled={busy !== null}
+                    onClick={() =>
+                      act("stop", (a, id) => a.stopSession(id), session.status === "queued" ? undefined : "Stop and remove this colony's microVM? The worktree is kept.")
+                    }
+                  >
+                    {busy === "stop" ? <Spinner /> : <IconPower size={13} />} Stop
+                  </Button>
+                )}
+              </span>
+            </div>
+            {pendingPrompt(session.pending_answer) && (
+              <div className="mt-1.5 border-t border-warn/30 pt-1.5 opacity-90 [overflow-wrap:anywhere]">
+                It asked before the merge: "{pendingPrompt(session.pending_answer)}" — check the answer still makes sense now main has moved.
+              </div>
+            )}
           </div>
         )}
         {publishStage && <div className="mt-2 text-[12.5px] text-muted">{publishStage}</div>}
@@ -578,6 +637,12 @@ function compactTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(n);
+}
+
+/** The question text of a stored answer (issue #562), or null when none is held or its prompt is blank. */
+function pendingPrompt(answer: Session["pending_answer"]): string | null {
+  const prompt = answer?.prompt?.trim();
+  return prompt ? prompt : null;
 }
 
 /** The colony's host footprint, in the same 16G / 512M shape the sandbox settings write sizes in. */

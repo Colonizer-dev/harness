@@ -950,6 +950,8 @@ mod tests {
             agent_session: None,
             pending_answer: None,
             prewarm: None,
+            supply_chain: None,
+            superseded: None,
             was_suspended: false,
             last_activity_at: Some(now),
             boot_timing: None,

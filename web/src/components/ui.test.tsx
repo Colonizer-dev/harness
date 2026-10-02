@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
 import type { Attention, Session } from "../types";
-import { AttentionBadge, StatusBadge, attentionText, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel } from "./ui";
+import { AttentionBadge, StatusBadge, attentionText, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel, supersededHeld, supersededTitle } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -18,6 +18,17 @@ const suspended = {
 };
 
 const answered = (answered_at?: string) => ({ question_id: "q1", prompt: "ship it?", answered_at });
+
+/** A supersession record (issue #673), kept or not. */
+const supersededBy = (kept: boolean): NonNullable<Session["superseded"]> => ({
+  by: "merged",
+  pr_url: "https://github.com/acme/repo/pull/9",
+  pr: 9,
+  title: "Fix the login",
+  reason: "issue",
+  at: "2026-09-26T10:30:00Z",
+  kept,
+});
 
 describe("statusLabel", () => {
   it("keeps the plain status label when the colony is not suspended", () => {
@@ -39,6 +50,12 @@ describe("statusLabel", () => {
   it("reads a colony that answered while suspended as queued for a slot, not as waiting on you", () => {
     const held = session({ status: "waiting_for_answer", suspended, pending_answer: answered("2026-09-26T10:05:00Z") });
     expect(statusLabel(held)).toBe("Answered · resumes when a slot frees");
+  });
+
+  it("reads an answered colony a merge superseded as held until kept, not as resuming on a free slot (issue #673)", () => {
+    const answeredWaiting = { status: "waiting_for_answer" as const, suspended, pending_answer: answered("2026-09-26T10:05:00Z") };
+    expect(statusLabel(session({ ...answeredWaiting, superseded: supersededBy(false) }))).toBe("Answered · held until kept");
+    expect(statusLabel(session({ ...answeredWaiting, superseded: supersededBy(true) }))).toBe("Answered · resumes when a slot frees");
   });
 
   it("keeps the suspended label while a colony without a stored answer still waits", () => {
@@ -115,6 +132,16 @@ describe("restorePlace", () => {
       me,
     ];
     expect(restorePlace(me, sessions)).toBe(1);
+  });
+
+  it("leaves a superseded colony that is not kept out of the line, and takes it back once kept (issue #673)", () => {
+    const held = { ...waiting("held", "2026-09-26T09:00:00Z", "2026-09-26T09:00:00Z"), superseded: supersededBy(false) };
+    const me = waiting("me", "2026-09-26T11:00:00Z", "2026-09-26T11:00:00Z");
+    expect(restorePlace(held, [held, me])).toBe(null);
+    expect(restorePlace(me, [held, me])).toBe(1);
+    const kept = { ...held, superseded: supersededBy(true) };
+    expect(restorePlace(kept, [kept, me])).toBe(1);
+    expect(restorePlace(me, [kept, me])).toBe(2);
   });
 
   it("is null outside the derived state", () => {
@@ -210,6 +237,34 @@ describe("StatusBadge", () => {
     expect(out).toContain("Answered · resumes when a slot frees");
     expect(out).not.toContain("bg-accent-soft");
     expect(out).not.toContain("pulse-soft");
+  });
+});
+
+describe("supersededHeld", () => {
+  it("is true only for a supersession that is not kept", () => {
+    expect(supersededHeld(session({}))).toBe(false);
+    expect(supersededHeld(session({ superseded: supersededBy(false) }))).toBe(true);
+    expect(supersededHeld(session({ superseded: supersededBy(true) }))).toBe(false);
+  });
+});
+
+// The supersession tooltip (issue #673) is shared by the colony view's badge and banner and the
+// sidebar's compact badge, so the words live in one place.
+describe("supersededTitle", () => {
+  const superseded = (reason: string, title = "Fix the login"): NonNullable<Session["superseded"]> => ({
+    by: "merged",
+    pr_url: "https://github.com/acme/repo/pull/9",
+    title,
+    reason: reason as "files",
+    at: "2026-09-28T10:00:00Z",
+    kept: false,
+  });
+
+  it("names the overlap reason and the colony whose merge covered the work, spelling unknown reasons out", () => {
+    expect(supersededTitle(superseded("issue"))).toBe('same issue — covered by "Fix the login"');
+    expect(supersededTitle(superseded("supply_chain", "Bump lodash"))).toBe('same supply-chain target — covered by "Bump lodash"');
+    expect(supersededTitle(superseded("files"))).toBe('overlapping files — covered by "Fix the login"');
+    expect(supersededTitle(superseded("something_new"))).toBe('something new — covered by "Fix the login"');
   });
 });
 

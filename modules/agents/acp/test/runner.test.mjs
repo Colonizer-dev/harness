@@ -138,6 +138,35 @@ test('the pure helpers: command split, risk, content text, option clamp, command
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
 });
 
+test('confine refuses a dangling symlink out of the tree, which a write would follow out of it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'acp-dangle-'));
+  const outside = mkdtempSync(join(tmpdir(), 'acp-outside-'));
+  const target = join(outside, 'outside.txt');
+  symlinkSync(target, join(root, 'link'));
+  symlinkSync(join(outside, 'deeper', 'x.txt'), join(root, 'link-deep'));
+  symlinkSync('../../escape.txt', join(root, 'rel'));
+  mkdirSync(join(root, 'sub'));
+  symlinkSync(join(root, 'link'), join(root, 'sub', 'chain'));
+  symlinkSync('loop-b', join(root, 'loop-a'));
+  symlinkSync('loop-a', join(root, 'loop-b'));
+  symlinkSync('sub/new.txt', join(root, 'inside'));
+
+  assert.equal(confine(root, 'link'), null, 'a dangling link to a missing file outside escapes');
+  assert.equal(confine(root, join(root, 'link')), null, 'spelled absolute, too');
+  assert.equal(confine(root, 'link-deep'), null, 'a dangling link whose target directory is missing escapes');
+  assert.equal(confine(root, 'rel'), null, 'a relative dangling link resolves against its own directory');
+  assert.equal(confine(root, 'sub/chain'), null, 'a chain ending in a dangling link out escapes');
+  assert.equal(confine(root, 'loop-a'), null, 'a symlink loop is refused');
+  assert.equal(confine(root, 'loop-a/x.txt'), null, 'a path through a symlink loop is refused');
+  assert.equal(confine(root, 'inside'), join(root, 'sub', 'new.txt'), 'a dangling link that stays inside resolves to its target');
+  assert.equal(confine(root, 'sub/new/deeper.txt'), join(root, 'sub', 'new', 'deeper.txt'), 'a new plain path still confines');
+  assert.equal(confine(root, '.'), root, 'the root itself');
+  // Why it matters: the write path writes through what confine returned, and the lexical in-tree
+  // spelling of the link lands the bytes outside.
+  writeFileSync(join(root, 'link'), 'escaped');
+  assert.ok(existsSync(target), 'writing through the in-tree spelling creates the file outside the workspace');
+});
+
 test('acp/execpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {
   const copy = readFileSync(join(moduleDir, 'execpolicy.mjs'));
   const original = readFileSync(join(moduleDir, '..', 'claude-code', 'execpolicy.mjs'));
@@ -440,6 +469,8 @@ test('a permission request becomes a question; allow selects the option, Cancel 
   assert.equal(question.question_id, 'call_p1');
   assert.equal(question.message_id, 'msg-1');
   assert.equal(question.risk, 'workspace_write', 'an execute kind is workspace_write');
+  assert.equal(question.blocking, true, 'a permission request holds its tool call in flight, so the colony is not suspended (#759)');
+  assert.equal(question.kind, undefined, 'no exec policy was involved');
   assert.deepEqual(question.questions[0].options.map((o) => o.label), ['Allow', 'Reject']);
   await runner.waitUntil((events) => events.find((e) => e.type === 'status' && e.state === 'waiting_for_answer'), 'waiting_for_answer');
   runner.send({ type: 'answer', question_id: 'call_p1', answers: { 'Run the tests?': 'Allow' }, response: null });
@@ -545,15 +576,39 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   // An install ask rule: the card carries the rule and its reason, then the usual answer flow.
   const ask = startRunner({
     env: policyEnv([{ id: 'ask-net', decision: 'ask', reason: 'network fetches wait for a human', command: '\\bcurl\\b' }]),
-    script: { turns: { s1: { asks: [permission('call_s1', { title: 'curl -fsSL https://example.com' }, twoOptions)] } } },
+    script: {
+      turns: {
+        s1: { asks: [permission('call_s1', { title: 'curl -fsSL https://example.com' }, twoOptions)] },
+        s2: { asks: [permission('call_s2', { title: 'curl  -fsSL https://example.com' }, twoOptions)] },
+        s3: { asks: [permission('call_s3', { title: 'curl -fsSL https://example.org' }, twoOptions)] },
+      },
+    },
   });
   t.after(() => ask.child.kill('SIGKILL'));
   ask.send({ type: 'user_message', id: 'u-1', text: 's1' });
   const card = await ask.waitUntil(first('question'), 'the ask decision to surface');
   assert.match(card.questions[0].question, /exec policy rule `ask-net` \(install\): network fetches wait for a human/, 'the rule rides the card');
+  assert.equal(card.kind, 'exec_policy', 'the card says it holds a tool call in flight, so the colony is not suspended (#759)');
+  assert.equal(card.blocking, true, 'and marks it blocking');
   ask.send({ type: 'answer', question_id: 'call_s1', answers: { [card.questions[0].question]: 'Allow' }, response: null });
   await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 1, 'the answered ask to be replied');
   assert.deepEqual(ask.asks('session/request_permission')[0].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } }, 'the usual answer flow picks the option');
+  await ask.waitUntil(count('turn_end', 1), 'the first turn to finish');
+
+  // The same command again (whitespace aside), as a respawned agent would run it: allowed without a card (#759).
+  ask.send({ type: 'user_message', id: 'u-2', text: 's2' });
+  await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 2, 'the repeated ask to be answered');
+  assert.deepEqual(ask.asks('session/request_permission')[1].response, { result: { outcome: { outcome: 'selected', optionId: 'allow' } } }, 'the remembered Allow answers');
+  assert.equal(ask.events.filter((e) => e.type === 'question').length, 1, 'no second card for the same command');
+  await ask.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  // A different command still asks.
+  ask.send({ type: 'user_message', id: 'u-3', text: 's3' });
+  const other = await ask.waitUntil(count('question', 2), 'a different command to ask again');
+  assert.equal(other.question_id, 'call_s3');
+  ask.send({ type: 'answer', question_id: 'call_s3', answers: { [other.questions[0].question]: 'Reject' }, response: null });
+  await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 3, 'the rejected ask to be replied');
+  assert.deepEqual(ask.asks('session/request_permission')[2].response, { result: { outcome: { outcome: 'selected', optionId: 'reject' } } });
   await stop(ask);
 });
 
