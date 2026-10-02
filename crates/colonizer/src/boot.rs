@@ -784,6 +784,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         flag("jev_routing_act").unwrap_or(false),
         flag("jev_shadow_mode").unwrap_or(false),
     );
+    // The Jev brief picker (#585) is its own default-off switch: it asks Jev which memory notes and
+    // skill packs to load, shadow only. Read here; the work is spawned at the end of the boot.
+    let brief_shadow = flag("jev_brief_shadow").unwrap_or(false);
     // The routing point's ask (issue #582): `None` only when the mode is off, so a short-circuit the
     // decision layer handles without a network call still produces a ledger row below. The org's own
     // switch (`org_settings.jev`) can turn every point off for its colonies.
@@ -1511,7 +1514,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
-    let resolved_egress = crate::egress::resolve(&modules, &org_settings);
+    // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
+    // its vendor's declared hosts without the operator restating them.
+    let resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
     let tls_hosts = tls_edge_hosts(&secrets);
     let (net_profiles, net_rules, egress_record) =
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
@@ -1655,6 +1660,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     ensure_starting(app, id).await?;
     start_link(app, id).await;
+    // Jev brief picks (#585, shadow only): spawn the candidate build and pick off the boot path, so
+    // a slow or unreachable Jev never delays or fails a boot. One call; brief_pick.rs owns the rest.
+    crate::brief_pick::start(
+        app,
+        id,
+        brief_shadow,
+        org_settings.jev != Some(false),
+        memory_on,
+        &plugin_names,
+        &task_labels,
+    );
     // A pre-warm boot (issue #701) has no answer riding it: once the runner is linked, this task
     // holds the colony open for the answer instead of finishing a normal launch. An answer that
     // lands is delivered on the spot; the timeout suspends the colony again and frees the slot.
@@ -2100,7 +2116,7 @@ mod tests {
             };
             // The default policy is Open with no operator entries: today's fence, plus the
             // always-blocked deny set every colony carries (#303).
-            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default());
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None);
             let (profiles, rules, record) =
                 colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
@@ -2164,6 +2180,7 @@ mod tests {
                 mode: "global".into(),
                 ..Default::default()
             },
+            ..Default::default()
         };
         let (profiles, rules, record) = colony_network(
             Some((vec!["allow@192.168.1.4:udp:41743".into()], 41740)),

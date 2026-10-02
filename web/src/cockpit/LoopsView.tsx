@@ -11,7 +11,7 @@ import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { TsAnyLoopCard } from "./TsAnyLoop";
-import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, endAtError, endAtFromInput, endAtInputValue, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { DocsLoopCard } from "./DocsLoopCard";
 import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
@@ -255,7 +255,7 @@ export function bodyOf(l: Loop, change: Partial<NewLoop> = {}): NewLoop {
   };
 }
 
-function LoopDialog({
+export function LoopDialog({
   loop,
   org,
   orgs,
@@ -298,6 +298,9 @@ function LoopDialog({
   const [subagentModel, setSubagentModel] = useState(loop?.subagent_model ?? "");
   const [autopilot, setAutopilot] = useState(loop?.autopilot ?? true);
   const [maxRuns, setMaxRuns] = useState(loop?.max_runs ? String(loop.max_runs) : "");
+  // The optional end date, held in the field's own local `datetime-local` shape and sent as UTC.
+  const [endAt, setEndAt] = useState(endAtInputValue(loop?.end_at ?? null));
+  const [endAtProblem, setEndAtProblem] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -306,6 +309,9 @@ function LoopDialog({
   }, []);
 
   const submit = async () => {
+    const problem = endAtError(endAt);
+    setEndAtProblem(problem);
+    if (problem) return;
     setSaving(true);
     try {
       const cadence: LoopCadence = toUtcLoopCadence(choice);
@@ -321,7 +327,7 @@ function LoopDialog({
         subagent_model: subagentModel || null,
         autopilot,
         max_runs: maxRuns ? Number.parseInt(maxRuns, 10) : null,
-        end_at: loop?.end_at ?? null,
+        end_at: endAtFromInput(endAt),
         enabled: loop ? loop.enabled || !loop.ended_reason : true,
       });
     } catch (e) {
@@ -559,7 +565,26 @@ function LoopDialog({
             <input type="number" min={1} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} placeholder="∞" className={cx(field, "w-20")} />
             runs
           </label>
+          <label className="flex items-center gap-2">
+            ends
+            <input
+              type="datetime-local"
+              aria-label="Ends"
+              value={endAt}
+              onChange={(e) => {
+                setEndAt(e.target.value);
+                if (endAtProblem) setEndAtProblem(null);
+              }}
+              className={cx(field, "w-56")}
+            />
+            <span className="text-faint">your local time</span>
+          </label>
         </div>
+        {endAtProblem && (
+          <p role="alert" className="m-0 text-[12.5px] text-err">
+            {endAtProblem}
+          </p>
+        )}
         <p className="rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12.5px] text-muted">
           Each run is a full colony with its own microVM and model spend. A frequent loop on a large repository adds up — start daily, and let the loop stop itself (loop_stop) when its goal is met.
         </p>

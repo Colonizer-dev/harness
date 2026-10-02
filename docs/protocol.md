@@ -388,8 +388,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/merge-train/loop` | The merge-train loop (issue #754, [loops.md](loops.md#merge-train)): `{settings, next_run_at, running, writes_blocked, repos: {"owner/repo": {paused, last_merge_at, last_train_merge, needs_redo, redo_dispatched, …}}, last_report, history}`. `settings` is `{enabled, cadence, allow, never, max_merges, repo_max_merges, cooldown_secs, ci_wait_minutes, ci_poll_secs, flaky_checks, self_heal, revert_on_red, redo_on_conflict, max_api_calls, min_call_gap_ms, held}`; a report is `{started_at, finished_at, dry_run, forced_dry_run, stopped, api_calls, summary, lines, repos: [{repo, main, paused, heal, items: [{session, pr_url, title, action: "merged"\|"updated"\|"rebased"\|"red"\|"rerun"\|"needs_redo"\|"redo_dispatched"\|"waiting"\|"skipped", reason}]}]}`; `history` is newest first. Read scope for API tokens |
 | `PUT /api/merge-train/loop` | Replaces the loop's settings (the same shape); out-of-range limits, a malformed `allow`/`never` entry or `revert_on_red` without `self_heal` are a `400`. Switching it on books the next run one cadence away. Owner only |
 | `POST /api/merge-train/loop/run[?dry_run=true]` | A dry run (or any run while external writes are blocked) answers `{started: false, report}`; a real run starts in the background and answers `{started: true}`, `409` while one is going. Owner only |
-| `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow, block}, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md)). **404** for a colony booted before the record existed |
-| `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
+| `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow (may list "module"), block}, module: {agent, allow}\|absent, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares)). `module` names the running agent module and the `egress` hosts it added to the allow list (#601); it is absent in `open` mode and for a module that declared nothing of its own. **404** for a colony booted before the record existed |
+| `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`. `totals` breaks the data dir down by category — `worktrees_bytes`, `repos_bytes`, `sessions_bytes` and `archive_bytes` (the log archive under `<data_dir>/archive`, [colonies.md](colonies.md#the-log-archive)) — plus `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
 | `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
@@ -1956,6 +1956,18 @@ This second opinion and Jev compaction (Token savings) are separate features sha
 `JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
 history at each compaction.
 
+**Boot brief (issue #585, shadow only).** A third optional use of the same client, `jev_brief_shadow`
+(a `claude-code` boolean, default `false`), asks Jev at boot which of this colony's shared-memory
+notes and skill packs are worth loading: up to five picks, one `choice` question per round (each round
+offers the remaining candidates plus `none`, and an answer outside them is a miss); an org whose Jev
+switch is off is never asked, like every other Jev point. Notes tagged
+`house-rule` or `security` are **mandatory** — always loaded, never offered, never dropped — and memory
+stays pull-only (§6.2): the picks are recorded, never acted on, so nothing the colony sees changes
+while the flag is off. The mothership writes one `pick` row per boot and one `used` row per watched
+note read or skill pack touched to `<data dir>/brief_picks.jsonl`, which `bench.mjs brief` grades
+([bench.md](bench.md#grading-jev-brief-picks)); `act` mode waits for the #582 decision layer and a
+measured token saving on the bench, so this stays telemetry.
+
 A caveat worth stating plainly: this integration's specific vendor claims — the endpoint, its pricing,
 its latency — could not be independently verified while it was built. The design leans on that: with
 no key and no flag set, it is inert, so an unverified or even nonexistent vendor causes no harm to a
@@ -2488,7 +2500,8 @@ owned}], chosen, would_catch, verdict, actual_first_failure_ms, focused_first_fa
 checks_run}`, `chosen` being `full` when there is nothing to focus on (fewer than two checks) —
 and `confirmed` still needs every check run green. Each fresh-checkout VM checks for the tool the command
 needs before running it: a tool the colony image does not carry (the default node image has no bun or
-pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
+pnpm, until the colony-node image is pinned) makes that check `unverifiable`, named in the summary,
+never `contradicted`. A branch that
 rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own
 homework: that check comes back `unverifiable` with that said plainly, and nothing runs. A check
 whose directory the branch deleted is skipped rather than run to a meaningless exit 1 — if no check

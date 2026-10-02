@@ -1,9 +1,25 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { AsyncQueue, buildOptions, DELEGATE_PROMPT_APPEND, environmentPrompt, runAgent, summariseUsage } from '../runner.mjs';
+import { AsyncQueue, buildOptions, DELEGATE_PROMPT_APPEND, environmentPrompt, packageManager, runAgent, summariseUsage } from '../runner.mjs';
 
 const base = { COLONIZER_CLAUDE_BIN: '/opt/claude/bin/claude', COLONIZER_DELEGATE: 'off' };
+
+/** Run `fn` on a throwaway directory carrying `files` (name -> contents), always cleaned up. */
+function withRepo(files, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-pm-'));
+  try {
+    for (const [name, contents] of Object.entries(files)) writeFileSync(join(dir, name), contents);
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const packageJson = `${JSON.stringify({ name: 'x' })}\n`;
 
 test('a subagent model is forced, so agents that pin their own model use it too', () => {
   const forced = buildOptions({ ...base, COLONIZER_SUBAGENT_MODEL: 'zai/glm-5.3-flash' }).options.env;
@@ -91,6 +107,44 @@ test('the colony environment is described only when the mothership names the ima
   assert.match(described, /Install a toolchain only when the task genuinely needs it/, 'installing stays possible; it is not forbidden');
 
   assert.ok(!buildOptions({ ...base }).options.systemPrompt.append.includes('no gh CLI'));
+});
+
+test('the package manager is detected the way done-claim verification detects it', () => {
+  const pm = (files) => withRepo(files, packageManager);
+  assert.deepEqual(pm({ 'package.json': packageJson, 'bun.lock': '' }), { name: 'bun', source: 'bun.lock' });
+  assert.deepEqual(pm({ 'package.json': packageJson, 'bun.lockb': '' }), { name: 'bun', source: 'bun.lockb' });
+  assert.deepEqual(pm({ 'package.json': packageJson, 'pnpm-lock.yaml': '' }), { name: 'pnpm', source: 'pnpm-lock.yaml' });
+  assert.deepEqual(pm({ 'package.json': packageJson, 'yarn.lock': '' }), { name: 'yarn', source: 'yarn.lock' });
+  assert.deepEqual(pm({ 'package.json': packageJson, 'package-lock.json': '' }), { name: 'npm', source: 'package-lock.json' });
+  assert.deepEqual(pm({ 'package.json': packageJson, 'npm-shrinkwrap.json': '' }), { name: 'npm', source: 'npm-shrinkwrap.json' });
+  // JS_LOCKFILES order decides it: bun wins when a bun and an npm lockfile are both there.
+  assert.deepEqual(pm({ 'package.json': packageJson, 'package-lock.json': '', 'bun.lock': '' }), { name: 'bun', source: 'bun.lock' });
+  // A package.json with no lockfile defaults to npm, exactly as verify.rs does.
+  assert.deepEqual(pm({ 'package.json': packageJson }), { name: 'npm', source: 'package.json' });
+  // No package.json at all is not a JavaScript repository, whatever lockfiles are there.
+  assert.equal(pm({ 'bun.lock': '' }), null);
+  assert.equal(pm({}), null);
+});
+
+test('the packageManager field settles it, and an invalid package.json falls back to the lockfiles', () => {
+  const pm = (files) => withRepo(files, packageManager);
+  assert.deepEqual(pm({ 'package.json': JSON.stringify({ packageManager: 'pnpm@9.1.0' }), 'package-lock.json': '' }), { name: 'pnpm', source: 'packageManager' });
+  assert.deepEqual(pm({ 'package.json': JSON.stringify({ packageManager: 'bun@1.1.0' }) }), { name: 'bun', source: 'packageManager' });
+  // A manager this does not know, or a bare name with no version, does not settle it.
+  assert.deepEqual(pm({ 'package.json': JSON.stringify({ packageManager: 'deno@2.0.0' }) }), { name: 'npm', source: 'package.json' });
+  assert.deepEqual(pm({ 'package.json': JSON.stringify({ packageManager: 'bun' }) }), { name: 'npm', source: 'package.json' });
+  // Invalid JSON: the field cannot settle it, so the lockfiles do — and it never throws.
+  assert.deepEqual(pm({ 'package.json': '{ not json', 'bun.lock': '' }), { name: 'bun', source: 'bun.lock' });
+  assert.deepEqual(pm({ 'package.json': '{ not json' }), { name: 'npm', source: 'package.json' });
+});
+
+test('the environment prompt names the package manager when one is detected', () => {
+  const named = environmentPrompt('node:24-bookworm', { name: 'bun', source: 'bun.lock' });
+  assert.match(named, /- This repository uses bun \(from `bun\.lock`\): install and test with `bun` rather than another package manager; done-claim verification runs it the same way\./);
+  assert.ok(named.includes(environmentPrompt('node:24-bookworm')), 'the image bullets stay a prefix of the named form');
+
+  assert.doesNotMatch(environmentPrompt('node:24-bookworm', null), /package manager/);
+  assert.doesNotMatch(environmentPrompt('node:24-bookworm'), /package manager/, 'absent when nothing is detected');
 });
 
 test('the orchestrator asks for focused reports and waits instead of idling', () => {

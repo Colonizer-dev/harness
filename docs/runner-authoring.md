@@ -38,10 +38,18 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    union does not cover is refused at discovery. A test walks every `modules/agents/*/module.json`
    and fails with "missing egress declaration" if the section is absent.
 
-   The declaration is recorded, not enforced: nothing derives a colony's network allowlist from it
-   yet ([boundaries.md](boundaries.md)). A colony in the default `open` egress mode reaches the
-   public internet anyway; one in `allowlist` mode reaches only what the operator lists, and the
-   module's declared hosts are not added for it ([sandbox-network.md](sandbox-network.md#egress-policy-303)).
+   The declaration is enforced in `allowlist` mode (#601): the running module's `api`, `auth` and
+   `extra` hosts join the colony's allow list (the union with the operator's `egress_allow`), so
+   the agent reaches the hosts you capture below without the operator restating them. Keep
+   `telemetry` out of the fence — it is recorded but never added, because there is no opt-in for
+   telemetry; the operator lists a telemetry host in `egress_allow` if they want it. A host you
+   declare is lowercased and must still parse as an operator entry (at least two labels); one that
+   does not is dropped, which can only narrow reach. A declared host never reopens a blocked
+   destination: the always-blocked deny set and the operator's `egress_block` compile ahead of every
+   allow. Each boot records `module: {agent, allow}` — what the module contributed — in
+   `<session dir>/egress.json` ([sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares)).
+   A colony in the default `open` egress mode reaches the public internet anyway; the declaration
+   there changes nothing, because the `public` profile already covers it.
 
    **Capture procedure.** The declaration should come from observation, not memory:
 
@@ -123,9 +131,9 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
 `modules/agents/acp` ([#509](https://github.com/Colonizer-dev/harness/issues/509)) drives any
 [Agent Client Protocol](https://agentclientprotocol.com) agent — JSON-RPC 2.0 over stdio — and maps
 it onto the runner protocol. It is a useful example of the checklist above, and it may save you
-writing a runner at all. Its status is **planned**: the runner and its tests are in the tree, but
-nothing stages the `gemini` binary into the colony image yet and no end-to-end colony run has
-happened (module README).
+writing a runner at all. Its status is **planned**: the runner and its tests are in the tree, and
+nothing stages the `gemini` binary into the colony image, but the `gemini` preset fetches its
+pinned bundle on first boot, and no end-to-end colony run has happened (module README).
 
 - **Settings.** `agent` (`COLONIZER_ACP_AGENT`): `gemini` runs `gemini --experimental-acp` and
   `grok` runs `grok agent stdio` (both verified at the handshake; a full turn with a real key has
@@ -139,8 +147,9 @@ happened (module README).
 - **Preflight.** It refuses an unknown preset or an empty custom command (`ACP_AGENT_UNKNOWN`) and
   a preset without its credential (`ACP_CREDENTIAL_MISSING`: `GEMINI_API_KEY` for `gemini`,
   `XAI_API_KEY` for `grok`); a credential the agent refuses at the handshake is
-  `ACP_AUTH_FAILED`. It does not probe the binary first: a missing `gemini` shows up as
-  `ACP_AGENT_FAILED` when the spawn fails.
+  `ACP_AUTH_FAILED`. The `gemini` preset resolves and, when it is not on `PATH`, fetches its pinned
+  bundle here (a fetch failure is `ACP_AGENT_FAILED`); otherwise it does not probe the binary first,
+  so a missing agent shows up as `ACP_AGENT_FAILED` when the spawn fails.
 - **Questions.** `session/request_permission` becomes a `question` with 2–4 options, its `risk`
   taken from the ACP tool kind (`read`, `search`, `fetch`, `think` are `read_only`, everything
   else `workspace_write`). ACP has no free-text answer, so "Other" replies `cancelled`.

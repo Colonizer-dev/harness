@@ -17,10 +17,6 @@ no KVM and no running colony, and checks out with the commands in
 
   **Start here:** the global args on `Cli` in `crates/colonizer/src/cli.rs` are accepted on every subcommand, but `open()` still reads `Settings::from_env()`; honour or refuse the flags on the local commands, and make `--help` say which.
 
-- [#608](https://github.com/Colonizer-dev/harness/issues/608) Loops: the end date is API-only; the cockpit form has no field for it — web
-
-  **Start here:** `end_at` is carried through `web/src/cockpit/LoopsView.tsx` (rows and the update payload) but no input sets it; add an optional date input and show the end date in the list. `LoopsView.test.tsx` covers the view.
-
 - [#613](https://github.com/Colonizer-dev/harness/issues/613) Header and Overview: today's spend, not only the running total — web
 
   **Start here:** the total renders in `web/src/cockpit/OverviewView.tsx` from the per-org rollups; sum today's rows from the spend journal instead (`web/src/spend.ts`, covered by `spend.test.ts`).
@@ -58,7 +54,7 @@ Still no microVM, but more to read:
 - Label the ones on the list when triaging. `gh issue edit` takes several numbers at once:
 
   ```sh
-  gh issue edit 600 601 603 604 608 611 613 620 621 622 --add-label "good first issue"
+  gh issue edit 600 601 603 604 611 613 620 621 622 --add-label "good first issue"
   ```
 
 - Enable Discussions (Settings → General → Features → Discussions), keeping the default Q&A and

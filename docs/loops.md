@@ -22,8 +22,9 @@ changelog entries (as `changelog.d/` fragments in a repository that keeps them, 
   [cli.md](cli.md#loops).
 - **The Map view** offers a map-refresh loop once a repository has a map ([Map refresh](#map-refresh)).
 
-An end date (`end_at`) can be set through the API; the cockpit's form keeps one that is already set
-but has no field for it.
+An optional **Ends** date and time in the loop form (your local time, stored as `end_at`) stops the
+loop when its next run would fall past it; a value that is not after now is refused in the form. The
+Loops list shows the day a dated loop ends.
 
 ## When it runs
 

@@ -9,8 +9,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { QuestionActions } from "../components/AskUserCard";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
+import { loadSessionDiff } from "../sessionDiff";
 import { initialStreamState, reduceFrame, type StreamState } from "../sessionStream";
-import type { ServerFrame, Session } from "../types";
+import type { ServerFrame, Session, SessionDiffFile } from "../types";
+import type { Api } from "../api";
 import { Inspector, pendingQuestionsOf, type PendingQuestion } from "./Inspector";
 
 const api = createMockApi();
@@ -57,10 +59,11 @@ function renderInspector(props: {
   questionActions?: QuestionActions;
   session?: Session;
   sessions?: Session[];
+  api?: Api;
 }): string {
   const selected = props.session ?? session();
   return renderToStaticMarkup(
-    <ApiContext.Provider value={api}>
+    <ApiContext.Provider value={props.api ?? api}>
       <Inspector
         target={{ kind: "colony", session: selected }}
         avatarUrl={null}
@@ -272,6 +275,49 @@ describe("Inspector claim wait", () => {
     const markup = renderInspector({ session: plain, sessions: [plain] });
     expect(markup).toContain("Queued behind holder1");
     expect(markup).not.toContain("in line");
+  });
+});
+
+// The pull request card's changed files (issue #611): the files behind a colony's PR, each with its
+// +/- counts, folded after a few. The counts load through the cached client, so a test seeds that
+// cache first — the server render runs no effects, and the cache is what the first paint reads.
+describe("Inspector pull request files", () => {
+  const FILES: SessionDiffFile[] = [
+    { path: "web/src/cockpit/Inspector.tsx", added: 41, removed: 6 },
+    { path: "web/src/api.ts", added: 8, removed: 0 },
+    { path: "web/src/types.ts", added: 12, removed: 1 },
+    { path: "web/src/cockpit/Inspector.test.tsx", added: 55, removed: 2 },
+    { path: "docs/gaps.md", added: 1, removed: 1 },
+    { path: "changelog.d/611.added.md", added: 4, removed: 0 },
+  ];
+
+  /** The mock client with /diff answering FILES, seeded through the same path the pane fetches on. */
+  const diffApi: Api = {
+    ...createMockApi(),
+    sessionDiff: async () => ({ id: "s1", repo: "acme/webshop", base: "main", files: FILES, added: 121, removed: 10, diff: "", truncated: false }),
+  };
+
+  it("lists the changed files with +/- counts, folding the list after a few", async () => {
+    await loadSessionDiff(diffApi, "s1", "2026-09-18T09:10:00Z");
+    const markup = renderInspector({
+      api: diffApi,
+      session: session({ pr_url: "https://github.com/acme/webshop/pull/42", publish_stage: "pr_opened" }),
+    });
+    // The first files and their counts.
+    expect(markup).toContain("web/src/cockpit/Inspector.tsx");
+    expect(markup).toContain("+41");
+    expect(markup).toContain("-6");
+    // Six files, five shown: the sixth folds behind "+1 more", a disclosure the toggle announces.
+    expect(markup).toContain("+1 more");
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain("aria-controls=");
+    expect(markup).not.toContain("changelog.d/611.added.md");
+  });
+
+  it("a colony without a pull request has no file rows", () => {
+    const markup = renderInspector({ api: diffApi, session: session({ pr_url: null }) });
+    expect(markup).not.toContain("web/src/cockpit/Inspector.tsx");
+    expect(markup).not.toContain("+41");
   });
 });
 

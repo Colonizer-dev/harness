@@ -10,6 +10,7 @@
 //   node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
 //   node scripts/bench.mjs compare bench-before.json bench-after.json
 //   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
+//   node scripts/bench.mjs brief bench-before.json bench-after.json  # grade Jev's boot brief picks against use
 //   node scripts/bench.mjs routing [--threshold 0.8] [--json]       # the tier rule against Jev's second opinion
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
 //
@@ -20,6 +21,11 @@
 // rule was wrong: where Jev would go lower, the rule's tier merged at least 90% of the time (the task was
 // easy); where Jev would go higher, the rule's tier failed at least 15 points more often than the baseline
 // of all shadow colonies. Otherwise it reads "not yet justified" and points at the bench comparison.
+//
+// `brief` reads <data dir>/brief_picks.jsonl (same `--data`/COLONIZER_DATA_DIR/`~/.local/share/colonizer`
+// rule) and grades the shadow boot brief of #585: the notes and skill packs Jev picked against the ones the
+// colony was later seen to use, per colony, per run and overall. Mandatory notes (always loaded, never
+// offered) are out of the universe; precision over no picks and recall over no uses read as undefined.
 //
 // `run` needs a mothership on COLONIZER_URL (default http://127.0.0.1:7878) with GitHub and an agent
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
@@ -543,6 +549,122 @@ export function formatJevReport(report) {
   ].join('\n');
 }
 
+// ------------------------------------------------------------------------------------------------- brief
+
+// Grading Jev brief picks (#585): the boot picker asks Jev, in shadow, which shared-memory notes and
+// skill packs a colony should load, and `<data dir>/brief_picks.jsonl` records the picks and the items
+// the colony was later seen to use. This grades the picks against that use, over the offered
+// candidates (mandatory notes, always loaded and never offered, are excluded): a picked candidate the
+// colony used is a true positive, a picked one it never used a false positive, a used one it did not
+// pick a false negative. Precision over no picks and recall over no uses read as null: undefined, not
+// a bad score — the same rule the compaction and routing reports keep.
+
+/** One session's picks against its uses. `pickRow` is the session's last `pick` row (a colony booted
+ *  twice is judged on its last boot), `usedItems` every item its `used` rows name. */
+export function briefMetrics(pickRow, usedItems) {
+  const candidates = pickRow?.candidates ?? [];
+  const mandatory = new Set(pickRow?.mandatory ?? []);
+  const picks = (pickRow?.picks ?? []).filter((p) => candidates.includes(p));
+  const used = new Set((usedItems ?? []).filter((i) => !mandatory.has(i) && candidates.includes(i)));
+  const picked = new Set(picks);
+  let tp = 0;
+  let fp = 0;
+  let fn = 0;
+  for (const c of candidates) {
+    const p = picked.has(c);
+    const u = used.has(c);
+    if (p && u) tp += 1;
+    else if (p) fp += 1;
+    else if (u) fn += 1;
+  }
+  return {
+    candidates: candidates.length,
+    picks: picks.length,
+    mandatory: mandatory.size,
+    tp,
+    fp,
+    fn,
+    precision: tp + fp > 0 ? tp / (tp + fp) : null,
+    recall: tp + fn > 0 ? tp / (tp + fn) : null,
+  };
+}
+
+// A total pools its colonies' counts and recomputes the rates from the pooled counts, and carries the
+// per-colony means of the three counts — one colony's pick is a small sample, so read them together.
+function poolBrief(groups) {
+  const t = { tp: 0, fp: 0, fn: 0 };
+  for (const g of groups) for (const k of Object.keys(t)) t[k] += g[k];
+  const mean = (key) => (groups.length > 0 ? groups.reduce((sum, g) => sum + g[key], 0) / groups.length : null);
+  return {
+    ...t,
+    colonies: groups.length,
+    precision: t.tp + t.fp > 0 ? t.tp / (t.tp + t.fp) : null,
+    recall: t.tp + t.fn > 0 ? t.tp / (t.tp + t.fn) : null,
+    mean_candidates: mean('candidates'),
+    mean_picks: mean('picks'),
+    mean_mandatory: mean('mandatory'),
+  };
+}
+
+/** The brief-pick ledger graded per (run, colony), with a per-run and an overall total, in the same
+ *  shape `jevReport` uses: a session grades under the first run whose results name it, else `(no run)`. */
+export function briefReport(rows, runs) {
+  const runsOf = new Map();
+  for (const run of runs) {
+    for (const r of run.results ?? []) {
+      if (r?.session_id && !runsOf.has(r.session_id)) {
+        runsOf.set(r.session_id, { run: run.label ?? NO_RUN, task: r.id ?? null, agent: r.agent ?? null, model: r.model ?? null });
+      }
+    }
+  }
+  const picks = new Map();
+  const used = new Map();
+  for (const row of rows) {
+    if (!row?.session_id) continue;
+    if (row.kind === 'pick') picks.set(row.session_id, row);
+    else if (row.kind === 'used') {
+      if (!used.has(row.session_id)) used.set(row.session_id, []);
+      used.get(row.session_id).push(row.item);
+    }
+  }
+  const groups = new Map();
+  for (const [session, pickRow] of picks) {
+    const meta = runsOf.get(session) ?? { run: NO_RUN, task: null, agent: null, model: null };
+    groups.set(`${meta.run}\u0000${session}`, { ...meta, colony: session, ...briefMetrics(pickRow, used.get(session) ?? []) });
+  }
+  const order = [...new Set([...runs.map((r) => r.label ?? NO_RUN), NO_RUN])];
+  const runsOut = order
+    .filter((label) => [...groups.values()].some((g) => g.run === label))
+    .map((label) => {
+      const colonies = [...groups.values()].filter((g) => g.run === label);
+      return { run: label, colonies, total: poolBrief(colonies) };
+    });
+  return { runs: runsOut, total: poolBrief(runsOut.flatMap((r) => r.colonies)) };
+}
+
+/** The human table, in the style of formatJevReport: precision and recall to two places, `–` where the
+ *  denominator is zero, and the counts beside them. The total row's first three numbers are the means. */
+export function formatBriefReport(report) {
+  const score = (v) => (v == null ? '–' : v.toFixed(2));
+  const mean = (v) => (v == null ? '–' : v.toFixed(1));
+  const harness = (c) => `${c.agent ?? '–'} · ${c.model ?? '–'}`;
+  const head = ['Run', 'Colony', 'Task', 'Harness · model', 'Candidates', 'Picks', 'Mandatory', 'TP', 'FP', 'FN', 'Precision', 'Recall'];
+  const line = (cells) => `| ${cells.join(' | ')} |`;
+  const colonyRow = (run, c) => [run, c.colony, c.task ?? '–', harness(c), c.candidates, c.picks, c.mandatory, c.tp, c.fp, c.fn, score(c.precision), score(c.recall)];
+  const totalRow = (run, label, t) => [run, label, '', '', mean(t.mean_candidates), mean(t.mean_picks), mean(t.mean_mandatory), t.tp, t.fp, t.fn, score(t.precision), score(t.recall)];
+  const rows = report.runs.flatMap((r) => [...r.colonies.map((c) => colonyRow(r.run, c)), totalRow(r.run, 'total', r.total)]);
+  rows.push(totalRow('overall', '', report.total));
+  return [
+    '# Jev brief picks, graded against the notes and packs the colony used',
+    '',
+    line(head),
+    line(head.map(() => '---')),
+    ...rows.map(line),
+    '',
+    'The universe is the offered candidates; mandatory notes (house-rule/security) always load and are excluded. Precision over no picks and recall over no uses read as –: undefined, not a bad score. In a total row the Candidates, Picks and Mandatory columns are per-colony means.',
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------------------------- routing
 
 // Is Jev `act` mode justified? (#583) The mothership's routing.jsonl ledger holds one `decision` row per
@@ -871,6 +993,12 @@ async function main() {
     console.log(args.json ? JSON.stringify(report, null, 2) : formatRoutingReport(report));
     return;
   }
+  if (args.command === 'brief') {
+    const rows = readJsonLines(join(dataDirOf(args), 'brief_picks.jsonl'));
+    const report = briefReport(rows, args.files.map((f) => JSON.parse(readFileSync(f, 'utf8'))));
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatBriefReport(report));
+    return;
+  }
   if (args.command === 'heldout') {
     if (args.files[0] !== 'add' || !args.heldout || !args.family || !args.check) throw new Error('use heldout add --heldout <dir> --family <family> --check <file>');
     outsideRepo(args.heldout); // before the lock, which would create the directory it guards
@@ -885,7 +1013,7 @@ async function main() {
     }
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, routing or clean');
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, brief, routing or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);

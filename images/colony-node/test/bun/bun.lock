@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 2,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "colony-node-test-bun",
+      "dependencies": {
+        "colony-node-test-dep": "file:./dep",
+      },
+    },
+  },
+  "packages": {
+    "colony-node-test-dep": ["colony-node-test-dep@file:dep", {}],
+  }
+}

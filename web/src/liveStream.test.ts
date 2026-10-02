@@ -73,7 +73,7 @@ const storage = (): StorageSummary => ({
   warn_free_bytes: 5,
   free_bytes: 100,
   admission_paused: false,
-  totals: { worktrees_bytes: 1, repos_bytes: 2, sessions_bytes: 3, microsandbox_bytes: null },
+  totals: { worktrees_bytes: 1, repos_bytes: 2, sessions_bytes: 3, archive_bytes: 4, microsandbox_bytes: null },
   reclaimable: [],
   unpushed: [],
   orphans: [],

@@ -799,8 +799,8 @@ export interface StorageSummary {
   free_bytes: number | null;
   /** Free space is below the floor: the queue is not starting new colonies (running ones keep running). */
   admission_paused: boolean;
-  /** Data-dir usage by category. `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
-  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; microsandbox_bytes: number | null };
+  /** Data-dir usage by category. `archive_bytes` is the log archive under `<data_dir>/archive`; `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
+  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; archive_bytes: number; microsandbox_bytes: number | null };
   /** Finished colonies whose work is pushed (a PR, or no_changes) and not yet cleaned up; `due` means past the auto-reclaim retention window. */
   reclaimable: Array<{ id: string; status: SessionStatus; pr_url: string | null; bytes: number; updated_at: string; due: boolean }>;
   /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
@@ -988,6 +988,16 @@ export interface ModelProvider extends ProviderLimits {
   pricing?: ProviderPricing | null;
   /** null = no probe: the first sign of an exhausted plan stays the colonies failing over. */
   quota?: ProviderQuotaProbe | null;
+  /**
+   * Whether the operator vetted this connection to carry restricted-sensitivity work — secrets,
+   * `.env` files, infra config (issue #472). Defaults to false: a connection is not trusted with a
+   * colony's secrets just because it is configured.
+   */
+  trusted: boolean;
+  /** Canonical model id → the name sent on the wire (issue #295). Empty serves any canonical as-is. */
+  model_map?: Record<string, string>;
+  /** Claude Code tool names the gateway strips from every request through this connection (issue #295). */
+  disabled_tools?: string[];
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -1086,6 +1096,12 @@ export interface SaveProviderRequest {
   queue_timeout_secs?: number | null;
   context_tokens?: number | null;
   fallback_model?: string | null;
+  /** Whether the connection may carry restricted-sensitivity work (issue #472). Omitted keeps the saved mark. */
+  trusted?: boolean;
+  /** Canonical model id → wire name (issue #295); omitted keeps the saved map, `{}` clears it. */
+  model_map?: Record<string, string>;
+  /** Claude Code tools stripped through this connection (issue #295); omitted keeps the list, `[]` clears it. */
+  disabled_tools?: string[];
 }
 
 /** GET /api/providers/{id}/health */
@@ -1690,6 +1706,29 @@ export interface FindingRecord {
   review_session?: string;
   verdict?: "pass" | "fail";
   pr?: string;
+}
+
+/** One file a colony changed, from GET /api/sessions/{id}/diff (issue #611): its path and line counts. */
+export interface SessionDiffFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/**
+ * Everything a colony changed against its base branch (GET /api/sessions/{id}/diff, issue #611):
+ * the per-file counts, their totals, and the unified diff text, capped at 200 KiB (`truncated` says
+ * when). The cockpit's pull request card reads only `files`; the CLI and MCP read the text.
+ */
+export interface SessionDiff {
+  id: string;
+  repo: string;
+  base: string | null;
+  files: SessionDiffFile[];
+  added: number;
+  removed: number;
+  diff: string;
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------

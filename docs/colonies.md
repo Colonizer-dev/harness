@@ -563,18 +563,23 @@ is refused and nothing is removed. In the cockpit, a second prompt asks whether 
 archived logs too. Cancel keeps them. Over the API, `DELETE /api/sessions/{id}?purge_logs=true`
 removes the bundles too.
 
-**Cleaning up the archive.** Nothing removes bundles automatically, and there is no saved retention
-setting. The Storage panel on the Overview page shows the archive's size. Its "Automatic cleanup"
-form removes bundles on request. Set "keep N days", "cap at X GB" or both, press Preview, then
-Apply. Every bundle is the only copy of that colony's logs, so nothing is removed unless you also
-check "Allow deleting the only copy". Apply removes exactly what the preview listed. If the
-archive changed since the preview, you are asked to preview again. Over the API, this is
+**Cleaning up the archive.** No bundles are removed until something asks for it. Automatic
+retention is the **Disk cleanup** loop's **Session archives** category ([loops.md](loops.md#disk-cleanup)):
+off by default, and, when switched on, it removes bundles older than 30 days (settable) and — past
+an optional size cap — the oldest first.
+
+The Storage panel on the Overview page shows the archive's size and a **Clean up now** form: a
+one-off pass run on request. Set "keep N days", "cap at X GB" or both, press Preview to word the
+plan, then Apply to run exactly what it listed. Every bundle is the only copy of that colony's
+logs, so nothing is removed unless you also check "Allow deleting the only copy". If the archive
+changed since the preview, you are asked to preview again. Over the API, this is
 `POST /api/archive/retention` with `{keep_days, max_gb, allow_single_copy, dry_run, expect}`, and
 `GET /api/archive` lists the bundles.
 
-**Limits.** The archive is local only. The disk figures and the free-disk floor in
-`GET /api/storage` do not count it yet. You cannot open an archived colony in the cockpit. Read
-the bundle with `tar`.
+**Limits.** The archive is local only. `GET /api/storage` reports the archive as
+`totals.archive_bytes` alongside the other categories, and its free-disk floor measures free
+space on the data disk, so the archive counts against it. You cannot open an archived colony in
+the cockpit. Read the bundle with `tar`.
 
 ## Automatic cleanup of finished worktrees
 
