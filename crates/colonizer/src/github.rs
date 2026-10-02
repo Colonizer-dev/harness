@@ -2161,6 +2161,11 @@ pub async fn publish(
         pending_base: Mutex::new(None),
         session_dir: app.session_dir(&s.id),
     };
+    // #761: a manual press publishes the redacted description, but still says out loud that the
+    // colony put a secret in it (autopilot never gets here with one: it holds for this press).
+    if let Some(note) = pr_description_secret_note(&app.session_dir(&s.id).join("out"), s) {
+        log.warn(note).await;
+    }
     let screen = ScreenGate::of(app.clone(), s).await;
     run_publish_with(&ops, screen.as_ref(), grant).await
 }
@@ -2374,7 +2379,22 @@ pub(crate) fn read_pr_description(out: &FsPath, s: &Session) -> (String, String)
     } else {
         truncate(&title, 200)
     };
+    // #761: everything published from `pr.md` — the commit subject, the PR title, the body that
+    // `create_pr` stores as `pr-body.md` and sends with `--body-file` — goes out redacted. The
+    // approval's candidate hash (publish.rs) is computed from this same read, so it still binds
+    // exactly what is published.
+    let title = crate::redact::redact_text(&title).into_owned();
+    let body = crate::redact::redact_text(&body).into_owned();
     (title, body)
+}
+
+/// The operator's line when redaction changed `pr.md` — `pr.md contained 1 secret (github token),
+/// redacted before publishing` — or `None` for a description with nothing secret in it. Redaction
+/// keeps the secret off GitHub, but a colony that wrote one into its description had it in hand,
+/// so this is the signal that someone should look (autopilot holds on it, events.rs).
+pub(crate) fn pr_description_secret_note(out: &FsPath, s: &Session) -> Option<String> {
+    let (title, body) = read_pr_description(out, s);
+    crate::redact::redaction_note("pr.md", &format!("{title}\n{body}"), "publishing")
 }
 
 /// Agents sign the end of their PR description ("Generated with Claude Code", co-author lines); Colonizer signs
@@ -3411,6 +3431,30 @@ mod tests {
             read_pr_description(&dir, &s),
             fallback,
             "a file past the cap is as good as absent"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #761: a credential in `pr.md` never reaches the commit, `pr-body.md` or the pull request;
+    /// a description with nothing secret in it is published as written.
+    #[test]
+    fn a_secret_in_pr_md_is_redacted_before_it_is_published() {
+        let dir = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let s = sibling("mine", Some(14), "PDF rendering", SessionStatus::Starting);
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        std::fs::write(
+            dir.join("pr.md"),
+            format!("# Rotate {secret}\n\nThe old token was {secret}.\n"),
+        )
+        .unwrap();
+        let (title, body) = read_pr_description(&dir, &s);
+        assert_eq!(title, "Rotate [REDACTED:github_token]");
+        assert_eq!(body, "The old token was [REDACTED:github_token].");
+        std::fs::write(dir.join("pr.md"), "# Render PDFs\n\nCloses #14.\n").unwrap();
+        assert_eq!(
+            read_pr_description(&dir, &s),
+            ("Render PDFs".to_string(), "Closes #14.".to_string())
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

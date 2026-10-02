@@ -1983,6 +1983,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// #761: a rotated log written before redaction existed is redacted on its way into the resumed
+    /// colony's prompt; ordinary text in it is told as it was.
+    #[tokio::test]
+    async fn the_resume_digest_redacts_a_secret_in_an_old_archived_log() {
+        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
+        let old = format!(
+            "{}\n{}\n",
+            json!({"seq": 1, "type": "user_message", "text": format!("export GH={secret}")}),
+            json!({"seq": 2, "type": "user_message", "text": "ran the tests"}),
+        );
+        std::fs::write(dir.join("events-1.jsonl"), old).unwrap();
+        let story = resume_digest(&dir).await.expect("an archived run has a story");
+        assert!(!story.contains(secret), "the secret stays out of the prompt: {story}");
+        assert!(story.contains("[REDACTED:"), "{story}");
+        assert!(
+            story.contains("#2 user_message: ran the tests"),
+            "normal content is unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_colony_is_fenced_to_public_with_only_the_host_ports_it_needs() {
         // A non-default gateway port, so a regression to the 41750 fallback shows up as a mismatch.
