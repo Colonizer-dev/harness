@@ -144,6 +144,15 @@ enum Command {
         /// Keep autopilot off: the finished work waits for you to open the pull request, even where the install default is on
         #[arg(long, conflicts_with = "autopilot")]
         no_autopilot: bool,
+        /// Start a colony on an issue another colony already holds, which would otherwise be refused (409)
+        #[arg(long)]
+        allow_duplicate: bool,
+        /// Wait for an issue another colony holds instead of being refused: the colony queues behind the holder and starts when the issue is its own
+        #[arg(long)]
+        queue_behind_holder: bool,
+        /// Start a colony on an epic — an issue with sub-issues, an `epic` label, or a title marking one — which would otherwise be refused (409)
+        #[arg(long)]
+        allow_epic: bool,
         /// The task, when the issue alone does not say it (the issue body is read either way)
         task: Option<String>,
     },
@@ -331,6 +340,34 @@ impl RedteamPreset {
             Self::Security => "security",
         }
     }
+}
+
+/// The `POST /api/sessions` body `colonizer launch` sends. `autopilot` is `Some` only when a flag
+/// chose one, so the publish module's setting decides otherwise; the claim and epic overrides
+/// travel as booleans, each off by default, the same fields the cockpit and the API take.
+#[allow(clippy::too_many_arguments)]
+fn launch_body(
+    repo: &str,
+    issue: Option<u64>,
+    task: Option<String>,
+    autopilot: Option<bool>,
+    model: Option<String>,
+    subagent_model: Option<String>,
+    allow_duplicate: bool,
+    queue_behind_holder: bool,
+    allow_epic: bool,
+) -> Value {
+    json!({
+        "repo": repo,
+        "issue": issue,
+        "instructions": task.unwrap_or_default(),
+        "autopilot": autopilot,
+        "model_override": model,
+        "subagent_model_override": subagent_model,
+        "allow_duplicate": allow_duplicate,
+        "queue_behind_holder": queue_behind_holder,
+        "allow_epic": allow_epic,
+    })
 }
 
 /// The `POST /api/redteam/runs` body `redteam start` sends.
@@ -1305,19 +1342,32 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             subagent_model,
             autopilot,
             no_autopilot,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
             task,
         } => {
             let json = cli.json;
             client_command(cli, move |machine| async move {
-                let body = json!({
-                    "repo": repo,
-                    "issue": issue,
-                    "instructions": task.unwrap_or_default(),
-                    // No flag at all: the publish module's autopilot setting decides, server-side.
-                    "autopilot": if autopilot { Some(true) } else if no_autopilot { Some(false) } else { None },
-                    "model_override": model,
-                    "subagent_model_override": subagent_model,
-                });
+                // No flag at all: the publish module's autopilot setting decides, server-side.
+                let autopilot = if autopilot {
+                    Some(true)
+                } else if no_autopilot {
+                    Some(false)
+                } else {
+                    None
+                };
+                let body = launch_body(
+                    &repo,
+                    issue,
+                    task,
+                    autopilot,
+                    model,
+                    subagent_model,
+                    allow_duplicate,
+                    queue_behind_holder,
+                    allow_epic,
+                );
                 // A person is launching, so `origin` stays unset: the field marks machine
                 // launchers (the burn-down scheduler, red-team hunters), not this command.
                 let Some(session) = machine.post("/api/sessions", Some(&body)).await? else {
@@ -3097,6 +3147,7 @@ mod tests {
             autopilot,
             no_autopilot,
             task,
+            ..
         } = cli.command.unwrap()
         else {
             panic!("launch did not parse");
@@ -3111,6 +3162,87 @@ mod tests {
         assert!(no_autopilot);
         // The two autopilot flags refuse to combine: the answer would depend on their order.
         assert!(parse(&["launch", "owner/repo", "--autopilot", "--no-autopilot"]).is_err());
+    }
+
+    /// The claim and epic overrides arrive as the API body wants them, off unless a flag asked.
+    #[test]
+    fn a_launch_with_the_claim_and_epic_overrides_sends_them_in_the_body() {
+        let cli = parse(&[
+            "launch",
+            "owner/repo",
+            "--allow-duplicate",
+            "--queue-behind-holder",
+            "--allow-epic",
+        ])
+        .unwrap();
+        let Command::Launch {
+            repo,
+            issue,
+            task,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+            ..
+        } = cli.command.unwrap()
+        else {
+            panic!("launch did not parse");
+        };
+        assert!(allow_duplicate && queue_behind_holder && allow_epic);
+        let body = launch_body(
+            &repo,
+            issue,
+            task,
+            None,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+        );
+        assert_eq!(body["allow_duplicate"], json!(true));
+        assert_eq!(body["queue_behind_holder"], json!(true));
+        assert_eq!(body["allow_epic"], json!(true));
+        // Set: the body deserializes into the server's request type with the overrides on.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(body.clone()).expect("the launch body deserializes into NewSession");
+        assert!(parsed.allow_duplicate && parsed.queue_behind_holder && parsed.allow_epic);
+
+        // No flags: the body still carries the fields, each off, and the server's defaults decide.
+        let plain = parse(&["launch", "owner/repo"]).unwrap();
+        let Command::Launch {
+            repo,
+            issue,
+            task,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+            ..
+        } = plain.command.unwrap()
+        else {
+            panic!("launch did not parse");
+        };
+        let body = launch_body(
+            &repo,
+            issue,
+            task,
+            None,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+        );
+        assert_eq!(body["allow_duplicate"], json!(false));
+        assert_eq!(body["queue_behind_holder"], json!(false));
+        assert_eq!(body["allow_epic"], json!(false));
+        // Omitted: the body still deserializes into the server's request type, each override off.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(body).expect("a plain launch body deserializes into NewSession");
+        assert!(!parsed.allow_duplicate && !parsed.queue_behind_holder && !parsed.allow_epic);
     }
 
     /// `redteam start` sends the preset and the rest as the API wants them: armed unless --now,

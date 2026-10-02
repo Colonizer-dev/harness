@@ -158,6 +158,15 @@ struct LaunchColony {
     /// Open the pull request automatically once the agent finishes cleanly and has written its PR
     /// description; omitted uses the install's default (the publish module's autopilot setting)
     autopilot: Option<bool>,
+    /// Start a colony on an issue another colony already holds; the launch would otherwise be
+    /// refused (409) naming the holder
+    allow_duplicate: Option<bool>,
+    /// Wait for an issue another colony holds instead of being refused: the colony queues behind the
+    /// holder and starts when the issue becomes its own
+    queue_behind_holder: Option<bool>,
+    /// Start a colony on an epic — an issue with sub-issues, an `epic` label, or a title marking one
+    /// — which would otherwise be refused (409)
+    allow_epic: Option<bool>,
 }
 
 #[tool_router]
@@ -331,13 +340,7 @@ impl ColonyServer {
     /// Start a colony on owner/repo, on one issue or free.
     #[tool(description = "Launch a colony: an agent in a microVM, working the repo, or one issue in it")]
     async fn launch_colony(&self, Parameters(params): Parameters<LaunchColony>) -> Result<CallToolResult, McpError> {
-        let body = json!({
-            "repo": params.repo,
-            "issue": params.issue,
-            "instructions": params.task.unwrap_or_default(),
-            "autopilot": params.autopilot,
-            "model_override": params.model,
-        });
+        let body = launch_body(&params);
         let launch = self.machine.post("/api/sessions", Some(&body)).await;
         Self::rendered(Self::sent(launch), |session| {
             json!({ "id": session["id"], "status": session["status"] }).to_string()
@@ -369,6 +372,22 @@ fn is_error(message: impl std::fmt::Display) -> Result<CallToolResult, McpError>
 /// A successful tool result whose text is a sentence.
 fn text_result(text: impl Into<String>) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![ContentBlock::text(text.into())]))
+}
+
+/// The `POST /api/sessions` body `launch_colony` sends. The claim and epic overrides default to
+/// `false` (the server's `NewSession` takes plain bools, which an explicit null would fail), and an
+/// omitted autopilot travels as null so the publish module's setting decides.
+fn launch_body(params: &LaunchColony) -> Value {
+    json!({
+        "repo": params.repo,
+        "issue": params.issue,
+        "instructions": params.task.clone().unwrap_or_default(),
+        "autopilot": params.autopilot,
+        "model_override": params.model,
+        "allow_duplicate": params.allow_duplicate.unwrap_or(false),
+        "queue_behind_holder": params.queue_behind_holder.unwrap_or(false),
+        "allow_epic": params.allow_epic.unwrap_or(false),
+    })
 }
 
 /// One colony as the tools report it: what an MCP client needs, not the whole persisted record.
@@ -486,6 +505,49 @@ mod tests {
 
         let read = json!({"owner": false, "scope": "read"});
         assert_eq!(effective_scope(&read, Some(Scope::Launch)), Scope::Read, "never raised");
+    }
+
+    /// `launch_colony` forwards the claim and epic overrides to the API body, each `false` when the
+    /// caller left it out; the body deserializes back into the server's `NewSession`.
+    #[test]
+    fn launch_colony_forwards_the_claim_and_epic_overrides() {
+        let body = launch_body(&LaunchColony {
+            repo: "acme/app".into(),
+            issue: Some(5),
+            task: Some("fix it".into()),
+            model: None,
+            autopilot: None,
+            allow_duplicate: Some(true),
+            queue_behind_holder: Some(true),
+            allow_epic: Some(true),
+        });
+        assert_eq!(body["repo"], json!("acme/app"));
+        assert_eq!(body["allow_duplicate"], json!(true));
+        assert_eq!(body["queue_behind_holder"], json!(true));
+        assert_eq!(body["allow_epic"], json!(true));
+        // Set: every override survives a round trip into the server's request type.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(body.clone()).expect("the launch body deserializes into NewSession");
+        assert!(parsed.allow_duplicate && parsed.queue_behind_holder && parsed.allow_epic);
+
+        let plain = launch_body(&LaunchColony {
+            repo: "acme/app".into(),
+            issue: None,
+            task: None,
+            model: None,
+            autopilot: None,
+            allow_duplicate: None,
+            queue_behind_holder: None,
+            allow_epic: None,
+        });
+        assert_eq!(plain["allow_duplicate"], json!(false));
+        assert_eq!(plain["queue_behind_holder"], json!(false));
+        assert_eq!(plain["allow_epic"], json!(false));
+        // Omitted: the body still deserializes, and each override reads off. A null here would be a
+        // type mismatch the server rejects, so this pins the wire shape.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(plain).expect("an omitted-override launch body deserializes into NewSession");
+        assert!(!parsed.allow_duplicate && !parsed.queue_behind_holder && !parsed.allow_epic);
     }
 
     // -- The stub mothership and the in-process MCP conformance smoke test. ----------------

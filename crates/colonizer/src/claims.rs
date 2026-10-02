@@ -194,11 +194,13 @@ pub fn remote_conflict_message(info: &RemoteClaimInfo, issue: u64) -> String {
     match (&info.host, &info.colony) {
         (Some(host), Some(colony)) => format!(
             "colony {colony} on host {host} already claimed #{issue} ({what}): starting a second colony duplicates its work. \
-             Read that colony's pull request or branch first, or pass allow_duplicate to start another anyway."
+             Read that colony's pull request or branch first, or pass allow_duplicate (`colonizer launch --allow-duplicate`) \
+             to start another anyway."
         ),
         _ => format!(
             "issue #{issue} is already claimed on GitHub ({what}): a colony on another mothership is working it, \
-             so starting one here duplicates its work. Pass allow_duplicate to start another anyway."
+             so starting one here duplicates its work. Pass allow_duplicate (`colonizer launch --allow-duplicate`) to \
+             start another anyway."
         ),
     }
 }

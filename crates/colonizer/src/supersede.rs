@@ -204,8 +204,8 @@ pub fn refusal_message(holder: &Session, target: &SupplyChainTarget) -> String {
     };
     format!(
         "colony {} is already on this supply-chain target ({} / {}) and {where_it_is}. Starting a \
-         second one duplicates its work: read that colony first, or pass allow_duplicate to start \
-         another anyway.",
+         second one duplicates its work: read that colony first, or pass allow_duplicate \
+         (`colonizer launch --allow-duplicate`) to start another anyway.",
         holder.id, target.package, target.advisory
     )
 }
