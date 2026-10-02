@@ -8,7 +8,7 @@
 
 use crate::{Shared, orgs, runtime, sessions::SessionStatus};
 use axum::{Json, extract::State};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::HashMap, time::Duration};
 use tokio::sync::Mutex;
@@ -40,9 +40,34 @@ pub struct HostSummary {
     pub slots_ceiling: usize,
     pub queue_depth: usize,
     pub disk_free_bytes: Option<u64>,
+    /// The disk's size, beside `disk_free_bytes`: what makes "97% full" sayable (issue #764).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
     /// RFC 3339, `None` for a peer that has never once answered.
     pub last_heartbeat: Option<String>,
     pub health: HostHealth,
+    /// Seconds since the host's queue loop last ticked, as its status reported it (issue #764);
+    /// omitted when unknown — an older peer, or a loop that has not ticked yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_tick_age_s: Option<i64>,
+    /// A fleet member's history-push drain state, as its status reported it (issue #764).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fleet_sync: Option<PeerSync>,
+}
+
+/// A member's `fleet_sync` block of the reduced `/api/status` (`fleet_sync::health_summary`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PeerSync {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub backlog_rows: u64,
+    #[serde(default)]
+    pub oldest_unsent_age_s: Option<i64>,
+    #[serde(default)]
+    pub last_error_class: Option<String>,
+    #[serde(default)]
+    pub consent: bool,
 }
 
 /// Last-known `HostSummary` per configured peer base URL (not per host id: an unreachable peer we
@@ -51,11 +76,55 @@ pub struct HostSummary {
 #[derive(Default)]
 pub struct FleetCache {
     last_known: Mutex<HashMap<String, HostSummary>>,
+    /// When each peer URL was last polled, answered or not: the instant a heartbeat's age is
+    /// measured at, so a member does not read as stale merely because nobody looked (issue #764).
+    last_polled: Mutex<HashMap<String, chrono::DateTime<chrono::Utc>>>,
+}
+
+/// What the latest poll of one peer URL saw, for member health (issue #764, fleet_health.rs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeerObservation {
+    /// When the latest poll ran.
+    pub polled_at: chrono::DateTime<chrono::Utc>,
+    /// When the peer last answered one; `None` if it never has.
+    pub last_answer: Option<chrono::DateTime<chrono::Utc>>,
+    /// Whether the latest poll was answered.
+    pub reachable: bool,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    /// What its last answer said about its queue loop and its history push.
+    pub runner_tick_age_s: Option<i64>,
+    pub fleet_sync: Option<PeerSync>,
 }
 
 impl FleetCache {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The latest poll of `url`, or `None` if it has never been polled.
+    pub async fn observation(&self, url: &str) -> Option<PeerObservation> {
+        let polled_at = *self.last_polled.lock().await.get(url)?;
+        let known = self.last_known.lock().await.get(url).cloned();
+        Some(PeerObservation {
+            polled_at,
+            last_answer: known
+                .as_ref()
+                .and_then(|k| k.last_heartbeat.as_deref())
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .map(|at| at.with_timezone(&chrono::Utc)),
+            reachable: known.as_ref().is_some_and(|k| k.health == HostHealth::Online),
+            disk_free_bytes: known.as_ref().and_then(|k| k.disk_free_bytes),
+            disk_total_bytes: known.as_ref().and_then(|k| k.disk_total_bytes),
+            runner_tick_age_s: known.as_ref().and_then(|k| k.runner_tick_age_s),
+            fleet_sync: known.as_ref().and_then(|k| k.fleet_sync.clone()),
+        })
+    }
+
+    /// Records one poll of `url`: `summary` is its row as the fleet view shows it.
+    pub(crate) async fn record_poll(&self, url: &str, at: chrono::DateTime<chrono::Utc>, summary: HostSummary) {
+        self.last_polled.lock().await.insert(url.to_string(), at);
+        self.last_known.lock().await.insert(url.to_string(), summary);
     }
 }
 
@@ -80,8 +149,11 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
         slots_ceiling,
         queue_depth,
         disk_free_bytes: host.disk_free_bytes,
+        disk_total_bytes: host.disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
+        runner_tick_age_s: crate::queue::last_tick_age_s(),
+        fleet_sync: None,
     }
 }
 
@@ -129,6 +201,14 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
     let slots_ceiling = host_num("microvms_ceiling");
     let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
     let disk_free_bytes = host.and_then(|host| host.get("disk_free_bytes")).and_then(Value::as_u64);
+    let disk_total_bytes = host.and_then(|host| host.get("disk_total_bytes")).and_then(Value::as_u64);
+    let runner_tick_age_s = body
+        .get("runner")
+        .and_then(|runner| runner.get("last_tick_age_s"))
+        .and_then(Value::as_i64);
+    let fleet_sync = body
+        .get("fleet_sync")
+        .and_then(|sync| serde_json::from_value::<PeerSync>(sync.clone()).ok());
     Some(HostSummary {
         id,
         name,
@@ -139,8 +219,11 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         slots_ceiling,
         queue_depth,
         disk_free_bytes,
+        disk_total_bytes,
         last_heartbeat: Some(chrono::Utc::now().to_rfc3339()),
         health: HostHealth::Online,
+        runner_tick_age_s,
+        fleet_sync,
     })
 }
 
@@ -164,8 +247,11 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
         slots_ceiling: 0,
         queue_depth: 0,
         disk_free_bytes: None,
+        disk_total_bytes: None,
         last_heartbeat: None,
         health: HostHealth::Unreachable,
+        runner_tick_age_s: None,
+        fleet_sync: None,
     };
     cache.insert(base_url.to_string(), placeholder.clone());
     placeholder
@@ -203,18 +289,14 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     let polls = peers
         .iter()
         .map(|url| async { (url.as_str(), poll_peer(&client, url, PEER_POLL_TIMEOUT).await) });
+    let polled_at = chrono::Utc::now();
     for (url, result) in futures_util::future::join_all(polls).await {
-        match result {
-            Some(summary) => {
-                app.fleet_cache
-                    .last_known
-                    .lock()
-                    .await
-                    .insert(url.to_string(), summary.clone());
-                hosts.push(summary);
-            }
-            None => hosts.push(unreachable_summary(app, url).await),
-        }
+        let summary = match result {
+            Some(summary) => summary,
+            None => unreachable_summary(app, url).await,
+        };
+        app.fleet_cache.record_poll(url, polled_at, summary.clone()).await;
+        hosts.push(summary);
     }
     hosts
 }
@@ -303,7 +385,25 @@ mod tests {
         assert_eq!(peer.queue_depth, 2);
         assert_eq!(peer.disk_free_bytes, Some(123456));
         assert!(peer.last_heartbeat.is_some());
+        assert_eq!(peer.runner_tick_age_s, None, "an older peer reports no runner tick");
+        assert_eq!(peer.fleet_sync, None);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #764: a member's reduced status carries its queue-loop tick and its drain state.
+    #[test]
+    fn a_members_runner_tick_and_sync_state_are_read_from_its_status() {
+        let mut body = peer_status_body("peer-123", "peer-box");
+        body["runner"] = json!({"last_tick_age_s": 400});
+        body["fleet_sync"] = json!({"state": "unauthorized", "backlog_rows": 3, "oldest_unsent_age_s": 7200,
+                                    "last_error_class": "unauthorized", "consent": true});
+        let row = summary_from_status_json("http://peer:7878", &body).unwrap();
+        assert_eq!(row.runner_tick_age_s, Some(400));
+        let sync = row.fleet_sync.unwrap();
+        assert_eq!(sync.state, "unauthorized");
+        assert_eq!((sync.backlog_rows, sync.oldest_unsent_age_s), (3, Some(7200)));
+        assert_eq!(sync.last_error_class.as_deref(), Some("unauthorized"));
+        assert!(sync.consent);
     }
 
     /// A peer answering without our token serves the reduced status (no id, no hostname): the row
@@ -372,8 +472,11 @@ mod tests {
             slots_ceiling: 4,
             queue_depth: 1,
             disk_free_bytes: Some(999),
+            disk_total_bytes: None,
             last_heartbeat: Some("2026-09-20T12:00:00+00:00".into()),
             health: HostHealth::Online,
+            runner_tick_age_s: None,
+            fleet_sync: None,
         };
         app.fleet_cache
             .last_known

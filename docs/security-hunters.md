@@ -8,7 +8,9 @@ renders the `scan` template, runs the installed binary, and parses the artifacts
 which still refuses external hunters), and orchestrator validation of the findings.
 In the cockpit's red-team wizard, Strix and Shannon are still disabled cards marked "Coming soon",
 and the red-team API refuses them with a 400; only the colony swarm runs (see
-[red-team.md](red-team.md#operating-it)).
+[red-team.md](red-team.md#operating-it)). For a security-focused raid today, run the colony swarm
+with the Security preset: security focus areas, a deterministic pre-scan and an operator checklist
+([red-team.md](red-team.md#the-security-preset)).
 
 ## On demand, verified, never vendored
 
