@@ -78,7 +78,7 @@ labels exist in the trait today; the scheduler does not.
 
 ## Related pieces that do exist
 
-Two things built since this slice point the same way. Neither runs a colony on
+Three things built since this slice point the same way. None of them runs a colony on
 another machine.
 
 - **The fleet view** ([#231](https://github.com/Colonizer-dev/harness/issues/231)).
@@ -90,6 +90,12 @@ another machine.
   host. It is read-only: each host still runs only its own colonies. This host only
   dials out; for a peer to answer, its operator sets that peer's `COLONIZER_BIND` to a
   private interface, never `0.0.0.0` ([protocol.md](protocol.md#get-apihosts)).
+- **Fleets** ([#686](https://github.com/Colonizer-dev/harness/issues/686)).
+  Motherships pair with a single-use invite and a confirmation code shown on both
+  screens, so the fleet view fills in without a hand-kept peer list, and a member can
+  sync its finished colonies' history to the owner once its operator opts in. Pairing
+  does not enroll a member into the owner's mesh; that waits on this design gate
+  ([fleet.md](fleet.md)).
 - **The session store** ([#325](https://github.com/Colonizer-dev/harness/issues/325)).
   Colony records sit behind a `SessionStore` interface so a different backend can
   hold them later. A mothership uses the local files today; an in-memory object store
