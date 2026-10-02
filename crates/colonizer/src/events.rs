@@ -330,6 +330,10 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     if event["type"] == "tool_call" {
         crate::jev_ladder::note_tool_call(app, id, rt, &event).await;
     }
+    // Jev brief picks (#585): a watched note's guest path in a call's input or a result's output, or
+    // a `Skill` call naming a watched pack, marks the item used. Shadow measurement only, and a
+    // no-op unless the boot picker armed a watch.
+    crate::brief_pick::note_event(app, id, rt, &event).await;
 
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {

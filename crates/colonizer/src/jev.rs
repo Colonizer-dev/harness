@@ -279,16 +279,19 @@ pub async fn shadow_opinion(
 pub(crate) mod mock {
     use super::*;
     use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use std::collections::VecDeque;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
     /// What the mock answers with: a valid choice at confidence 0.87, a 429 then a valid answer, this
-    /// HTTP status every time, or no answer at all (well past any point budget).
+    /// HTTP status every time, no answer at all (well past any point budget), or each of a script's
+    /// bodies in turn — for a caller asking several questions, like the brief picker's rounds (#585).
     #[derive(Clone)]
     pub(crate) enum Reply {
         Choice(&'static str),
+        Scripted(Arc<Mutex<VecDeque<Value>>>),
         FailOnceThenOk,
         Status(u16),
         NeverRespond,
@@ -311,6 +314,10 @@ pub(crate) mod mock {
         let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
         match state.reply {
             Reply::Choice(choice) => (axum::http::StatusCode::OK, Json(body(choice))).into_response(),
+            Reply::Scripted(script) => match script.lock().unwrap().pop_front() {
+                Some(next) => (axum::http::StatusCode::OK, Json(next)).into_response(),
+                None => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            },
             Reply::FailOnceThenOk => {
                 if attempt == 0 {
                     axum::http::StatusCode::TOO_MANY_REQUESTS.into_response()
@@ -339,6 +346,11 @@ pub(crate) mod mock {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         (format!("http://{addr}/v1/systemone"), attempts)
+    }
+
+    /// Serves a mock that answers each of `answers` in turn, then errors once the script runs out.
+    pub(crate) async fn serve_scripted(answers: Vec<Value>) -> String {
+        serve(Reply::Scripted(Arc::new(Mutex::new(answers.into())))).await.0
     }
 }
 

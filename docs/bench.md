@@ -140,6 +140,29 @@ recall is the share of re-issued chunks the pass predicted to keep. A zero denom
 sample; a `total` row pools them, so ten colonies' one-decision runs begin to say something. A reread only
 ever grades decisions from its own session.
 
+## Grading Jev brief picks
+
+When the shadow boot brief (issue #585) is on (`jev_brief_shadow`, see
+[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), the mothership appends one `pick` row
+per colony boot — the mandatory notes, the offered candidates, what Jev picked and what it left — and one
+`used` row each time the colony is later seen to read a watched note or use a watched skill pack, to
+`<data dir>/brief_picks.jsonl`. `brief` reads that ledger and grades the picks against the uses:
+
+```sh
+node scripts/bench.mjs brief bench-before.json bench-after.json   # --data <dir> names a non-default mothership
+node scripts/bench.mjs brief --json bench-before.json             # the same report as JSON
+```
+
+The universe is the offered candidates. A candidate Jev picked that the colony was seen to use is a true
+positive, a picked one it never used a false positive, and a used one it did not pick a false negative.
+Mandatory notes (the `house-rule` and `security` tags, always loaded and never offered) are excluded, as
+are uses of items that were not on the board. Precision and recall are over those counts, with a zero
+denominator reading `–`: undefined, not a bad score. The table carries the counts beside the rates, the
+per-colony means of the candidate, pick and mandatory counts, and `total` and `overall` rows that pool the
+counts and recompute the rates from them. A colony booted twice is judged on its last boot. Shadow picks
+say what Jev *would* have loaded, so the bench run both ways is the real test: `run --label plain` with
+`jev_brief_shadow` off, `run --label brief` with it on, then `compare bench-plain.json bench-brief.json`.
+
 ## Judging Jev routing
 
 The mothership appends a `decision` row to `<data dir>/routing.jsonl` for every routed boot — the rule's

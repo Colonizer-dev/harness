@@ -1956,6 +1956,18 @@ This second opinion and Jev compaction (Token savings) are separate features sha
 `JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
 history at each compaction.
 
+**Boot brief (issue #585, shadow only).** A third optional use of the same client, `jev_brief_shadow`
+(a `claude-code` boolean, default `false`), asks Jev at boot which of this colony's shared-memory
+notes and skill packs are worth loading: up to five picks, one `choice` question per round (each round
+offers the remaining candidates plus `none`, and an answer outside them is a miss); an org whose Jev
+switch is off is never asked, like every other Jev point. Notes tagged
+`house-rule` or `security` are **mandatory** — always loaded, never offered, never dropped — and memory
+stays pull-only (§6.2): the picks are recorded, never acted on, so nothing the colony sees changes
+while the flag is off. The mothership writes one `pick` row per boot and one `used` row per watched
+note read or skill pack touched to `<data dir>/brief_picks.jsonl`, which `bench.mjs brief` grades
+([bench.md](bench.md#grading-jev-brief-picks)); `act` mode waits for the #582 decision layer and a
+measured token saving on the bench, so this stays telemetry.
+
 A caveat worth stating plainly: this integration's specific vendor claims — the endpoint, its pricing,
 its latency — could not be independently verified while it was built. The design leans on that: with
 no key and no flag set, it is inert, so an unverified or even nonexistent vendor causes no harm to a

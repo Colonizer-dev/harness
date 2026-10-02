@@ -784,6 +784,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         flag("jev_routing_act").unwrap_or(false),
         flag("jev_shadow_mode").unwrap_or(false),
     );
+    // The Jev brief picker (#585) is its own default-off switch: it asks Jev which memory notes and
+    // skill packs to load, shadow only. Read here; the work is spawned at the end of the boot.
+    let brief_shadow = flag("jev_brief_shadow").unwrap_or(false);
     // The routing point's ask (issue #582): `None` only when the mode is off, so a short-circuit the
     // decision layer handles without a network call still produces a ledger row below. The org's own
     // switch (`org_settings.jev`) can turn every point off for its colonies.
@@ -1657,6 +1660,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     ensure_starting(app, id).await?;
     start_link(app, id).await;
+    // Jev brief picks (#585, shadow only): spawn the candidate build and pick off the boot path, so
+    // a slow or unreachable Jev never delays or fails a boot. One call; brief_pick.rs owns the rest.
+    crate::brief_pick::start(
+        app,
+        id,
+        brief_shadow,
+        org_settings.jev != Some(false),
+        memory_on,
+        &plugin_names,
+        &task_labels,
+    );
     // A pre-warm boot (issue #701) has no answer riding it: once the runner is linked, this task
     // holds the colony open for the answer instead of finishing a normal launch. An answer that
     // lands is delivered on the spot; the timeout suspends the colony again and frees the slot.
