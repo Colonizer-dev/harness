@@ -499,7 +499,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
         // colony drive, like answering.
-        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "keep"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },
@@ -542,6 +542,9 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
+        // The built-in TypeScript any loop's settings, last report and trend: a watch. Changing its
+        // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
+        ["api", "ts-any-loop"] if get => Need::Bare(Scope::Read),
         // Loops (issue #627): listing loops and reading a loop's runs is a watch; creating,
         // editing, deleting or running a loop can each start a colony, so they need launch —
         // operate never reaches a loop mutation. Which loops a token may touch, and what its runs
@@ -896,6 +899,8 @@ mod tests {
             "/api/sessions/abc/answer",
             "/api/sessions/abc/stop",
             "/api/sessions/abc/resume",
+            // Issue #673: keeping a superseded colony lets it start, so it drives like resume.
+            "/api/sessions/abc/keep",
         ] {
             assert!(
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),

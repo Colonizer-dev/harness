@@ -67,6 +67,8 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         parked: None,
         agent_session: None,
         pending_answer: None,
+        supply_chain: None,
+        superseded: None,
         was_suspended: false,
         last_activity_at: None,
         boot_timing: None,

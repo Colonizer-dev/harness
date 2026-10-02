@@ -414,7 +414,7 @@ async fn refresh_base(app: &Shared, repo: &str, bare: &std::path::Path, base: &s
     let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
     let fetched = crate::util::exec_within(
         BASE_REFRESH_LIMIT,
-        app.git(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
+        app.git_authed(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
     )
     .await;
     if let Err(e) = fetched {
@@ -598,13 +598,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
-        github::with_boot_retry(
+        let synced = github::with_boot_retry(
             &format!("syncing the local clone of {}", s.repo),
             Some(&log),
             boot_started_at,
             || github::sync_repo(app, &s.repo, &bare, &log),
         )
-        .await?;
+        .await;
+        if let Err(e) = synced {
+            return Err(github::access_error(app, &s.repo, e).await);
+        }
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
         github::with_boot_retry(
@@ -1981,6 +1984,30 @@ mod tests {
         assert!(noted.iter().any(|i| i.contains("external effects are off")), "{noted:?}");
         assert_eq!(said(&app, &s.id, "warn").await.len(), 1, "no second fetch was tried");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #761: a rotated log written before redaction existed is redacted on its way into the resumed
+    /// colony's prompt; ordinary text in it is told as it was.
+    #[tokio::test]
+    async fn the_resume_digest_redacts_a_secret_in_an_old_archived_log() {
+        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
+        let old = format!(
+            "{}\n{}\n",
+            json!({"seq": 1, "type": "user_message", "text": format!("export GH={secret}")}),
+            json!({"seq": 2, "type": "user_message", "text": "ran the tests"}),
+        );
+        std::fs::write(dir.join("events-1.jsonl"), old).unwrap();
+        let story = resume_digest(&dir).await.expect("an archived run has a story");
+        assert!(!story.contains(secret), "the secret stays out of the prompt: {story}");
+        assert!(story.contains("[REDACTED:"), "{story}");
+        assert!(
+            story.contains("#2 user_message: ran the tests"),
+            "normal content is unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

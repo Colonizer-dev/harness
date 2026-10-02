@@ -74,6 +74,7 @@ colonizer answer abc123 1                              # by option number, label
 colonizer stop abc123                                  # the microVM goes away; the worktree is kept
 colonizer resume abc123                                # back on the kept worktree where it was left
 colonizer pr abc123                                    # the pull request URL and state
+colonizer pr abc123 --wait --timeout 30m               # wait for the checks to settle; exit 7 on failure
 colonizer map owner/repo                               # the repository's architecture map, as a text outline
 colonizer map owner/repo --find login                  # only the components a query matches
 ```
@@ -108,6 +109,17 @@ their source paths, then the connections. A repository with no map yet exits 4 w
 stderr. `--find QUERY` prints only the components matching the query, case-insensitively: a
 substring of a label, id, type or source path, or a file under a component's source directory
 (`src/auth/login.rs` finds the component whose source is `src/auth`).
+
+`pr --wait` follows a pull request's checks until they settle, re-reading the colony every
+15 s — it sees the mothership's view, which the mothership refreshes about once a minute while
+checks run. Success, or nothing to wait for (a pull request with no checks), prints the usual
+line and exits 0; a failure prints it and exits 7. A colony that ends without opening a pull
+request, one whose pull request is merged or closed before the checks settle, or a parked
+colony (nothing will publish until it is resumed) exits 1 with a note on stderr.
+A settled verdict wins over the status, so a pull request the merge train merged once its
+checks went green exits 0. `--timeout DURATION` (`--wait` only; `90`, `90s`, `30m`, `2h`, `1d`
+— the unit spellings `loop create` reads) gives up with exit 8 and a note naming the last checks
+state; without it, `--wait` waits indefinitely.
 
 Tokens — the owner token only (see below):
 
@@ -244,6 +256,8 @@ Exit codes are part of the interface, so a script can tell a typo from a refusal
 | 4 | Not found: no such colony, loop or token (404) |
 | 5 | Conflict (409, e.g. `stop` mid-publish); for `ask` and `answer`, a colony that is not asking anything |
 | 6 | A launch cap was refused (429): a scoped token's concurrency limit or daily budget |
+| 7 | `pr --wait` followed the pull request's checks and they failed |
+| 8 | `pr --wait --timeout` ran out of time before the checks settled |
 
 ## Completions and the man page
 
@@ -323,8 +337,3 @@ map loop (whose runs launch outside any token's caps) is the owner's alone.
   marker — a description of the task from outside, not the maintainer's voice.
 - **In the log.** The activity log records what a token did through the API under the actor
   `token:<name>`.
-
-## Not yet
-
-- Following a pull request's checks: `colonizer pr` prints the checks state once, when the
-  mothership knows it, but nothing waits on it.

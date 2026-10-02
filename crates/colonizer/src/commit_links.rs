@@ -504,7 +504,7 @@ pub async fn on_pr_head(app: &App, id: &str, head: &str) -> Option<Reconciled> {
     let refspec = format!("+refs/heads/{0}:refs/remotes/origin/{0}", p.branch);
     let fetched = crate::util::exec_within(
         GIT_LIMIT,
-        app.git(&p.bare)
+        app.git_authed(&p.bare)
             .args([
                 "fetch",
                 "--quiet",

@@ -7,7 +7,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactElement, type ReactNode } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
-import { SESSION_STATUS, isAnsweredWaiting, isLive, statusLabel, store, stored, timeAgo } from "../components/ui";
+import { SESSION_STATUS, isAnsweredWaiting, isLive, statusLabel, store, stored, supersededHeld, timeAgo } from "../components/ui";
 import { errorMessage, useApi, useToast } from "../context";
 import type { Loop, NewLoop, RepoMap, Session } from "../types";
 import { describeLoopCadence } from "./loops";
@@ -65,7 +65,8 @@ export function isBlocked(s: Session): boolean {
 /** What a still ant's colony is doing. One that answered while suspended (issue #667) is not
  *  waiting on anyone — its answer is stored and it is queued for a parallelism slot. */
 export function blockedDoing(s: Session): string {
-  if (isAnsweredWaiting(s)) return "resumes when a slot frees";
+  // Issue #673: a superseded one waits for Keep, not for a slot.
+  if (isAnsweredWaiting(s)) return supersededHeld(s) ? "held until kept" : "resumes when a slot frees";
   return s.status === "waiting_for_answer" ? "waiting for you" : "idle";
 }
 

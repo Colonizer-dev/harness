@@ -317,15 +317,23 @@ async fn read_messages(app: &App, id: &str) -> Vec<ChatMessage> {
         .unwrap_or_default()
 }
 
+/// One transcript line as it is stored: a credential the operator pasted or the model echoed is
+/// redacted field by field first (#761), so `<id>.jsonl` — and every later request built from it —
+/// only carries the mark. A message with nothing secret in it is stored exactly as before.
+fn message_line(message: &ChatMessage) -> Result<String> {
+    let line = serde_json::to_string(message)?;
+    Ok(crate::redact::redact_line(&line).into_owned())
+}
+
 async fn append_message(app: &App, id: &str, message: &ChatMessage) -> Result<()> {
     tokio::fs::create_dir_all(dir(app)).await?;
-    append_line(&messages_path(app, id), &serde_json::to_string(message)?).await
+    append_line(&messages_path(app, id), &message_line(message)?).await
 }
 
 async fn rewrite_messages(app: &App, id: &str, messages: &[ChatMessage]) -> Result<()> {
     let mut text = String::new();
     for m in messages {
-        text.push_str(&serde_json::to_string(m)?);
+        text.push_str(&message_line(m)?);
         text.push('\n');
     }
     write_atomic(&messages_path(app, id), text.as_bytes()).await
@@ -2721,6 +2729,33 @@ mod tests {
         write_meta(app, &meta).await.unwrap();
         rewrite_messages(app, &meta.id, messages).await.unwrap();
         meta
+    }
+
+    /// #761: a credential pasted into a chat or echoed by the model is stored as the mark, in an
+    /// appended message and in a rewritten transcript alike; ordinary messages are kept as written.
+    #[tokio::test]
+    async fn a_secret_in_a_chat_message_is_stored_redacted() {
+        let root = std::env::temp_dir().join(format!("colonizer-chat-redact-{}", uuid::Uuid::new_v4()));
+        let app = crate::tests::test_app(&root);
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let plain = msg("user", "why does the build fail?");
+        let meta = seed(
+            &app,
+            "t",
+            &[plain.clone(), msg("assistant", &format!("use GH_TOKEN={secret}"))],
+        )
+        .await;
+        append_message(&app, &meta.id, &msg("user", &format!("my token is {secret}")))
+            .await
+            .unwrap();
+        let text = tokio::fs::read_to_string(messages_path(&app, &meta.id)).await.unwrap();
+        assert!(!text.contains(secret), "{text}");
+        let stored = parse_messages(&text);
+        assert_eq!(stored.len(), 3);
+        assert_eq!(stored[0], plain, "an ordinary message is unchanged");
+        assert!(stored[1].content.contains("[REDACTED:"), "{}", stored[1].content);
+        assert_eq!(stored[2].content, "my token is [REDACTED:github_token]");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

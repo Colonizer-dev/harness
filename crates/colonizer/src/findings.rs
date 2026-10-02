@@ -54,7 +54,10 @@ pub fn parse(event: &Value) -> Result<Finding> {
         if value.chars().count() > max {
             bail!("the finding's {name} is longer than {max} characters");
         }
-        Ok(value.to_string())
+        // #761: a finding is agent output bound for a public issue and for `finding-body.md`, so a
+        // credential in it is redacted here, once, and everything downstream (the validator, the
+        // grant's candidate hash, the body file, `gh issue create`) sees only the mark.
+        Ok(crate::redact::redact_text(value).into_owned())
     };
     let title = field("title", MAX_TITLE)?;
     if title.contains('\n') {
@@ -380,6 +383,28 @@ mod tests {
         );
         assert_eq!(duplicate_of("Career pages are supported", &open), None);
         assert_eq!(duplicate_of("anything", &json!({"not": "a list"})), None);
+    }
+
+    /// #761: a secret in a finding never reaches `finding-body.md` or the filed issue; a finding
+    /// with nothing secret in it is filed word for word.
+    #[test]
+    fn a_secret_in_a_finding_is_redacted_before_the_body_is_rendered() {
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let finding = parse(&event(
+            &format!("Token {secret} committed"),
+            &format!("config.yml sets GH_TOKEN={secret}"),
+            &format!("grep printed {secret}"),
+        ))
+        .unwrap();
+        let body = issue_body(&finding, &grant_session(), None);
+        for text in [finding.title.as_str(), body.as_str()] {
+            assert!(!text.contains(secret), "{text}");
+            assert!(text.contains("[REDACTED:"), "{text}");
+        }
+        let plain = parse(&event("Career pages are unsupported", "llms.txt says so", "Read model.rs")).unwrap();
+        assert_eq!(plain.title, "Career pages are unsupported");
+        assert_eq!(plain.body, "llms.txt says so");
+        assert_eq!(plain.evidence, "Read model.rs");
     }
 
     #[test]

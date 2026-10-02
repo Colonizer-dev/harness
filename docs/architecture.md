@@ -386,7 +386,9 @@ Five `publish` settings drive it (all off/empty by default, shown in the cockpit
 
 A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
 no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
-branch's own CI is green. The merge is a squash with `--match-head-commit` that deletes the branch — never
+branch's own CI is green. A colony another merge superseded (issue #673; see
+[colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
+never lands a second copy of work that is already in main. The merge is a squash with `--match-head-commit` that deletes the branch — never
 a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
 to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
 for exactly those readings. The one case the watcher never sees — a pull request whose head does not
