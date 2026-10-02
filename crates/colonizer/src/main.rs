@@ -72,6 +72,7 @@ mod packages;
 mod path_policy;
 mod phone;
 mod plugins;
+mod prescan;
 mod presets;
 mod protocol;
 mod provider_quota;

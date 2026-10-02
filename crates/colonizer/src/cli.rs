@@ -201,6 +201,12 @@ enum Command {
         #[command(subcommand)]
         command: LoopCommand,
     },
+    /// Start and list red-team runs: hunters that find and report bugs, or security defects with
+    /// `--preset security`
+    Redteam {
+        #[command(subcommand)]
+        command: RedteamCommand,
+    },
     /// Manage the mothership's scoped API tokens (the owner token only)
     Token {
         #[command(subcommand)]
@@ -244,6 +250,139 @@ enum FleetCommand {
         #[arg(long)]
         preview: bool,
     },
+}
+
+/// The `redteam` subcommands.
+#[derive(Subcommand, Debug)]
+enum RedteamCommand {
+    /// Start a run against one repository. It arms by default and launches as soon as no colony
+    /// is live; --now starts it immediately or fails with exit 5 while colonies are live
+    Start {
+        /// The repository to raid, as owner/repo
+        #[arg(value_name = "OWNER/REPO")]
+        repo: String,
+        /// general (bug hunt) or security (security focus areas, a deterministic pre-scan and an
+        /// operator checklist)
+        #[arg(long, value_enum, default_value_t = RedteamPreset::General)]
+        preset: RedteamPreset,
+        /// Hunters in the swarm, 1 to 8 (default 3)
+        #[arg(long, value_name = "N")]
+        hunters: Option<usize>,
+        /// Run the hunters' orchestrator on this model
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Run the hunters' subagents on this model
+        #[arg(long, value_name = "MODEL")]
+        subagent_model: Option<String>,
+        /// Let hunters fix what they find (off: they only report, and never open or merge anything)
+        #[arg(long)]
+        autofix: bool,
+        /// Start now instead of arming; refused while any colony is live
+        #[arg(long)]
+        now: bool,
+    },
+    /// List red-team runs, newest first
+    List,
+}
+
+/// A red-team preset, as `--preset` spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RedteamPreset {
+    General,
+    Security,
+}
+
+impl RedteamPreset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Security => "security",
+        }
+    }
+}
+
+/// The `POST /api/redteam/runs` body `redteam start` sends.
+fn redteam_start_body(
+    repo: &str,
+    preset: RedteamPreset,
+    hunters: Option<usize>,
+    model: Option<String>,
+    subagent_model: Option<String>,
+    autofix: bool,
+    now: bool,
+) -> Value {
+    json!({
+        "repo": repo,
+        "preset": preset.as_str(),
+        "swarm_size": hunters,
+        "model": model,
+        "subagent_model": subagent_model,
+        "autofix": autofix,
+        "arm": !now,
+    })
+}
+
+async fn redteam_command(cli: &Cli, command: RedteamCommand) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        match command {
+            RedteamCommand::Start {
+                repo,
+                preset,
+                hunters,
+                model,
+                subagent_model,
+                autofix,
+                now,
+            } => {
+                let body = redteam_start_body(&repo, preset, hunters, model, subagent_model, autofix, now);
+                let run = machine
+                    .post("/api/redteam/runs", Some(&body))
+                    .await?
+                    .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+                if json {
+                    println!("{}", pretty(&run)?);
+                } else {
+                    println!(
+                        "red-team run {} on {} ({} preset, {})",
+                        run["id"].as_str().unwrap_or("?"),
+                        run["repo"].as_str().unwrap_or("?"),
+                        run["preset"].as_str().unwrap_or("general"),
+                        run["state"].as_str().unwrap_or("?")
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+            RedteamCommand::List => {
+                let runs = machine.get("/api/redteam/runs").await?;
+                if json {
+                    println!("{}", pretty(&runs)?);
+                    return Ok(EXIT_OK);
+                }
+                let rows = runs.as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    eprintln!("no red-team runs");
+                    return Ok(EXIT_OK);
+                }
+                for r in &rows {
+                    let c = &r["counts"];
+                    let leads = r["prescan"]["leads"].as_array().map(Vec::len);
+                    println!(
+                        "{:<12}  {:<28}  {:<8}  {:<8}  {} found, {} validated{}",
+                        r["id"].as_str().unwrap_or("?"),
+                        util::truncate(r["repo"].as_str().unwrap_or("?"), 28),
+                        r["preset"].as_str().unwrap_or("general"),
+                        r["state"].as_str().unwrap_or("?"),
+                        c["found"].as_u64().unwrap_or(0),
+                        c["validated"].as_u64().unwrap_or(0),
+                        leads.map(|n| format!(", {n} pre-scan leads")).unwrap_or_default()
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+        }
+    })
+    .await
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1279,6 +1418,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             .await
         }
         Command::Loop { command } => loop_command(cli, command).await,
+        Command::Redteam { command } => redteam_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
         Command::Fleet { command } => fleet_command(cli, command),
     }
@@ -2404,6 +2544,18 @@ mod tests {
                 "5",
             ][..],
             &["token", "revoke", "tok_x"][..],
+            &["redteam", "list"][..],
+            &["redteam", "start", "acme/app"][..],
+            &[
+                "redteam",
+                "start",
+                "acme/app",
+                "--preset",
+                "security",
+                "--hunters",
+                "8",
+                "--now",
+            ][..],
         ] {
             assert!(parse(args).is_ok(), "{args:?} should parse");
         }
@@ -2451,6 +2603,56 @@ mod tests {
         assert!(no_autopilot);
         // The two autopilot flags refuse to combine: the answer would depend on their order.
         assert!(parse(&["launch", "owner/repo", "--autopilot", "--no-autopilot"]).is_err());
+    }
+
+    /// `redteam start` sends the preset and the rest as the API wants them: armed unless --now,
+    /// general unless named, and an unknown preset is a usage error.
+    #[test]
+    fn redteam_start_sends_the_preset_field() {
+        let cli = parse(&[
+            "redteam",
+            "start",
+            "acme/app",
+            "--preset",
+            "security",
+            "--hunters",
+            "4",
+            "--autofix",
+        ])
+        .unwrap();
+        let Some(Command::Redteam {
+            command:
+                RedteamCommand::Start {
+                    repo,
+                    preset,
+                    hunters,
+                    model,
+                    subagent_model,
+                    autofix,
+                    now,
+                },
+        }) = cli.command
+        else {
+            panic!("redteam start did not parse");
+        };
+        let body = redteam_start_body(&repo, preset, hunters, model, subagent_model, autofix, now);
+        assert_eq!(body["repo"], json!("acme/app"));
+        assert_eq!(body["preset"], json!("security"));
+        assert_eq!(body["swarm_size"], json!(4));
+        assert_eq!(body["autofix"], json!(true));
+        assert_eq!(body["arm"], json!(true), "a CLI start arms unless --now");
+        let plain = parse(&["redteam", "start", "acme/app", "--now"]).unwrap();
+        let Some(Command::Redteam {
+            command: RedteamCommand::Start { preset, now, .. },
+        }) = plain.command
+        else {
+            panic!("redteam start did not parse");
+        };
+        assert_eq!(preset, RedteamPreset::General, "general is the default preset");
+        let body = redteam_start_body("acme/app", preset, None, None, None, false, now);
+        assert_eq!(body["preset"], json!("general"));
+        assert_eq!(body["arm"], json!(false));
+        assert!(parse(&["redteam", "start", "acme/app", "--preset", "offensive"]).is_err());
     }
 
     /// An argument nobody planned for is a usage error (exit 2), not a silently started server —

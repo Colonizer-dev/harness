@@ -1456,6 +1456,43 @@ export interface RedTeamSynthesis {
   superseded: string[];
 }
 
+/** Which focus list and briefing a run's hunters get: the bug hunt, or the security hunt with a pre-scan. */
+export type RedTeamPreset = "general" | "security";
+
+/** A security pre-scan lead: a deterministic heuristic hit, never a confirmed vulnerability. */
+export interface PreScanLead {
+  /** `P1`, `P2`, …; hunters and the synthesis cite it. */
+  id: string;
+  check: string | null;
+  /** Index into the security preset's eight focus areas. */
+  focus: number;
+  path: string;
+  line: number | null;
+  commit: string | null;
+  message: string;
+}
+
+/** Operator checklist item states. There is deliberately no "passed": code cannot prove these. */
+export type ChecklistStatus = "needs_review" | "not_verifiable";
+
+export interface ChecklistItem {
+  id: string;
+  title: string;
+  status: ChecklistStatus;
+  evidence: string;
+}
+
+/** A security run's pre-scan, run on the host mirror before the hunters launch. */
+export interface PreScan {
+  ran_at: string | null;
+  commit: string | null;
+  /** `gitleaks` when the host had it installed, `builtin` for the fallback, empty when it could not run. */
+  secret_scanner: string;
+  notes: string[];
+  leads: PreScanLead[];
+  checklist: ChecklistItem[];
+}
+
 /** GET /api/redteam/runs: one swarm against one repository. */
 export interface RedTeamRun {
   id: string;
@@ -1483,6 +1520,10 @@ export interface RedTeamRun {
   subagent_model?: string | null;
   /** The schedule that started this run, if one did. */
   schedule_id?: string | null;
+  /** Absent from runs made before presets: read as general. */
+  preset?: RedTeamPreset;
+  /** A security run's pre-scan; null for general runs and until a security run launches. */
+  prescan?: PreScan | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
@@ -1495,6 +1536,8 @@ export interface StartRedTeamRunRequest {
   hunter?: string;
   model?: string | null;
   subagent_model?: string | null;
+  /** `general` when unset. */
+  preset?: RedTeamPreset;
 }
 
 /** When a red-team schedule fires, in UTC. `weekday` 0 = Monday; a monthly `day` past the month's end fires on its last day. */
@@ -1512,6 +1555,8 @@ export interface RedTeamSchedule {
   model: string | null;
   subagent_model: string | null;
   autofix: boolean;
+  /** Absent from schedules saved before presets: read as general. */
+  preset?: RedTeamPreset;
   cadence: RedTeamCadence;
   enabled: boolean;
   next_run_at: string;
@@ -1529,6 +1574,7 @@ export interface NewRedTeamSchedule {
   model?: string | null;
   subagent_model?: string | null;
   autofix?: boolean;
+  preset?: RedTeamPreset;
   cadence: RedTeamCadence;
   enabled?: boolean;
 }

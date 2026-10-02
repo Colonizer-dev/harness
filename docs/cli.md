@@ -120,6 +120,21 @@ colonizer token revoke tok_x
 `colonizer mcp` starts the MCP server instead of driving one; it is documented in
 [mcp.md](mcp.md).
 
+## Red-team runs
+
+A red-team run sends a swarm of hunter colonies at one repository; what a run does is
+[red-team.md](red-team.md):
+
+```sh
+colonizer redteam start acme/app                                  # armed: starts when no colony is live
+colonizer redteam start acme/app --preset security --hunters 8    # the security preset, a full swarm
+colonizer redteam start acme/app --now                            # start now (exit 5 while colonies are live)
+colonizer redteam list                                            # runs, newest first, with preset and counts
+```
+
+`--preset` is `general` (the default) or `security`; `--hunters N` is the swarm size, 1 to 8.
+`--model`, `--subagent-model` and `--autofix` mirror the cockpit wizard.
+
 ## Loops
 
 Loops are saved prompts that launch a colony on a schedule; what they do is

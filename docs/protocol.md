@@ -380,9 +380,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
-| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
-| `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
-| `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
+| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
+| `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, preset, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
+| `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, preset?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
 | `PUT /api/redteam/schedules/{id}` | Same body; replaces the settings, keeps `id`, `created_at` and the last firing, and recomputes `next_run_at`. **404** for an unknown schedule |
 | `DELETE /api/redteam/schedules/{id}` | Removes it. **404** for an unknown schedule |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
@@ -2700,9 +2700,15 @@ path, so the parallel limit applies: a hunter may sit `queued` until a slot free
  "hunters": [{"session_id": "ab12cd34", "title": "Red-team hunter 1/3: …", "module": "general",
               "version": null, "focus": "error handling and edge cases"}],
  "counts": {"found": 0, "validated": 0, "rejected": 0, "filed": 0, "merged": null},
- "synthesis": null,
+ "synthesis": null, "preset": "general", "prescan": null,
  "created_at": "…", "started_at": null, "ended_at": null, "gate_reason": null}
 ```
+
+`preset` is `general` or `security`. A security run records its pre-scan in `prescan` before the
+first hunter launches: `{"ran_at", "commit", "secret_scanner": "gitleaks|builtin|", "notes": [..],
+"leads": [{"id": "P1", "check", "focus": 0-7, "path", "line", "commit", "message"}], "checklist":
+[{"id", "title", "status": "needs_review|not_verifiable", "evidence"}]}` — a checklist item is never
+passed ([red-team.md](red-team.md#the-pre-scan)).
 
 The gate. A run may only *launch* while no colony is live (a ``SessionStatus::is_live()`` state
 anywhere, whatever the org). `POST` with `arm` unset/`false` ("start now") launches its hunters
@@ -2738,7 +2744,8 @@ share of the brief) and cites the host paths. The report is
 `sessions/<synthesis id>/out/redteam-report.jsonl`, JSON lines, one object per distinct defect,
 most severe first: `{"defect", "severity": "critical|high|medium|low", "reproduction":
 "reproduced|unconfirmed", "steps", "files": [..], "hunters": [<hunter session ids>], "merged_from":
-n, "validation": "validated|rejected|unvalidated"}` — a defect several hunters reported is one
+n, "validation": "validated|rejected|unvalidated"}`, and on a security run also `"proof"` and
+`"prescan_leads": ["P3"]` (the pre-scan leads the defect confirmed) — a defect several hunters reported is one
 line naming all of them, and `validation` carries the ledger verdicts (§6.6): `validated` when any
 merged finding was validated, `rejected` when all were, else `unvalidated`. `synthesis` tracks the
 judge independently of the run's own state, which stays `done`: `null` | `{"state":
