@@ -14,7 +14,8 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
-import { deviceLabel, pushSupported, subscribeThisDevice, unsubscribeThisDevice } from "../push";
+import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscriptions, unsubscribeThisDevice } from "../push";
+import { PushDeviceList } from "./PushDevicePrefs";
 import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
@@ -34,6 +35,8 @@ import type {
   ProviderPreset,
   ProviderPricing,
   ProviderWire,
+  QuotaActionReply,
+  QuotaCard,
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
@@ -60,6 +63,7 @@ import {
 import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
+import { ProviderQuotaCard, QuotaChangeSummary, runQuotaAction } from "../cockpit/ProviderQuotaCard";
 import { RemoteAccessPane } from "./RemoteAccessPane";
 import { TokensPane } from "./TokensPane";
 import { FleetPane } from "./FleetPane";
@@ -69,6 +73,7 @@ import { SetupSection } from "./SetupSection";
 import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { PhonePane } from "./PhonePane";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -78,7 +83,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -378,6 +383,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "phone",
+          label: "Add your phone",
+          hint: "Pair your phone with a code, and revoke it here",
+        },
+        {
           id: "tokens",
           label: "API tokens",
           hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
@@ -547,11 +557,12 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "phone") pane = <PhonePane back={back} />;
   else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "fleet") pane = <FleetPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
-  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
+  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} orgs={orgs} back={back} />;
   else if (active === "desktop") pane = <DesktopPane back={back} />;
   else if (active === "providers") {
     pane = (
@@ -1629,18 +1640,16 @@ function DesktopPane({ back }: { back?: () => void }) {
 // notifications.ts), not through the Api, so there is nothing here to save.
 // ---------------------------------------------------------------------------
 
-/** An enrolled device's date, as the list shows it: "Sep 23". */
-function pushDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 function NotificationsPane({
   prefs,
   onChanged,
+  orgs,
   back,
 }: {
   prefs: NotificationPrefs;
   onChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  /** The workspaces the cockpit knows, offered as repo-filter suggestions for a device. */
+  orgs?: OrgInfo[];
   back?: () => void;
 }) {
   // The browser's answer as of the pane opening, or as of the last ask from the switch below.
@@ -1655,6 +1664,8 @@ function NotificationsPane({
   const pushable = pushSupported();
   const [subs, setSubs] = useState<PushSubscriptionSummary[] | null>(null);
   const [subscribing, setSubscribing] = useState(false);
+  // Which rows are this browser's own subscription: only their saves claim its timezone (#743).
+  const [ownIds, setOwnIds] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     if (!pushable) return;
@@ -1663,6 +1674,9 @@ function NotificationsPane({
       .pushSubscriptions()
       .then((rows) => !cancelled && setSubs(rows))
       .catch(() => !cancelled && setSubs([]));
+    thisDeviceSubscriptions(api)
+      .then((rows) => !cancelled && setOwnIds(new Set(rows.map((row) => row.id))))
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -1674,6 +1688,7 @@ function NotificationsPane({
     void subscribeThisDevice(api, deviceLabel(navigator.userAgent))
       .then((row) => {
         setSubs((rows) => [...(rows ?? []).filter((other) => other.id !== row.id), row]);
+        setOwnIds((ids) => new Set(ids).add(row.id));
         toast(`Push is on for ${row.label}.`, "success");
       })
       .catch((error) => toast(errorMessage(error), "error"))
@@ -1806,21 +1821,13 @@ function NotificationsPane({
           )}
           {!pushable && showIosInstallHint() && <IosHomeScreenSheet />}
           {subs !== null && subs.length > 0 && (
-            <div className="mt-1 overflow-hidden rounded-xl border border-border">
-              {subs.map((row) => (
-                <div key={row.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] font-medium">{row.label}</div>
-                    <div className="truncate font-mono text-[11px] text-faint">
-                      {row.endpoint_host} · enrolled {pushDate(row.created_at)}
-                    </div>
-                  </div>
-                  <Button variant="danger" size="sm" onClick={() => revokeDevice(row)}>
-                    Revoke
-                  </Button>
-                </div>
-              ))}
-            </div>
+            <PushDeviceList
+              subs={subs}
+              orgs={orgs}
+              ownIds={ownIds}
+              onRevoke={revokeDevice}
+              onChanged={(row) => setSubs((rows) => (rows ?? []).map((other) => (other.id === row.id ? row : other)))}
+            />
           )}
         </div>
 
@@ -2898,6 +2905,7 @@ function ProvidersPane({
       }
     >
       <div className="space-y-3">
+        <ProviderQuotaCards reloadProviders={reload} />
         <div className="space-y-2">
           <ClaudeRow claude={claude} models={models} onOpenConnections={onOpenConnections} />
           {error && <p className="text-[13px] text-err">{error}</p>}
@@ -2919,6 +2927,7 @@ function ProvidersPane({
                 <ProviderForm
                   key={provider.id}
                   initial={provider}
+                  peers={providers}
                   preset={provider.preset}
                   takenIds={[]}
                   onCancel={() => setEditing(null)}
@@ -2951,6 +2960,7 @@ function ProvidersPane({
               <ProviderForm
                 key={`new-${editing.preset}`}
                 preset={editing.preset}
+                peers={providers}
                 takenIds={providers.map((p) => p.id)}
                 onCancel={() => setEditing(null)}
                 onSaved={(saved) => {
@@ -3012,6 +3022,49 @@ function ProvidersPane({
         </p>
       </div>
     </Pane>
+  );
+}
+
+/**
+ * The "Provider out of quota" cards (issue #767) at the top of the providers pane: the same cards
+ * the inbox shows, answered here the same way. Refreshed on the pane's own 5 s rhythm.
+ */
+function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promise<void> }) {
+  const api = useApi();
+  const toast = useToast();
+  const [cards, setCards] = useState<QuotaCard[]>([]);
+  // The last switch's "was X → now Y" summary, kept after its card goes (issue #767).
+  const [switched, setSwitched] = useState<QuotaActionReply | null>(null);
+  const load = useCallback(async () => {
+    try {
+      setCards((await api.attention()).quota_cards ?? []);
+    } catch {
+      // An older mothership has no /api/attention: no cards, nothing to say.
+    }
+  }, [api]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+  if (cards.length === 0 && !switched) return null;
+  return (
+    <div className="space-y-2">
+      <QuotaChangeSummary reply={switched} onDismiss={() => setSwitched(null)} />
+      {cards.map((card) => (
+        <ProviderQuotaCard
+          key={card.provider}
+          card={card}
+          onAction={async (provider, body) => {
+            const reply = await runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body);
+            if ((reply?.changes?.length ?? 0) > 0) setSwitched(reply);
+            await Promise.all([load(), reloadProviders()]);
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -3415,9 +3468,21 @@ function CatalogBrowser({
   );
 }
 
+/**
+ * The fallback picker's non-Claude choices (issue #767): every model on another provider that speaks
+ * the same wire, as `<provider>/<model>` — the gateway retries a quota-exhausted request there
+ * itself. A cross-wire provider is left out; the Mothership refuses it too.
+ */
+export function sameWireFallbacks(ownId: string, wire: ProviderWire, peers: ModelProvider[]): string[] {
+  return peers
+    .filter((p) => p.id !== ownId && p.wire === wire)
+    .flatMap((p) => p.models.map((m) => `${p.id}/${m}`));
+}
+
 function ProviderForm({
   initial,
   preset,
+  peers = [],
   takenIds,
   onCancel,
   onSaved,
@@ -3425,6 +3490,8 @@ function ProviderForm({
 }: {
   initial?: ModelProvider;
   preset: ProviderPreset;
+  /** The providers on file, for the same-wire fallback choices. */
+  peers?: ModelProvider[];
   takenIds: string[];
   onCancel: () => void;
   onSaved: (provider: ModelProvider) => void;
@@ -3464,6 +3531,7 @@ function ProviderForm({
   // A new Local provider opens Advanced so the prefilled limits are visible.
   const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
   const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
+  const sameWire = sameWireFallbacks(initial?.id ?? "", wire, peers);
   const ids = {
     id: useId(),
     name: useId(),
@@ -3783,13 +3851,29 @@ function ProviderForm({
               error={limits.context_tokens.error}
               help="The model's context size, so agents compact before they hit it."
             />
-            <FormField id={ids.fallback} label="Fallback model" info={<p>Used when the provider is unreachable, times out or the queue is full.</p>}>
+            <FormField
+              id={ids.fallback}
+              label="Fallback model"
+              info={
+                <p>
+                  A Claude model is used when the provider is unreachable, times out, the queue is full or its plan runs out. A
+                  model on another provider of the same wire is used when its plan runs out: the Mothership retries there.
+                </p>
+              }
+            >
               <select id={ids.fallback} value={fallback} onChange={(e) => setFallback(e.target.value)} className={inputClass}>
                 <option value="">None</option>
-                {fallback && !anthropicModels.some((m) => m.id === fallback) && <option value={fallback}>{fallback}</option>}
+                {fallback && !anthropicModels.some((m) => m.id === fallback) && !sameWire.includes(fallback) && (
+                  <option value={fallback}>{fallback}</option>
+                )}
                 {anthropicModels.map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.label === model.id ? model.id : `${model.id} · ${model.label}`}
+                  </option>
+                ))}
+                {sameWire.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
                   </option>
                 ))}
               </select>
@@ -3965,7 +4049,7 @@ function PriceField({
   );
 }
 
-function ChipsInput({
+export function ChipsInput({
   id,
   values,
   onChange,

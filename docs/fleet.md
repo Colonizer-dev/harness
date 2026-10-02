@@ -75,12 +75,13 @@ vouches for. Either way nothing pairs quietly.
 ## What a member may do: the `fleet` scope
 
 Approving a request mints the member a **fleet-scoped API token** — the new `fleet` scope, the
-lowest there is. It is admitted on exactly two routes:
+lowest there is. It is admitted on exactly four routes:
 
 | Route | Why |
 | :--- | :--- |
 | `GET /api/hosts` | the fleet view, so every member can see every other |
 | `POST /api/fleet/peer/leave` | leaving without holding anything broader |
+| `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | the history push ([below](#history-push)), into the member's own directory on the owner |
 
 Everything else answers 403, the same as any other scoped token out of scope. The token is handed
 over exactly once at approval, stored hashed on the member, and never shown again on either side —
@@ -92,8 +93,116 @@ offer it ([cli.md](cli.md#scoped-api-tokens)).
 
 Either side ends the membership — the owner with **Remove**, the member with **Leave fleet**. The
 member's fleet token is revoked, the mesh plumbing described below is updated, and the member keeps
-every local colony, secret and setting. Leaving is behind a confirmation, since it costs the fleet
+every local colony, secret and setting. A removal also leaves a **tombstone** on the owner — the
+removed member's id and its token's SHA-256, the same hash the token registry kept (the most
+recent 256) — so the removed machine's next call answers **403** `removed from the fleet` instead
+of the **401** an unknown or invalid token gets, and the member can tell it was removed. A member
+that leaves by itself leaves no tombstone. Leaving is behind a confirmation, since it costs the fleet
 view and takes a new invite to undo.
+
+## History push
+
+A member pushes its history to the owner on its own: every finished colony (pull request opened,
+merged or closed, no changes, stopped, failed) travels as one **row** — the same allowlist
+projection of the colony record the export bundle carries, keyed `<host id>:<session id>` — and
+its log ledgers (`events.jsonl`, `harness.jsonl`, `gateway.jsonl`) travel as **payloads**, keyed
+by their SHA-256. Running colonies wait until they finish. The owner keeps each member's history
+under `<data_dir>/fleet-ingest/<member_id>/`: `sessions.json` (rows by id) and `payloads/`. The
+routes are in [protocol.md](protocol.md#fleet-history-push-issue-762).
+
+**Joining is not consent.** Every membership starts with history sync **off**, and nothing is
+sent until the member's operator turns it on after seeing what would go: Settings → Fleet shows
+the counts beside the switch, `colonizer fleet sync --preview` (`GET /api/fleet/sync/preview`)
+prints them — finished colonies, log files, bytes in all and not yet sent, and what is never sent —
+and `colonizer fleet sync --enable` (`POST /api/fleet/sync/consent {"enabled": true}`) prints the
+same preview, then turns it on. `--disable` withdraws it. Until then the status reads
+`consent_required`, the background task sends nothing, and the manual trigger refuses with a
+**409** that says how to consent. Consent belongs to the membership: leaving and re-joining — even
+the same owner — starts it off again.
+
+**Where it runs.** With consent given, a background task on the member drains shortly after
+startup, right after consent is given, and every five minutes after that; an owner or a machine
+alone pushes nothing. `COLONIZER_FLEET_SYNC=off` stops the background drain. `colonizer fleet sync`
+(or `POST /api/fleet/sync`) drains now, and `colonizer fleet sync --status` (`GET /api/fleet/sync`)
+shows where it stands.
+
+**How it drains.**
+
+- **Payloads first.** Every payload a row references is uploaded and acknowledged before the row
+  is sent; the owner also refuses, by name, a row whose payloads it does not hold. A log larger
+  than 32 MiB is named on its row as omitted and not sent.
+- **Acknowledged means sent.** The drain state lives in the member's `<data_dir>/fleet-sync.json`:
+  each row's fingerprint (its record, and each log's size and modification time) as the owner
+  acknowledged it, written after every batch. A row that changes — a pull request merged later —
+  is sent again; an unchanged one never is.
+- **Resumable at any point.** A drain killed mid-batch re-sends only rows the owner never
+  acknowledged, and the owner upserts by row id, so a re-send replaces rather than duplicates.
+- **Capped batches.** At most 100 rows and 1 MiB of body per batch.
+- **A bad row is isolated, never blocking.** When the owner refuses a batch without naming a row,
+  the member splits it in half and retries each half until the row that causes it stands alone.
+  A refused row is retried on later drains; after three refusals it is **retired** — listed in
+  the status with the owner's reason, and left out until the row itself changes.
+
+**Failures are states.** The status (`consent_required`, `idle`, `synced`, `backoff`,
+`unauthorized`, `removed`, `error`) is recorded with a reason, for the member-health view to show:
+
+| The owner answers | The member |
+| :--- | :--- |
+| **401** | stops, and flags `unauthorized` for attention: the owner does not know the token. Pairing has no token refresh, so a person checks the owner or joins again |
+| **403** | stops syncing: `removed` — the owner removed this machine (below). Nothing local is deleted |
+| **429** / **503** | waits out `Retry-After` — inline up to a minute, otherwise `backoff` until then |
+| anything else, or no answer | `error`; the next tick tries again |
+
+Background drains stay stopped after a 401 or a 403; a manual `fleet sync` tries again. Leaving
+and re-joining starts the drain state over, since a new membership is a new owner's view.
+
+### Reading it on the owner
+
+Settings → Fleet on the owner has a **Fleet history** section: every member's synced colonies,
+newest finish first, each marked "finished on <member>". Filters narrow it by member, repository,
+status and finish date, and the totals at the top — colonies, merged, and cost where the rows
+carry one — are counted per member and per repository over whatever the filters leave. Picking a
+colony opens its record (repository, issue, branch, pull request, cost, summary, error) and its
+logs, each read from the payload the member sent. The cockpit's fleet panel lists hosts rather than
+colonies, so the history lives here. The routes are `GET /api/fleet/history`,
+`GET /api/fleet/history/{member}/{row_id}` and `…/logs/{name}`
+([protocol.md](protocol.md#fleet-history-on-the-owner-issue-762)); they are the owner's alone — a
+scoped token, a member's `fleet` token included, reads **403**.
+
+- **Removed members.** Removing a member keeps what it synced. Its colonies stay listed, marked
+  "(removed)", under the name it had: the owner writes it to `member.json` beside the rows. When
+  the last member is removed the section still shows while any history remains.
+- **Redaction.** Logs are served exactly as the member sent them. Redacting secrets before they
+  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)); the
+  owner runs no redaction pass of its own on this history.
+- **Retention.** The owner keeps a synced row for `COLONIZER_FLEET_INGEST_RETENTION_DAYS` days after
+  it arrives (default `90`; `0` keeps everything). The reclaim tick, every five minutes, drops older
+  rows and then every payload no remaining row references that is itself older than the window —
+  so a log uploaded just before its row is never taken. A member directory left empty is removed.
+  The member keeps its own copy either way, and an unchanged row is not sent again.
+
+## Member health
+
+Settings → Fleet shows each member with one badge: **OK**, a grey **Not checked yet** until the
+owner has polled it, or a degraded (amber) or stopped (red)
+reason such as "No heartbeat for 12 min", with the one thing to do underneath ("the machine may be
+asleep"). The owner works it out from what it already sees — the member's answers to the fleet
+poll, its disk, whether its token still exists — and the worst problem wins. The rule, the
+thresholds and which signals are wired are in [protocol.md](protocol.md#member-health-issue-764).
+
+Each member's answer to that poll also says how its [history push](#history-push) and its colony
+runner are doing, so the badge covers them too:
+
+- A member whose last sync drew a **401** or a **403** (removed) reads **stopped**, "Token revoked",
+  with "re-pair this machine" underneath.
+- A member whose drain has ended with rows still unsent for an hour or more reads **degraded**,
+  "Sync behind by N rows". The drain runs every five minutes, so that is a dozen drains in a row.
+- A member whose queue loop has not ticked for five minutes or more (it ticks every five seconds)
+  reads **degraded**, "Colony runner not ticking", with "restart colonizer on this machine".
+- A member whose operator has not turned history sync on is **not** degraded: that is a choice,
+  not a fault. It shows a grey "History sync off" note under the badge instead.
+
+A member running an older colonizer reports neither, and those signals stay unmeasured.
 
 ## The mesh ACL: ready, but nothing can use it yet
 

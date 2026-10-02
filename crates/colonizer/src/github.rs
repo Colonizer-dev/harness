@@ -120,16 +120,9 @@ impl App {
 
     /// Host-side git, hardened so nothing inside a repository can make it execute code.
     pub fn git_plain(&self) -> Command {
-        let mut c = Command::new("git");
+        let mut c = Command::from(host_git_offline());
         c.args(["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"])
-            .args(HOST_GIT_NO_EXEC)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GH_PROMPT_DISABLED", "1")
-            // A colony sandbox exports these for its own worktree; host-side git never inherits
-            // them (callers that set them after construction still override).
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
+            .env("GH_PROMPT_DISABLED", "1");
         if let Some(token) = self.github_token() {
             c.env("GH_TOKEN", token);
         }
@@ -145,6 +138,21 @@ impl App {
     pub fn bare_repo(&self, repo: &str) -> PathBuf {
         self.cfg.data_dir.join("repos").join(format!("{repo}.git"))
     }
+}
+
+/// The hardening every host-side git carries, as a blocking command with no credentials: the
+/// [`HOST_GIT_NO_EXEC`] overrides, no terminal prompt, and none of a colony sandbox's `GIT_DIR` /
+/// `GIT_WORK_TREE` / `GIT_INDEX_FILE` (callers that set them after construction still override).
+/// [`App::git_plain`] builds on it; code that holds no [`App`] and only reads a local repository
+/// (the fleet repo fingerprint, `repo_identity.rs`) uses it directly.
+pub(crate) fn host_git_offline() -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    c.args(HOST_GIT_NO_EXEC)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    c
 }
 
 /// `-c` overrides that stop host-side git from executing anything a repository (or a colony that
@@ -265,13 +273,20 @@ pub enum Denial {
     NotVisible,
     /// The credential itself was refused.
     BadCredential,
+    /// GitHub has suspended the account: a 403 whose body says so. Reconnecting the same account
+    /// does not help, so it is told apart from a refused credential.
+    Suspended,
 }
 
 /// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
 /// GitHub, and so the wording lives in one place.
 pub fn classify(error: &str) -> Option<Denial> {
     let text = error.to_ascii_lowercase();
-    if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
+    // Checked first: GitHub answers a suspended account with a 403, which would otherwise read as a
+    // refused credential and send the operator off to reconnect an account that cannot be used.
+    if text.contains("suspended") && (text.contains("http 403") || text.contains("account")) {
+        Some(Denial::Suspended)
+    } else if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
         Some(Denial::NotVisible)
     } else if text.contains("http 401") || text.contains("http 403") || text.contains("bad credentials") {
         Some(Denial::BadCredential)
@@ -289,6 +304,14 @@ pub fn classify(error: &str) -> Option<Denial> {
 pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow::Error {
     let raw = format!("{error:#}");
     let Some(denial) = classify(&raw) else { return error };
+    if denial == Denial::Suspended {
+        // No `gh api user` here: it would be refused the same way, and the suspension is the message.
+        return anyhow!(
+            "GitHub has suspended the account signed in on this machine, so {repo} cannot be read. Reconnecting \
+             the same account will not help; a colony that already has a worktree keeps it and can still be \
+             resumed. (GitHub said: {raw})"
+        );
+    }
     let who = match viewer(app).await {
         Ok(user) => user["login"]
             .as_str()
@@ -296,16 +319,17 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
             .unwrap_or_else(|| "this machine".into()),
         Err(_) => "this machine".into(),
     };
-    match denial {
-        Denial::NotVisible => anyhow!(
+    if denial == Denial::NotVisible {
+        anyhow!(
             "GitHub cannot see {repo} as {who}. It may have been deleted or renamed, or {who} may not have access \
              to it — GitHub answers the same way to all three. The colony's worktree is kept, so it can be resumed \
              once access is back; otherwise delete the colony. (GitHub said: {raw})"
-        ),
-        Denial::BadCredential => anyhow!(
+        )
+    } else {
+        anyhow!(
             "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
              (GitHub said: {raw})"
-        ),
+        )
     }
 }
 
@@ -549,6 +573,9 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
     }
     log.info("fetching origin").await;
     exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    // Issue #765: a fetch may have brought a force-push of a colony branch; re-point the links of
+    // any colony here whose branch tip moved (one `rev-parse` each, and only colonies with links).
+    crate::commit_links::after_sync(app, repo).await;
     Ok(())
 }
 
@@ -1895,6 +1922,15 @@ impl PublishOps for GitPublishOps<'_> {
                 .info(format!("parent PR merged; rebased {moved} commit(s) onto {dest}"))
                 .await;
         }
+        // Issue #765: the commits now on origin are recorded with their patch-ids, so the link from
+        // each back to this colony survives the rebases and force-pushes that follow. Best effort:
+        // the push has landed, and a lost record is a warning, never a failed publish.
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        match crate::commit_links::record_for_session(self.app, &self.s.id, &self.admin, &base).await {
+            Ok(0) => {}
+            Ok(n) => self.log.info(format!("recorded {n} commit link(s)")).await,
+            Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
+        }
         Ok(())
     }
 
@@ -2758,6 +2794,11 @@ mod tests {
         assert_eq!(
             classify("gh: Resource not accessible (HTTP 403)"),
             Some(Denial::BadCredential)
+        );
+        // A suspended account is its own answer, not a credential to reconnect.
+        assert_eq!(
+            classify("gh: Sorry. Your account was suspended. (HTTP 403)"),
+            Some(Denial::Suspended)
         );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);

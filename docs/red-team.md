@@ -52,6 +52,92 @@ longer than the swarm can carry at the 20-per-brief cap waits for a later run. T
 the hunter's own and says to chase them first, even where they fall outside the focus assignment —
 the one exception to it ([docs/bench.md](bench.md#the-raid-set)).
 
+## The Security preset
+
+A run has a preset: `general` (the default, and what every run made before presets reads as) or
+`security`. The general preset is the bug hunt above, unchanged. The security preset keeps the same
+swarm mechanics — 1 to 8 hunters, focus areas cycling `i % 8`, each brief naming its own focus and
+listing the other seven, the findings tool, never open, merge or autofix unless autofix is on, bench
+raid leads, and a synthesis colony at the end — with its own eight focus areas:
+
+1. **auth on every route** — every route, endpoint and handler refuses an unauthenticated caller on
+   the server; admin checks happen on the server, never only in the UI.
+2. **object-level access (IDOR)** — changing IDs in URLs and bodies must not reach another user's or
+   tenant's rows; row level security is on and scoped where the stack has it.
+3. **sessions, tokens and secrets** — token lifetimes, refresh tokens revoked on logout, no secrets in
+   URLs or logs, no home-rolled auth or crypto.
+4. **input handling and injection** — server-side validation, SQL built from strings, command
+   injection, path traversal, output escaping and XSS, unsafe deserialisation.
+5. **the web boundary** — CORS (never a wildcard with credentials), CSRF, webhook signature checks,
+   open redirects, SSRF on fetch-by-URL, uploads (size, type, isolated processing).
+6. **abuse and cost limits** — rate limits on login, signup, password reset and AI endpoints; spending
+   caps; loops and queues a caller can make unbounded.
+7. **AI and agent safety** — model output and fetched content treated as untrusted; tool, SQL and
+   shell calls a model makes bounded and confirmed; injected instructions in repo agent files; agents
+   kept away from production credentials; dependencies an assistant may have invented.
+8. **failure and leakage** — generic errors to clients, secrets and personal data kept out of logs,
+   an audit trail, and backups with a restore path.
+
+A security brief adds two rules. A finding needs a proof attached: the request and response, a
+failing test, or a minimal script run against a local instance the hunter started. And the rules of
+engagement: attack only the repository and a local instance inside the hunter's microVM — no
+deployed environment, external host or third-party service, and no real credentials.
+
+Pick it with the wizard's **Preset** choice, `"preset": "security"` on `POST /api/redteam/runs` or
+`POST /api/redteam/schedules`, or `colonizer redteam start owner/repo --preset security`
+([cli.md](cli.md#red-team-runs)). An unknown preset is a 400.
+
+### The pre-scan
+
+Before the first hunter of a security run exists, the mothership pre-scans the repository's host
+mirror (`data/repos/<owner>/<repo>.git`). It is deterministic: no model tokens, and the repository's
+code never runs. The tree is read blob by blob with `git ls-tree` and `git cat-file` — no checkout,
+so no attributes, filters or hooks — and the history with `git log -p`, both with repository-controlled
+execution and lazy fetches turned off. It checks for:
+
+- `.env` files (not templates) committed, or env files in use with no `.gitignore` rule covering them;
+- secrets in the tree and the history: with gitleaks when the
+  operator has it on the host's `PATH` (it is never downloaded; its report is redacted), otherwise a
+  built-in provider-prefix scan, and the report says which ran and that the fallback knows fewer key
+  shapes;
+- client-exposed env vars that are secret-shaped (`NEXT_PUBLIC_*SECRET*`, `VITE_*_API_KEY`; anon,
+  publishable and public keys are left alone);
+- manifests with no committed lockfile, and dependencies on `*`, `latest` or open ranges;
+- declared dependencies the lockfile has no entry for, or lockfile entries with no registry metadata —
+  checked against the lockfile only, offline — as candidates for invented packages;
+- CORS allowing any origin in a file that also allows credentials;
+- SQL assembled from strings (concatenation, templates, f-strings, `format!`);
+- webhook routes in files with no sign of a signature check;
+- public storage buckets and rules (S3 ACLs and policies, GCS `allUsers`, Supabase public buckets,
+  Firebase `if true`);
+- row level security disabled in SQL migrations, or (on Supabase) tables created without it;
+- repo agent files (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`, `.mcp.json`, Claude and Cursor settings)
+  with suspicious instructions, hidden characters or wide tool grants, flagged for human review.
+
+Every hit is a **lead**, never a vulnerability. Leads are numbered `P1`, `P2`, … and each belongs to
+one focus area; the run deals it to the hunter holding that focus (round-robin when a swarm of more
+than eight holds a focus twice; to hunter `focus % n` when a smaller swarm holds none), up to 20 per
+brief, like bench raid leads. The brief asks the hunter to confirm or dismiss each one and cite its id.
+A mirror that does not exist yet (no colony has cloned the repository) skips the scan and says so.
+
+### The report
+
+The pre-scan is stored on the run as `prescan` — the scanned commit, which secret scanner ran,
+notes, the leads, and the operator checklist — and the cockpit's red-team history shows it under the
+run as two sections: **Pre-scan leads** and **Operator checklist**.
+
+The checklist lists what code cannot prove: keys rotated after any exposure, spending caps at every
+provider, token lifetimes set, backups restore-tested, production credentials out of agents' reach,
+and upload processing isolated. Each item carries the evidence the repository or the mothership
+shows (the exposures the pre-scan found, "no spend cap in Colonizer provider settings for provider
+X", "no backup job found in repo", where lifetimes or upload handling appear) and is either
+`needs_review` or `not_verifiable`. No item is ever marked passed.
+
+The security synthesis judge ranks the merged defects by severity (reproduced before unconfirmed at
+the same severity), attaches the strongest proof to each line (`proof`), and merges the pre-scan leads
+hunters confirmed into the defects they became (`prescan_leads`). A lead nobody confirmed stays out of
+the merged report; it is still listed on the run.
+
 ## Findings and the tally
 
 Each hunter writes `findings.jsonl` in its session directory (protocol §6.6), one line
