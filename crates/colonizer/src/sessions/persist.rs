@@ -36,6 +36,12 @@ impl App {
         self.cfg.data_dir.join("jev_ladder.jsonl")
     }
 
+    /// Every verification's focused-first measurement (#584), one JSON line each, kept in the data
+    /// dir like the ladder ledger so the speed-up can be judged across colonies.
+    pub(crate) fn jev_focus_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("jev_focus.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }

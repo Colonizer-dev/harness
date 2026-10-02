@@ -114,6 +114,7 @@ mod usage;
 mod util;
 mod validation;
 mod verify;
+mod verify_focus;
 mod version;
 mod voice;
 mod watchdog;

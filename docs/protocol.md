@@ -2244,7 +2244,14 @@ root or, when it belongs to a subdirectory's own package, from that subdirectory
 - **Covered by neither:** the root Makefile's `test:` target → `make test`, and nothing at all when
   the repository declares none.
 
-The checks run sequentially, one microVM each. Each fresh-checkout VM checks for the tool the command
+The checks run sequentially, one microVM each, in the diff's order unless the `publish` module's
+`verify_focus` setting says otherwise ([#584](https://github.com/Colonizer-dev/harness/issues/584)): `act` runs first the check owning the most changed
+files and, when it contradicts the claim, skips the rest; `shadow` (the default) keeps the order and
+only measures; `off` does neither. Shadow and act append one row per verification that ran a check
+to the data dir's `jev_focus.jsonl` — `{kind: "focus", ts, session, mode, candidates: [{label,
+owned}], chosen, would_catch, verdict, actual_first_failure_ms, focused_first_failure_ms, total_ms,
+checks_run}`, `chosen` being `full` when there is nothing to focus on (fewer than two checks) —
+and `confirmed` still needs every check run green. Each fresh-checkout VM checks for the tool the command
 needs before running it: a tool the colony image does not carry (the default node image has no bun or
 pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
 rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own

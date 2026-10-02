@@ -864,13 +864,25 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
     let (mut ran_any, mut all_green) = (false, true);
     let mut first_failure: Option<i32> = None;
     let mut reported_zero = true;
+    // Focused-first (#584): which check goes first, and what each check cost and said.
+    let focus = crate::verify_focus::mode(app).await;
+    let candidates = crate::verify_focus::focus_candidates(&checks, &changed);
+    let chosen = crate::verify_focus::choose(&candidates);
+    let mut runs: Vec<crate::verify_focus::Run> = Vec::new();
     if contradictions.is_empty() && forced.is_none() {
         if checks.is_empty() {
             forced = Some(format!(
                 "no test command applies to the files this diff touches (nothing usable on {base})"
             ));
         } else {
-            for check in &checks {
+            let mut order: Vec<usize> = (0..checks.len()).collect();
+            if let (crate::verify_focus::Mode::Act, Some(first)) = (focus, chosen) {
+                order.retain(|&i| i != first);
+                order.insert(0, first);
+            }
+            for &index in &order {
+                let check = &checks[index];
+                let (check_started, contradicted_before) = (Instant::now(), contradictions.len());
                 let ran = match run_tests(
                     app,
                     s,
@@ -934,8 +946,20 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
                         break;
                     }
                 }
+                let failed = contradictions.len() > contradicted_before;
+                runs.push(crate::verify_focus::Run {
+                    check: index,
+                    ms: check_started.elapsed().as_millis() as u64,
+                    failed,
+                });
+                // Act: the focused check's own contradiction settles the verdict, so the rest of
+                // the suite is not paid for. Nothing else stops early.
+                if failed && focus == crate::verify_focus::Mode::Act && Some(index) == chosen {
+                    break;
+                }
             }
-            green = ran_any.then_some(all_green);
+            // Confirmed needs the whole suite: a check that never ran can never count as green.
+            green = ran_any.then_some(all_green && runs.len() == checks.len());
         }
     }
     record.exit_code = first_failure.or_else(|| (ran_any && reported_zero).then_some(0));
@@ -959,7 +983,11 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
         Verdict::Inconclusive => format!("inconclusive: {}", record.inconclusive.join("; ")),
         Verdict::Unverifiable => "the tests could not be judged".into(),
     });
-    record.finished(started)
+    let record = record.finished(started);
+    if focus != crate::verify_focus::Mode::Off && !runs.is_empty() {
+        crate::verify_focus::record(app, &s.id, focus, &candidates, chosen, &runs, record.verdict, record.ms).await;
+    }
+    record
 }
 
 /// What one fresh-checkout run said — the same reading for the head and the base: the guest's own
@@ -2291,6 +2319,135 @@ pub(crate) mod tests {
         assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
         assert!(v.summary.contains("no test command applies"), "{}", v.summary);
         assert_eq!(v.exit_code, None, "no VM booted to fail in a deleted directory");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two crates on the base, `a` and `b`; the branch changes one file in `a` and two in `b`, so
+    /// the diff's order runs `a` first while focus (#584) picks `b`. `mode` is `verify_focus`.
+    async fn two_crate_fixture(app: &crate::Shared, mode: &str) {
+        app.modules
+            .write()
+            .await
+            .publish
+            .settings
+            .insert("verify_focus".into(), json!(mode));
+        let repo = worktree_fixture(app, None, "did the work", false).await;
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(repo.join(dir).join("src")).unwrap();
+            std::fs::write(repo.join(dir).join("Cargo.toml"), "[package]\n").unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "two crates");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        for file in ["a/src/x.rs", "b/src/y.rs", "b/src/z.rs"] {
+            std::fs::write(repo.join(file), "fn main() {}\n").unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "work");
+    }
+
+    /// Each run a [`crate_runner`] saw, as `(dir, head?)`, in order.
+    type Calls = Arc<Mutex<Vec<(String, bool)>>>;
+
+    /// A runner for [`two_crate_fixture`] that logs each run and fails the head run in `failing`
+    /// (the base always passes, so that failure contradicts).
+    fn crate_runner(failing: Option<&'static str>) -> (VmRunner, Calls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let runner: VmRunner = Arc::new(move |spec| {
+            let log = log.clone();
+            Box::pin(async move {
+                let ws = spec.mounts.iter().find(|m| m.target == "/workspace").unwrap().source.clone();
+                let head = tokio::fs::try_exists(ws.join("b/src/y.rs")).await.unwrap_or(false);
+                let dir = if spec.command[2].contains("/workspace/a'") { "a" } else { "b" };
+                log.lock().unwrap().push((dir.to_string(), head));
+                let code = i32::from(head && failing == Some(dir));
+                let report = spec.mounts.iter().find(|m| m.target == "/colonizer-verify").unwrap();
+                tokio::fs::write(report.source.join("exit"), code.to_string()).await?;
+                Ok(code)
+            })
+        });
+        (runner, calls)
+    }
+
+    fn focus_rows(app: &crate::Shared) -> Vec<Value> {
+        std::fs::read_to_string(app.jev_focus_file())
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn runs(calls: &Calls) -> Vec<(String, bool)> {
+        calls.lock().unwrap().clone()
+    }
+
+    /// Act: the focused check runs first; its contradiction stops the verification there.
+    #[tokio::test]
+    async fn act_mode_stops_at_the_focused_checks_failure() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(Some("b"));
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(runs(&calls), [("b".into(), true), ("b".into(), false)], "a never ran");
+        let rows = focus_rows(&app);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["mode"], "act");
+        assert_eq!(rows[0]["chosen"], "b: cargo test");
+        assert_eq!(rows[0]["would_catch"], true);
+        assert_eq!(rows[0]["checks_run"], 1);
+        assert_eq!(rows[0]["candidates"][1], json!({"label": "b: cargo test", "owned": 2}));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The acceptance test for #584: in act mode a confirmed verdict still ran the full suite.
+    #[tokio::test]
+    async fn act_mode_confirms_only_after_the_full_suite() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(None);
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert_eq!(
+            runs(&calls),
+            [("b".into(), true), ("a".into(), true)],
+            "focused first, then the rest"
+        );
+        assert_eq!(focus_rows(&app)[0]["would_catch"], Value::Null, "nothing failed");
+        // A failure outside the focused check is still found by the rest of the suite.
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(Some("a"));
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(runs(&calls), [("b".into(), true), ("a".into(), true), ("a".into(), false)]);
+        assert_eq!(focus_rows(&app)[1]["would_catch"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Shadow runs exactly what off runs, in the same order, with the same verdict — and only
+    /// records what focus would have done.
+    #[tokio::test]
+    async fn shadow_mode_changes_nothing_but_the_ledger() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let mut seen = Vec::new();
+        for mode in ["off", "shadow"] {
+            two_crate_fixture(&app, mode).await;
+            let (runner, calls) = crate_runner(Some("b"));
+            let v = verify(&app, &runner).await;
+            seen.push((v.verdict, v.contradictions, runs(&calls)));
+            assert_eq!(focus_rows(&app).len(), usize::from(mode == "shadow"), "off records nothing");
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[1].0, Verdict::Contradicted);
+        assert_eq!(seen[1].2, [("a".into(), true), ("b".into(), true), ("b".into(), false)]);
+        let row = &focus_rows(&app)[0];
+        assert_eq!(
+            (&row["mode"], &row["chosen"], &row["would_catch"]),
+            (&json!("shadow"), &json!("b: cargo test"), &json!(true))
+        );
+        assert_eq!(row["verdict"], "contradicted");
+        assert_eq!(row["checks_run"], 2);
         let _ = std::fs::remove_dir_all(root);
     }
 
