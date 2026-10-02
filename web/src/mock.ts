@@ -3434,6 +3434,8 @@ export function createMockApi(): Api {
       worktrees_bytes: 3_221_225_472,
       repos_bytes: 1_073_741_824,
       sessions_bytes: 268_435_456,
+      // The two seeded archive bundles (issue #496), under <data_dir>/archive.
+      archive_bytes: 5_242_880 + 2_621_440,
       // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
       microsandbox_bytes: 2_147_483_648,
     },

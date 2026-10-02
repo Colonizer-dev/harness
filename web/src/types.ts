@@ -799,8 +799,8 @@ export interface StorageSummary {
   free_bytes: number | null;
   /** Free space is below the floor: the queue is not starting new colonies (running ones keep running). */
   admission_paused: boolean;
-  /** Data-dir usage by category. `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
-  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; microsandbox_bytes: number | null };
+  /** Data-dir usage by category. `archive_bytes` is the log archive under `<data_dir>/archive`; `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
+  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; archive_bytes: number; microsandbox_bytes: number | null };
   /** Finished colonies whose work is pushed (a PR, or no_changes) and not yet cleaned up; `due` means past the auto-reclaim retention window. */
   reclaimable: Array<{ id: string; status: SessionStatus; pr_url: string | null; bytes: number; updated_at: string; due: boolean }>;
   /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
