@@ -942,7 +942,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         if health["reachable"] != true {
             // The cached probe only feeds a warning; a refusal is decided on a fresh one, so an
             // endpoint that came back within the probe TTL is not refused on a stale answer (#295).
-            let health = if provider.fallback_model.is_some() {
+            // Only a Claude fallback covers an unreachable endpoint: a provider-prefixed one is the
+            // gateway's quota retry (issue #767), which a connection that never answers never reaches.
+            let health = if provider.claude_fallback().is_some() {
                 health.clone()
             } else {
                 crate::gateway::probe(app, provider).await
@@ -959,7 +961,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .await;
                 continue;
             }
-            let then = match &provider.fallback_model {
+            let then = match provider.claude_fallback() {
                 Some(model) => format!("its requests will fall back to {model}"),
                 // Without a fallback every request through this connection can only fail, so the
                 // launch is refused with the fix instead of warned about (#295).

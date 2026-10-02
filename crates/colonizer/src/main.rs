@@ -84,6 +84,7 @@ mod publish;
 mod push;
 mod push_prefs;
 mod queue;
+mod quota_cards;
 mod rebase;
 mod reclaim;
 mod redteam;

@@ -353,6 +353,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::plugins::routes())
         .merge(crate::providers::routes())
         .merge(crate::publish::routes())
+        .merge(crate::quota_cards::routes())
         .merge(crate::push::routes())
         .merge(crate::reclaim::routes())
         .merge(crate::redteam::routes())

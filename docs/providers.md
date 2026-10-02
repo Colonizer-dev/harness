@@ -68,9 +68,10 @@ with a fix in the message, when any of these holds:
 
 1. the model's `<provider>/` prefix names no configured connection;
 2. the connection's non-empty `model_map` does not list the model;
-3. the connection is unreachable at launch and the route has no `fallback_model`. Before refusing, the
+3. the connection is unreachable at launch and the route has no Claude `fallback_model` (a
+   `<provider>/<model>` fallback only covers quota exhaustion). Before refusing, the
    boot probes the connection again rather than trusting the cached answer, so an outage that ended a
-   moment ago does not block the launch. A connection with a `fallback_model` only gets a warning in
+   moment ago does not block the launch. A connection with a Claude `fallback_model` only gets a warning in
    the colony log: its requests go to that Claude model instead.
 
 Only the connections this colony's model settings name (`model`, `subagent_model`,
@@ -112,10 +113,25 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
   `quota` probe left on the old origin is refused the same way: move or clear it in the same save.
 - **Quota exhaustion.** When a provider answers `429` or `403` with a message that says the plan ran out
   (not a plain rate limit), the gateway records it as exhausted until the reset the message names, or
-  for 15 minutes when it names none. With a `fallback_model`, the request is retried on that Claude
-  model. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
+  for 15 minutes when it names none. With a Claude `fallback_model`, the request is retried on that
+  Claude model. With a `<provider>/<model>` fallback on another connection of the same wire (anthropic
+  to anthropic, openai to openai), the Mothership retries the request there itself; a cross-wire
+  fallback is refused when you save it. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
   connection the colonies route to is exhausted, the queue pauses, and a colony whose turn died on the
   plan is stopped with its worktree kept until the provider recovers.
+- **Out-of-quota card.** Colonies blocked on an exhausted connection (every request since their last
+  success answered with the quota error, and no `fallback_model` retry) show on one "Provider out of
+  quota" card per connection — in the inbox's "Needs you" list and at the top of Settings →
+  Providers — with the model, the reset and a countdown. **Switch model** moves those colonies (or,
+  with "this org", their orgs' model settings too) to a healthy model from the picker, which shows
+  each model's failure rate, and restarts them on it. "Every role using this provider" goes further:
+  every model role in the install's agent settings and every org override that points at the
+  connection moves too, after each role is checked (nothing changes if one cannot take the model),
+  and the cockpit lists each setting as "was X → now Y". "Remember" saves the pick as the
+  connection's `fallback_model` — a Claude model, or a model on a same-wire connection — so the next
+  exhaustion retries on it by itself. **Wait until reset**
+  parks them and resumes them at the reset. **Stop** stops them. The API is
+  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
   and the colony log says why.

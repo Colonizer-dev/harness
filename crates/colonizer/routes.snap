@@ -1,6 +1,7 @@
 /api/activity                                        GET    unauth=401    token=owner            activity=-
 /api/archive                                         GET    unauth=401    token=owner            activity=-
 /api/archive/retention                               POST   unauth=401    token=owner            activity=-
+/api/attention                                       GET    unauth=401    token=owner            activity=-
 /api/burn-down                                       GET    unauth=401    token=owner            activity=-
 /api/burn-down/stop                                  POST   unauth=401    token=owner            activity=burn_down.stop
 /api/chat                                            GET    unauth=401    token=owner            activity=-
@@ -112,6 +113,7 @@
 /api/providers/{id}                                  DELETE unauth=401    token=owner            activity=settings.remove
 /api/providers/{id}                                  PUT    unauth=401    token=owner            activity=settings.save
 /api/providers/{id}/health                           GET    unauth=401    token=owner            activity=-
+/api/providers/{id}/quota-action                     POST   unauth=401    token=owner            activity=settings.save
 /api/push/answer                                     POST   unauth=415    token=owner            activity=-
 /api/push/key                                        GET    unauth=401    token=owner            activity=-
 /api/push/presence                                   POST   unauth=401    token=owner            activity=-
