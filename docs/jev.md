@@ -36,6 +36,27 @@ the harness makes zero network calls and every rule behaves exactly as before.
 | Point | Settings | Budget |
 | --- | --- | --- |
 | `routing.tier` | `jev_shadow_mode`, `jev_routing_act`, `jev_routing_act_confidence` | 1800 ms |
+| `recovery.path` | `jev_shadow_mode`, `jev_recovery_act`, `jev_recovery_act_confidence`, `jev_recovery_cap` | 1800 ms |
+
+### `recovery.path`
+
+What to do when a step fails: a provider error, a tool failure, a watchdog stall, or
+`autopilot_held`. The closed option set is `retry_same`, `retry_other_provider`, `narrow_task`
+(split the work into smaller subagent tasks), `nudge_agent`, `ask_human` and `stop`. `ask_human` and
+`stop` are always offered; `retry_other_provider` only where a second provider exists (today neither
+call site can switch a running colony cheaply, so it is never offered). Nothing in the set pushes,
+publishes or deletes — those are not options.
+
+- The harness's own rule is the fallback and the shadow-mode action: the watchdog's nudge (`Stall`)
+  and autopilot's hold (`AutopilotHeld`, or `ProviderError` when the colony is already flagged as a
+  provider error).
+- In **act** mode a confident pick is carried out: a `retry_same`/`narrow_task`/`nudge_agent` sends
+  the agent a short message, while `ask_human` and `stop` leave the colony for you (no nudge or
+  message). At the watchdog site `stop` also interrupts the current turn; at the autopilot site the
+  turn has already ended, so `stop` only raises the "needs you" flag like `ask_human`.
+- **Caps.** At most `jev_recovery_cap` (default 2) machine-chosen recoveries per colony; recovering
+  past the cap is `ask_human`. Recoveries that ask a person or stop never count against it. The
+  count is per colony, in memory — a mothership restart starts it over.
 
 ## The ledger
 
@@ -46,8 +67,13 @@ Every ask at a point that is not off appends one row to `decisions.jsonl` in the
 - `pick` and `confidence` are null on a miss; `miss` names why (`no_key`, `org_off`, `forbidden`,
   `timeout`, `error`, `outside_options`).
 - `did` is what the harness did in the end — for routing, `jev` when the tier came from Jev's pick
-  and `rule` otherwise.
-- `outcome` is reserved for later per-point work grading a decision against what happened; null today.
+  and `rule` otherwise; for recovery, `jev`, `rule`, or `cap` when the per-colony cap turned an
+  automatic pick into `ask_human`.
+- `outcome` grades a decision against what happened. `recovery.path` fills it: ten minutes after each
+  decision (shadow and act alike) a second row is appended with the same point, session and `ts`,
+  `kind: "outcome"`, and `outcome` = `{"progressed": bool, "window_min": 10}` — whether the colony's
+  activity shows progress after the decision. A grade measures only, so it writes no activity line. A
+  restart before the window elapses loses that grade. Other points leave it null today.
 
 Each ask also writes one activity line (`GET /api/activity`): `decision.shadow` for a shadow ask,
 `decision.act` for a used act pick, and `decision.fallback` for an act ask on the rule or any miss.
