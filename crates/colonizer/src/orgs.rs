@@ -119,6 +119,11 @@ pub struct OrgSettings {
     /// refuses to start new colonies for it, while keeping its settings and its existing colonies.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Whether this org's colonies may consult Jev at any decision point (issue #582). `Some(false)`
+    /// turns every point off for the org's colonies — no network call is made — while `None` or
+    /// `Some(true)` follows the module settings, point by point.
+    #[serde(default)]
+    pub jev: Option<bool>,
     #[serde(default)]
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
@@ -903,6 +908,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     };
     if !named("enabled") {
         incoming.enabled = saved.enabled;
+    }
+    if !named("jev") {
+        incoming.jev = saved.jev;
     }
     if !named("agent") {
         incoming.agent = saved.agent.clone();

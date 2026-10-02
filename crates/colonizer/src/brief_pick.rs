@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// A note carrying any of these tags is mandatory: always loaded, never offered, never droppable.
 /// Kept lowercase, matching how `memory::draft` normalises tags.
@@ -33,6 +34,10 @@ const QUESTION_ID: &str = "brief_item";
 
 /// The option that ends a pick loop.
 const NONE: &str = "none";
+
+/// One round's ceiling — the same 1800 ms every Jev point uses (`decide.rs`). The loop runs off the
+/// boot path, so this bounds how long a measurement takes, never a boot.
+const ROUND_BUDGET: Duration = Duration::from_millis(1800);
 
 /// One offered item: a shared-memory note or a skill pack. `label` is `note:<scope>/<id>` or
 /// `skill:<pack>` — the option string sent to Jev and the ledger's key; `path` is the guest path the
@@ -206,10 +211,20 @@ impl Watch {
 }
 
 /// The boot path's one call (#585). Spawns the pick off the boot path so it never delays or fails a
-/// boot: disabled, no Jev key, or memory off all return immediately, and everything the spawned task
-/// does is measurement. `plugin_names` are the configured packs, `labels` the task's issue labels.
-pub(crate) fn start(app: &Shared, id: &str, enabled: bool, memory_on: bool, plugin_names: &[String], labels: &[String]) {
-    if !enabled || !memory_on {
+/// boot: disabled, the org's Jev switch off (`org_settings.jev`, which turns every Jev point off for
+/// its colonies — #582), no Jev key, or memory off all return immediately with no network call, and
+/// everything the spawned task does is measurement. `plugin_names` are the configured packs,
+/// `labels` the task's issue labels.
+pub(crate) fn start(
+    app: &Shared,
+    id: &str,
+    enabled: bool,
+    org_allows: bool,
+    memory_on: bool,
+    plugin_names: &[String],
+    labels: &[String],
+) {
+    if !enabled || !org_allows || !memory_on {
         return;
     }
     let Some(api_key) = crate::jev::api_key() else { return };
@@ -274,7 +289,7 @@ async fn run(app: Shared, id: String, api_key: String, plugin_names: Vec<String>
     app.runtime(&id).await.brief_pick.lock().await.arm(&watch);
 
     let (picks, rounds, missed) = pick(
-        &crate::jev::JevClient::new(api_key),
+        &crate::jev::JevClient::new_at(api_key, crate::jev::ENDPOINT.to_string()),
         &s.issue_title,
         &labels,
         &mandatory,
@@ -330,24 +345,27 @@ async fn pick(
     let mut missed = false;
     while picks.len() < MAX_PICKS && !remaining.is_empty() {
         rounds += 1;
-        let options: Vec<String> = remaining
+        let options: Vec<&str> = remaining
             .iter()
-            .map(|candidate| candidate.label.clone())
-            .chain([NONE.to_string()])
+            .map(|candidate| candidate.label.as_str())
+            .chain([NONE])
             .collect();
         let state =
             json!({ "title": title, "labels": &labels, "mandatory": &mandatory, "candidates": &remaining, "picks": &picks });
-        match client.ask_choice(QUESTION_ID, &options, &state).await {
-            None => {
+        // A choice outside the offered options is a miss, never a pick: matched exactly, so a pick is
+        // always a label this round offered.
+        let choice = match client.ask(QUESTION_ID, &options, &state, ROUND_BUDGET).await {
+            Ok(answer) if options.contains(&answer.choice.as_str()) => answer.choice,
+            _ => {
                 missed = true;
                 break;
             }
-            Some((choice, _)) if choice == NONE => break,
-            Some((choice, _)) => {
-                picks.push(choice.clone());
-                remaining.retain(|candidate| candidate.label != choice);
-            }
+        };
+        if choice == NONE {
+            break;
         }
+        remaining.retain(|candidate| candidate.label != choice);
+        picks.push(choice);
     }
     (picks, rounds, missed)
 }
@@ -422,7 +440,7 @@ mod tests {
     }
 
     fn client(base: String) -> crate::jev::JevClient {
-        crate::jev::JevClient::with_base_url("test-key".into(), base)
+        crate::jev::JevClient::new_at("test-key".into(), base)
     }
 
     /// The acceptance rule: a `house-rule` or `security` note is never offered as an option, and is in
@@ -450,7 +468,7 @@ mod tests {
     #[tokio::test]
     async fn picking_stops_at_none_the_cap_and_a_miss() {
         let c = |label: &str| candidate(label);
-        let base = crate::jev::tests::serve_scripted(vec![answer("c0"), answer("none"), answer("c1")]).await;
+        let base = crate::jev::mock::serve_scripted(vec![answer("c0"), answer("none"), answer("c1")]).await;
         let (picks, rounds, missed) = pick(&client(base), "a task", &[], &[], &[c("c0"), c("c1")]).await;
         assert_eq!(
             (picks.as_slice(), rounds, missed),
@@ -460,11 +478,11 @@ mod tests {
 
         let script: Vec<Value> = (0..MAX_PICKS + 3).map(|i| answer(&format!("c{i}"))).collect();
         let pool: Vec<Candidate> = (0..MAX_PICKS + 3).map(|i| c(&format!("c{i}"))).collect();
-        let base = crate::jev::tests::serve_scripted(script).await;
+        let base = crate::jev::mock::serve_scripted(script).await;
         let (picks, rounds, missed) = pick(&client(base), "a task", &[], &[], &pool).await;
         assert_eq!((picks.len(), rounds, missed), (MAX_PICKS, MAX_PICKS, false));
 
-        let base = crate::jev::tests::serve_scripted(vec![answer("ghost")]).await;
+        let base = crate::jev::mock::serve_scripted(vec![answer("ghost")]).await;
         let (picks, rounds, missed) = pick(&client(base), "a task", &[], &[], &[c("c0")]).await;
         assert!(picks.is_empty(), "a choice outside the options is a miss, not a pick");
         assert_eq!((rounds, missed), (1, true));

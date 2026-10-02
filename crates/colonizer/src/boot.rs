@@ -787,6 +787,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The Jev brief picker (#585) is its own default-off switch: it asks Jev which memory notes and
     // skill packs to load, shadow only. Read here; the work is spawned at the end of the boot.
     let brief_shadow = flag("jev_brief_shadow").unwrap_or(false);
+    // The routing point's ask (issue #582): `None` only when the mode is off, so a short-circuit the
+    // decision layer handles without a network call still produces a ledger row below. The org's own
+    // switch (`org_settings.jev`) can turn every point off for its colonies.
+    let routing_ask = crate::jev::shadow_opinion(
+        jev_mode,
+        org_settings.jev != Some(false),
+        &s.issue_title,
+        &task_labels,
+        &task_signals,
+    )
+    .await;
     let route_settings = crate::routing::RoutingSettings {
         enabled: flag("route_per_task").unwrap_or(true),
         chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
@@ -797,7 +808,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         sensitive: crate::sensitivity::required_mark(sensitivity, org_settings.sensitivity.as_ref())
             > crate::sensitivity::ProviderMark::Any,
     };
-    task_signals.jev = crate::jev::shadow_opinion(jev_mode.asks(), &s.issue_title, &task_labels, &task_signals).await;
+    task_signals.jev = routing_ask.as_ref().and_then(|ask| ask.opinion.clone());
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
     let model = setting_str(&agent_choice, &agent.schema, "model");
@@ -942,6 +953,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // A lost routing record is a lost measurement, not a failed boot: say so and carry on.
     if let Err(e) = append_line(&app.routing_file(), &line).await {
         log.error(format!("could not save the routing decision: {e:#}")).await;
+    }
+    // The shared decision ledger (issue #582): one row per ask at any point, saying what was picked
+    // or why nothing was, and what the harness did about it. `did` is `jev` only when the routing
+    // decision's tier came from Jev's opinion, so a report can compare the two sources by outcome.
+    if let Some(ask) = &routing_ask {
+        let did = if tier_decision.source == crate::routing::Source::Jev {
+            "jev"
+        } else {
+            "rule"
+        };
+        let row = crate::decide::row(&crate::decide::ROUTING_TIER, &s, jev_mode, ask.options, &ask.result, did);
+        crate::decide::record(app, &row).await;
     }
     let gateway_token = random_token();
     let routing = providers::colony_routes(app, &gateway_token);
@@ -1491,7 +1514,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
-    let resolved_egress = crate::egress::resolve(&modules, &org_settings);
+    // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
+    // its vendor's declared hosts without the operator restating them.
+    let resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
     let tls_hosts = tls_edge_hosts(&secrets);
     let (net_profiles, net_rules, egress_record) =
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
@@ -1637,7 +1662,15 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     start_link(app, id).await;
     // Jev brief picks (#585, shadow only): spawn the candidate build and pick off the boot path, so
     // a slow or unreachable Jev never delays or fails a boot. One call; brief_pick.rs owns the rest.
-    crate::brief_pick::start(app, id, brief_shadow, memory_on, &plugin_names, &task_labels);
+    crate::brief_pick::start(
+        app,
+        id,
+        brief_shadow,
+        org_settings.jev != Some(false),
+        memory_on,
+        &plugin_names,
+        &task_labels,
+    );
     // A pre-warm boot (issue #701) has no answer riding it: once the runner is linked, this task
     // holds the colony open for the answer instead of finishing a normal launch. An answer that
     // lands is delivered on the spot; the timeout suspends the colony again and frees the slot.
@@ -2083,7 +2116,7 @@ mod tests {
             };
             // The default policy is Open with no operator entries: today's fence, plus the
             // always-blocked deny set every colony carries (#303).
-            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default());
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None);
             let (profiles, rules, record) =
                 colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
@@ -2147,6 +2180,7 @@ mod tests {
                 mode: "global".into(),
                 ..Default::default()
             },
+            ..Default::default()
         };
         let (profiles, rules, record) = colony_network(
             Some((vec!["allow@192.168.1.4:udp:41743".into()], 41740)),

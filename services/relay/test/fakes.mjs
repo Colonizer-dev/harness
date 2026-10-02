@@ -55,8 +55,9 @@ export function fakePair() {
   return [a, b];
 }
 
-/** Fails a promise after 2s, so a protocol bug shows as a test failure instead of a hang. */
-export function within(promise, label = 'timed out', ms = 2000) {
+/** Fails a promise after 10s, so a protocol bug shows as a test failure instead of a hang. Kept well
+ * above the fakes' helloTimeoutMs below, so this guard never races the relay's own hello timer under load. */
+export function within(promise, label = 'timed out', ms = 10000) {
   let timer;
   return Promise.race([
     promise,
@@ -93,7 +94,7 @@ export function makeDo(opts = {}) {
     state,
     {},
     {
-      helloTimeoutMs: 2000,
+      helloTimeoutMs: 5000, // comfortably above the async verifyEd25519 cost, and below production's 10000
       responseTimeoutMs: 1000,
       idleTimeoutMs: 4000,
       pingMs: 60000,
