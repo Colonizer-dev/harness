@@ -4,12 +4,14 @@
 // theme override. The colony and memory panes are passed in as slots so App keeps its existing
 // wiring for them, and settings stays the dialog App already owns rather than a second copy.
 import { CodeView } from "./CodeView";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
 import type { QuestionActions } from "../components/AskUserCard";
 import type { SectionId } from "../components/SettingsDialog";
 import { isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "../components/ui";
+import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewFromUrl, welcomeFromUrl, type SharedIssue } from "../launchUrl";
+import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
 import { colonyFromUrl } from "../push";
@@ -29,12 +31,14 @@ import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
+import { runQuotaAction } from "./ProviderQuotaCard";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
 import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
 import { Page } from "./Page";
+import { PhoneWelcomeSheet } from "../components/PhoneWelcomeSheet";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -54,8 +58,9 @@ function storedDashOpen(): boolean | null {
 
 const THEME_KEY = "colonizer.theme";
 
-/** Every view the rail can route to; "home" is the Nest. */
-export const COCKPIT_VIEWS: readonly CockpitView[] = ["overview", "home", "colony", "launch", "inbox", "history", "loops", "settings", "memory", "host", "secrets", "code", "chat"];
+/** Every view the rail can route to; "home" is the Nest. The list itself lives in launchUrl.ts,
+ *  next to the `?view=` parsing that must agree with it. */
+export { COCKPIT_VIEWS };
 
 function storedView(): CockpitView {
   const saved = stored(VIEW_KEY);
@@ -74,6 +79,7 @@ export function actionError(action: "stop" | "resume", colony: string, error: un
 
 export function Cockpit({
   sessions,
+  sessionsLoaded,
   orgs,
   redRuns = [],
   selectedOrg,
@@ -108,6 +114,8 @@ export function Cockpit({
 }: {
   /** Every colony the mothership knows; the cockpit filters to the chosen workspace itself. */
   sessions: Session[];
+  /** Whether the first session poll has landed; launch urls wait for it before acting. */
+  sessionsLoaded: boolean;
   orgs: OrgInfo[];
   /** Red-team runs; the overview card and the nest's raid overlay read them. */
   redRuns?: RedTeamRun[];
@@ -160,14 +168,22 @@ export function Cockpit({
 }) {
   const api = useApi();
   const toast = useToast();
-  const [view, setView] = useState<CockpitView>(storedView);
+  // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
+  const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
   const [askPrompt, setAskPrompt] = useState<{ text: string; n: number } | null>(null);
   // A file the Chat view asked the Code page to open.
   const [codeRequest, setCodeRequest] = useState<{ repo: string; path: string; n: number } | null>(null);
+  // An issue a share-target launch handed over (`?share_url=…`, issue #745), kept until the colony
+  // list can say where it belongs; and the prefill that decision hands to the launch form.
+  const [shared, setShared] = useState<SharedIssue | null>(() => sharedIssueFromUrl(window.location.href));
+  const [launchPrefill, setLaunchPrefill] = useState<SharedIssue | null>(null);
   // A colony a push deep link asked for (issue #516): `?colony=<id>` from boot, or a
   // `colonizer:open` message from the service worker, opened once the session list has it.
   const [deeplink, setDeeplink] = useState<string | null>(() => colonyFromUrl(window.location.href));
+  // A phone that just signed in through a scanned code lands on `?welcome=phone` (issue #746),
+  // which offers the install-and-notify sheet once.
+  const [welcome, setWelcome] = useState<"phone" | null>(() => welcomeFromUrl(window.location.href));
   const [theme, setTheme] = useState<"light" | "dark" | null>(storedTheme);
   const [inspector, setInspector] = useState<InspectorTarget | null>(null);
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -291,6 +307,10 @@ export function Cockpit({
   // the view on screen. Without this the open colony would carry two sockets.
   const streamFor = view === "home" && inspector?.kind === "colony" ? inspector.session.id : null;
   const { stream, state } = useSessionStream(api, streamFor);
+  // The outbox's view of what the worker is holding, so an answer queued while the socket was
+  // down can be reported when the mothership finally refuses it.
+  const outbox = useOutbox();
+  const queuedAnswers = useRef(new Set<string>());
   const settlers = useMemo(() => Object.values(buildThread(state).subagents), [state]);
   // The inspector answers the colony's question from this same stream, so the pane clears itself
   // the moment `question_answered` arrives — nothing here is cached from render to render.
@@ -298,22 +318,41 @@ export function Cockpit({
   const questionActions = useMemo<QuestionActions>(() => {
     const live = inspector?.kind === "colony" ? isLive(inspector.session.status) : false;
     const connected = state.connection === "open";
+    // Offline is no longer a wall (issue #746): with the worker's outbox behind us the answer can
+    // queue and send on reconnect, so the card stays open — and owns up to the queueing.
+    const queueing = !connected && live && canQueue();
     return {
-      answer: (questionId, answers, response) => {
+      answer: (questionId, answers, response, questions) => {
         try {
-          const sent = stream?.send({ type: "answer", question_id: questionId, answers, response }) ?? false;
-          if (!sent) toast("Not connected to the colony — try again in a moment.", "error");
-          return sent;
+          const outcome = sendOrQueue(stream, { type: "answer", question_id: questionId, answers, response }, questions);
+          if (outcome.status === "failed") toast("Not connected to the colony — try again in a moment.", "error");
+          if (outcome.status === "queued") {
+            queuedAnswers.current.add(outcome.id);
+            toast("Answer queued — it sends when you're back online.");
+          }
+          return outcome.status !== "failed";
         } catch (error) {
           toast(errorMessage(error), "error");
           return false;
         }
       },
       submitting: state.submitting,
-      canAnswer: connected && live,
-      blockedBy: !live ? "ended" : !connected ? "disconnected" : null,
+      canAnswer: (connected || queueing) && live,
+      willQueue: queueing,
+      blockedBy: !live ? "ended" : !connected && !queueing ? "disconnected" : null,
     };
   }, [stream, inspector, state.submitting, state.connection, toast]);
+
+  // A queued answer the mothership refused — a fresher answer won (409), or the colony is gone —
+  // must not vanish without a word.
+  useEffect(() => {
+    for (const drop of outbox.dropped) {
+      if (queuedAnswers.current.has(drop.id)) {
+        queuedAnswers.current.delete(drop.id);
+        toast(droppedText("answer", drop.status), "error");
+      }
+    }
+  }, [outbox.dropped, toast]);
 
   // The inspector points at a colony by identity, so a poll that replaces the list must not leave it
   // holding a stale copy — or pointing at a colony that has since been forgotten.
@@ -373,6 +412,7 @@ export function Cockpit({
     if (!deeplink) return;
     if (!sessions.some((s) => s.id === deeplink)) return;
     openColonyById(deeplink);
+    setPendingOpen(deeplink);
     setDeeplink(null);
     const url = new URL(window.location.href);
     if (url.searchParams.has("colony")) {
@@ -380,6 +420,51 @@ export function Cockpit({
       window.history.replaceState(null, "", url);
     }
   }, [deeplink, sessions, openColonyById]);
+
+  // The launch params are read into state at boot, so the address bar can lose them at once — a
+  // reload, a re-share or a copied url starts from the persisted view like any other day.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const before = url.search;
+    for (const name of LAUNCH_PARAMS) url.searchParams.delete(name);
+    if (url.search !== before) window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+  }, []);
+
+  // A shared issue (issue #745) waits for the first session poll, then goes where it belongs: the
+  // colony holding it opens, and otherwise Launch takes it prefilled. A pull request only ever
+  // follows a session that recorded its PR url, never an unrelated colony that happens to hold the
+  // same number.
+  useEffect(() => {
+    if (!shared || !sessionsLoaded) return;
+    const holder = holdingSession(sessions, shared);
+    if (holder) {
+      openColonyById(holder.id);
+      setPendingOpen(holder.id);
+    } else {
+      const owner = shared.repo.split("/")[0];
+      if (selectedOrg && !sameOrg(owner, selectedOrg)) onSelectOrg(owner);
+      setLaunchPrefill(shared);
+      setView("launch");
+    }
+    setShared(null);
+  }, [shared, sessionsLoaded, sessions, openColonyById, selectedOrg, onSelectOrg]);
+
+  // The prefill is one-shot: the launch form reads it only when it mounts, so leaving Launch drops
+  // it — coming back starts from whatever the visitor last picked, not the shared issue again.
+  useEffect(() => {
+    if (view !== "launch") setLaunchPrefill(null);
+  }, [view]);
+
+  // Opening a colony from a deep link or a share competes with App's keep-a-valid-selection
+  // effect, which can run in the same commit still seeing the selection as empty and pick the
+  // newest live colony over the one just asked for. So the asked-for id is remembered, and once
+  // the selection has settled, re-asserted if it lost — a no-op whenever it stuck.
+  const [pendingOpen, setPendingOpen] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pendingOpen) return;
+    if (selectedId !== pendingOpen && sessions.some((s) => s.id === pendingOpen)) onSelectSession(pendingOpen);
+    setPendingOpen(null);
+  }, [pendingOpen, selectedId, sessions, onSelectSession]);
 
   const act = useCallback(
     async (id: string, action: "stop" | "resume", run: (id: string) => Promise<Session>) => {
@@ -450,12 +535,16 @@ export function Cockpit({
       case "launch":
         return (
           <LaunchView
+            // A prefill that lands while Launch is already showing must remount the form, which
+            // reads the prefill only on mount.
+            key={launchPrefill ? `${launchPrefill.repo}#${launchPrefill.number}` : "blank"}
             org={selectedOrg}
             githubConnected={status?.github.connected ?? false}
             statusKnown={status !== null}
             autopilotDefault={autopilotDefault}
             maxParallel={status?.sandbox.max_parallel ?? null}
             sessions={sessions}
+            prefill={launchPrefill}
             onOpenColony={(session) => openColonyById(session.id)}
             onCreated={(session) => {
               onCreated(session);
@@ -524,6 +613,10 @@ export function Cockpit({
             sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
+            quotaCards={status?.quota_cards ?? []}
+            onQuotaAction={(provider, body) =>
+              runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
+            }
           />
         );
       case "history":
@@ -713,6 +806,9 @@ export function Cockpit({
       </div>
       </div>
       <MobileTabBar view={view} onNavigate={navigate} inboxCount={needAnywhere} />
+      {/* The phone sign-in welcome (issue #746): offered once, gone on dismiss or on reload —
+          the ?welcome= that opened it is stripped at boot. */}
+      {welcome && <PhoneWelcomeSheet onClose={() => setWelcome(null)} />}
     </div>
     </ColonizeProvider>
   );

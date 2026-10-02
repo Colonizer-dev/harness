@@ -49,8 +49,12 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait ExecutionBackend: Send + Sync {
     /// Boot a detached microVM running `spec.command` as its main process.
     fn boot<'a>(&'a self, spec: &'a crate::sandbox::BootSpec) -> BoxFuture<'a, anyhow::Result<()>>;
-    /// Remove a microVM. Best-effort, like the sandbox function: never fails.
-    fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, ()>;
+    /// Remove a microVM and confirm it is gone: `Ok` only once the node's own listing no longer
+    /// names it (a listed-but-stopped microVM is not gone), `Err` when the state is unknown — a
+    /// caller that must not touch the worktree while the microVM may still be there refuses.
+    /// See [`crate::sandbox::remove_confirmed`]; the best-effort [`crate::sandbox::remove`] stays
+    /// for the callers that only tidy up.
+    fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, anyhow::Result<()>>;
     /// Names of the currently running microVMs.
     fn running<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<HashSet<String>>>;
     /// Download an image into the node's cache.
@@ -79,8 +83,12 @@ impl ExecutionBackend for LocalBackend {
         Box::pin(crate::sandbox::boot(&self.msb, spec))
     }
 
-    fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, ()> {
-        Box::pin(crate::sandbox::remove(&self.msb, name))
+    fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(crate::sandbox::remove_confirmed(
+            &self.msb,
+            name,
+            crate::sandbox::REMOVE_CONFIRM_TIMEOUT,
+        ))
     }
 
     fn running<'a>(&'a self) -> BoxFuture<'a, anyhow::Result<HashSet<String>>> {
@@ -142,10 +150,11 @@ mod tests {
             })
         }
 
-        fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, ()> {
+        fn remove<'a>(&'a self, name: &'a str) -> BoxFuture<'a, anyhow::Result<()>> {
             let name = name.to_string();
             Box::pin(async move {
                 self.running.lock().unwrap().remove(&name);
+                Ok(())
             })
         }
 
@@ -199,7 +208,7 @@ mod tests {
         let running = backend.running().await.unwrap();
         assert!(running.contains("colony-a") && running.contains("colony-b"));
 
-        backend.remove("colony-a").await;
+        backend.remove("colony-a").await.unwrap();
         let running = backend.running().await.unwrap();
         assert!(!running.contains("colony-a"));
         assert!(running.contains("colony-b"));

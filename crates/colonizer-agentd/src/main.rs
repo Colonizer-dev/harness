@@ -7,7 +7,9 @@ mod harden;
 mod pty;
 mod runner;
 mod seal;
+mod services;
 mod store;
+mod watch;
 
 use axum::{
     Json, Router,
@@ -23,7 +25,12 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{os::unix::process::CommandExt, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    os::unix::process::CommandExt,
+    path::{Path, PathBuf},
+    process::ExitCode,
+    sync::Arc,
+};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{
@@ -36,21 +43,29 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage: colonizer-agentd [--config PATH] [--token-file PATH] [--state-dir DIR]
-                       [--seal-token] [--seccomp-profile] [--exec-hardened -- CMD [ARGS...]]
+                       [--path-policy FILE] [--seal-token] [--seccomp-profile]
+                       [--exec-hardened -- CMD [ARGS...]]
 
   --config PATH      session config            (default /colonizer/session.json)
   --token-file PATH  bearer token for the API  (default /colonizer/token)
   --state-dir DIR    event log directory       (default /var/lib/colonizer)
+  --path-policy FILE path policy bind list     (default /colonizer/path-policy; when present,
+                     masked and protected paths are bound inside nested checkouts as they
+                     appear — watch.rs, docs/path-policy.md)
   --seal-token       cover the token file with a read-only bind of /dev/null once it has been
                      read, so no other process in the VM can read it; fail closed (seal.rs)
   --seccomp-profile  print the runner hardening profile as JSON and exit
   --exec-hardened    harden this process like a runner child, then exec CMD (after --)
-  --version          print the version";
+  --version          print the version
+
+  svc start|stop     register and run a long-lived service (services.rs); also spelled by
+                     invoking this binary through a `colonizer-svc` symlink";
 
 struct Args {
     config: PathBuf,
     token_file: PathBuf,
     state_dir: PathBuf,
+    path_policy: PathBuf,
     seal_token: bool,
     exec: Vec<String>,
 }
@@ -62,6 +77,7 @@ impl Args {
             config: "/colonizer/session.json".into(),
             token_file: "/colonizer/token".into(),
             state_dir: "/var/lib/colonizer".into(),
+            path_policy: "/colonizer/path-policy".into(),
             seal_token: false,
             exec: Vec::new(),
         };
@@ -100,7 +116,7 @@ impl Args {
                     }
                     break;
                 }
-                "--config" | "--token-file" | "--state-dir" => {
+                "--config" | "--token-file" | "--state-dir" | "--path-policy" => {
                     let value = match inline {
                         Some(value) => value,
                         None => iter.next().ok_or_else(|| format!("{flag} needs a value"))?,
@@ -108,6 +124,7 @@ impl Args {
                     let slot = match flag.as_str() {
                         "--config" => &mut args.config,
                         "--token-file" => &mut args.token_file,
+                        "--path-policy" => &mut args.path_policy,
                         _ => &mut args.state_dir,
                     };
                     *slot = PathBuf::from(value);
@@ -121,6 +138,19 @@ impl Args {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let argv: Vec<String> = std::env::args().collect();
+    // `colonizer-svc` is this binary under another name (a symlink in the image); the same surface
+    // is spelled `colonizer-agentd svc ...`, so both are checked before the flag parser (nothing
+    // agentd takes starts with a bare `svc`).
+    let invoked_as = argv
+        .first()
+        .map(|arg| Path::new(arg).file_name().and_then(|name| name.to_str()).unwrap_or_default());
+    if invoked_as == Some("colonizer-svc") {
+        return services::svc_main(argv.into_iter().skip(1).collect()).await;
+    }
+    if argv.get(1).map(String::as_str) == Some("svc") {
+        return services::svc_main(argv.into_iter().skip(2).collect()).await;
+    }
     let args = match Args::parse(std::env::args().skip(1).collect()) {
         Ok(Some(args)) => args,
         Ok(None) => return ExitCode::SUCCESS,
@@ -150,7 +180,8 @@ async fn run(args: Args) -> Result<(), BoxError> {
         eprintln!("colonizer-agentd {VERSION}: warning: cannot harden the daemon itself: {e}");
     }
     let raw = std::fs::read(&args.config).map_err(|e| format!("cannot read {}: {e}", args.config.display()))?;
-    let config: SessionConfig = serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
+    let mut config: SessionConfig =
+        serde_json::from_slice(&raw).map_err(|e| format!("invalid {}: {e}", args.config.display()))?;
     let token = std::fs::read_to_string(&args.token_file)
         .map_err(|e| format!("cannot read {}: {e}", args.token_file.display()))?
         .trim()
@@ -185,6 +216,29 @@ async fn run(args: Args) -> Result<(), BoxError> {
             config.listen, config.agent.module
         ),
     ));
+
+    // Issue #700: the boot script's `colonizer-svc` link is best-effort; a missing one is a warn
+    // event the host shows, not a silent gap the agent trips over later.
+    if let Some(warning) = services::svc_link_warning(Path::new(services::BIN_DIR)) {
+        store.append(log_event("warn", warning));
+    }
+    // Path policy beyond boot (#648): masked and protected paths are bound inside nested
+    // checkouts as they appear, before the runner exists to act on them. Best effort — a miss is
+    // still reported at publish (watch.rs); it never stops the daemon.
+    watch::start(&config.workspace, &args.path_policy, store.clone());
+    // Issue #700: on a resume boot the declared services come back before the agent reads its
+    // brief, and the relaunch report prefixes the first user message. Nothing is served while the
+    // probes run — the HTTP server starts below — so the mothership's boot health-wait carries a
+    // deadline extended by their timeouts (boot.rs). Without `restore` — every fresh boot — this
+    // is a no-op.
+    if let Some(prefix) = services::relaunch(&config, &store).await {
+        config.initial_prompt = Some(
+            match config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+                Some(prompt) => format!("{prefix}\n\n{prompt}"),
+                None => prefix,
+            },
+        );
+    }
 
     let runner = runner::start(&config, store.clone());
     let state = AppState {

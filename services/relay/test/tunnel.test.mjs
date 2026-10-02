@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { runtime } from '../src/runtime.js';
 import { CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, helloMessage, pathTemplate, stripHopByHop } from '../src/protocol.js';
 import { b64decode, b64encode } from '../src/crypto.js';
-import { FakeMothership, INSTALL, fakePair, makeDo, proxyRequest, within } from './fakes.mjs';
+import { FakeMothership, INSTALL, fakePair, makeDo, proxyRequest, verified, within } from './fakes.mjs';
 
 const ENCODER = new TextEncoder();
 const bytes = (text) => ENCODER.encode(text);
@@ -429,7 +429,7 @@ test('pending handshakes are independent: attacker dials never stop the real hel
 
   // The real handshake still completes and takes the tunnel.
   await ms.hello(INSTALL, real.nonce);
-  for (let tries = 500; relay.tunnel?.ws?.peer !== real.socket && tries > 0; tries--) await new Promise((r) => setImmediate(r));
+  await verified(real.socket);
   assert.equal(relay.tunnel?.ws?.peer, real.socket, 'the real hello never completed');
   assert.equal(real.socket.closeEvent, null);
 
@@ -448,16 +448,18 @@ test('a stalled response body is errored and its slot freed after streamIdleMs o
   const response = await pending;
   const errored = assert.rejects(response.text(), 'a stalled body must error');
 
-  // Fresh frames keep it alive: a chunk halfway through the window resets the timer.
+  // Fresh frames keep it alive: every chunk re-arms the body's idle window, so silence is the only thing
+  // that can kill the body. Each chunk lands on the next event-loop turn, where armBodyIdle swaps in a
+  // fresh timer — asserted by identity instead of sleeping through the window.
+  const bodyTimer = () => relay.streams.get(req.id)?.bodyTimer;
+  const landed = () => new Promise((r) => setImmediate(r));
   ms.send({ t: 'body', id: req.id, chunk: b64encode(bytes('one')), end: false });
-  await new Promise((r) => setTimeout(r, 50));
+  await landed();
+  const armed = bodyTimer();
+  assert.ok(armed, 'the res did not arm a body idle window');
   ms.send({ t: 'body', id: req.id, chunk: b64encode(bytes('two')), end: false });
-  let dead = false;
-  errored.then(() => {
-    dead = true;
-  }, () => {});
-  await new Promise((r) => setTimeout(r, 50)); // 100ms after the first chunk: one full window
-  assert.equal(dead, false, 'the body was killed despite fresh frames');
+  await landed();
+  assert.notEqual(bodyTimer(), armed, 'a fresh chunk did not re-arm the body window');
 
   // Then silence for a full window errors it and frees the slot.
   await within(errored, 'the stalled body never errored');

@@ -270,6 +270,15 @@ const GUIDES: Record<string, Guide> = {
     ],
     both: true,
   },
+  phone: {
+    icon: "user",
+    blurb: "Pairs your phone: scan a one-use code, confirm the code it shows here, revoke it any time.",
+    flow: [
+      { icon: "mothership", label: "This cockpit" },
+      { icon: "lock", label: "Scan, then confirm" },
+      { icon: "user", label: "Your phone" },
+    ],
+  },
   updates: {
     icon: "download",
     blurb: "Keeps Colonizer current with the latest release.",

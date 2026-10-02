@@ -4,7 +4,7 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import { evaluateExecPolicy, execPolicyLogLine, execPolicyQuestion, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
@@ -390,6 +391,18 @@ export function childEnv(env) {
 }
 
 /**
+ * The record name for a background command: a short hash of the text, so rerunning the same job
+ * overwrites its record instead of accumulating them (issue #700).
+ */
+export function backgroundRecordName(command) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < command.length; i++) {
+    hash = Math.imul(hash ^ command.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return `bg-${hash.toString(16).padStart(8, '0')}`;
+}
+
+/**
  * SDK options from the environment. Returns warnings instead of logging so stdout stays protocol-only.
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
@@ -623,6 +636,30 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       },
     ],
   };
+  if (env.COLONIZER_SERVICES_DIR) {
+    // Background Bash calls get a restart:false service record (issue #700), so a resumed boot's
+    // relaunch report can name what the suspension killed. The record carries the command text,
+    // never an env value, and a failed write is one log line — never a blocked tool call.
+    options.hooks = {
+      ...options.hooks,
+      PostToolUse: [{
+        matcher: 'Bash',
+        hooks: [async ({ tool_input }) => {
+          try {
+            const command = tool_input?.command;
+            if (tool_input?.run_in_background && typeof command === 'string' && command.trim()) {
+              const name = backgroundRecordName(command);
+              writeFileSync(join(env.COLONIZER_SERVICES_DIR, `${name}.json`),
+                JSON.stringify({ name, cmd: command, restart: false, source: 'background' }));
+            }
+          } catch (err) {
+            process.stderr.write(`colonizer: recording a background command failed: ${err?.message ?? err}\n`);
+          }
+          return { continue: true };
+        }],
+      }],
+    };
+  }
   if (instructions) {
     // Conditional instructions (issue #473): appended after the gates above — they arrive first at
     // index 0 — and never carrying a permission decision, so they cannot allow or deny anything.
@@ -699,11 +736,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {object} [args.execPolicy]  the layered exec policy (issue #471); an `ask` becomes a question
+ * @param {object} [args.pathPolicy]  the mounted path policy (issue #647), as loadPathPolicy returned; a path-taking
+ *   tool call that lands on a masked or protected path emits one `path_policy` event per (access, path)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -727,6 +766,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   // compaction pass can then remove from (an applied drop_call) or score again.
   const jevPendingCalls = new Map(); // tool_call_id -> { tool, result } until the result arrives
   let jevLivePairs = []; // pairs present in the transcript, in call order: { tool_call_id, tool }
+  const pathPolicySeen = new Set(); // `access\0path` already reported, so one attempt is one event
 
   /**
    * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
@@ -881,6 +921,20 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     return next;
   };
 
+  /**
+   * The path policy's runtime report (issue #647): a path-taking tool call that lands on a masked
+   * or protected path emits one `path_policy` event per (access, path) per run. Reporting only —
+   * no decision, no permission field; the mount enforced before this ever ran (pathpolicy.mjs).
+   */
+  const reportPathPolicy = (block, parent) => {
+    const event = evaluatePathPolicy(pathPolicy, block.name, block.input ?? {}, { workspace: process.cwd() });
+    if (!event) return;
+    const key = `${event.access}\u0000${event.path}`;
+    if (pathPolicySeen.has(key)) return;
+    pathPolicySeen.add(key);
+    emit(withAgent(event, parent));
+  };
+
   const onAssistant = (msg) => {
     const messageId = msg.message?.id ?? msg.uuid ?? null;
     const parent = msg.parent_tool_use_id ?? null;
@@ -922,6 +976,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
               parent,
             ),
           );
+          reportPathPolicy(block, parent);
         }
       }
     }
@@ -1241,6 +1296,9 @@ async function main() {
   // The layered exec policy (issue #471), loaded once: the repo layer's file is read before the
   // agent can run anything, and the same object is what runAgent answers questions from.
   const execPolicy = loadExecPolicy(process.env);
+  // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
+  // the runtime reports against. Absent (an older harness) means the feature is off, silently.
+  const pathPolicy = loadPathPolicy(process.env);
   const { options, warnings } = buildOptions(process.env, {
     // Claude Code's base URL: Headroom when it is running, which forwards to the router or to Anthropic.
     routerUrl: headroom?.url ?? router?.url,
@@ -1255,6 +1313,7 @@ async function main() {
     execPolicy,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+  for (const message of pathPolicy.warnings) emit({ type: 'log', level: 'warn', message });
 
   // Before the agent sees the workspace, not after. In block mode a finding
   // ends the colony here, with the terminal still reachable for a human.
@@ -1267,7 +1326,7 @@ async function main() {
   }
 
   const enforceChoices = !['0', 'false', 'no', 'off'].includes(String(process.env.COLONIZER_ENFORCE_CHOICES ?? '').toLowerCase());
-  await runAgent({ query, commands, emit, options, execPolicy, enforceChoices, instructions });
+  await runAgent({ query, commands, emit, options, execPolicy, pathPolicy: pathPolicy.policy, enforceChoices, instructions });
   await headroom?.close();
   await router?.close();
   process.exit(0);

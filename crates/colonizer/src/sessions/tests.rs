@@ -41,6 +41,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         publishing_holds_slot: status == SessionStatus::Publishing,
         needs_rebase: false,
         rebase_orphaned: false,
+        unseen_failure: false,
         queued_behind: None,
         claim_wait: false,
         verify: None,
@@ -67,6 +68,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         agent_session: None,
         pending_answer: None,
         prewarm: None,
+        was_suspended: false,
         last_activity_at: None,
         boot_timing: None,
         boot_cpus: None,
@@ -178,18 +180,10 @@ pub(crate) fn app_that_can_create_needing(root: &std::path::Path, needs_claude: 
     std::fs::write(dir.join("module.json"), r#"{"id":"claude-code","entry":["run"]}"#).unwrap();
     std::fs::create_dir_all(assets.join("bin")).unwrap();
     std::fs::write(assets.join("bin/colonizer-agentd"), b"\x7fELF padding").unwrap();
-    let agent = AgentModule {
-        id: "claude-code".into(),
-        name: "Claude Code".into(),
-        description: String::new(),
-        dir,
-        entry: vec!["run".into()],
-        needs_claude,
-        requires: crate::modules::Requires::default(),
-        schema: json!({}),
-        egress: None,
-        resume_dir: None,
-        loop_tools: false,
-    };
+    let agent = AgentModule::test("claude-code")
+        .name("Claude Code")
+        .dir(dir)
+        .entry(vec!["run".into()])
+        .needs_claude(needs_claude);
     crate::tests::test_app_with_agents(root, vec![agent], |cfg| cfg.assets = Some(assets))
 }

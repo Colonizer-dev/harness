@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // Minimal MCP stdio server for the OpenCode module: the model sees colonizer_ask_user,
-// colonizer_finding_file and colonizer_memory_propose, and every call is forwarded to the
+// colonizer_finding_file and colonizer_memory_propose, and those calls are forwarded to the
 // runner's loopback bridge (COLONIZER_BRIDGE_URL). Newline-delimited JSON-RPC 2.0; no dependencies.
+// When COLONIZER_MEMORY_DIR is mounted it also serves shared memory's read tools (issue #766):
+// colonizer_memory_briefing, colonizer_memory_changes and colonizer_memory_search answer here, from
+// memory-mcp.mjs, and never cross the bridge. Memory is pulled through them, never injected.
 // Asks can wait on a human for minutes, so while one is in flight the server sends periodic
 // progress notifications on the call's progressToken to hold the request open.
 // Loop colonies (docs/protocol.md, Loops) also get colonizer_loop_stop, plus colonizer_loop_next
@@ -9,10 +12,13 @@
 
 import { createInterface } from 'node:readline';
 
+import { callMemoryTool, MEMORY_READ_TOOL_NAMES, MEMORY_READ_TOOLS, memoryState } from './memory-mcp.mjs';
+
 const BRIDGE = process.env.COLONIZER_BRIDGE_URL ?? '';
 const TOKEN = process.env.COLONIZER_BRIDGE_TOKEN ?? '';
 const LOOP = process.env.COLONIZER_LOOP === 'true';
 const SELF_PACED = process.env.COLONIZER_LOOP_SELF_PACED === 'true';
+const MEMORY_DIR = process.env.COLONIZER_MEMORY_DIR ?? '';
 // The delay bounds the bridge clamps to; here they only word the description.
 const NEXT_MIN_MINUTES = 15;
 const NEXT_MAX_MINUTES = 24 * 60;
@@ -28,10 +34,11 @@ const TOOLS = [
     description: 'File a confirmed problem found outside the task (what is wrong, where, why it matters). Include how you confirmed it as evidence.',
     inputSchema: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'string' } }, required: ['title', 'body', 'evidence'] },
   },
+  ...(MEMORY_DIR ? MEMORY_READ_TOOLS : []),
   {
     name: 'memory_propose',
     description: 'Propose a durable, reusable learning for shared memory (scope repo, org or global). Nothing is written directly; the proposal goes to review.',
-    inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['repo', 'org', 'global'] }, title: { type: 'string' }, content: { type: 'string' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['scope', 'title', 'content'] },
+    inputSchema: { type: 'object', properties: { scope: { type: 'string', enum: ['repo', 'org', 'global'] }, title: { type: 'string' }, content: { type: 'string' }, kind: { type: 'string', enum: ['plan', 'decision', 'file_change', 'failure', 'architecture', 'convention'], description: 'What the entry is; default convention' }, confidence: { type: 'number', minimum: 0, maximum: 1, description: 'How sure you are it holds beyond this task, 0 to 1' }, tags: { type: 'array', items: { type: 'string' } } }, required: ['scope', 'title', 'content'] },
   },
   LOOP && SELF_PACED && {
     name: 'loop_next',
@@ -54,6 +61,8 @@ const TOOLS = [
 
 const PATHS = { ask_user: '/ask', finding_file: '/finding', memory_propose: '/memory', loop_next: '/loop_next', loop_stop: '/loop_stop' };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
+// What this colony has been told about shared memory, so memory_changes can say what is new.
+const memorySession = memoryState();
 
 async function forward(path, args, progressToken) {
   let res;
@@ -81,6 +90,7 @@ async function onCall(name, args, progressToken) {
   // A tool the env gated off (loop_next/loop_stop without COLONIZER_LOOP) is unknown, not forwarded.
   if (!TOOLS.some((tool) => tool.name === name)) throw Object.assign(new Error(`unknown tool ${name}`), { code: -32602 });
   try {
+    if (MEMORY_READ_TOOL_NAMES.includes(name)) return { content: [{ type: 'text', text: await callMemoryTool(name, args, { dir: MEMORY_DIR, state: memorySession }) }] };
     const data = await forward(PATHS[name], args, progressToken);
     if (data?.cancelled) return { content: [{ type: 'text', text: 'The question was cancelled before the user answered.' }], isError: true };
     if (data?.error) return { content: [{ type: 'text', text: String(data.error) }], isError: true };

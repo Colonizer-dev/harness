@@ -137,9 +137,10 @@ struct LastSent {
 }
 
 /// The sources exactly as their GET handlers answer them: the hub calls the handlers directly and
-/// unwraps the `Json`, so hub and HTTP can never drift apart. No handler changes were needed.
+/// unwraps the `Json`, so hub and HTTP can never drift apart. The sessions hub reads the bare
+/// array the list route answers without pagination params, which is the same handler underneath.
 async fn sessions_snapshot(app: &Shared) -> Vec<sessions::Session> {
-    sessions::list(State(app.clone()), None).await.0
+    sessions::list_bare(State(app.clone()), None).await.0
 }
 
 async fn orgs_snapshot(app: &Shared) -> Vec<Value> {
@@ -249,9 +250,15 @@ async fn run_hub(app: Shared, hub: Hub) {
 }
 
 /// `GET /api/stream`: authenticated by `host_guard` like every other `/api/` route, then upgraded.
-pub async fn handler(State(app): State<Shared>, ws: WebSocketUpgrade) -> Response {
+pub async fn handler(
+    State(app): State<Shared>,
+    revocation: Option<axum::Extension<crate::auth::Revocation>>,
+    ws: WebSocketUpgrade,
+) -> Response {
     app.stream.ensure_running(&app);
-    ws.on_upgrade(move |socket| serve(app, socket))
+    // A revoked phone's feed closes at once (issue #746).
+    let revocation = revocation.map(|axum::Extension(r)| r);
+    ws.on_upgrade(move |socket| crate::auth::Revocation::until(revocation, serve(app, socket)))
 }
 
 fn text(frame: &str) -> Message {
@@ -398,7 +405,7 @@ mod tests {
             app.sessions.write().await.push(session);
         }
         let frames = full_frames(&app).await;
-        let body = sessions::list(State(app.clone()), None).await.0;
+        let body = sessions::list_bare(State(app.clone()), None).await.0;
         let parsed: Value = serde_json::from_str(&frames[0]).unwrap();
         let frame_ids: Vec<&str> = parsed["sessions"]
             .as_array()

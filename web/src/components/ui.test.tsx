@@ -7,8 +7,8 @@ import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { session } from "../cockpit/testFixtures";
-import type { Session } from "../types";
-import { StatusBadge, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel } from "./ui";
+import type { Attention, Session } from "../types";
+import { AttentionBadge, StatusBadge, attentionText, isAnsweredWaiting, occupiesSlot, ordinal, parkedLabel, restorePlace, statusLabel } from "./ui";
 
 const suspended = {
   at: "2026-09-26T10:00:00Z",
@@ -210,5 +210,34 @@ describe("StatusBadge", () => {
     expect(out).toContain("Answered · resumes when a slot frees");
     expect(out).not.toContain("bg-accent-soft");
     expect(out).not.toContain("pulse-soft");
+  });
+});
+
+describe("attentionText", () => {
+  const attention = (overrides: Partial<Attention>): Attention => ({ reason: "stalled", since: "2026-09-26T10:00:00Z", nudges: 1, ...overrides });
+
+  it("says why an autopilot hold happened when the mothership sent a detail (issue #672)", () => {
+    expect(
+      attentionText(attention({ reason: "autopilot_held", detail: "`cargo test` exited 101 in a fresh checkout; failing: a::b (last 200 lines in out/verify-cargo-test.log)" })),
+    ).toBe("`cargo test` exited 101 in a fresh checkout; failing: a::b (last 200 lines in out/verify-cargo-test.log)");
+  });
+
+  it("keeps the plain hold label when there is no detail to show", () => {
+    expect(attentionText(attention({ reason: "autopilot_held" }))).toBe("Autopilot held the PR");
+    expect(attentionText(attention({ reason: "autopilot_held", detail: "  " }))).toBe("Autopilot held the PR");
+  });
+
+  it("leaves other reasons alone even when a detail is present: only a hold reads it", () => {
+    expect(attentionText(attention({ reason: "stalled", nudges: 2, detail: "ignored" }))).toBe("No progress, nudged 2×");
+  });
+
+  it("puts the hold's detail in the attention badge's tooltip beside the suspended-answer badge", () => {
+    const detail = "`web: npm test` exited 1 in a fresh checkout; failing: renders the banner";
+    const out = renderToStaticMarkup(<AttentionBadge attention={attention({ reason: "autopilot_held", detail })} />);
+    expect(out).toContain("title=\"`web: npm test` exited 1 in a fresh checkout; failing: renders the banner\"");
+    // The detail does not change the answered-waiting derivation the badge sits next to (issue #667).
+    const held = session({ status: "waiting_for_answer", suspended, pending_answer: answered("2026-09-26T10:05:00Z"), attention: attention({ reason: "autopilot_held", detail }) });
+    expect(isAnsweredWaiting(held)).toBe(true);
+    expect(statusLabel(held)).toBe("Answered · resumes when a slot frees");
   });
 });

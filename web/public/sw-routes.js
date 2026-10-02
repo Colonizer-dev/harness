@@ -3,7 +3,7 @@
 //  - "network": left alone. Every other /api call, every write, the ?token= sign-in, a ?refresh=
 //               the operator asked for, anything cross-origin.
 //  - "asset":   /assets/* — Vite's content-hashed files, which never change under one name — served
-//               from the cache first and cached on the way in.
+//               from whichever build's cache has them (this build's first) and cached on the way in.
 //  - "image":   /api/img — GitHub avatars through the mothership's own week-long cache — served from
 //               the cache first.
 //  - "swr":     a short allowlist of read-only GET JSON (repository meta, packages, lines of code):
@@ -18,8 +18,9 @@ self.colonizerSwr = [
 
 // --- Push notifications -----------------------------------------------------------------------
 //
-// The mothership encrypts one small JSON payload per push: {title, body, url, tag}. These two run
-// inside the worker but are kept here, pure, so the tests can load them exactly like colonizerRoute.
+// The mothership encrypts one small JSON payload per push: {title, body, url, tag, silent}, plus
+// `answer: {token, choices}` on a question the notification itself may answer. These run inside the
+// worker but are kept here, pure, so the tests can load them exactly like colonizerRoute.
 
 /**
  * The only urls a notification may open: a same-origin relative path — starting with "/" and not
@@ -36,10 +37,19 @@ self.colonizerSafeUrl = function colonizerSafeUrl(url) {
 /**
  * The push payload to show. Anything malformed — empty, truncated by the push service, not JSON,
  * an array — degrades to a generic "Colonizer" notification instead of throwing: a silent drop
- * would look exactly like a missed colony. Missing fields fall back one at a time.
+ * would look exactly like a missed colony. Missing fields fall back one at a time. `colony` is the
+ * session id a colony notification names, `badge` the mothership's attention count behind the push
+ * (null when absent or not a non-negative integer), and `resolved` marks the silent push that asks
+ * every device to drop one colony's notification (issue #744).
+ *
+ * A question push also carries `answer: {token, choices}` — the labels the notification itself may
+ * answer with. That block is parsed just as defensively: a non-object drops entirely, a bad field
+ * drops one at a time, and a question that cannot be answered from here (no usable token, no
+ * choices, more than 3 — answering with a cut-down subset would mislead the colony) degrades to
+ * `{token: "", choices: []}`, which the actions below turn into a plain "Open to answer".
  */
 self.colonizerPushPayload = function colonizerPushPayload(raw) {
-  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "" };
+  const fallback = { title: "Colonizer", body: "A colony needs you.", url: "/", tag: "", silent: true, colony: null, badge: null, resolved: false };
   let data = null;
   try {
     data = JSON.parse(raw);
@@ -48,12 +58,56 @@ self.colonizerPushPayload = function colonizerPushPayload(raw) {
   }
   if (!data || typeof data !== "object" || Array.isArray(data)) return fallback;
   const text = (value) => (typeof value === "string" ? value.trim() : "");
+  const answerOf = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const token = typeof value.token === "string" && /^[0-9a-f]{8,128}$/i.test(value.token) ? value.token : "";
+    const choices = (Array.isArray(value.choices) ? value.choices : [])
+      .filter((choice) => typeof choice === "string" && choice.trim())
+      .map((choice) => choice.trim().slice(0, 80));
+    if (!token || choices.length < 1 || choices.length > 3) return { token: "", choices: [] };
+    return { token, choices };
+  };
+  const badge = typeof data.badge === "number" && Number.isInteger(data.badge) && data.badge >= 0 ? data.badge : null;
+  const colony = text(data.colony);
   return {
     title: text(data.title) || fallback.title,
     body: text(data.body) || fallback.body,
     url: self.colonizerSafeUrl(data.url),
     tag: text(data.tag),
+    // The mothership may let a question's push sound (issue #743); anything it does not say is silent.
+    silent: typeof data.silent === "boolean" ? data.silent : true,
+    answer: answerOf(data.answer),
+    colony: colony || null,
+    badge,
+    resolved: data.type === "resolved",
   };
+};
+
+/**
+ * The buttons a question notification offers, within what the platform shows (maxActions is 0 or
+ * undefined on iOS, Safari and Firefox, which show none — there the tap itself opens the cockpit).
+ * One button per choice, then free text when the platform can deliver it, then a plain Open, each
+ * only while a slot is left. A question that cannot be answered inline gets a single "Open to
+ * answer" — never a subset of its choices.
+ */
+self.colonizerNotificationActions = function colonizerNotificationActions(answer, maxActions, supportsReply) {
+  const room = Math.max(0, Math.floor(Number(maxActions)) || 0);
+  if (!answer || !Array.isArray(answer.choices)) return [];
+  if (!answer.token || answer.choices.length < 1 || answer.choices.length > room) return room >= 1 ? [{ action: "open", title: "Open to answer" }] : [];
+  const actions = answer.choices.map((title, index) => ({ action: `choice:${index}`, title }));
+  if (supportsReply && actions.length < room) actions.push({ action: "other", type: "text", title: "Other…", placeholder: "Your answer" });
+  if (actions.length < room) actions.push({ action: "open", title: "Open" });
+  return actions;
+};
+
+/**
+ * The one summary notification standing in for several colony notifications at once (issue #744):
+ * shown from two colonies waiting, closed again at one or none — where it would only repeat what a
+ * single colony notification already says. null when there is nothing to show.
+ */
+self.colonizerSummary = function colonizerSummary(count) {
+  if (typeof count !== "number" || !Number.isInteger(count) || count < 2) return null;
+  return { title: `${count} colonies need you`, tag: "summary", url: "/" };
 };
 
 self.colonizerRoute = function colonizerRoute(url, method, mode, origin) {

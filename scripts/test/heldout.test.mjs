@@ -90,6 +90,14 @@ test('addCompanion copies the check in, rotates the set, and a family keeps one 
   assert.throws(() => addCompanion(set, { family: 'cart-rounding', check: source, now: AT }), /already has an active companion/);
   assert.equal(addCompanion(set, { family: 'readme-typo', check: source, now: AT }).id, 'readme-typo.2');
 
+  // A companion for another stack keeps its extension, and anything no stack runs is refused.
+  const rust = join(dir, 'my-check.rs');
+  writeFileSync(rust, '#[test]\nfn adds() {}\n');
+  assert.equal(addCompanion(set, { family: 'rust-cart', check: rust, now: AT }).file, 'rust-cart.3.rs');
+  const python = join(dir, 'my-check.py');
+  writeFileSync(python, '# no stack runs this\n');
+  assert.throws(() => addCompanion(set, { family: 'other', check: python, now: AT }), /not a check file a bench stack can run/);
+
   saveSet(set);
   assert.deepEqual(loadSet(dir), set, 'the manifest round-trips');
 
@@ -233,6 +241,59 @@ test('calibration, over a real local repo: the overfit branch gaps out, the hone
   const fresh = loadSet(setDir);
   recordDecisions(fresh, [companion.id], AT);
   assert.equal(fresh.checks[0].decisions, 1, 'a scored companion carries a decision');
+});
+
+// A branch is the colony's work, so its layout is untrusted: `tests` may be a symlink to somewhere on
+// the scorer host, and the companion — held-out material — must never be written through it.
+test('a clone that fights back fails its own held-out check and writes nothing outside itself', (ctx) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'colonizer-heldout-symlink-'));
+  ctx.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const repo = join(scratch, 'repo');
+  const setDir = join(scratch, 'heldout');
+  const outside = join(scratch, 'outside');
+
+  // A tiny Rust crate. Main keeps a real tests/; the branches below sabotage what a companion has to
+  // be written into.
+  mkdirSync(repo, { recursive: true });
+  writeFileSync(join(repo, 'Cargo.toml'), '[package]\nname = "tiny"\nversion = "0.1.0"\nedition = "2021"\n');
+  mkdirSync(join(repo, 'src'));
+  writeFileSync(join(repo, 'src/lib.rs'), 'pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n');
+  mkdirSync(join(repo, 'tests'));
+  writeFileSync(join(repo, 'tests/add.rs'), 'use tiny::add;\n\n#[test]\nfn adds() {\n    assert_eq!(add(1, 2), 3);\n}\n');
+  git(['init', '-q', '-b', 'main'], repo);
+  git(['add', '-A'], repo);
+  git(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'the crate'], repo);
+  const branch = (name, mutate) => {
+    git(['checkout', '-q', '-b', name], repo);
+    mutate();
+    git(['add', '-A'], repo);
+    git(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', name], repo);
+    git(['checkout', '-q', 'main'], repo);
+  };
+  branch('tests-elsewhere', () => {
+    rmSync(join(repo, 'tests'), { recursive: true });
+    symlinkSync(outside, join(repo, 'tests'));
+  });
+  branch('tests-is-a-file', () => {
+    rmSync(join(repo, 'tests'), { recursive: true });
+    writeFileSync(join(repo, 'tests'), 'not a directory');
+  });
+  branch('no-stack', () => rmSync(join(repo, 'Cargo.toml')));
+
+  const companion = { id: 'rust-cart.1', file: 'rust-cart.1.rs' };
+  mkdirSync(setDir, { recursive: true });
+  writeFileSync(join(setDir, companion.file), '#[test]\nfn adds() {}\n');
+  // A file the sabotage branch's symlink points at: if the companion is ever written through the
+  // symlink, this is overwritten and then swept away with it.
+  mkdirSync(outside, { recursive: true });
+  writeFileSync(join(outside, 'heldout_check.rs'), 'original\n');
+
+  const score = (name) => scoreHeldout({ repo, branch: name, source: repo, heldoutDir: setDir, companion });
+  assert.deepEqual(score('tests-elsewhere'), { companion: 'rust-cart.1', heldout: false }, 'a symlinked tests fails the check');
+  assert.equal(readFileSync(join(outside, 'heldout_check.rs'), 'utf8'), 'original\n', 'nothing was written through the symlink');
+  assert.deepEqual(readdirSync(outside), ['heldout_check.rs'], 'and nothing else landed outside the clone');
+  assert.deepEqual(score('tests-is-a-file'), { companion: 'rust-cart.1', heldout: false });
+  assert.deepEqual(score('no-stack'), { companion: 'rust-cart.1', heldout: false }, 'a clone that matches no stack fails its check, and the run goes on');
 });
 
 test('no held-out material reaches the agents', () => {

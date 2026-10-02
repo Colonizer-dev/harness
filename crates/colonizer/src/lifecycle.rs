@@ -37,16 +37,49 @@ pub(crate) const RESUME_CONFLICT: &str =
 
 /// Stops the agent link, asks agentd to shut the runner down, removes the VM and its mesh node,
 /// and takes the path policy's empty placeholders back out of the kept worktree: they were only
-/// bind targets for the VM just removed, and a resume's boot makes them again.
+/// bind targets for the VM just removed, and a resume's boot makes them again. Best-effort, as
+/// ever: a removal that cannot be confirmed is only said on the colony's log. The checked
+/// variant — [`teardown_vm_confirmed`] — is for the caller that must not go on to touch the
+/// worktree while the microVM may still be there.
 pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
+    if let Err(e) = teardown_vm_confirmed(app, s).await
+        // A deleted colony's worktree is gone with it, and its record must not gain a log line back.
+        && app.session(&s.id).await.is_some()
+    {
+        app.session_log(&s.id, "warn", format!("could not confirm the microVM was removed: {e:#}"))
+            .await;
+    }
+}
+
+/// [`teardown_vm`] with the removal checked: `Err` unless the execution backend confirms the
+/// sandbox is gone from its own listing, so a caller that goes on to touch the worktree (a
+/// publish) can refuse first. The agentd `/v1/shutdown` outcome is said, not trusted — it only
+/// stops the runner inside the guest, and the guest decides whether it answers — because the gate
+/// is the host-controlled removal and the host's own sandbox list.
+pub(crate) async fn teardown_vm_confirmed(app: &Shared, s: &Session) -> anyhow::Result<()> {
     if let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() {
         rt.stop.send_replace(true);
     }
+    let mut shutdown_problem: Option<String> = None;
     if s.mesh.as_ref().is_some_and(|m| m.ip.is_some()) || s.local_port.is_some() {
-        let _ = tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await;
+        match tokio::time::timeout(Duration::from_secs(15), agentd_http(app, s, "POST", "/v1/shutdown")).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => shutdown_problem = Some(format!("agentd shutdown failed: {e:#}")),
+            Err(_) => shutdown_problem = Some("agentd shutdown did not answer within 15s".into()),
+        }
     }
-    app.execution.remove(&s.sandbox).await;
+    let removed = app.execution.remove(&s.sandbox).await;
     // A deleted colony's worktree is gone with it, and its record must not gain a log line back.
+    if let Some(problem) = shutdown_problem
+        && app.session(&s.id).await.is_some()
+    {
+        app.session_log(
+            &s.id,
+            "warn",
+            format!("{problem}; the removal's own confirmation is what counts"),
+        )
+        .await;
+    }
     if let Some(admin) = s.git_admin_dir.as_deref()
         && app.session(&s.id).await.is_some()
     {
@@ -71,6 +104,7 @@ pub(crate) async fn teardown_vm(app: &Shared, s: &Session) {
     {
         let _ = mesh.delete_nodes_named(&s.sandbox).await;
     }
+    removed
 }
 
 /// The backend's `running` with the restart's patience. A failed `msb ls` says nothing about the
@@ -982,8 +1016,10 @@ pub async fn resume(
             x.mesh = None;
             x.local_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
-            // the boot; any held answer stays on the record, and the boot delivers it. A pending
+            // the boot; any held answer stays on the record, and the boot delivers it. The boot is
+            // told whether it is restoring a suspension (issue #700) before the flag goes. A pending
             // pre-warm request is subsumed: this resume is the boot it was asking for.
+            x.was_suspended = x.suspended.is_some();
             x.suspended = None;
             x.prewarm = None;
             // A parked colony stops being parked here (issue #213): the record had its say — the

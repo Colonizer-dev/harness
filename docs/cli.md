@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `open`, `login-item`, `telemetry`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -120,6 +120,21 @@ colonizer token revoke tok_x
 `colonizer mcp` starts the MCP server instead of driving one; it is documented in
 [mcp.md](mcp.md).
 
+## Red-team runs
+
+A red-team run sends a swarm of hunter colonies at one repository; what a run does is
+[red-team.md](red-team.md):
+
+```sh
+colonizer redteam start acme/app                                  # armed: starts when no colony is live
+colonizer redteam start acme/app --preset security --hunters 8    # the security preset, a full swarm
+colonizer redteam start acme/app --now                            # start now (exit 5 while colonies are live)
+colonizer redteam list                                            # runs, newest first, with preset and counts
+```
+
+`--preset` is `general` (the default) or `security`; `--hunters N` is the swarm size, 1 to 8.
+`--model`, `--subagent-model` and `--autofix` mirror the cockpit wizard.
+
 ## Loops
 
 Loops are saved prompts that launch a colony on a schedule; what they do is
@@ -133,6 +148,9 @@ colonizer loop run loop_x1                                       # start the nex
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
+colonizer loop merge-train show                                  # the built-in merge-train loop: settings and last report
+colonizer loop merge-train allow acme/app                        # opt a repository in; `on` switches the loop on
+colonizer loop merge-train run --dry-run                         # what it would merge, update, rebase and skip, and why
 ```
 
 `loop create` takes the repository as `owner/repo` (`owner/*` for a map loop: every repository
@@ -151,6 +169,56 @@ cadence. `loop list` shows the cadence in words with its times in your local tim
 (`enabled`, `paused`, `ended`) and when it runs next; an empty list prints a note to stderr, and
 `--json` prints the raw records everywhere.
 
+## Fleet export and import
+
+A machine's past can travel with it: `fleet export` writes this machine's session history, colony
+logs and spend/usage stats into one bundle, and `fleet import` reads a bundle back into a data
+dir. Both run locally off the data dir — no mothership needs to be running — and neither reads
+anything secret-bearing from the config dir (export touches only its `host_id`, the machine id
+the fleet already displays), so no API token, provider key or credential ever leaves the machine.
+The bundle format is
+[protocol.md, §6.11 Fleet export bundle](protocol.md#611-fleet-export-bundle-687).
+
+```sh
+colonizer fleet export                          # colonizer-export-<origin_name>-<YYYYMMDD>.tar.zst in cwd
+colonizer fleet export --out /tmp/acme.tar.zst  # a path of your own
+colonizer fleet export --no-logs --preview      # what would be written; writes nothing
+colonizer fleet import /tmp/acme.tar.zst        # backfill into fleet-imports/<origin_host>/
+colonizer fleet import /tmp/acme.tar.zst --preview
+```
+
+`export` prints the preview first — per category (`history`, `logs`, `stats`): how many
+sessions or files, the time range and the size — then writes the bundle, by default
+`colonizer-export-<origin_name>-<YYYYMMDD>.tar.zst` in the current directory. `--no-history`,
+`--no-logs` and `--no-stats` leave a category out; an excluded one still shows in the preview,
+marked not included. `--preview` prints the preview and writes nothing. `import` prints the same
+preview, read from the bundle's manifest, then imports under `fleet-imports/<origin_host>/` with
+progress; interrupting it is safe — what landed is kept, and re-running the same file resumes it
+and replaces sessions by id instead of duplicating them. With the global `--json` the previews
+print as the bundle's manifest. The fleet-join dialog (#686) drives the same format
+over the fleet connection, preview → confirm → transfer, so a machine that joins a fleet is
+backfilled the same way.
+
+### Fleet sync
+
+A machine that has joined a fleet can push its finished colonies' history to the owner
+([fleet.md](fleet.md#history-push)) — once its operator consents; joining alone sends nothing.
+`fleet sync --preview` shows what would be sent, `--enable` prints that preview and consents,
+`--disable` withdraws consent, `fleet sync` asks the running mothership to drain now, and
+`--status` shows where the push stands. None but a plain `fleet sync` or `--enable` sends anything.
+
+```sh
+colonizer fleet sync --preview  # colonies, log files and bytes that would go, and what never does
+colonizer fleet sync --enable   # print the preview, then consent for this membership
+colonizer fleet sync --disable  # stop sending
+colonizer fleet sync            # drain now: rows and payloads sent, pending, retired
+colonizer fleet sync --status   # consent_required, synced, backoff, unauthorized, removed or error
+```
+
+Without consent a plain `fleet sync` fails with the 409 and says how to give it. A manual
+`fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
+`Retry-After`. With the global `--json` both print the mothership's answer.
+
 ## `--json`
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
@@ -158,7 +226,8 @@ what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop
 the `token` and `loop` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
-stored map document — or, with `--find`, the search result — and `answer` echoes the answer body
+stored map document — or, with `--find`, the search result — `fleet export --preview` and
+`fleet import <file> --preview` the bundle's manifest, and `answer` echoes the answer body
 it sent. Scripts should prefer it to parsing the human columns.
 
 ## Exit codes
@@ -218,6 +287,11 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, `GET /api/loops` and `/api/loops/{id}/runs`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
 | `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/stop`, `/resume` |
 | `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+
+A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
+for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
+`POST /api/fleet/peer/leave`, and the history push's `POST /api/fleet/peer/rows` and
+`PUT /api/fleet/peer/payloads/{sha256}`.
 
 Everything else is the owner's at any scope — token management itself, settings, secrets, and
 publishing. The enforcement is the same for every client of the API, the CLI included.

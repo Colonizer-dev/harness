@@ -1,7 +1,8 @@
 //! Scoped API tokens (issue #508): named, least-privilege keys the maintainer hands to CLIs and
 //! automations, so they can drive the mothership without holding the per-install owner token.
 //!
-//! A token carries an ordered scope — `read` < `operate` < `launch` — optional org and repo limits
+//! A token carries an ordered scope — `fleet` < `read` < `operate` < `launch` — optional org and
+//! repo limits
 //! (empty lists mean no limit), and optional launch caps: the most colonies it may keep unfinished,
 //! and the most model spend its colonies may run up per UTC day. The registry lives at
 //! `<config_dir>/api-tokens.json` and stores only a SHA-256 hash of each token: the plaintext is
@@ -30,11 +31,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
-/// How much a token may do, ordered so `token.scope >= needed` reads as "may". `read` watches,
-/// `operate` drives colonies that exist (answer, stop, resume, prewarm), `launch` starts colonies.
+/// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
+/// trust scope one machine in a fleet holds (issue #686): it reaches only the fleet's own routes,
+/// and nothing below `read` passes any other need. `read` watches, `operate` drives colonies that
+/// exist (answer, stop, resume, prewarm), `launch` starts colonies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
+    Fleet,
     Read,
     Operate,
     Launch,
@@ -44,6 +48,7 @@ impl Scope {
     /// The wire spelling, shared by the registry file and the API answers.
     pub fn as_str(self) -> &'static str {
         match self {
+            Scope::Fleet => "fleet",
             Scope::Read => "read",
             Scope::Operate => "operate",
             Scope::Launch => "launch",
@@ -51,9 +56,12 @@ impl Scope {
     }
 
     /// Parses the scope a create request names. Manual, so a bad one is refused with the
-    /// vocabulary in the message rather than a deserialization error.
+    /// vocabulary in the message rather than a deserialization error. `fleet` parses — the fleet
+    /// module mints its tokens through [`Registry::create_fleet_token`] — but [`Registry::create`]
+    /// refuses it: it is never a scope the cockpit's token form hands out.
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
+            "fleet" => Some(Scope::Fleet),
             "read" => Some(Scope::Read),
             "operate" => Some(Scope::Operate),
             "launch" => Some(Scope::Launch),
@@ -205,7 +213,7 @@ pub struct Registry {
 
 /// SHA-256 of a token, hex. Stored rather than the plaintext, so neither the file nor a leak of it
 /// hands over a working credential.
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     crate::util::hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
@@ -269,6 +277,11 @@ impl Registry {
             return Err(format!("name is {} characters; keep it under {MAX_NAME}", name.len()));
         }
         let scope = Scope::parse(&req.scope).ok_or_else(|| "scope must be one of: read, operate, launch".to_string())?;
+        if scope == Scope::Fleet {
+            // Fleet scope is the pairing machinery's to mint, one token per joined machine; it is
+            // never a scope a token-holder asks for at the token form.
+            return Err("scope must be one of: read, operate, launch".to_string());
+        }
         let orgs = clean_orgs(&req.orgs)?;
         let repos = clean_repos(&req.repos)?;
         if req.max_concurrent.is_some_and(|max| max == 0) {
@@ -300,6 +313,47 @@ impl Registry {
         Ok(CreatedToken { token: plaintext, meta })
     }
 
+    /// Mints the one fleet-scoped token a joined machine holds, named for it. Deliberately outside
+    /// [`Registry::create`], which refuses the scope: a fleet token is the pairing machinery's
+    /// artifact, handed to exactly one machine at approve time, so the token form can neither ask
+    /// for the scope nor mint one outside a pairing. Returns the plaintext once and its id, which
+    /// the member row keeps for the revocation that removal and leaving both run.
+    pub(crate) async fn create_fleet_token(&self, member_name: &str) -> Result<(String, String), String> {
+        let name = format!("fleet: {member_name}");
+        if name.len() > MAX_NAME {
+            return Err(format!("name is {} characters; keep it under {MAX_NAME}", name.len()));
+        }
+        let plaintext = format!("col_{}", crate::util::random_token());
+        let stored = Stored {
+            id: format!("tok_{}", short_id()),
+            name,
+            scope: Scope::Fleet,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+            created_at: Utc::now(),
+            last_used_at: None,
+            token_hash: hash_token(&plaintext),
+        };
+        let id = stored.id.clone();
+        let mut tokens = self.tokens.write().await;
+        tokens.push(stored);
+        self.save(&tokens).await;
+        Ok((plaintext, id))
+    }
+
+    /// The stored hash of token `id` — what the fleet keeps of a removed member's token, so the
+    /// revoked credential still reads as "removed" rather than unknown.
+    pub(crate) async fn token_hash(&self, id: &str) -> Option<String> {
+        self.tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.token_hash.clone())
+    }
+
     /// Removes a token; `None` when no token carries the id. Presentations of the revoked token
     /// stop authenticating at once — the next request finds nothing.
     pub async fn revoke(&self, id: &str) -> Option<TokenMeta> {
@@ -307,6 +361,8 @@ impl Registry {
         let at = tokens.iter().position(|t| t.id == id)?;
         let removed = tokens.remove(at);
         self.save(&tokens).await;
+        // Its open sockets and streams end now, not at its next request (issue #746).
+        crate::auth::Revocation::fire(&format!("token:{id}"));
         Some(removed.meta())
     }
 
@@ -389,6 +445,9 @@ enum Need<'a> {
     /// A launch route — starting a colony, or a loop mutation, each of which starts or reshapes
     /// colonies: the body (or the loop) is the handler's to check.
     Launch,
+    /// A fleet route (issue #686): watching the host list across the fleet, or leaving it. Only a
+    /// fleet-scoped token passes — the trust scope buys exactly these, nothing else.
+    Fleet,
     /// No scoped token: owner only.
     Owner,
 }
@@ -420,13 +479,68 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "question" | "events" | "diff"] if get && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "question" | "events" | "diff" | "commits"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume" | "prewarm"] if post && !id.is_empty() => Need::Session {
+        // Artifacts (§7.5, issue #651): a colony's `out/` files read at watch scope, like the
+        // colony itself — the listing, the archive and the per-file download are one read.
+        ["api", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
             id,
-            at_least: Scope::Operate,
+            at_least: Scope::Read,
+        },
+        ["api", "sessions", id, "files", "archive"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["api", "sessions", id, "files", name, "content"] if get && !id.is_empty() && !name.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
+        // colony drive, like answering.
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "prewarm"] if post && !id.is_empty() => {
+            Need::Session {
+                id,
+                at_least: Scope::Operate,
+            }
+        }
+        // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
+        // unseen-failure flag — so watching it is enough, however it arrives.
+        ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
+        // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
+        // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
+        // container reads as an unknown colony (404), never as a forbidden one.
+        ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        // The read-side core (§7, issue #650): the same need as the `/api` reads over the same
+        // data. Discovery needs no credential at all — `host_guard` admits it before this runs —
+        // but is listed anyway, so a scoped token is not refused on a public route. The single
+        // colony hides behind its org/repo limits like `/api/sessions/{id}`.
+        ["uhp", "v1", "uhp" | "harnesses" | "models"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "harnesses", id] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "sessions", id, "files", "archive"] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "sessions", id, "files", name, "content"] if get && !id.is_empty() && !name.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "containers", cid, "files", fid, "content"] if get && !cid.is_empty() && !fid.is_empty() => Need::Session {
+            id: cid.strip_prefix("cntr_").unwrap_or(cid),
+            at_least: Scope::Read,
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
@@ -436,9 +550,20 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // answer to, is the handlers' to check, where the loop is in hand.
         ["api", "loops"] if get => Need::Bare(Scope::Read),
         ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        // The merge train's last tick (issue #671): a watch, like the loops list.
+        ["api", "merge-train"] if get => Need::Bare(Scope::Read),
+        ["api", "merge-train", "loop"] if get => Need::Bare(Scope::Read),
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
+        // Fleet (issue #686): the host list is what a joined machine's token is for, and leaving
+        // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
+        ["api", "hosts"] if get => Need::Fleet,
+        ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
+        // The history push (issue #762): a member uploads its log payloads, then the colony rows
+        // that reference them, onto its own directory on the owner — nothing else of the owner's.
+        ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
+        ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
@@ -454,6 +579,7 @@ pub(crate) fn describe_need(method: &Method, path: &str) -> String {
         Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
         Need::Map { .. } => "map".to_string(),
         Need::Launch => "launch".to_string(),
+        Need::Fleet => "fleet".to_string(),
         Need::Owner => "owner".to_string(),
     }
 }
@@ -521,6 +647,10 @@ pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, p
         }
         Need::Launch if token.scope >= Scope::Launch => Ok(()),
         Need::Launch => Err(Deny::forbidden(token, method, path)),
+        // The fleet scope reaches only the fleet's own routes; being the lowest scope, it passes
+        // every other need's `>=` check already, so this is the one place it admits anything.
+        Need::Fleet if token.scope == Scope::Fleet => Ok(()),
+        Need::Fleet => Err(Deny::forbidden(token, method, path)),
         Need::Owner => Err(Deny::forbidden(token, method, path)),
     }
 }
@@ -752,6 +882,7 @@ mod tests {
             "/api/sessions/abc/question",
             "/api/sessions/abc/events",
             "/api/sessions/abc/diff",
+            "/api/sessions/abc/commits",
             "/api/maps/acme/web",
             "/api/maps/acme/web/files",
             "/api/tokens/self",
@@ -769,6 +900,11 @@ mod tests {
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
                 "read {path}"
             );
+            assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
+        }
+        // Marking a colony seen (issue #744) is looking at it, not driving it: read may POST it.
+        for path in ["/api/sessions/abc/seen"] {
+            assert!(authorize(&app, &read, &post, path).await.is_ok(), "read {path}");
             assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
         }
         // Launching needs launch.

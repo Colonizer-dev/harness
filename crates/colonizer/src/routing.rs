@@ -25,8 +25,9 @@ const EXTENSIONS: [&str; 18] = [
     ".sql", ".lock",
 ];
 
-/// How much reasoning a task needs. Ordered by capability and price, cheapest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// How much reasoning a task needs. Ordered by capability and price, cheapest first — the derived
+/// `Ord` follows declaration order, so `Low < Medium < High` and a floor is just `max`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
     Low,
@@ -73,14 +74,14 @@ pub struct Signals {
     /// harness supplies no defaults for it, so such a colony never routes down to the cheapest tier.
     pub known_preset: bool,
     /// An optional second opinion from the external Jev classifier (`jev.rs`), fetched by the boot
-    /// path before `decide` runs. Recorded only — it never changes the rule's score or `decide`'s
-    /// output tier.
+    /// path before `decide` runs. It never changes the rule's score; it changes `decide`'s output
+    /// tier only in [`JevMode::Act`], above the confidence threshold and never below the floor.
     pub jev: Option<JevOpinion>,
 }
 
-/// A recorded-but-not-applied second opinion from an optional external classifier ("Jev"), fetched
-/// by the boot path before `decide` runs. `decide` copies it through unchanged into `Decision` — it
-/// never affects `tier`.
+/// A second opinion from an optional external classifier ("Jev"), fetched by the boot path before
+/// `decide` runs. `decide` copies it through unchanged into `Decision`, and acts on its tier only in
+/// [`JevMode::Act`] (issue #583).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct JevOpinion {
     pub tier: Tier,
@@ -89,8 +90,51 @@ pub struct JevOpinion {
     pub estimated_cost_usd: f64,
 }
 
+/// The decision point a routing record is about, so a report reading `routing.jsonl` can tell this
+/// one apart from any other point that later records its decisions the same way.
+pub const DECISION_POINT: &str = "routing.tier";
+
+/// What the boot path does with Jev's tier opinion (issue #583).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JevMode {
+    /// Not asked.
+    #[default]
+    Off,
+    /// Asked and recorded, never applied.
+    Shadow,
+    /// Asked, and its tier is used when it is confident enough — never below the floor.
+    Act,
+}
+
+impl JevMode {
+    /// The mode from the two module settings: `jev_routing_act` wins, then `jev_shadow_mode`.
+    pub fn from_settings(act: bool, shadow: bool) -> JevMode {
+        if act {
+            JevMode::Act
+        } else if shadow {
+            JevMode::Shadow
+        } else {
+            JevMode::Off
+        }
+    }
+
+    /// Whether the boot path should ask Jev at all: act needs the opinion just as shadow does.
+    pub fn asks(&self) -> bool {
+        *self != JevMode::Off
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JevMode::Off => "off",
+            JevMode::Shadow => "shadow",
+            JevMode::Act => "act",
+        }
+    }
+}
+
 /// Per-task routing as configured. Resolved by the caller from module settings and the colony record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RoutingSettings {
     /// Whether to route per task at all. Off: a colony with no tier of its own runs on the module's
     /// `model`.
@@ -98,6 +142,29 @@ pub struct RoutingSettings {
     /// A tier this colony was started with, which wins over the rule — honoured even when routing is
     /// off.
     pub chosen: Option<Tier>,
+    /// What to do with Jev's opinion when `signals.jev` carries one.
+    pub jev_mode: JevMode,
+    /// The confidence at or above which an act-mode opinion is used instead of the rule's tier.
+    pub jev_act_confidence: f64,
+    /// Whether the task is sensitive: its sensitivity class demands more than any provider
+    /// (`sensitivity::required_mark` above `Any`). A sensitive task's floor is the rule's own tier,
+    /// so Jev can raise it but never route it down.
+    pub sensitive: bool,
+}
+
+#[cfg(test)]
+impl RoutingSettings {
+    /// Routing on or off with no operator tier and Jev off — the settings every colony had before
+    /// Jev could act.
+    pub fn rule(enabled: bool) -> RoutingSettings {
+        RoutingSettings {
+            enabled,
+            chosen: None,
+            jev_mode: JevMode::Off,
+            jev_act_confidence: 0.8,
+            sensitive: false,
+        }
+    }
 }
 
 /// What decided the tier.
@@ -107,6 +174,9 @@ pub enum Source {
     Off,
     Rule,
     Override,
+    /// Jev's opinion, in act mode, confident enough and different from the rule's tier (clamped to
+    /// the floor). An opinion that lands on the rule's own tier leaves the source `Rule`.
+    Jev,
 }
 
 /// The tier a colony will run on, with everything that chose it, so the choice can be logged and
@@ -123,9 +193,13 @@ pub struct Decision {
     pub score: i32,
     /// One clause naming the tier and the signals behind it, for the session log.
     pub reason: String,
-    /// Jev's second opinion, copied through from `Signals` unchanged. Shadow mode only: never read
-    /// by `decide` to pick `tier`.
+    /// Jev's second opinion, copied through from `Signals` unchanged. Read by `decide` to pick
+    /// `tier` only in act mode.
     pub jev: Option<JevOpinion>,
+    /// The lowest tier Jev may route this task to: the rule's tier for a sensitive task, medium for
+    /// an unknown preset (the rule's own clamp), the higher of the two when both hold, `None` when
+    /// neither does. It bounds Jev only; the rule and an operator tier are not floored.
+    pub floor: Option<Tier>,
 }
 
 impl Decision {
@@ -137,7 +211,7 @@ impl Decision {
     }
 
     /// Whether Jev's tier agrees with the rule's own tier — `None` when no opinion was recorded.
-    /// Shadow-mode comparison only: this never feeds back into `tier`.
+    /// A comparison for the record: `decide` reads the opinion itself, not this.
     pub fn jev_agrees(&self) -> Option<bool> {
         Some(self.jev.as_ref()?.tier == self.rule)
     }
@@ -165,11 +239,22 @@ pub fn signals(title: &str, text: &str, labels: &[String], known_preset: bool) -
     }
 }
 
+/// The lowest tier Jev may pick for a task (issue #583). A sensitive task keeps the rule's tier as
+/// its floor: the tier decides which model, and so which provider, the colony starts on, and the
+/// security gate (sensitivity.rs) never vouched for routing sensitive work any cheaper than the rule
+/// would. An unknown preset keeps the rule's own clamp off low.
+pub fn floor(sensitive: bool, known_preset: bool, rule: Tier) -> Option<Tier> {
+    let sensitive = sensitive.then_some(rule);
+    let preset = (!known_preset).then_some(Tier::Medium);
+    sensitive.max(preset)
+}
+
 /// The tier a colony runs on. Pure: the same task always routes the same way.
 pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
     let score = score(signals);
     let rule = rule_tier(signals, score);
     let detail = score_detail(signals, score);
+    let floor = floor(settings.sensitive, signals.known_preset, rule);
     // An explicit tier is an operator instruction, so it is honoured whether or not the rule is on.
     if let Some(chosen) = settings.chosen {
         return Decision {
@@ -183,6 +268,7 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
                 rule.as_str()
             ),
             jev: signals.jev.clone(),
+            floor,
         };
     }
     if !settings.enabled {
@@ -193,7 +279,42 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
             score,
             reason: "per-task routing is off, so the colony runs on the module's model".to_string(),
             jev: signals.jev.clone(),
+            floor,
         };
+    }
+    // Act mode: a confident opinion replaces the rule's tier, raised to the floor if it is below it.
+    // A NaN confidence fails the comparison, so it falls back to the rule like a low one.
+    if settings.jev_mode == JevMode::Act
+        && let Some(jev) = signals
+            .jev
+            .as_ref()
+            .filter(|jev| jev.confidence >= settings.jev_act_confidence)
+    {
+        let tier = floor.map_or(jev.tier, |floor| jev.tier.max(floor));
+        if tier != rule {
+            let mut reason = format!(
+                "{} tier, from Jev at confidence {:.2}; the rule says {} at {detail}",
+                tier.as_str(),
+                jev.confidence,
+                rule.as_str()
+            );
+            if tier != jev.tier {
+                reason.push_str(&format!(
+                    " (Jev said {}, kept at the {} floor)",
+                    jev.tier.as_str(),
+                    tier.as_str()
+                ));
+            }
+            return Decision {
+                tier,
+                rule,
+                source: Source::Jev,
+                score,
+                reason,
+                jev: signals.jev.clone(),
+                floor,
+            };
+        }
     }
     Decision {
         tier: rule,
@@ -202,6 +323,7 @@ pub fn decide(settings: &RoutingSettings, signals: &Signals) -> Decision {
         score,
         reason: format!("{} tier, {detail}", rule.as_str()),
         jev: signals.jev.clone(),
+        floor,
     }
 }
 
@@ -459,6 +581,7 @@ mod tests {
             &RoutingSettings {
                 enabled: true,
                 chosen: None,
+                ..RoutingSettings::rule(true)
             },
             task,
         )
@@ -472,7 +595,7 @@ mod tests {
         assert_eq!(typo.paths, 5);
         assert!(!typo.one_directory);
         assert_eq!(
-            decide(&RoutingSettings { enabled: true, chosen: None }, &typo),
+            decide(&RoutingSettings::rule(true), &typo),
             Decision {
                 tier: Tier::Low,
                 rule: Tier::Low,
@@ -481,6 +604,7 @@ mod tests {
                 reason: "low tier, score 1: a 76-character body, no checklist items, 5 paths named across directories, and the typo label"
                     .to_string(),
                 jev: None,
+                floor: None,
             }
         );
         let plain = signals("fix a typo", text, &[], true);
@@ -603,6 +727,7 @@ mod tests {
                 reason: "medium tier, score -2: a 12-character body, no checklist items, no paths named, and the typo label, kept off low because the sandbox preset is unknown"
                     .to_string(),
                 jev: None,
+                floor: Some(Tier::Medium),
             }
         );
 
@@ -635,13 +760,7 @@ mod tests {
             jev: None,
         };
         assert_eq!(
-            decide(
-                &RoutingSettings {
-                    enabled: false,
-                    chosen: None
-                },
-                &big
-            ),
+            decide(&RoutingSettings::rule(false), &big),
             Decision {
                 tier: Tier::Medium,
                 rule: Tier::High,
@@ -649,6 +768,7 @@ mod tests {
                 score: 10,
                 reason: "per-task routing is off, so the colony runs on the module's model".to_string(),
                 jev: None,
+                floor: None,
             }
         );
     }
@@ -668,6 +788,7 @@ mod tests {
             &RoutingSettings {
                 enabled: false,
                 chosen: Some(Tier::Low),
+                ..RoutingSettings::rule(true)
             },
             &big,
         );
@@ -681,6 +802,7 @@ mod tests {
                 reason: "low tier, set for this colony; the rule says high at score 10: a 5000-character body, 6 checklist items, 5 paths named across directories, and the epic label"
                     .to_string(),
                 jev: None,
+                floor: None,
             }
         );
         // The rule is off, but an override against its recorded tier is still a misroute label.
@@ -690,6 +812,7 @@ mod tests {
             &RoutingSettings {
                 enabled: false,
                 chosen: Some(Tier::High),
+                ..RoutingSettings::rule(true)
             },
             &big,
         );
@@ -705,6 +828,7 @@ mod tests {
             &RoutingSettings {
                 enabled: true,
                 chosen: Some(Tier::Low),
+                ..RoutingSettings::rule(true)
             },
             &small,
         );
@@ -718,6 +842,7 @@ mod tests {
                 reason: "low tier, set for this colony; the rule says low at score 0: a 180-character body, no checklist items, 1 path named"
                     .to_string(),
                 jev: None,
+                floor: None,
             }
         );
         assert!(!agreed.misroute());
@@ -726,6 +851,7 @@ mod tests {
             &RoutingSettings {
                 enabled: true,
                 chosen: Some(Tier::High),
+                ..RoutingSettings::rule(true)
             },
             &small,
         );
@@ -739,6 +865,7 @@ mod tests {
                 reason: "high tier, set for this colony; the rule says low at score 0: a 180-character body, no checklist items, 1 path named"
                     .to_string(),
                 jev: None,
+                floor: None,
             }
         );
         assert!(overruled.misroute());
@@ -877,6 +1004,7 @@ mod tests {
             &RoutingSettings {
                 enabled: false,
                 chosen: None,
+                ..RoutingSettings::rule(true)
             },
             &with_opinion,
         );
@@ -894,6 +1022,7 @@ mod tests {
             &RoutingSettings {
                 enabled: true,
                 chosen: Some(Tier::High),
+                ..RoutingSettings::rule(true)
             },
             &with_opinion,
         );
@@ -922,11 +1051,224 @@ mod tests {
             &RoutingSettings {
                 enabled: true,
                 chosen: Some(Tier::Medium),
+                ..RoutingSettings::rule(true)
             },
             &disagreeing,
         );
         assert_eq!(overridden.rule, Tier::Low);
         assert_eq!(overridden.jev_agrees(), Some(false));
+    }
+
+    fn jev_at(tier: Tier, confidence: f64) -> JevOpinion {
+        JevOpinion { confidence, ..jev(tier) }
+    }
+
+    fn acting(sensitive: bool) -> RoutingSettings {
+        RoutingSettings {
+            jev_mode: JevMode::Act,
+            jev_act_confidence: 0.8,
+            sensitive,
+            ..RoutingSettings::rule(true)
+        }
+    }
+
+    #[test]
+    fn jev_mode_comes_from_the_two_settings_and_act_still_asks_for_the_opinion() {
+        assert_eq!(JevMode::from_settings(false, false), JevMode::Off);
+        assert_eq!(JevMode::from_settings(false, true), JevMode::Shadow);
+        assert_eq!(JevMode::from_settings(true, false), JevMode::Act);
+        assert_eq!(JevMode::from_settings(true, true), JevMode::Act);
+        assert!(!JevMode::Off.asks());
+        assert!(JevMode::Shadow.asks() && JevMode::Act.asks());
+        assert!(Tier::Low < Tier::Medium && Tier::Medium < Tier::High);
+    }
+
+    #[test]
+    fn act_mode_uses_a_confident_jev_tier_in_either_direction() {
+        // The rule lands on low for this task.
+        let small = signals_with(180, 0, 1, true, None);
+        let up = decide(
+            &acting(false),
+            &Signals {
+                jev: Some(jev_at(Tier::High, 0.9)),
+                ..small.clone()
+            },
+        );
+        assert_eq!(
+            (up.tier, up.rule, up.source, up.floor),
+            (Tier::High, Tier::Low, Source::Jev, None)
+        );
+        assert_eq!(up.jev_agrees(), Some(false));
+        assert!(!up.misroute(), "Jev acting is not an operator override");
+
+        // The rule lands on high here; a confident low opinion routes it down when nothing floors it.
+        let big = signals_with(6_001, 0, 2, false, None);
+        let down = decide(
+            &acting(false),
+            &Signals {
+                jev: Some(jev_at(Tier::Low, 0.8)),
+                ..big
+            },
+        );
+        assert_eq!((down.tier, down.rule, down.source), (Tier::Low, Tier::High, Source::Jev));
+
+        // An opinion that agrees with the rule leaves the source as the rule.
+        let same = decide(
+            &acting(false),
+            &Signals {
+                jev: Some(jev_at(Tier::Low, 0.99)),
+                ..small
+            },
+        );
+        assert_eq!((same.tier, same.source), (Tier::Low, Source::Rule));
+    }
+
+    #[test]
+    fn act_mode_falls_back_to_the_rule_below_the_threshold_or_without_an_opinion() {
+        let small = signals_with(180, 0, 1, true, None);
+        for confidence in [0.0, 0.5, 0.79, f64::NAN] {
+            let decision = decide(
+                &acting(false),
+                &Signals {
+                    jev: Some(jev_at(Tier::High, confidence)),
+                    ..small.clone()
+                },
+            );
+            assert_eq!(
+                (decision.tier, decision.source),
+                (Tier::Low, Source::Rule),
+                "confidence {confidence}"
+            );
+        }
+        let none = decide(&acting(false), &small);
+        assert_eq!((none.tier, none.source), (Tier::Low, Source::Rule));
+    }
+
+    #[test]
+    fn shadow_and_off_modes_never_change_the_tier_however_confident_jev_is() {
+        for mode in [JevMode::Off, JevMode::Shadow] {
+            for tier in [Tier::Low, Tier::Medium, Tier::High] {
+                let decision = decide(
+                    &RoutingSettings {
+                        jev_mode: mode,
+                        jev_act_confidence: 0.0,
+                        ..RoutingSettings::rule(true)
+                    },
+                    &Signals {
+                        jev: Some(jev_at(tier, 1.0)),
+                        ..signals_with(180, 0, 1, true, None)
+                    },
+                );
+                assert_eq!(
+                    (decision.tier, decision.source),
+                    (Tier::Low, Source::Rule),
+                    "{mode:?} {tier:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn act_mode_never_routes_below_the_security_floor() {
+        // Rule tiers low, medium and high, on known and unknown presets.
+        let tasks = [
+            signals_with(180, 0, 1, true, None),
+            signals_with(401, 2, 0, true, None),
+            signals_with(6_001, 0, 2, false, None),
+        ];
+        let tiers = [Tier::Low, Tier::Medium, Tier::High];
+        for task in tasks {
+            for known_preset in [true, false] {
+                for sensitive in [false, true] {
+                    for jev_tier in tiers {
+                        for confidence in [0.0, 0.5, 0.8, 0.95, 1.0] {
+                            let decision = decide(
+                                &acting(sensitive),
+                                &Signals {
+                                    known_preset,
+                                    jev: Some(jev_at(jev_tier, confidence)),
+                                    ..task.clone()
+                                },
+                            );
+                            let floor = decision.floor;
+                            assert_eq!(floor, super::floor(sensitive, known_preset, decision.rule));
+                            if sensitive {
+                                assert_eq!(floor.map(|f| f >= decision.rule), Some(true));
+                                assert!(decision.tier >= decision.rule, "a sensitive task is never routed down");
+                            }
+                            if !known_preset {
+                                assert_ne!(decision.tier, Tier::Low, "an unknown preset is never routed to low");
+                            }
+                            if let Some(floor) = floor {
+                                assert!(decision.tier >= floor, "{decision:?}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_sensitive_task_lets_jev_raise_the_tier_but_not_lower_it() {
+        let big = signals_with(6_001, 0, 2, false, None);
+        let kept = decide(
+            &acting(true),
+            &Signals {
+                jev: Some(jev_at(Tier::Low, 1.0)),
+                ..big
+            },
+        );
+        assert_eq!(
+            (kept.tier, kept.source, kept.floor),
+            (Tier::High, Source::Rule, Some(Tier::High))
+        );
+
+        let middle = signals_with(401, 2, 0, true, None);
+        let raised = decide(
+            &acting(true),
+            &Signals {
+                jev: Some(jev_at(Tier::High, 1.0)),
+                ..middle
+            },
+        );
+        assert_eq!((raised.tier, raised.source), (Tier::High, Source::Jev));
+
+        // An unknown preset floors at medium, so a confident low opinion lands on medium.
+        let clamped = decide(
+            &acting(false),
+            &Signals {
+                known_preset: false,
+                jev: Some(jev_at(Tier::Low, 1.0)),
+                ..signals_with(6_001, 0, 2, false, None)
+            },
+        );
+        assert_eq!((clamped.tier, clamped.source), (Tier::Medium, Source::Jev));
+        assert!(clamped.reason.contains("kept at the medium floor"), "{}", clamped.reason);
+    }
+
+    #[test]
+    fn an_operator_tier_still_wins_in_act_mode_and_routing_off_still_ignores_jev() {
+        let task = Signals {
+            jev: Some(jev_at(Tier::High, 1.0)),
+            ..signals_with(180, 0, 1, true, None)
+        };
+        let chosen = decide(
+            &RoutingSettings {
+                chosen: Some(Tier::Low),
+                ..acting(false)
+            },
+            &task,
+        );
+        assert_eq!((chosen.tier, chosen.source), (Tier::Low, Source::Override));
+        let off = decide(
+            &RoutingSettings {
+                enabled: false,
+                ..acting(false)
+            },
+            &task,
+        );
+        assert_eq!((off.tier, off.source), (Tier::Medium, Source::Off));
     }
 
     #[test]

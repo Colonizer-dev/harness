@@ -243,7 +243,14 @@ pub async fn sweep_once(app: &Shared, cfg: &ReclaimConfig) -> SweepReport {
         match lifecycle::cleanup_one(app, &id).await {
             Ok(s) => {
                 // Manual cleanup leaves the VM to the operator, but the automatic path must not leak one.
-                app.execution.remove(&s.sandbox).await;
+                if let Err(e) = app.execution.remove(&s.sandbox).await {
+                    app.session_log(
+                        &id,
+                        "warn",
+                        format!("automatically reclaimed, but the microVM could not be confirmed removed: {e:#}"),
+                    )
+                    .await;
+                }
                 app.session_log(&id, "info", "automatically reclaimed: its pull request holds the work, so the worktree was removed and the colony is now unresumable".into()).await;
                 report.reclaimed.push(id);
             }
@@ -394,6 +401,8 @@ pub async fn run(app: Shared) {
     loop {
         tick.tick().await;
         let report = sweep_once(&app, &ReclaimConfig::load(&app).await).await;
+        // The owner's ingested fleet history (#762) ages out on the same tick, on its own window.
+        crate::fleet_history::prune_tick(&app).await;
         if !report.is_empty() {
             eprintln!(
                 "reclaim: reclaimed {}, failed {}, orphans removed {}, held {}",

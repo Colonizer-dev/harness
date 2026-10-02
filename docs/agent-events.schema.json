@@ -20,6 +20,7 @@
     { "$ref": "#/$defs/memory_proposal" },
     { "$ref": "#/$defs/finding" },
     { "$ref": "#/$defs/jev_ladder" },
+    { "$ref": "#/$defs/path_policy" },
     { "$ref": "#/$defs/loop_next" },
     { "$ref": "#/$defs/loop_stop" }
   ],
@@ -234,7 +235,9 @@
         "title": { "type": "string" },
         "content": { "type": "string" },
         "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." }
+        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." },
+        "kind": { "enum": ["plan", "decision", "file_change", "failure", "architecture", "convention"], "default": "convention", "description": "What the entry is (issue #766)." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure the colony is that the entry holds beyond its task (issue #766). A global proposal is promoted to fleet-wide memory only when colonies in two distinct repositories propose it at 0.8 or more; absent counts as 0." }
       },
       "required": ["type", "title", "content"]
     },
@@ -283,6 +286,18 @@
         "reason": { "type": "string", "description": "Why then, one short line. Absent reads as empty." }
       },
       "required": ["type", "delay_minutes"]
+    },
+    "path_policy": {
+      "type": "object",
+      "description": "The agent reached for a path the path policy masks or write-protects (docs/path-policy.md, issue #647), reported by the runner from the same bind list the guest booted with. Reporting only: the mount enforced before this ran, so the event carries no decision and no permission field, and the mothership's only act is to log it — one colony log line and one activity entry per distinct (access, path).",
+      "properties": {
+        "type": { "const": "path_policy" },
+        "access": { "type": "string", "enum": ["read", "write"], "description": "What the agent was trying to do. A read is reported only for a masked path; reads of protected paths are allowed." },
+        "policy": { "type": "string", "enum": ["masked", "protected"], "description": "Which side of the policy the path falls on." },
+        "path": { "type": "string", "description": "The workspace-relative path, as the runner resolved it through any symlink." },
+        "tool": { "type": "string", "description": "The tool that made the attempt (\"Read\", an ACP `fs/write_text_file`). Absent on a runner from before the field existed." }
+      },
+      "required": ["type", "access", "policy", "path"]
     },
     "loop_stop": {
       "type": "object",

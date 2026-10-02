@@ -100,6 +100,19 @@ pub(crate) async fn with_slot<T>(
     claim(&mut guard, room)
 }
 
+/// When the queue loop last came round, as Unix seconds; 0 until its first tick. A wedged tick
+/// (a `start_queued` that never returns) leaves it to age, which is what member health reads as
+/// "colony runner not ticking" (issue #764).
+static LAST_TICK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Seconds since the queue loop last ticked, or `None` before its first tick.
+pub fn last_tick_age_s() -> Option<i64> {
+    match LAST_TICK.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        at => Some((chrono::Utc::now().timestamp() - at).max(0)),
+    }
+}
+
 /// Starts queued colonies as slots free up, oldest first. A colony whose org or repository is at its own
 /// limit doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
 /// is stacked on.
@@ -108,6 +121,7 @@ pub async fn run_queue(app: Shared) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        LAST_TICK.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
         start_queued(&app).await;
     }
 }
@@ -195,6 +209,9 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         // onto a worktree that no longer exists, and `can_resume` would never take it back afterwards.
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
+        // Written under the list lock, not through `update_session`, so the unseen mark it would
+        // set at this crossing is set here (issue #744).
+        s.unseen_failure = true;
         let cleared = s.clear_attention();
         s.updated_at = Utc::now();
         let mut message = String::from("was cleaned up while it waited in the queue, so it can never start");
@@ -269,6 +286,7 @@ fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
     }
     s.status = SessionStatus::Failed;
     s.error = Some(reason.to_string());
+    s.unseen_failure = true; // as above: this crossing bypasses `update_session` (issue #744)
     let cleared = s.clear_attention();
     s.updated_at = Utc::now();
     let mut message = format!("can never start: {reason}");
@@ -769,6 +787,8 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
                     return None;
                 }
                 x.status = SessionStatus::Starting;
+                // Told to the boot for session.json's `restore` (issue #700) before the flag goes.
+                x.was_suspended = x.suspended.is_some();
                 x.suspended = None;
                 // A pre-warm request on top of a held answer is stale: this boot delivers the
                 // answer, so there is nothing left to warm.
@@ -889,6 +909,9 @@ pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::Mod
                 if let Some(p) = x.prewarm.as_mut() {
                     p.started_at = Some(Utc::now());
                 }
+                // The warm-up boot restores a suspension (issue #700): session.json's `restore`
+                // says so, though the suspension itself stays until an answer lands.
+                x.was_suspended = x.suspended.is_some();
                 claimed_for_boot(x);
                 Some(x.clone())
             },
@@ -1067,6 +1090,36 @@ pub(crate) async fn prewarm_expire(app: &Shared, id: &str) -> bool {
     true
 }
 
+/// The resume scheduler's verdict for one colony at `now` (unix seconds): quota-parked, with a
+/// worktree to resume into, and due — its provider recovered, or the reset a card's "wait" scheduled
+/// it for has come ([`crate::quota_cards::park_due`]). The provider is the one the flag names (a
+/// card's wait records it), else the one the park's error names; with neither, any exhaustion
+/// anywhere holds it. Pure over `exhausted`, so the schedule is tested with a fake clock.
+pub(crate) fn quota_resume_due(
+    s: &Session,
+    provider_ids: &[String],
+    exhausted: &dyn Fn(&str) -> bool,
+    any_exhausted: bool,
+    now: i64,
+) -> bool {
+    let Some(attention) = s
+        .attention
+        .as_ref()
+        .filter(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+    else {
+        return false;
+    };
+    if s.cleaned_up || s.git_admin_dir.is_none() {
+        return false;
+    }
+    let provider = crate::quota_cards::flagged_provider(s, provider_ids);
+    let out = match provider.as_deref() {
+        Some(pid) => exhausted(pid),
+        None => any_exhausted,
+    };
+    crate::quota_cards::park_due(attention, out, now)
+}
+
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
 /// worktree never left, so the normal admission loop resumes them like any operator resume. Both
 /// park shapes qualify: the pre-#213 `Stopped` stand-in and a real `Parked` whose park discarded
@@ -1085,17 +1138,8 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
         let any_exhausted = !app.gateway.quota_exhausted().is_empty();
-        let recovered = |s: &Session| {
-            s.attention
-                .as_ref()
-                .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
-                && !s.cleaned_up
-                && s.git_admin_dir.is_some()
-                && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
-                    Some(pid) => !app.gateway.is_quota_exhausted(&pid),
-                    None => !any_exhausted,
-                }
-        };
+        let now = Utc::now().timestamp();
+        let recovered = |s: &Session| quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any_exhausted, now);
         let mut cold: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for s in sessions
@@ -1561,6 +1605,10 @@ mod tests {
         assert!(matches!(claim, Some(Claim::Retire(..))), "retired, not started");
         assert_eq!(queued.status, SessionStatus::Failed, "out of the queue for good");
         assert_eq!(queued.error.as_deref(), Some(reason.as_str()));
+        assert!(
+            queued.unseen_failure,
+            "the badge counts the retirement until someone looks (#744)"
+        );
         // A colony claimed in the meantime is left alone.
         let mut starting = colony("acme", SessionStatus::Starting);
         assert!(claim_refused(&mut starting, &reason).is_none());
@@ -2081,19 +2129,10 @@ mod tests {
     /// The smallest agent module, with or without the `session_resume` declaration that makes a
     /// colony's suspension possible at all.
     fn agent_module(id: &str, resume_dir: Option<&str>) -> crate::modules::AgentModule {
-        crate::modules::AgentModule {
-            id: id.into(),
-            name: id.into(),
-            description: String::new(),
-            dir: std::path::PathBuf::from("/opt/colonizer/agent"),
-            entry: vec!["runner.mjs".into()],
-            needs_claude: false,
-            requires: crate::modules::Requires::default(),
-            schema: json!({}),
-            egress: None,
-            resume_dir: resume_dir.map(String::from),
-            loop_tools: false,
-        }
+        crate::modules::AgentModule::test(id)
+            .dir(std::path::PathBuf::from("/opt/colonizer/agent"))
+            .entry(vec!["runner.mjs".into()])
+            .resume_dir(resume_dir.map(String::from))
     }
 
     /// A colony waiting on its user, with whatever session id its runner has (or has not) reported.

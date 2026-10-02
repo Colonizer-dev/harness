@@ -212,19 +212,9 @@ mod tests {
         if exec_policy {
             schema["properties"]["exec_policy"] = json!({"env": "COLONIZER_EXEC_POLICY"});
         }
-        AgentModule {
-            id: name.to_lowercase().replace(' ', "-"),
-            name: name.into(),
-            description: String::new(),
-            dir: PathBuf::new(),
-            entry: vec![],
-            needs_claude: false,
-            requires: Default::default(),
-            schema,
-            egress: None,
-            resume_dir: None,
-            loop_tools: false,
-        }
+        AgentModule::test(&name.to_lowercase().replace(' ', "-"))
+            .name(name)
+            .schema(schema)
     }
 
     fn install(exec_policy: &str) -> crate::config::ModuleChoice {

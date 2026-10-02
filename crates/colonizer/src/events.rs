@@ -63,11 +63,14 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 /// Issue #328: what autopilot does once a completion claim's verification verdict is in. A
 /// contradicted colony is held for the maintainer exactly as a failed turn is; anything else
 /// publishes as before — an unverifiable claim is not the colony's fault, and holding it would
-/// strand finished work on infra noise.
+/// strand finished work on infra noise, and an inconclusive one failed on the base commit too, so
+/// the failure is not this change's.
 pub(crate) fn verdict_step(verdict: &crate::verify::Verdict) -> Autopilot {
     match verdict {
         crate::verify::Verdict::Contradicted => Autopilot::Hold("the completion claim was contradicted"),
-        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Unverifiable => Autopilot::Publish,
+        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Inconclusive | crate::verify::Verdict::Unverifiable => {
+            Autopilot::Publish
+        }
     }
 }
 
@@ -388,11 +391,14 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             // too — the judge answers only at or below its ceiling — and a question without one,
             // from an older runner, counts as a workspace write.
             let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
+            // A new question retires the old one's notification answer tokens (issue #742).
+            app.answer_tokens.revoke(id).await;
             *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {
             *rt.open_question.lock().await = None;
+            app.answer_tokens.revoke(id).await;
             let mut activity = rt.activity.lock().await;
             activity.question_since = None;
             // The question is resolved either way, so an unanswered-provider streak behind it is over.
@@ -411,8 +417,18 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             content,
             tags,
             origin,
+            kind,
+            confidence,
         } => {
-            memory_proposal(app, id, origin.as_deref(), scope.as_deref(), &title, &content, &tags).await;
+            let proposal = ProposalBody {
+                scope: scope.as_deref(),
+                title: &title,
+                content: &content,
+                tags: &tags,
+                kind: kind.as_deref(),
+                confidence,
+            };
+            memory_proposal_full(app, id, origin.as_deref(), proposal).await;
         }
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
@@ -423,6 +439,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         AgentEvent::LoopStop { reason } => {
             crate::loops::on_stop(app, id, &reason).await;
+        }
+        // The path policy's runtime report (issue #647): a log line and an activity entry per
+        // distinct (access, path), with the untrusted fields sanitised on this side (path_policy.rs).
+        AgentEvent::PathPolicy {
+            access,
+            policy,
+            path,
+            tool,
+        } => {
+            crate::path_policy::on_attempt(app, id, rt, &access, &policy, &path, &tool).await;
         }
         // Shadow measurement (#475): the pass's decisions are logged to the jev_ladder ledger and
         // arm the reread watch, and nothing else changes. Pure telemetry — never read as acted on.
@@ -566,9 +592,18 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     .await;
 }
 
-/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
-/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
-/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2).
+/// A proposal's body, as the runner sent it.
+pub(crate) struct ProposalBody<'a> {
+    pub scope: Option<&'a str>,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub tags: &'a [String],
+    pub kind: Option<&'a str>,
+    pub confidence: Option<f64>,
+}
+
+/// A proposal without a kind or confidence, as runners from before issue #766 send it.
+#[cfg(test)]
 pub(crate) async fn memory_proposal(
     app: &Shared,
     id: &str,
@@ -578,6 +613,31 @@ pub(crate) async fn memory_proposal(
     content: &str,
     tags: &[String],
 ) {
+    let body = ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind: None,
+        confidence: None,
+    };
+    memory_proposal_full(app, id, origin, body).await
+}
+
+/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
+/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
+/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2). A global
+/// proposal is only a sighting of a fleet-wide candidate (issue #766): it is queued for review as a
+/// global note once candidates from enough distinct repositories agree with enough confidence.
+pub(crate) async fn memory_proposal_full(app: &Shared, id: &str, origin: Option<&str>, body: ProposalBody<'_>) {
+    let ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind,
+        confidence,
+    } = body;
     let Some(s) = app.session(id).await else { return };
     let scope = scope.unwrap_or("repo");
     // Shared memory is read-only from inside a colony (docs/architecture.md, "Shared memory
@@ -610,15 +670,28 @@ pub(crate) async fn memory_proposal(
         .await;
         return;
     }
+    let Some(kind) = memory::parse_kind(kind) else {
+        app.session_log(
+            id,
+            "error",
+            format!("rejected a memory proposal: kind must be one of {}", memory::KINDS.join(", ")),
+        )
+        .await;
+        return;
+    };
+    // Out of range or not a number reads as no confidence at all, which never promotes.
+    let confidence = confidence.filter(|c| c.is_finite()).map(|c| c.clamp(0.0, 1.0));
     let key = match scope {
         "org" => s.org.clone(),
         "repo" => s.repo.clone(),
         _ => String::new(),
     };
-    // Who proposed, shown in the review queue: the session id is the colony id, and `origin` is
-    // always `orchestrator` here — everything else was refused above (absent: that same legacy case).
-    let source = json!({"session_id": s.id, "repo": s.repo, "origin": origin.unwrap_or("orchestrator")});
-    let note = match memory::draft(scope, &key, title, content, tags, source) {
+    // Who proposed, shown in the review queue and kept as the note's provenance (issue #766): the
+    // session id is the colony id, the commit is read host-side, and `origin` is always
+    // `orchestrator` here — everything else was refused above (absent: that same legacy case).
+    let commit = memory::colony_commit(app, &s).await;
+    let source = json!({"session_id": s.id, "repo": s.repo, "commit": commit, "origin": origin.unwrap_or("orchestrator")});
+    let mut note = match memory::draft(scope, &key, title, content, tags, source) {
         Ok(note) => note,
         Err(e) => {
             app.session_log(id, "error", format!("rejected a memory proposal: {e:#}"))
@@ -626,6 +699,12 @@ pub(crate) async fn memory_proposal(
             return;
         }
     };
+    note.kind = kind.to_string();
+    note.confidence = confidence;
+    if scope == "global" {
+        global_sighting(app, id, &s, note, commit).await;
+        return;
+    }
     let (title, scope) = (note.title.clone(), note.scope.clone());
     let review = orgs::memory_requires_review(&modules);
     // Only a repo note can skip review. An org or global note reaches every colony in the org or the
@@ -677,6 +756,59 @@ pub(crate) async fn memory_proposal(
         }
         Err(e) => {
             app.session_log(id, "error", format!("could not store a memory proposal: {e:#}"))
+                .await
+        }
+    }
+}
+
+/// A colony's global proposal (issue #766): recorded as a sighting of its fleet-wide candidate, and
+/// queued for review as a global note only once the candidate clears the bar. Fleet-wide memory is
+/// always reviewed, whatever `require_review` says: it reaches every colony (issue #376).
+async fn global_sighting(app: &Shared, id: &str, s: &Session, note: memory::Note, commit: Option<String>) {
+    let sighting = memory::Sighting {
+        colony: s.id.clone(),
+        repo: s.repo.clone(),
+        commit,
+        confidence: note.confidence.unwrap_or(0.0),
+        seen_at: Utc::now(),
+    };
+    let title = note.title.clone();
+    match app.memory.record_sighting(&note, sighting).await {
+        Ok(Some(global)) => match app.memory.add_proposal(global).await {
+            Ok(proposal) => {
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "memory: \"{title}\" was seen in {} repositories with enough confidence and is waiting for your review as fleet-wide memory",
+                        memory::PROMOTE_MIN_REPOS
+                    ),
+                )
+                .await;
+                let rt = app.runtimes.lock().await.get(id).cloned();
+                if let Some(rt) = rt {
+                    rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
+                }
+            }
+            Err(e) => {
+                app.session_log(id, "error", format!("could not queue a fleet-wide memory note: {e:#}"))
+                    .await
+            }
+        },
+        Ok(None) => {
+            app.session_log(
+                id,
+                "info",
+                format!(
+                    "memory: \"{title}\" is held as a fleet-wide candidate; it is reviewed for global memory once colonies in {} repositories propose it with confidence of at least {}",
+                    memory::PROMOTE_MIN_REPOS,
+                    memory::PROMOTE_CONFIDENCE
+                ),
+            )
+            .await
+        }
+        Err(e) => {
+            app.session_log(id, "error", format!("could not record a fleet-wide memory candidate: {e:#}"))
                 .await
         }
     }
@@ -865,7 +997,8 @@ mod tests {
     }
 
     /// Issue #328: only a contradicted claim holds — unverifiable is infra noise, not the
-    /// colony's fault, and holding it would strand finished work.
+    /// colony's fault, and holding it would strand finished work; inconclusive failed on the base
+    /// commit too, so it is not this change's failure.
     #[test]
     fn only_a_contradicted_claim_holds_the_publish() {
         assert_eq!(
@@ -873,6 +1006,7 @@ mod tests {
             Autopilot::Hold("the completion claim was contradicted")
         );
         assert_eq!(verdict_step(&crate::verify::Verdict::Confirmed), Autopilot::Publish);
+        assert_eq!(verdict_step(&crate::verify::Verdict::Inconclusive), Autopilot::Publish);
         assert_eq!(verdict_step(&crate::verify::Verdict::Unverifiable), Autopilot::Publish);
     }
 
@@ -912,28 +1046,30 @@ mod tests {
             propose(&app, Some(scope), "Sign commits", "Always sign.").await;
             assert!(app.memory.notes(scope, key).await.unwrap().is_empty(), "{scope}");
         }
-        assert_eq!(app.memory.proposals().await.len(), 2);
+        // The org note queues; the global one is only a sighting of a fleet-wide candidate (#766).
+        assert_eq!(app.memory.proposals().await.len(), 1);
+        assert_eq!(app.memory.candidates().await.len(), 1);
 
         // An absent origin is a runner from before the field existed: read as the orchestrator.
         memory_proposal(&app, "abc", None, None, "Run tests locked", "Use --locked.", &[]).await;
         let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].source["reviewed"], json!(false));
-        assert_eq!(app.memory.proposals().await.len(), 2, "the repo note did not queue");
+        assert_eq!(app.memory.proposals().await.len(), 1, "the repo note did not queue");
 
         // A repo note the store cannot take is queued instead, unmarked: approving it is its review.
         app.modules.write().await.memory.provider = memory::MEM0.into();
         set(&app, "base_url", json!("ftp://nowhere")).await;
         memory_proposal(&app, "abc", Some("orchestrator"), None, "Deploys", "Stage first.", &[]).await;
         let pending = app.memory.proposals().await;
-        assert_eq!(pending.len(), 3);
+        assert_eq!(pending.len(), 2);
         assert!(pending.iter().all(|p| p.note.source["reviewed"].is_null()), "{pending:?}");
 
         app.modules.write().await.memory.provider = "files".into();
         set(&app, "require_review", json!(true)).await;
         propose(&app, Some("repo"), "Commit style", "Keep commits small.").await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
-        assert_eq!(app.memory.proposals().await.len(), 4);
+        assert_eq!(app.memory.proposals().await.len(), 3);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -973,8 +1109,104 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending[0].note.source,
-            json!({"session_id": "abc", "repo": "acme/repo", "origin": "orchestrator"})
+            json!({"session_id": "abc", "repo": "acme/repo", "commit": null, "origin": "orchestrator"})
         );
+        assert!(
+            app.memory.candidates().await.is_empty(),
+            "no refused proposal left a sighting"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a colony's global proposal is a sighting, and fleet-wide memory needs confidence of
+    /// at least 0.8 in two distinct repositories — then it is queued for review, never stored, even
+    /// with review off. 0.79 anywhere never counts, and one repository at 0.8 is not enough.
+    #[tokio::test]
+    async fn fleet_wide_memory_needs_confidence_in_two_repositories() {
+        let (app, root) = crate::sessions::tests::app_with_colony("a1", SessionStatus::Running).await;
+        for (id, org) in [("a2", "acme"), ("b1", "beta"), ("c1", "gamma")] {
+            let mut s = crate::sessions::tests::colony(org, SessionStatus::Running);
+            s.id = id.into();
+            app.sessions.write().await.push(s);
+        }
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        async fn propose(app: &Shared, id: &str, confidence: f64) {
+            let body = ProposalBody {
+                scope: Some("global"),
+                title: "Pin the toolchain",
+                content: "Pin the Rust toolchain in rust-toolchain.toml.",
+                tags: &[],
+                kind: Some("convention"),
+                confidence: Some(confidence),
+            };
+            memory_proposal_full(app, id, Some("orchestrator"), body).await;
+        }
+        let pending = |app: Shared| async move { app.memory.proposals().await.len() };
+
+        // 0.79 in two repositories: not promoted.
+        propose(&app, "a1", 0.79).await;
+        propose(&app, "b1", 0.79).await;
+        assert_eq!(pending(app.clone()).await, 0, "0.79 is under the bar");
+        // 0.8 in only one repository (two colonies on acme/repo count once): not promoted.
+        propose(&app, "a1", 0.8).await;
+        propose(&app, "a2", 0.9).await;
+        assert_eq!(pending(app.clone()).await, 0, "one repository is not the fleet");
+        // 0.8 in a second repository: queued for review as a global note, with every sighting's provenance.
+        propose(&app, "c1", 0.8).await;
+        let queued = app.memory.proposals().await;
+        assert_eq!(queued.len(), 1);
+        let global = &queued[0].note;
+        assert_eq!((global.scope.as_str(), global.kind.as_str()), ("global", "convention"));
+        let repos: Vec<&str> = global.source["promoted_from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["repo"].as_str().unwrap())
+            .collect();
+        assert_eq!(repos, ["acme/repo", "gamma/repo"]);
+        assert!(
+            app.memory.notes("global", "").await.unwrap().is_empty(),
+            "review is never skipped"
+        );
+        // A third sighting does not queue it again.
+        propose(&app, "b1", 0.95).await;
+        assert_eq!(pending(app.clone()).await, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a proposal keeps its kind and confidence, an unknown kind is refused, and a repo
+    /// note lands in its own repository's scope only.
+    #[tokio::test]
+    async fn a_proposal_keeps_its_kind_and_stays_in_its_repository() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let mut other = crate::sessions::tests::colony("beta", SessionStatus::Running);
+        other.id = "def".into();
+        app.sessions.write().await.push(other);
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        let body = |kind| ProposalBody {
+            scope: Some("repo"),
+            title: "Migrations run first",
+            content: "Run migrations before the seed step.",
+            tags: &[],
+            kind: Some(kind),
+            confidence: Some(0.7),
+        };
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("failure")).await;
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("gossip")).await;
+        let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
+        assert_eq!(notes.len(), 1, "the unknown kind was refused");
+        assert_eq!((notes[0].kind.as_str(), notes[0].confidence), ("failure", Some(0.7)));
+        assert!(app.memory.notes("repo", "beta/repo").await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1461,6 +1693,104 @@ mod tests {
         );
         assert_eq!(s.error, None, "so no agent-exited error painted over the suspension");
         assert!(s.suspended.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The path policy's runtime report (issue #647): the first attempt at a path lands as one
+    /// warn line in the colony log and one activity entry; a repeat of the same (access, path) is
+    /// silent; a path that could never be a bind, or a field outside the contract's two words, is
+    /// dropped outright rather than logged.
+    #[tokio::test]
+    async fn a_path_policy_attempt_is_logged_once_and_sanitised() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let entries = || async {
+            let text = std::fs::read_to_string(app.cfg.data_dir.join(crate::activity::FILE)).unwrap();
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<crate::activity::Entry>(line).ok())
+                .filter(|entry| entry.kind == "colony.path_policy")
+                .collect::<Vec<_>>()
+        };
+
+        let attempt = r#"{"seq":1,"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}"#;
+        handle_agent_event(&app, "abc", &rt, attempt).await;
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(logs.back().unwrap()["level"], "warn");
+            assert_eq!(
+                logs.back().unwrap()["message"],
+                "path policy: agent tried to read masked `.env` (Read)",
+                "the attempt, the side of the policy, and the tool, one line"
+            );
+        }
+        let logged = entries().await;
+        assert_eq!(logged.len(), 1, "one attempt, one activity entry");
+        assert_eq!(logged[0].actor, "colony");
+        assert_eq!(logged[0].colony.as_deref(), Some("abc"));
+        assert_eq!(logged[0].detail.as_deref(), Some("tried to read masked `.env` (Read)"));
+
+        handle_agent_event(&app, "abc", &rt, attempt).await;
+        assert_eq!(entries().await.len(), 1, "a repeated attempt is not a second entry");
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(
+                logs.back().unwrap()["message"],
+                "path policy: agent tried to read masked `.env` (Read)",
+                "the colony log did not repeat it either"
+            );
+        }
+
+        handle_agent_event(
+            &app,
+            "abc",
+            &rt,
+            r#"{"seq":2,"type":"path_policy","access":"write","policy":"protected","path":".git/config","tool":"Edit"}"#,
+        )
+        .await;
+        assert_eq!(entries().await.len(), 2, "a different (access, path) is its own report");
+
+        for junk in [
+            r#"{"seq":3,"type":"path_policy","access":"read","policy":"masked","path":"/abs/.env","tool":"Read"}"#,
+            r#"{"seq":4,"type":"path_policy","access":"read","policy":"masked","path":"../escape","tool":"Read"}"#,
+            r#"{"seq":5,"type":"path_policy","access":"peek","policy":"masked","path":".env"}"#,
+        ] {
+            handle_agent_event(&app, "abc", &rt, junk).await;
+        }
+        assert_eq!(entries().await.len(), 2, "nothing unbindable reached the log");
+
+        // The cap: once ATTEMPT_CAP distinct (access, path) pairs are carried, further attempts are
+        // dropped from both logs, and one notice says so — once, not per dropped attempt.
+        for i in 0..=crate::path_policy::ATTEMPT_CAP {
+            handle_agent_event(
+                &app,
+                "abc",
+                &rt,
+                &format!(
+                    r#"{{"seq":{},"type":"path_policy","access":"read","policy":"masked","path":"cap{i}","tool":"Read"}}"#,
+                    10 + i
+                ),
+            )
+            .await;
+        }
+        // Two were already carried, so the loop's ATTEMPT_CAP + 1 distinct paths fill the set to
+        // exactly the cap; the attempts beyond it reach neither log.
+        assert_eq!(
+            entries().await.len(),
+            crate::path_policy::ATTEMPT_CAP,
+            "the activity stops at the cap"
+        );
+        {
+            let logs = rt.logs.lock().await;
+            assert_eq!(
+                logs.iter()
+                    .filter(|line| line["message"]
+                        .as_str()
+                        .is_some_and(|m| m.contains("further attempts are not reported")))
+                    .count(),
+                1,
+                "the cap notice is logged exactly once"
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

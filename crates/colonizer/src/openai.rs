@@ -235,7 +235,7 @@ fn stop_reason(finish_reason: &str) -> &'static str {
 }
 
 /// OpenAI counts cached prompt tokens inside `prompt_tokens`; Anthropic reports them separately.
-fn usage_of(usage: &Value) -> Usage {
+pub(crate) fn usage_of(usage: &Value) -> Usage {
     let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
     let cached = usage["prompt_tokens_details"]["cached_tokens"]
         .as_u64()

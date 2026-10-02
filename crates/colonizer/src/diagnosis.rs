@@ -284,6 +284,19 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
                 };
                 return Some(state("waiting_on_provider", text, hit.reset_at));
             }
+            // A provider refusing the 1-hour cache TTL fails every turn the same way, so waiting for
+            // the next message never helps: name the provider flag that fixes it (issues #305, #317).
+            if let Some(text) = candidate
+                && rejects_cache_ttl(text)
+            {
+                return Some(state(
+                    "waiting_on_provider",
+                    "waiting on provider: it rejects the 1-hour prompt-cache TTL (cache_control.ttl); \
+                     turn on normalize_cache_ttl for this provider in Settings → Providers, then resume"
+                        .into(),
+                    None,
+                ));
+            }
             if reason == Some(provider_quota::QUOTA_EXHAUSTED_REASON) {
                 return Some(state(
                     "waiting_on_provider",
@@ -335,6 +348,12 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
         }
         _ => None,
     }
+}
+
+/// Whether an assistant text is Claude Code reporting an endpoint that refuses `cache_control.ttl`,
+/// e.g. `API Error: 400 `cache_control.ttl: 1h` is not supported`.
+fn rejects_cache_ttl(text: &str) -> bool {
+    text.starts_with("API Error") && text.contains("cache_control.ttl") && text.contains("not supported")
 }
 
 /// The host-wide stall predicate over the newest event time known: live colonies, a non-empty
@@ -454,6 +473,10 @@ mod tests {
         use SessionStatus::*;
         let held = || with(Idle, |s| s.attention = Some(serde_json::json!({"reason": "autopilot_held"})));
         let quota = || vec![serde_json::json!({"seq": 1, "type": "assistant_text", "text": QUOTA_TEXT})];
+        let cache_ttl = || {
+            vec![serde_json::json!({"seq": 1, "type": "assistant_text",
+                "text": "API Error: 400 `cache_control.ttl: 1h` is not supported"})]
+        };
         let booting = with(Starting, |s| {
             s.boot_timing = Some(serde_json::json!({"phases": [{"name": "clone", "ms": 60000}, {"name": "git", "ms": 30000}]}));
             s.created_at = now() - chrono::Duration::minutes(3);
@@ -518,6 +541,25 @@ mod tests {
                 Some("09-23 07:54:00 UTC"),
             ),
             (held(), asking, Some("waiting_on_human"), &["Ship it?"], None),
+            (
+                held(),
+                cache_ttl(),
+                Some("waiting_on_provider"),
+                &["cache_control.ttl", "normalize_cache_ttl"],
+                None,
+            ),
+            (
+                held(),
+                cache_ttl()
+                    .into_iter()
+                    .chain(std::iter::once(
+                        serde_json::json!({"seq": 2, "type": "user_message", "text": "fix"}),
+                    ))
+                    .collect(),
+                Some("waiting_on_human"),
+                &["autopilot held"],
+                None,
+            ),
             (stale, noisy, Some("stuck"), &["2h", "tool_call: Bash"], None),
             (with(Stopped, |_| {}), quota(), None, &[], None),
             (with(Publishing, |_| {}), quota(), None, &[], None),
@@ -569,7 +611,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let Json(list) = sessions::list(State(app), None).await;
+        let Json(list) = sessions::list_bare(State(app), None).await;
         let wire = serde_json::to_value(&list).unwrap();
         assert!(wire[0].get("recent_events").is_none());
         assert!(wire[0].get("diagnosis").is_none());

@@ -244,7 +244,9 @@ pub(crate) enum AgentEvent {
     /// A proposed shared-memory note (§6.2). An absent or null `scope` means `repo`, the schema's
     /// default, and absent `tags` mean none. `origin` names who asked — `orchestrator`, a
     /// `subagent:<name>`, a `background:<name>` — and absent means a runner from before the field
-    /// existed, which could only have been the orchestrator.
+    /// existed, which could only have been the orchestrator. `kind` is one of the memory kinds
+    /// (issue #766; absent means `convention`) and `confidence` how sure the colony is, 0 to 1
+    /// (absent means 0: it can never promote a global note).
     MemoryProposal {
         #[serde(default)]
         scope: Option<String>,
@@ -254,6 +256,10 @@ pub(crate) enum AgentEvent {
         tags: Vec<String>,
         #[serde(default)]
         origin: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        confidence: Option<f64>,
     },
     /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
     /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
@@ -287,6 +293,22 @@ pub(crate) enum AgentEvent {
         trigger: Option<String>,
         #[serde(default)]
         decisions: Vec<JevDecision>,
+    },
+    /// The agent reached for a path the path policy masks or write-protects (issue #647): the
+    /// runner judges each path-taking tool call against the same bind list the guest booted with.
+    /// Reporting only — the mount enforced before this ran; the dispatch turns the event into a
+    /// colony log line and an activity entry, once per distinct (access, path) per colony.
+    PathPolicy {
+        /// `read` or `write` — what the agent was trying to do.
+        access: String,
+        /// Which side of the policy: `masked` or `protected`.
+        policy: String,
+        /// Workspace-relative, as the runner resolved it through any symlink.
+        path: String,
+        /// The tool that made the attempt ("Read", an ACP `fs/write_text_file`, …); absent on a
+        /// runner from before the field existed.
+        #[serde(default)]
+        tool: String,
     },
     /// Everything the harness only forwards, and any type a newer runner adds (§2: unknown types
     /// must be ignored). A known body with broken fields lands here too: it was forwarded, it just
@@ -388,20 +410,20 @@ mod tests {
             AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
         ));
         assert!(matches!(
-            &events[21],
+            &events[24],
             AgentEvent::Status {
                 state: AgentState::Idle,
                 detail: None
             }
         ));
         assert!(matches!(
-            &events[22],
+            &events[25],
             AgentEvent::Status {
                 state: AgentState::Exited,
                 detail: None
             }
         ));
-        match &events[20] {
+        match &events[23] {
             AgentEvent::TurnEnd {
                 is_error,
                 cost_usd,
@@ -414,6 +436,16 @@ mod tests {
             }
             other => panic!("the turn that ends the fixture is a turn_end, got {other:?}"),
         }
+        // The masked read the runner reports (issue #647): the attempt, with the tool that made it.
+        assert_eq!(
+            events[21],
+            AgentEvent::PathPolicy {
+                access: "read".into(),
+                policy: "masked".into(),
+                path: ".env".into(),
+                tool: "Read".into(),
+            }
+        );
 
         // The forwarded-only types land on the catch-all on purpose: the browser is their consumer.
         assert_eq!(events[4], AgentEvent::Other, "log");
@@ -425,6 +457,8 @@ mod tests {
         assert_eq!(events[15], AgentEvent::Other, "tool_result");
         assert_eq!(events[18], AgentEvent::Other, "tool_call");
         assert_eq!(events[19], AgentEvent::Other, "tool_result with a denial");
+        assert_eq!(events[20], AgentEvent::Other, "tool_call for the masked read");
+        assert_eq!(events[22], AgentEvent::Other, "tool_result of the masked read");
     }
 
     /// The regression guard for browser pass-through: a type a newer runner adds, or a known body
@@ -461,6 +495,7 @@ mod tests {
             "finding",
             "loop_next",
             "loop_stop",
+            "path_policy",
         ] {
             assert!(AgentEvent::is_acted_on(tag), "{tag} is a variant of this enum");
         }
@@ -684,7 +719,9 @@ mod tests {
                 title: "t".into(),
                 content: "c".into(),
                 tags: vec![],
-                origin: None
+                origin: None,
+                kind: None,
+                confidence: None
             }
         );
         let nulled =

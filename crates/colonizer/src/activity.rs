@@ -80,10 +80,12 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.retain",
     "colony.answer",
     "colony.prewarm",
+    "colony.path_policy",
     "chat.colony",
     "chat.issue",
     "colonize.issue",
     "colonize.colony",
+    "publish.merge_train",
     "loop.create",
     "loop.update",
     "loop.pause",
@@ -425,6 +427,18 @@ const RULES: &[Rule] = &[
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
+    rule(
+        "PUT",
+        "/api/merge-train/loop",
+        "loop.update",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/merge-train/loop/run",
+        "loop.run_now",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
     rule("POST", "/api/redteam/runs", "redteam.start", Target::NewRun),
     rule(
         "POST",
@@ -460,6 +474,12 @@ const RULES: &[Rule] = &[
     rule(
         "PUT",
         "/api/providers/{id}",
+        "settings.save",
+        Target::Named("provider", "providers"),
+    ),
+    rule(
+        "POST",
+        "/api/providers/{id}/quota-action",
         "settings.save",
         Target::Named("provider", "providers"),
     ),
@@ -600,6 +620,12 @@ const RULES: &[Rule] = &[
         "/api/memory/notes/{id}",
         "memory.note",
         Target::Fixed("removed a memory note", "memory"),
+    ),
+    rule(
+        "POST",
+        "/api/memory/notes/{id}/revoke",
+        "memory.note",
+        Target::Fixed("revoked a memory note", "memory"),
     ),
     rule(
         "POST",

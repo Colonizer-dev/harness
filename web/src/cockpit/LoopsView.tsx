@@ -11,6 +11,7 @@ import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
 
 export const LOOP_ORIGIN = "loop:";
@@ -120,6 +121,8 @@ export function LoopsView({
             New loop
           </Button>
         </div>
+
+        <MergeLoopCard repos={repos} />
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (

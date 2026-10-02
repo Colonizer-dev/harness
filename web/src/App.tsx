@@ -9,20 +9,24 @@ import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
 import { Sidebar, type MainView, type SidebarTab } from "./components/Sidebar";
 import { Cockpit } from "./cockpit/Cockpit";
+import { DemoBanner } from "./components/DemoBanner";
+import { DEMO } from "./demo";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
+  applyAppBadge,
   applyFavicon,
   applyTabTitle,
+  attentionCount,
   diffEvents,
   eventText,
-  needsYou,
   orgFilterForTarget,
   parseNotificationPrefs,
   playQuestionBlip,
   serializeNotificationPrefs,
   showColonyNotification,
   snapshotOf,
+  unseenFailure,
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
@@ -35,7 +39,10 @@ import {
   type LiveConnection,
 } from "./liveStream";
 import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
+import { usePushPresence } from "./push";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
+import { UpdatePrompt } from "./components/UpdatePrompt";
+import { useAppUpdate } from "./installApp";
 import { useImagePull } from "./useImagePull";
 import { usePollTick } from "./usePollTick";
 import type {
@@ -118,6 +125,9 @@ export function App() {
   const [liveStorage, setLiveStorage] = useState<StorageSummary | null>(null);
   // One image-pull poller for the whole app; Setup, Settings and the sidebar all read it.
   const pull = useImagePull(true);
+  // A new build installed and waiting (the mothership shipped an update): the card in the fixed
+  // column asks, and the reload happens only from there.
+  const appUpdate = useAppUpdate();
 
   const loadStatus = useCallback(async (fresh?: boolean) => {
     try {
@@ -371,10 +381,16 @@ export function App() {
   // The in-tab layer. With the layer off App passes 0, which is today's look exactly: tabTitle(0) is
   // the static "Colonizer" and faviconHref(false) the href index.html ships with.
   useEffect(() => {
-    const count = notifyPrefs.inTab ? sessions.filter(needsYou).length : 0;
+    const count = notifyPrefs.inTab ? attentionCount(sessions) : 0;
     applyTabTitle(count);
     applyFavicon(count > 0);
   }, [sessions, notifyPrefs.inTab]);
+
+  // The app badge carries the count whatever the in-tab switch does (issue #744): hiding it from
+  // this tab's title should not empty the dock icon of another desktop's screen.
+  useEffect(() => {
+    applyAppBadge(attentionCount(sessions));
+  }, [sessions]);
 
   // The Setup view, derived once from the same state the dialog renders. `pull.status` and the
   // module list ride along so the checklist reacts to a finished download or a stack change.
@@ -562,6 +578,36 @@ export function App() {
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
 
+  // The focused-tab report (issue #743): tells the mothership which colony this tab has open and
+  // whether it could show a notification itself, so a push for it can be held back. A no-op where
+  // push cannot work and in mock mode.
+  usePushPresence(api, current?.id ?? null);
+
+  // An unseen failure is resolved by looking at it (issue #744): with the failed colony open in
+  // front of you, the seen route fires once — dropping it from the badge here while the mothership
+  // tells every other device. Every open (strip, list, a tapped notification) ends in this
+  // selection, so this one effect covers them all and only ever fires for `unseenFailure` — an
+  // open question is not closed by a visit. The ref keeps it to one call per watch, a hidden tab
+  // never fires, and a failed call resets the ref so the next poll retries.
+  const seenWhileWatching = useRef<string | null>(null);
+  useEffect(() => {
+    const see = () => {
+      if (!current || !unseenFailure(current)) {
+        // Watch over: forget the colony, so a later unseen failure of the same one asks again.
+        if (seenWhileWatching.current === current?.id) seenWhileWatching.current = null;
+        return;
+      }
+      if (seenWhileWatching.current === current.id || document.visibilityState !== "visible") return;
+      seenWhileWatching.current = current.id;
+      void api.seenSession(current.id).catch(() => {
+        seenWhileWatching.current = null;
+      });
+    };
+    see();
+    document.addEventListener("visibilitychange", see);
+    return () => document.removeEventListener("visibilitychange", see);
+  }, [api, current]);
+
   const storageAlert = visibleStorageAlert(status?.storage, dismissedStorage);
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
   // a mothership already set up still gets asked, in memory, on its first load of the page.
@@ -699,7 +745,9 @@ export function App() {
 
   return (
     <SecretsNavContext.Provider value={openSecrets}>
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      {DEMO && <DemoBanner />}
+      <div className="flex min-h-0 flex-1">
       {narrow ? (
         <>
           {sidebarOpen && (
@@ -723,6 +771,7 @@ export function App() {
           <div className="min-h-0 flex-1">
             <Cockpit
               sessions={sessions}
+              sessionsLoaded={sessionsLoaded}
               orgs={orgs}
               redRuns={redRuns}
               selectedOrg={selectedOrg}
@@ -787,8 +836,8 @@ export function App() {
         onSetupShown={() => setSetupShown(true)}
         onSetupDismissed={dismissSetup}
       />
-      {(storageAlert || liveMapPrompt) && (
-        // Both fixed cards live in the same corner; the shared column keeps them stacked and clickable.
+      {(storageAlert || liveMapPrompt || appUpdate.ready) && (
+        // The fixed cards live in the same corner; the shared column keeps them stacked and clickable.
         <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
           {storageAlert && (
             <StorageAlert
@@ -805,6 +854,7 @@ export function App() {
               }}
             />
           )}
+          {appUpdate.ready && <UpdatePrompt />}
         </div>
       )}
       <OrgSettingsDialog
@@ -813,6 +863,7 @@ export function App() {
         onClose={() => setOrgSettingsFor(null)}
         onSaved={saveOrgInfo}
       />
+      </div>
     </div>
     </SecretsNavContext.Provider>
   );
