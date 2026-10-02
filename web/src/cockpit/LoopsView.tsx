@@ -15,6 +15,7 @@ import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadenc
 import { DocsLoopCard } from "./DocsLoopCard";
 import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
+import { SupplyChainLoopCard } from "./SupplyChainLoop";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -125,6 +126,8 @@ export function LoopsView({
         </div>
 
         <MergeLoopCard repos={repos} />
+
+        <SupplyChainLoopCard onOpenColony={onOpenColony} />
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (

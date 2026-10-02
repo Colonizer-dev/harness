@@ -197,6 +197,9 @@ pub struct App {
     pub runtime_cache: Mutex<Option<crate::runtime::Cached>>,
     /// The `GET /api/stream` push hub: one shared broadcast diff task for all open tabs.
     pub stream: crate::stream::Hub,
+    /// The built-in "Dependencies & supply chain" loop (supply_chain_loop.rs): its settings,
+    /// reports and dispatch records, saved to `<config_dir>/supply-chain-loop.json`.
+    pub supply_chain: crate::supply_chain_loop::Store,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: crate::telemetry::Telemetry,
     /// The built-in "TypeScript: remove any" loop (ts_any_loop.rs): its settings, reports, trend
@@ -278,6 +281,7 @@ impl App {
             repo_owners: RwLock::new(BTreeSet::new()),
             runtime_cache: Mutex::new(None),
             stream: crate::stream::Hub::new(),
+            supply_chain: crate::supply_chain_loop::Store::new(&cfg.config_dir),
             telemetry: crate::telemetry::Telemetry::new(&cfg.config_dir)?,
             ts_any: crate::ts_any_loop::Store::new(&cfg.config_dir),
             updater: crate::update::Updater::new(),

@@ -1888,6 +1888,109 @@ export interface Loop {
   created_at: string;
 }
 
+// The built-in "Dependencies & supply chain" loop (GET/PUT /api/supply-chain-loop,
+// POST /api/supply-chain-loop/run; supply_chain_loop.rs).
+
+export type SupplySeverity = "critical" | "high" | "moderate" | "low";
+export type SupplyFindingKind = "vulnerability" | "yanked" | "unmaintained" | "deprecated" | "license" | "outdated";
+
+/** The loop's settings: off, with an empty allowlist, until the operator opts in. */
+export interface SupplyChainSettings {
+  enabled: boolean;
+  /** Orgs (`acme`) and repositories (`acme/app`) opted in. */
+  allow: string[];
+  /** Daily by default; `interval` no tighter than 60 minutes. */
+  cadence: LoopCadence;
+  max_per_repo: number;
+  max_per_run: number;
+  cooldown_hours: number;
+  /** The least severe finding that is dispatched; everything is reported. */
+  min_severity: SupplySeverity;
+  /** Also report direct dependencies a major version or more behind (never dispatched). */
+  outdated: boolean;
+  /** Check lockfiles no host scanner reads with the mothership's own OSV lookup. */
+  builtin: boolean;
+  autopilot: boolean;
+}
+
+export interface SupplyFinding {
+  ecosystem: string;
+  package: string;
+  version: string | null;
+  kind: SupplyFindingKind;
+  severity: SupplySeverity;
+  id: string | null;
+  title: string;
+  fixed: string | null;
+  fix_available: boolean;
+  fix_via?: string | null;
+  major_bump: boolean;
+  url: string | null;
+  lockfile: string;
+  scanner: string;
+}
+
+export interface SupplyRepoReport {
+  repo: string;
+  sha: string | null;
+  scanners: string[];
+  findings: SupplyFinding[];
+  notes: string[];
+  /** Files nothing checked, and what to install. */
+  missing: string[];
+  error: string | null;
+}
+
+export interface SupplyAttention {
+  repo: string;
+  ecosystem: string;
+  package: string;
+  version: string | null;
+  id: string | null;
+  severity: SupplySeverity;
+  reason: string;
+}
+
+export interface SupplyChainReport {
+  id: string;
+  started_at: string;
+  finished_at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "manual";
+  blocked: boolean;
+  repos: SupplyRepoReport[];
+  counts: Partial<Record<SupplySeverity, number>>;
+  dispatched: { repo: string; ecosystem: string; session: string | null; title: string; findings: number; worst: SupplySeverity }[];
+  skipped: { repo: string; ecosystem: string | null; reason: string; findings: number }[];
+  attention: SupplyAttention[];
+  note: string | null;
+}
+
+export interface SupplyChainRun {
+  id: string;
+  at: string;
+  trigger: string;
+  counts: Partial<Record<SupplySeverity, number>>;
+  dispatched: number;
+  skipped: number;
+  attention: number;
+  summary: string;
+}
+
+export interface SupplyChainLoop {
+  name: string;
+  settings: SupplyChainSettings;
+  next_run_at: string | null;
+  running: boolean;
+  /** Which scanners the mothership's host has installed. */
+  scanners: Record<string, boolean>;
+  /** Whether COLONIZER_NO_EXTERNAL_EFFECTS holds every dispatch. */
+  blocked: boolean;
+  last_report: SupplyChainReport | null;
+  history: SupplyChainRun[];
+  attention: SupplyAttention[];
+}
+
 /** POST /api/loops, and PUT /api/loops/{id} (a full replace). */
 export interface NewLoop {
   name: string;

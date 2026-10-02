@@ -113,6 +113,9 @@ import type {
   MergeLoopSettings,
   MergeLoopView,
   MergeTrainStatus,
+  SupplyChainLoop,
+  SupplyChainReport,
+  SupplyChainSettings,
   PhoneInvite,
   Phones,
 } from "./types";
@@ -531,6 +534,12 @@ export interface Api {
   runTsAnyLoop(body: { dry_run: boolean; repo?: string }): Promise<TsAnyReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
+  /** GET /api/supply-chain-loop: the built-in dependencies and supply-chain loop. */
+  supplyChainLoop(): Promise<SupplyChainLoop>;
+  /** PUT /api/supply-chain-loop: replaces its settings (off, with an empty allowlist, by default). */
+  saveSupplyChainLoop(settings: SupplyChainSettings): Promise<SupplyChainLoop>;
+  /** POST /api/supply-chain-loop/run: a run now, or a dry run that writes nothing. 409 while one runs. */
+  runSupplyChainLoop(body: { dry_run: boolean; repo?: string }): Promise<SupplyChainReport>;
   /** GET /api/merge-train/loop: the merge-train loop's settings, paused repositories and run history (issue #754). */
   mergeLoop(): Promise<MergeLoopView>;
   /** PUT /api/merge-train/loop: replaces the settings. */
@@ -873,6 +882,9 @@ export const httpApi: Api = {
   saveTsAnyLoop: (settings) => put("/api/ts-any-loop", settings),
   runTsAnyLoop: (body) => post("/api/ts-any-loop/run", body),
   mergeTrain: () => request("/api/merge-train"),
+  supplyChainLoop: () => request("/api/supply-chain-loop"),
+  saveSupplyChainLoop: (settings) => put("/api/supply-chain-loop", settings),
+  runSupplyChainLoop: (body) => post("/api/supply-chain-loop/run", body),
   mergeLoop: () => request("/api/merge-train/loop"),
   saveMergeLoop: (settings) => put("/api/merge-train/loop", settings),
   runMergeLoop: (dryRun) => post(`/api/merge-train/loop/run${dryRun ? "?dry_run=true" : ""}`),

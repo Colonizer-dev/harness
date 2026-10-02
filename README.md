@@ -393,7 +393,9 @@ instead, and what has to be true before unattended work: [docs/audit.md](docs/au
 Module settings live in `~/.config/colonizer/modules.json` and are edited in the UI. The answers to
 the [live map](docs/telemetry.md) and [usage data](docs/usage-data.md) questions live beside it, in
 `telemetry.json` and `usage.json`, and `usage-last.json` beside those keeps the last usage batch
-built. Process settings come from the environment. There is one more for usage data:
+built. The built-in [dependencies and supply-chain loop](docs/loops.md#dependencies--supply-chain) keeps its settings
+in `supply-chain-loop.json`; it is off, with an empty allowlist, until you opt a repository or org
+in. Process settings come from the environment. There is one more for usage data:
 `COLONIZER_TELEMETRY_ENDPOINT` names the collector it is posted to, at most once a day — with no
 default, so unset means nothing is ever sent ([docs/usage-data.md](docs/usage-data.md)). The rest:
 
