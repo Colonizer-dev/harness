@@ -33,7 +33,8 @@ the API token never appears on it or in any URL.
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file
-  (`<config_dir>/api-token`) and ignores `--host` and `--token-file`.
+  (`<config_dir>/api-token`) and refuses `--host` and `--token-file` (exit 2): it is local on
+  purpose.
 - When the mothership is bound to `0.0.0.0` or `[::]`, the link points at loopback (`127.0.0.1` or
   `[::1]`). To reach the cockpit from another device, use [remote access](#remote-access) or your
   own TLS proxy or SSH tunnel.

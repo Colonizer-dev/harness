@@ -67,11 +67,11 @@ that is already running:
 colonizer update
 ```
 
-`colonizer update` talks to the mothership on `COLONIZER_BIND` with the local
-token file (`<config dir>/api-token`), so run it on the machine the mothership
-runs on; `--host` does not apply to it. It needs the check to have run: with the
-check switched off, or before its first answer (a minute after start), it says
-so and installs nothing.
+`colonizer update` talks to the mothership on `COLONIZER_BIND` — or the one
+`--host` names — with the local token file (`<config dir>/api-token`), or the
+token `COLONIZER_TOKEN` or `--token-file` gives. It needs the check to have run:
+with the check switched off, or before its first answer (a minute after start),
+it says so and installs nothing.
 
 Two builds are refused, and the refusal names both versions: a development
 build, which holds work no release contains, and a release newer than the
