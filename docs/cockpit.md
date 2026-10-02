@@ -414,8 +414,10 @@ Red-team runs do not drive their scans yet. See [red-team.md](red-team.md) for h
 
 **Sidebar: Memory.**
 
-Shared memory is notes that colonies can search while they work, at global, workspace and
-repository scope. Colonies propose new notes; nothing is shared until you approve it. The view lists
+Shared memory is notes that colonies can pull while they work, at global, workspace and
+repository scope; none of it is put into a colony's prompt. Colonies propose new notes; nothing is
+shared until you approve it, and a global note is proposed for your review only once colonies in two
+repositories agree on it. The view lists
 pending proposals grouped by colony, and the approved notes, which you can edit or delete. The
 sidebar badge counts proposals waiting for review.
 

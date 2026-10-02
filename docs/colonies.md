@@ -319,6 +319,17 @@ Nothing becomes memory until it is approved. The **Memory** module's `require_re
 by default. Turning it off only lets repository notes through. Org and global notes are always
 reviewed.
 
+- Memory is never put into a colony's prompt. The agent asks for it with `memory_briefing` (a short
+  summary, each entry with its kind and its source: colony, repository, commit) and
+  `memory_changes` (what was added or revoked since it last asked).
+- Every entry has a kind: plan, decision, file-change note, failure, architecture note or convention.
+- A repository note stays with its repository. A note becomes global (fleet-wide) only when colonies
+  in two different repositories propose it with confidence of at least 0.8, and you approve it.
+  `GET /api/memory/candidates` lists what is waiting on a second repository.
+- To take a note back, revoke it: `POST /api/memory/notes/{id}/revoke?scope=&key=`. Colonies stop
+  seeing it at their next briefing, and the mothership keeps a record of what it was and where it
+  came from.
+
 **Limits.** Nothing extracts memories from a conversation automatically. With the `mem0` provider,
 the mem0 key never enters a colony. The access table is in
 [architecture.md, Shared memory access](architecture.md#shared-memory-access).

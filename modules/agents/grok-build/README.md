@@ -23,7 +23,9 @@ At startup the runner registers a `colonizer` MCP server by writing `[mcp_server
 `command`, `args` and `env` into `$GROK_HOME/config.toml` (26-config-reference.md; `GROK_CONFIG`
 overlays cannot add MCP servers): `mcp.mjs`, a dependency-free stdio server that the runner points at
 a loopback HTTP bridge held for the colony's life. `wait` (block instead of polling; grok's default
-`tool_timeout_sec` of 6000 s covers a wait's 1800 s cap) and `memory_search` run inside the server;
+`tool_timeout_sec` of 6000 s covers a wait's 1800 s cap), `memory_briefing`, `memory_changes` and
+`memory_search` (shared memory is pulled through these, never put into the prompt; issue #766) run
+inside the server;
 `finding_file` and `memory_propose` cross the bridge and leave the colony as `finding` and
 `memory_proposal` events, and so do a loop colony's pacing tools: `loop_next` (the next run's delay
 in minutes, clamped to 15–1440 like the mothership clamps it) and `loop_stop`. The model sees the

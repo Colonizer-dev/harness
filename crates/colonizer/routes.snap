@@ -66,11 +66,13 @@
 /api/maps/{owner}/{name}/file                        GET    unauth=401    token=map              activity=-
 /api/maps/{owner}/{name}/files                       GET    unauth=401    token=map              activity=-
 /api/memory                                          GET    unauth=401    token=owner            activity=-
+/api/memory/candidates                               GET    unauth=401    token=owner            activity=-
 /api/memory/mem0                                     GET    unauth=401    token=owner            activity=-
 /api/memory/mem0                                     PUT    unauth=401    token=owner            activity=settings.save
 /api/memory/mem0/check                               POST   unauth=401    token=owner            activity=-
 /api/memory/notes                                    POST   unauth=401    token=owner            activity=memory.note
 /api/memory/notes/{id}                               DELETE unauth=401    token=owner            activity=memory.note
+/api/memory/notes/{id}/revoke                        POST   unauth=401    token=owner            activity=memory.note
 /api/memory/proposals                                GET    unauth=401    token=owner            activity=-
 /api/memory/proposals/{id}/approve                   POST   unauth=401    token=owner            activity=memory.review
 /api/memory/proposals/{id}/reject                    POST   unauth=401    token=owner            activity=memory.review

@@ -162,7 +162,7 @@ export async function createBridge({ emit, findings = false, setStatus = () => {
         if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
         else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
         else {
-          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
         }
       } else if (req.url === '/loop_next') {
