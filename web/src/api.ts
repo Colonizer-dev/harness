@@ -347,6 +347,8 @@ export interface Api {
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<StopReply>;
+  /** POST /api/sessions/{id}/keep (issue #673): release a superseded colony to start again. 409 when it is not superseded. */
+  keepSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
   /** POST /api/sessions/{id}/seen: the colony was looked at — clears `unseen_failure` and has the mothership push "resolved" to every device (issue #744). */
   seenSession(id: string): Promise<void>;
@@ -744,6 +746,7 @@ export const httpApi: Api = {
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
+  keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   seenSession: (id) => post(`/api/sessions/${enc(id)}/seen`),
   storageSummary: () => request("/api/storage"),

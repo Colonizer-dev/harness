@@ -949,6 +949,8 @@ mod tests {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            supply_chain: None,
+            superseded: None,
             was_suspended: false,
             last_activity_at: Some(now),
             boot_timing: None,

@@ -432,6 +432,16 @@ pub(crate) fn merge_args(pr_url: &str, head_oid: &str, delete_branch: bool) -> V
     args
 }
 
+/// Why the train leaves this colony's pull request alone (issue #673): another colony's merge
+/// superseded it and the operator has not kept it. `None` for everything the train may consider.
+fn superseded_hold(s: &Session) -> Option<String> {
+    let superseded = s.superseded.as_ref().filter(|_| crate::supersede::blocks_start(s))?;
+    Some(format!(
+        "superseded by {}; Keep the colony to put it back in the train",
+        superseded.pr_url
+    ))
+}
+
 /// Whether another open colony sits on this one's branch: a colony stacked on it (`parent`), or any
 /// open pull request targeting the branch in the same repository. Its branch is then kept on merge,
 /// so the child's pull request is not closed under it.
@@ -664,7 +674,12 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
                 };
                 // Only the head of the train is `next`: a later mergeable one waits its turn, since
                 // the first merge moves the base out from under it.
-                let mut decision = decide(f, guards);
+                // Issue #673: a merge already covered this colony's work — the train must not
+                // squash a second copy of it in. Held until the operator keeps it.
+                let mut decision = match superseded_hold(s) {
+                    Some(reason) => Decision::Skipped(reason),
+                    None => decide(f, guards),
+                };
                 if decision == Decision::Merge {
                     if let Some(first) = first.clone() {
                         decision = Decision::Waiting(format!(
@@ -704,16 +719,21 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
         } else if authority::external_writes_blocked() {
             say(PrStatus::Waiting, publish::BLOCKED.to_string());
         } else {
-            // Fresh sessions: another colony may have been stacked on this one since the tick began.
+            // Fresh sessions: another colony may have been stacked on this one since the tick began,
+            // or (issue #673) a merge seen since the snapshot may have superseded it.
             let fresh = app.sessions.read().await.clone();
             let url = s.pr_url.clone().unwrap_or_default();
-            let args = merge_args(&url, &head, !has_stacked_child(&fresh, s));
-            match crate::util::exec_within(MERGE_TIMEOUT, &mut app.gh(args)).await {
-                Ok(_) => {
-                    say(PrStatus::Merged, "squash-merged by the merge train".to_string());
-                    merged = Some((url, s.clone()));
+            if let Some(reason) = fresh.iter().find(|x| x.id == s.id).and_then(superseded_hold) {
+                say(PrStatus::Skipped, reason);
+            } else {
+                let args = merge_args(&url, &head, !has_stacked_child(&fresh, s));
+                match crate::util::exec_within(MERGE_TIMEOUT, &mut app.gh(args)).await {
+                    Ok(_) => {
+                        say(PrStatus::Merged, "squash-merged by the merge train".to_string());
+                        merged = Some((url, s.clone()));
+                    }
+                    Err(e) => say(PrStatus::Waiting, format!("the merge failed: {e:#}")),
                 }
-                Err(e) => say(PrStatus::Waiting, format!("the merge failed: {e:#}")),
             }
         }
     }
@@ -1251,5 +1271,27 @@ mod tests {
         assert_eq!(behind_from_compare(Some(&json!({"behind_by": 0}))), Some(0));
         assert_eq!(behind_from_compare(Some(&json!({}))), None);
         assert_eq!(behind_from_compare(None), None);
+    }
+
+    /// Issue #673: a superseded colony's pull request is held out of the train until it is kept —
+    /// the merge that superseded it already landed the work.
+    #[test]
+    fn a_superseded_colony_is_held_out_of_the_train_until_kept() {
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        s.pr_url = Some("https://github.com/acme/widget/pull/12".into());
+        assert_eq!(superseded_hold(&s), None, "never superseded, the train may consider it");
+        s.superseded = Some(crate::supersede::Supersession {
+            by: "merged".into(),
+            pr_url: "https://github.com/acme/widget/pull/9".into(),
+            pr: Some(9),
+            title: "Fix the leak".into(),
+            reason: crate::supersede::OverlapReason::Files,
+            at: Utc::now(),
+            kept: false,
+        });
+        let reason = superseded_hold(&s).expect("an unkept supersession holds it");
+        assert!(reason.contains("pull/9") && reason.contains("Keep"), "{reason}");
+        s.superseded.as_mut().unwrap().kept = true;
+        assert_eq!(superseded_hold(&s), None, "kept: back in the train");
     }
 }

@@ -538,6 +538,14 @@ export function fixInstructions(r: SupplyRisk): string {
   return `Supply-chain fix: ${r.ecosystem} package "${r.name}"${r.version ? ` ${r.version}` : ""} — ${KIND_LABEL[r.kind] ?? r.kind}: ${r.reason}. Used in ${where}.${via} ${target}, update the lockfile, run the repository's tests and builds, and explain the change in the PR. Do not add any Claude/AI attribution.`;
 }
 
+/** The advisory a risk names (issue #673): the id at the end of an OSV or GitHub advisory link.
+ *  A risk with no advisory URL (yanked, typosquat, …) uses the URL itself, so the target it
+ *  records still compares equal to itself launch after launch. */
+export function advisoryId(r: SupplyRisk): string {
+  const match = /(?:osv\.dev\/vulnerability|github\.com\/advisories)\/([A-Za-z0-9.-]+)/.exec(r.url);
+  return match?.[1] ?? r.url;
+}
+
 function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: (id: string) => void }): ReactElement {
   const api = useApi();
   const toast = useToast();
@@ -551,7 +559,9 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
     if (!repo) return;
     setSending(key);
     try {
-      const s = await api.createSession({ repo, title: `Supply chain: ${r.name}`, instructions: fixInstructions(r), autopilot: true });
+      // The target rides on the launch (issue #673): a second live colony for it is refused, and a
+      // same-repository merge over this one marks it superseded.
+      const s = await api.createSession({ repo, title: `Supply chain: ${r.name}`, instructions: fixInstructions(r), autopilot: true, supply_chain: { package: r.name, advisory: advisoryId(r) } });
       toast({
         title: `A colony is fixing ${r.name}`,
         body: `${repo} · ${KIND_LABEL[r.kind] ?? r.kind}`,

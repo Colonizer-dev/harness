@@ -499,7 +499,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
         // colony drive, like answering.
-        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "keep"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },
@@ -896,6 +896,8 @@ mod tests {
             "/api/sessions/abc/answer",
             "/api/sessions/abc/stop",
             "/api/sessions/abc/resume",
+            // Issue #673: keeping a superseded colony lets it start, so it drives like resume.
+            "/api/sessions/abc/keep",
         ] {
             assert!(
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
