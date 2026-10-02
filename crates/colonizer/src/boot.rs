@@ -223,6 +223,209 @@ async fn default_base(app: &Shared, repo: &str, log: &SessionLogger, started_at:
     }
 }
 
+/// Where a colony keeps the issue it was started on, inside its session directory: written at the
+/// first boot that fetched it, and read back by every resume instead of asking GitHub again.
+pub(crate) const ISSUE_FILE: &str = "issue.json";
+
+/// How long a resume waits on GitHub for an issue it has no stored copy of at all.
+const RESUME_ISSUE_LIMIT: Duration = Duration::from_secs(30);
+
+/// How long a resume waits on the best-effort refresh of its base branch.
+const BASE_REFRESH_LIMIT: Duration = Duration::from_secs(60);
+
+/// How many lines of one event log are searched for the colony's first brief. The runner sends it
+/// as the first message, so it sits near the top.
+const BRIEF_SEARCH_LINES: usize = 200;
+
+/// The issue a boot works on. A fresh boot calls `fetch` (which carries the retry budget and the
+/// access wording) and stores what comes back in [`ISSUE_FILE`]. A resume never needs GitHub: it
+/// reads the stored issue, else the one recovered from its first brief (`vm/session.json`, then
+/// the event logs), and only a colony with neither asks `fetch` once — whose failure is a warning,
+/// not a failed resume, since the worktree and branch are what the colony's work lives in.
+async fn resolve_issue<F, Fut>(
+    dir: &std::path::Path,
+    s: &Session,
+    resume: bool,
+    log: &SessionLogger,
+    fetch: F,
+) -> Result<Option<Value>>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    let Some(number) = s.issue else { return Ok(None) };
+    if !resume {
+        let issue = fetch().await?;
+        store_issue(dir, &issue, log).await;
+        return Ok(Some(issue));
+    }
+    if let Some(issue) = stored_issue(dir) {
+        log.info(format!(
+            "resuming on the stored copy of issue #{number}; GitHub is not asked again"
+        ))
+        .await;
+        return Ok(Some(issue));
+    }
+    if let Some(issue) = issue_from_brief(dir) {
+        log.info(format!("resuming on issue #{number} as this colony's first brief carried it"))
+            .await;
+        store_issue(dir, &issue, log).await;
+        return Ok(Some(issue));
+    }
+    match fetch().await {
+        Ok(issue) => {
+            store_issue(dir, &issue, log).await;
+            Ok(Some(issue))
+        }
+        Err(e) => {
+            log.warn(format!(
+                "resumed offline: issue #{number} is not stored and GitHub could not be read ({}); resuming on its \
+                 title and the kept worktree",
+                truncate(&format!("{e:#}"), 300)
+            ))
+            .await;
+            Ok(Some(
+                json!({"number": number, "title": s.issue_title, "body": "", "labels": [], "comments": []}),
+            ))
+        }
+    }
+}
+
+/// The stored issue, when there is a readable one.
+fn stored_issue(dir: &std::path::Path) -> Option<Value> {
+    let bytes = std::fs::read(dir.join(ISSUE_FILE)).ok()?;
+    let issue: Value = serde_json::from_slice(&bytes).ok()?;
+    issue.get("title")?.as_str()?;
+    Some(issue)
+}
+
+/// Stores the issue a boot works on. Best effort: a colony that cannot write it still boots, and
+/// its resume recovers the issue from its brief instead.
+async fn store_issue(dir: &std::path::Path, issue: &Value, log: &SessionLogger) {
+    let written = std::fs::create_dir_all(dir)
+        .map_err(anyhow::Error::from)
+        .and_then(|()| Ok(serde_json::to_vec_pretty(issue)?))
+        .and_then(|bytes| write_private(&dir.join(ISSUE_FILE), &bytes));
+    if let Err(e) = written {
+        log.warn(format!("could not store the issue for a later resume: {e:#}")).await;
+    }
+}
+
+/// The issue as this colony's first brief carried it, for a colony started before issues were
+/// stored: the `<issue>` block of the last `vm/session.json`, else of the first message in the
+/// event logs, oldest run first.
+fn issue_from_brief(dir: &std::path::Path) -> Option<Value> {
+    let from_session = std::fs::read(dir.join("vm").join("session.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|v| v["initial_prompt"].as_str().and_then(parse_issue_block));
+    if from_session.is_some() {
+        return from_session;
+    }
+    let mut archives: Vec<u64> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_prefix("events-")?
+                .strip_suffix(".jsonl")?
+                .parse()
+                .ok()
+        })
+        .collect();
+    archives.sort_unstable();
+    let mut logs: Vec<PathBuf> = archives.into_iter().map(|n| dir.join(format!("events-{n}.jsonl"))).collect();
+    logs.push(dir.join("events.jsonl"));
+    logs.iter()
+        .find_map(|path| first_brief(path).as_deref().and_then(parse_issue_block))
+}
+
+/// The runner's echo of its first message (`user_message` with id `initial`) in one event log.
+fn first_brief(path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = std::fs::File::open(path).ok()?;
+    std::io::BufReader::new(file)
+        .lines()
+        .take(BRIEF_SEARCH_LINES)
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .find(|e| e["type"] == "user_message" && e["id"] == "initial")
+        .and_then(|e| e["text"].as_str().map(String::from))
+}
+
+/// Reads back the `<issue>` block `github::build_prompt` writes: its header lines, then the body
+/// (comments included, as the prompt carried them).
+fn parse_issue_block(prompt: &str) -> Option<Value> {
+    let start = prompt.find("<issue>\n")? + "<issue>\n".len();
+    let rest = &prompt[start..];
+    let end = rest
+        .find("\n</issue>\n\nThe issue text above")
+        .or_else(|| rest.rfind("\n</issue>"))?;
+    let block = &rest[..end];
+    let (head, body) = block.split_once("\n\n").unwrap_or((block, ""));
+    let mut issue = json!({"title": "", "body": "", "labels": [], "comments": []});
+    for line in head.lines() {
+        if let Some(title) = line.strip_prefix("Title: ") {
+            issue["title"] = json!(title.trim());
+        } else if let Some(url) = line.strip_prefix("URL: ") {
+            issue["url"] = json!(url.trim());
+        } else if let Some(author) = line.strip_prefix("Author: @") {
+            issue["author"] = json!({"login": author.trim()});
+        } else if let Some(labels) = line.strip_prefix("Labels: ") {
+            let names: Vec<Value> = labels
+                .split(", ")
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| json!({"name": l}))
+                .collect();
+            issue["labels"] = Value::Array(names);
+        }
+    }
+    let body = body.trim();
+    if body != "(no description)" {
+        issue["body"] = json!(body);
+    }
+    issue["title"].as_str().filter(|t| !t.is_empty())?;
+    Some(issue)
+}
+
+/// The default branch as the local mirror records it (a bare clone's `HEAD`), so a resume need
+/// not ask GitHub.
+async fn local_default_branch(app: &App, bare: &std::path::Path) -> Option<String> {
+    let out = crate::util::exec(app.git(bare).args(["symbolic-ref", "--short", "HEAD"]))
+        .await
+        .ok()?;
+    let branch = out.trim();
+    (!branch.is_empty()).then(|| branch.to_string())
+}
+
+/// Best-effort refresh of a resumed colony's base in the local mirror. The colony's own work is on
+/// its kept branch, so a remote that is unreachable or refuses costs only freshness: the resume
+/// carries on with the mirror as it is and says so. With external effects off it is not tried.
+async fn refresh_base(app: &Shared, repo: &str, bare: &std::path::Path, base: &str, log: &SessionLogger) {
+    if crate::authority::external_writes_blocked() {
+        log.info("resumed offline: external effects are off, so the base was not refreshed")
+            .await;
+        return;
+    }
+    let lock = app.repo_lock(repo).await;
+    let _guard = lock.lock().await;
+    let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+    let fetched = crate::util::exec_within(
+        BASE_REFRESH_LIMIT,
+        app.git_authed(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
+    )
+    .await;
+    if let Err(e) = fetched {
+        log.warn(format!(
+            "resumed offline: base not refreshed, carrying on with origin/{base} as the local mirror has it ({})",
+            truncate(&format!("{e:#}"), 300)
+        ))
+        .await;
+    }
+}
+
 /// The network fence a colony boots with, resolved from the egress policy (#303): the harness's
 /// own port-scoped infrastructure allows — never the broad `host` profile, which allows every
 /// host-loopback port and would let the untrusted colony agent drive the cockpit API
@@ -274,6 +477,12 @@ fn tls_edge_hosts(secrets: &[sandbox::Secret]) -> Vec<String> {
     secrets.iter().flat_map(|secret| secret.hosts.iter().cloned()).collect()
 }
 
+/// The most a resume's service readiness waits may extend the boot health-wait by (issue #700): a
+/// manifest may name an absurd `timeout_secs`, and the boot must neither hang on it nor overflow
+/// the deadline arithmetic. The guest honours the spec's timeout either way; this only bounds the
+/// mothership's patience with it.
+const MAX_RESTORE_WAIT_SECS: u64 = 600;
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -300,21 +509,31 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .cloned()
         .context("agent module is not installed")?;
 
-    let issue = match s.issue {
-        Some(number) => {
-            let label = format!("fetching issue {}#{number}", s.repo);
-            log.info(label.clone()).await;
-            let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
-                github::fetch_issue(app, &s.repo, number)
-            })
-            .await;
-            match fetched {
-                Ok(issue) => Some(issue),
-                Err(e) => return Err(github::access_error(app, &s.repo, e).await),
-            }
+    let dir = app.session_dir(id);
+    let bare = app.bare_repo(&s.repo);
+    // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
+    // resumed one already has it — stored at its first boot, or recovered from its first brief —
+    // and does not ask GitHub again, so a GitHub that refuses or is unreachable cannot fail it.
+    let issue = resolve_issue(&dir, &s, resume, &log, || async {
+        let number = s.issue.unwrap_or_default();
+        if resume {
+            // One bounded attempt, only for a colony that has nothing stored at all.
+            return tokio::time::timeout(RESUME_ISSUE_LIMIT, github::fetch_issue(app, &s.repo, number))
+                .await
+                .context("GitHub did not answer in time")?;
         }
-        None => None,
-    };
+        let label = format!("fetching issue {}#{number}", s.repo);
+        log.info(label.clone()).await;
+        let fetched = github::with_boot_retry(&label, Some(&log), boot_started_at, || {
+            github::fetch_issue(app, &s.repo, number)
+        })
+        .await;
+        match fetched {
+            Ok(issue) => Ok(issue),
+            Err(e) => Err(github::access_error(app, &s.repo, e).await),
+        }
+    })
+    .await?;
     // A resumed colony keeps the base it started from; its branch already exists on top of it. A
     // colony stacked on another one takes the parent's branch, resolved now — so a long wait ends on
     // a fresh answer rather than the one given at create time. The queue only starts a stacked
@@ -345,6 +564,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             stacked_on = Some(branch.clone());
             branch
         }
+        // A resumed colony that never recorded its base (an older record) reads the default branch
+        // off the local mirror rather than asking GitHub; only a mirror that cannot say asks.
+        stack::BootBase::Default if resume => match local_default_branch(app, &bare).await {
+            Some(base) => base,
+            None => default_base(app, &s.repo, &log, boot_started_at).await?,
+        },
         stack::BootBase::Default => default_base(app, &s.repo, &log, boot_started_at).await?,
         stack::BootBase::Wait { colony } => {
             bail!("the colony `{colony}` this one is stacked on has no branch to build on yet")
@@ -363,12 +588,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     mark_phase(app, id, &mut timing, "issue").await;
 
-    let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
     let admin = if resume {
         // The worktree and branch outlive the microVM, so a resumed colony picks them up as they are.
         log.info(format!("resuming on the kept worktree, branch {}", s.branch)).await;
-        PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?)
+        let admin = PathBuf::from(s.git_admin_dir.as_deref().context("this colony has no worktree to resume")?);
+        refresh_base(app, &s.repo, &bare, &base, &log).await;
+        admin
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
@@ -432,7 +658,6 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     mark_phase(app, id, &mut timing, "git").await;
 
-    let dir = app.session_dir(id);
     let vm_dir = dir.join("vm");
     let out_dir = dir.join("out");
     // Cloned out of the lock before the awaits below: `touched_files` shells out to git per
@@ -496,12 +721,6 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
-    let route_settings = crate::routing::RoutingSettings {
-        enabled: setting(&agent_choice, &agent.schema, "route_per_task")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
-    };
     let task_labels: Vec<String> = issue
         .as_ref()
         .and_then(|i| i["labels"].as_array())
@@ -531,14 +750,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sensitivity_config = crate::sensitivity::SensitivityConfig::load(&wt);
     let named_paths = crate::routing::paths_in(&s.issue_title, body_text);
     let sensitivity = crate::sensitivity::classify_paths(named_paths, &sensitivity_config);
-    // Jev shadow mode (jev.rs): an optional external classifier's second opinion, fetched here in
-    // the async boot path — never inside `routing::decide`, which stays synchronous and pure. Off by
-    // default, and a silent no-op without both the setting and a `JEV_API_KEY` secret: it is recorded
-    // for later comparison and never changes the tier a colony runs on.
-    let jev_enabled = setting(&agent_choice, &agent.schema, "jev_shadow_mode")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    task_signals.jev = crate::jev::shadow_opinion(jev_enabled, &s.issue_title, &task_labels, &task_signals).await;
+    // Jev (jev.rs): an optional external classifier's second opinion, fetched here in the async boot
+    // path — never inside `routing::decide`, which stays synchronous and pure. Off by default, and a
+    // silent no-op without both a setting and a `JEV_API_KEY` secret. Shadow mode records it for
+    // comparison; act mode (issue #583) lets a confident opinion pick the tier, never below the
+    // floor `decide` derives from `sensitive` — whether this org's gateway demands more than any
+    // provider for the task's class (sensitivity.rs `required_mark`).
+    let flag = |key: &str| setting(&agent_choice, &agent.schema, key).and_then(Value::as_bool);
+    let jev_mode = crate::routing::JevMode::from_settings(
+        flag("jev_routing_act").unwrap_or(false),
+        flag("jev_shadow_mode").unwrap_or(false),
+    );
+    let route_settings = crate::routing::RoutingSettings {
+        enabled: flag("route_per_task").unwrap_or(true),
+        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
+        jev_mode,
+        jev_act_confidence: setting(&agent_choice, &agent.schema, "jev_routing_act_confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.8),
+        sensitive: crate::sensitivity::required_mark(sensitivity, org_settings.sensitivity.as_ref())
+            > crate::sensitivity::ProviderMark::Any,
+    };
+    task_signals.jev = crate::jev::shadow_opinion(jev_mode.asks(), &s.issue_title, &task_labels, &task_signals).await;
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
     let model = setting_str(&agent_choice, &agent.schema, "model");
@@ -553,9 +786,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // input price, which sometimes costs more than running the task directly would have. Opt-in —
     // until real per-colony token volumes are measured (#469) the operator supplies the estimate,
     // and an all-zero one skips the gate entirely, so every colony that has not opted in boots
-    // exactly as before. Only the rule's own low pick is gated: medium is the module's model and
-    // high an escalation, neither with a context-reload tradeoff, and an operator's explicit tier
-    // is an instruction a cost estimate must never second-guess.
+    // exactly as before. Only a low pick by the rule or by Jev in act mode is gated: medium is the
+    // module's model and high an escalation, neither with a context-reload tradeoff, and an
+    // operator's explicit tier is an instruction a cost estimate must never second-guess. The gate
+    // only ever keeps the colony on the module's model, so it can never undercut the floor.
     let mut cost_record = Value::Null;
     let mut gated = false;
     let mut effective_model = routed_model.to_string();
@@ -575,7 +809,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                     .and_then(Value::as_bool)
                     .unwrap_or(true)
                     && !estimate.worth_routing()
-                    && tier_decision.source == crate::routing::Source::Rule;
+                    && matches!(
+                        tier_decision.source,
+                        crate::routing::Source::Rule | crate::routing::Source::Jev
+                    );
                 if gated {
                     effective_model = module_model.clone();
                 }
@@ -628,17 +865,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         )
         .await;
     }
-    // A shadow opinion that disagrees with the rule is worth a low-key note for later promotion
-    // analysis; it never blocks boot or looks like an error.
-    if tier_decision.jev_agrees() == Some(false) {
+    // An opinion that disagrees with the rule is worth a low-key note for later promotion analysis;
+    // it never blocks boot or looks like an error. In act mode the reason above already says so
+    // when Jev picked the tier.
+    if tier_decision.jev_agrees() == Some(false) && tier_decision.source != crate::routing::Source::Jev {
         log.info(format!(
-            "jev shadow mode: the second opinion says {} where the rule says {}",
+            "jev {} mode: the second opinion says {} where the rule says {}",
+            jev_mode.as_str(),
             tier_decision.jev.as_ref().map(|jev| jev.tier.as_str()).unwrap_or("?"),
             tier_decision.rule.as_str()
         ))
         .await;
     }
     let record = json!({
+        // Which decision this is and how Jev took part (issue #583), so a report can compare
+        // Jev-acted decisions against rule ones by outcome without re-deriving either.
+        "point": crate::routing::DECISION_POINT,
+        "jev_mode": jev_mode,
+        "jev_agrees": tier_decision.jev_agrees(),
+        "floor": tier_decision.floor,
         "tier": tier_decision.tier,
         "rule": tier_decision.rule,
         "source": tier_decision.source,
@@ -720,7 +965,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         if health["reachable"] != true {
             // The cached probe only feeds a warning; a refusal is decided on a fresh one, so an
             // endpoint that came back within the probe TTL is not refused on a stale answer (#295).
-            let health = if provider.fallback_model.is_some() {
+            // Only a Claude fallback covers an unreachable endpoint: a provider-prefixed one is the
+            // gateway's quota retry (issue #767), which a connection that never answers never reaches.
+            let health = if provider.claude_fallback().is_some() {
                 health.clone()
             } else {
                 crate::gateway::probe(app, provider).await
@@ -737,7 +984,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                 .await;
                 continue;
             }
-            let then = match &provider.fallback_model {
+            let then = match provider.claude_fallback() {
                 Some(model) => format!("its requests will fall back to {model}"),
                 // Without a fallback every request through this connection can only fail, so the
                 // launch is refused with the fix instead of warned about (#295).
@@ -868,6 +1115,26 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             read_only: false,
         });
     }
+    // Services that come back after a resume (issue #700): the guest's writers (`colonizer-svc`,
+    // a Claude Code background-Bash hook) record every service they start as one JSON file in this
+    // directory, which lives in the host session dir — so the records outlive the microVM exactly
+    // like the transcripts above — and is mounted back writable at the path the env var names.
+    // Created on every boot, so the writers always have it; read on a resume, when the `restore`
+    // key of session.json below is built from it.
+    let services_dir = dir.join(crate::services::DIR_NAME);
+    std::fs::create_dir_all(&services_dir)?;
+    runner_env.insert(
+        crate::services::ENV_VAR.into(),
+        Value::String(crate::services::GUEST_DIR.into()),
+    );
+    // GUEST_DIR sits inside the read-only /colonizer mount, where the guest cannot create a mount
+    // point: without this directory in vm_dir the microVM fails to boot (agentd never serves).
+    vm_mount_point(&vm_dir, crate::services::GUEST_DIR)?;
+    mounts.push(Mount {
+        source: services_dir.clone(),
+        target: crate::services::GUEST_DIR.into(),
+        read_only: false,
+    });
     // Claude Code plugin directories, mounted read-only from the mothership.
     //
     // Outside /workspace on purpose: publish runs `git add -A`, so a plugin
@@ -1019,13 +1286,43 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
         (None, _) => prompt,
     };
-    let session_json = json!({
+    // What a resume brings back (issue #700): the manifest's declared services plus the records
+    // the previous run registered, scrubbed of the colony's secret values before any of it reaches
+    // session.json. The guest relaunches the restartable ones, waits each out to readiness or its
+    // timeout, and opens the resumed turn saying what came back and what was lost. Warnings are
+    // logged, never a failed boot; only a resume boot carries the key.
+    let mut restore = None;
+    // The guest starts no runner — and serves no HTTP — until every restartable service answered
+    // or timed out (issue #700), so the health wait below must outlast the longest readiness wait
+    // it was handed: a manifest timeout beyond the base deadline would otherwise fail the boot
+    // while the guest was still waiting a service out. Only specs with a probe wait anything, and
+    // one without `timeout_secs` gets the guest's default. The cap keeps a manifest naming an
+    // absurd `timeout_secs` from hanging the boot — or overflowing the deadline arithmetic below.
+    let mut restore_wait = Duration::ZERO;
+    if resume {
+        let secrets: Vec<String> = colony_secrets.iter().map(|(_, value)| value.clone()).collect();
+        let (specs, warnings) = crate::services::resume_specs(&wt, &services_dir, &secrets);
+        for warning in warnings {
+            log.warn(format!("services: {warning}")).await;
+        }
+        restore_wait = specs
+            .iter()
+            .filter(|spec| spec.restart && spec.ready.is_some())
+            .map(|spec| spec.timeout_secs.unwrap_or(crate::services::DEFAULT_TIMEOUT_SECS))
+            .max()
+            .map_or(Duration::ZERO, |secs| Duration::from_secs(secs.min(MAX_RESTORE_WAIT_SECS)));
+        restore = Some(crate::services::restore_json(s.was_suspended, &specs));
+    }
+    let mut session_json = json!({
         "session_id": id,
         "workspace": "/workspace",
         "listen": format!("0.0.0.0:{AGENTD_PORT}"),
         "agent": {"module": agent.id, "command": agent.vm_command(), "env": runner_env},
         "initial_prompt": initial_prompt,
     });
+    if let Some(restore) = restore {
+        session_json["restore"] = restore;
+    }
     std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
     std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
 
@@ -1100,6 +1397,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             hosts: vec!["api.typesafe.ai".into()],
         });
     }
+    // Vendor keys (issue #629): a module whose manifest declares a vendor host gets the gateway
+    // provider's stored key for that vendor — else the mothership's own env — pushed under the env
+    // names and hosts the manifest names. Nothing configured is silent: the module runs without a
+    // key, which is not a boot failure. A colony secret naming the same env keeps its own value.
+    let taken = colony_secrets.iter().map(|(meta, _)| meta.env.clone()).collect::<Vec<_>>();
+    secrets.extend(crate::modules::vendor_boot_secrets(
+        &agent,
+        &|id| app.provider_key(id),
+        &|name| std::env::var(name).ok(),
+        &taken,
+    ));
     if !colony_secrets.is_empty() {
         log.info(format!(
             "colony secrets: {}",
@@ -1275,7 +1583,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     mark_phase(app, id, &mut timing, "mesh-join").await;
 
     let s = ensure_starting(app, id).await?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    // The base covers the guest's own start plus one health attempt left in flight when agentd
+    // starts serving; a resume's readiness waits ride on top of it (issue #700, `restore_wait`).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90) + restore_wait;
     loop {
         match agentd_http(app, &s, "GET", "/v1/health").await {
             Ok((200, _)) => break,
@@ -1332,13 +1642,23 @@ pub(crate) fn jev_compaction(
     Ok((source, key))
 }
 
+/// Creates, in the host dir mounted read-only at `/colonizer`, the mount point for a nested mount
+/// at `target`: the guest cannot create one under a read-only mount, and a missing mount point
+/// fails the microVM's boot. A target outside `/colonizer` needs nothing and is left alone.
+fn vm_mount_point(vm_dir: &std::path::Path, target: &str) -> std::io::Result<()> {
+    match target.strip_prefix("/colonizer/") {
+        Some(rel) if !rel.is_empty() => std::fs::create_dir_all(vm_dir.join(rel)),
+        _ => Ok(()),
+    }
+}
+
 const BOOT_SCRIPT: &str = r#"#!/bin/sh
 # Generated by colonizer. Runs as the microVM's main process.
 set -u
 mkdir -p /var/lib/colonizer
 # Git metadata is mounted read-only; give git a private, writable index.
 if [ -f "${GIT_DIR:-}/index" ]; then cp "$GIT_DIR/index" "$GIT_INDEX_FILE"; fi
-export PATH="/opt/node/bin:/opt/claude/bin:$PATH"
+export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH"
 if [ -f /colonizer/mesh-authkey ]; then
   mkdir -p /var/lib/tailscale
   /opt/colonizer/tailscale/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscaled.sock \
@@ -1408,6 +1728,12 @@ mount --bind /proc/sys /proc/sys 2>/dev/null \
   && mount -o remount,bind,ro /proc/sys 2>/dev/null \
   || echo "colonizer: /proc/sys stays writable" >&2
 mount -o remount,ro /sys 2>/dev/null || echo "colonizer: /sys stays writable" >&2
+# The agent-facing service registry (issue #700) is the agentd binary under its argv0 name. Only
+# the binary's own bind is read-only (msb mounts a single file, not its directory); the directory
+# is the VM's writable overlay root, so the symlink sticks. `set -u` is not `set -e`: a failed link
+# says so here, and agentd logs a warn event when it finds the link missing.
+ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc \
+  || echo "colonizer: could not link colonizer-svc; the agent must run \`colonizer-agentd svc\` instead" >&2
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --seal-token --state-dir /var/lib/colonizer
 "#;
 
@@ -1446,6 +1772,218 @@ mod tests {
         assert!(!story.contains("the new run"), "the live log is not the story");
         assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A resumable colony on issue #7, in a throwaway App, with its session directory made.
+    fn resumable(tag: &str) -> (std::path::PathBuf, Shared, Session, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-resume-{tag}-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let app = crate::app::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Starting);
+        s.id = format!("res{tag}");
+        s.issue = Some(7);
+        s.issue_title = "Fix the flaky login".into();
+        s.branch = "colonizer/issue-7".into();
+        let dir = app.session_dir(&s.id);
+        std::fs::create_dir_all(dir.join("vm")).unwrap();
+        (root, app, s, dir)
+    }
+
+    fn github_issue() -> Value {
+        json!({
+            "number": 7,
+            "title": "Fix the flaky login",
+            "body": "The login test fails one run in ten.",
+            "labels": [{"name": "bug"}, {"name": "ready"}],
+            "comments": [],
+            "url": "https://github.com/acme/repo/issues/7",
+            "author": {"login": "octo"},
+        })
+    }
+
+    /// What a colony's session log said at `level`, oldest first.
+    async fn said(app: &Shared, id: &str, level: &str) -> Vec<String> {
+        let rt = app.runtime(id).await;
+        let logs = rt.logs.lock().await;
+        logs.iter()
+            .filter(|e| e["level"] == level)
+            .filter_map(|e| e["message"].as_str().map(String::from))
+            .collect()
+    }
+
+    /// The observed outage: GitHub refusing (403, account suspended) or unreachable. A resume with
+    /// a stored issue never asks, so neither can fail it, and the issue it boots on is the stored one.
+    #[tokio::test]
+    async fn a_resume_boots_on_the_stored_issue_whatever_github_says() {
+        for (tag, refusal) in [
+            ("403", "gh: Sorry. Your account was suspended. (HTTP 403)"),
+            ("net", "error connecting to api.github.com: dial tcp: network is unreachable"),
+        ] {
+            let (root, app, s, dir) = resumable(tag);
+            let worktree = root.join("worktree");
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::write(worktree.join("half-done.rs"), "// unfinished work").unwrap();
+            std::fs::write(dir.join(ISSUE_FILE), github_issue().to_string()).unwrap();
+            let asked = std::cell::Cell::new(0);
+            let log = app.logger(&s.id);
+            let issue = resolve_issue(&dir, &s, true, &log, || async {
+                asked.set(asked.get() + 1);
+                Err(anyhow::anyhow!(refusal))
+            })
+            .await
+            .expect("a resume with a stored issue does not fail on GitHub");
+            assert_eq!(issue, Some(github_issue()));
+            assert_eq!(asked.get(), 0, "GitHub is not asked again on resume");
+            assert!(worktree.join("half-done.rs").exists(), "the worktree is left as it was");
+            assert!(said(&app, &s.id, "error").await.is_empty());
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// A colony started before issues were stored recovers its issue from its first brief:
+    /// `vm/session.json` first, else the runner's echo of it in the oldest event log. Either way the
+    /// recovered issue is stored, so the next resume reads it directly.
+    #[tokio::test]
+    async fn an_old_colony_recovers_its_issue_from_its_brief() {
+        let (root, app, mut s, dir) = resumable("brief");
+        s.base = Some("main".into());
+        let prompt = github::build_prompt(&s, Some(&github_issue()), "main", false, &[], None, None);
+        let failing = || async { Err::<Value, _>(anyhow::anyhow!("gh: Sorry. Your account was suspended. (HTTP 403)")) };
+        let log = app.logger(&s.id);
+
+        std::fs::write(
+            dir.join("vm/session.json"),
+            json!({"session_id": s.id, "initial_prompt": prompt}).to_string(),
+        )
+        .unwrap();
+        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        assert_eq!(issue["title"], "Fix the flaky login");
+        assert_eq!(issue["body"], "The login test fails one run in ten.");
+        assert_eq!(issue["labels"], json!([{"name": "bug"}, {"name": "ready"}]));
+        assert_eq!(issue["author"]["login"], "octo");
+        assert!(dir.join(ISSUE_FILE).exists(), "the recovered issue is stored");
+
+        // The last session.json carried only a held answer; the first run's event log has the brief.
+        std::fs::remove_file(dir.join(ISSUE_FILE)).unwrap();
+        std::fs::write(
+            dir.join("vm/session.json"),
+            json!({"initial_prompt": "The maintainer answered: yes"}).to_string(),
+        )
+        .unwrap();
+        let echo = json!({"seq": 1, "type": "user_message", "id": "initial", "text": prompt});
+        std::fs::write(
+            dir.join("events-1.jsonl"),
+            format!("{}\n{echo}\n", json!({"seq": 0, "type": "status", "state": "running"})),
+        )
+        .unwrap();
+        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        assert_eq!(issue["body"], "The login test fails one run in ten.");
+        // And it resumes with the same brief as before: the prompt rebuilt from the recovered
+        // issue carries the same issue block.
+        let rebuilt = github::build_prompt(&s, Some(&issue), "main", true, &[], None, None);
+        assert!(rebuilt.contains("Title: Fix the flaky login") && rebuilt.contains("Labels: bug, ready"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Nothing stored anywhere and GitHub down: the resume still goes ahead, on the issue's title
+    /// and the kept worktree, with a warning rather than a failure.
+    #[tokio::test]
+    async fn a_resume_with_nothing_stored_and_github_down_warns_and_carries_on() {
+        let (root, app, s, dir) = resumable("bare");
+        let log = app.logger(&s.id);
+        let issue = resolve_issue(&dir, &s, true, &log, || async {
+            Err(anyhow::anyhow!("error connecting to api.github.com"))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(issue["title"], "Fix the flaky login");
+        let warned = said(&app, &s.id, "warn").await;
+        assert!(warned.iter().any(|w| w.starts_with("resumed offline")), "{warned:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The path when GitHub works: a fresh boot fetches the issue and stores it, and the resume
+    /// boots on exactly what was fetched.
+    #[tokio::test]
+    async fn a_fresh_boot_stores_the_issue_its_resume_reads_back() {
+        let (root, app, s, dir) = resumable("fresh");
+        let log = app.logger(&s.id);
+        let fresh = resolve_issue(&dir, &s, false, &log, || async { Ok(github_issue()) })
+            .await
+            .unwrap();
+        assert_eq!(fresh, Some(github_issue()));
+        let resumed = resolve_issue(&dir, &s, true, &log, || async { Ok(json!({"title": "changed since"})) })
+            .await
+            .unwrap();
+        assert_eq!(resumed, fresh, "the resume boots on the stored issue");
+        // A colony with no issue asks nobody either way.
+        let mut chat = s.clone();
+        chat.issue = None;
+        let none = resolve_issue(&dir, &chat, false, &log, || async { Err(anyhow::anyhow!("never asked")) }).await;
+        assert!(none.unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh launch still needs GitHub, but a suspended account is named as one — not sent off to
+    /// reconnect — and the failure reaches the boot.
+    #[tokio::test]
+    async fn a_fresh_launch_refused_by_a_suspended_account_says_so() {
+        let (root, app, s, dir) = resumable("susp");
+        let log = app.logger(&s.id);
+        let raw = "`gh issue view 7 -R acme/repo` failed (exit status: 1): gh: Sorry. Your account was suspended. (HTTP 403)";
+        let err = resolve_issue(&dir, &s, false, &log, || async {
+            Err(github::access_error(&app, "acme/repo", anyhow::anyhow!(raw)).await)
+        })
+        .await
+        .expect_err("a fresh launch cannot start without its issue");
+        let message = format!("{err:#}");
+        assert!(message.contains("suspended the account"), "{message}");
+        assert!(!message.contains("Reconnect GitHub"), "{message}");
+        assert!(!dir.join(ISSUE_FILE).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The base refresh on resume is best effort: a remote that cannot be reached is a warning and
+    /// the mirror stays as it was; with external effects off it is not tried at all. The mirror's
+    /// own `HEAD` answers the default branch without GitHub.
+    #[tokio::test]
+    async fn a_base_refresh_that_fails_on_resume_is_a_warning() {
+        let (root, app, s, _dir) = resumable("fetch");
+        let bare = root.join("mirror.git");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("--git-dir")
+                .arg(&bare)
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&["init", "--quiet", "--bare", "--initial-branch=trunk"]);
+        let gone = root.join("no-such-remote.git");
+        git(&["remote", "add", "origin", gone.to_str().unwrap()]);
+        let log = app.logger(&s.id);
+
+        refresh_base(&app, &s.repo, &bare, "trunk", &log).await;
+        let warned = said(&app, &s.id, "warn").await;
+        assert!(
+            warned.iter().any(|w| w.starts_with("resumed offline: base not refreshed")),
+            "{warned:?}"
+        );
+        assert!(said(&app, &s.id, "error").await.is_empty());
+        assert_eq!(local_default_branch(&app, &bare).await.as_deref(), Some("trunk"));
+
+        {
+            let _offline = crate::authority::test_block_external_writes();
+            refresh_base(&app, &s.repo, &bare, "trunk", &log).await;
+        }
+        let noted = said(&app, &s.id, "info").await;
+        assert!(noted.iter().any(|i| i.contains("external effects are off")), "{noted:?}");
+        assert_eq!(said(&app, &s.id, "warn").await.len(), 1, "no second fetch was tried");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1655,13 +2193,87 @@ mod tests {
         assert!(!agent_needs_node(&[]), "an empty command needs nothing mounted");
     }
 
+    /// Regression (PR #770's colony-e2e): the services mount targets a path inside the read-only
+    /// `/colonizer` mount, so its mount point must be created host-side or the microVM fails to boot.
+    #[test]
+    fn the_services_mount_point_exists_inside_the_vm_dir() {
+        let vm_dir = std::env::temp_dir().join(format!("colonizer-mountpoint-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        vm_mount_point(&vm_dir, crate::services::GUEST_DIR).unwrap();
+        assert!(vm_dir.join(crate::services::DIR_NAME).is_dir());
+        vm_mount_point(&vm_dir, "/workspace").unwrap();
+        assert!(
+            !vm_dir.join("workspace").exists(),
+            "targets outside /colonizer are left alone"
+        );
+        std::fs::remove_dir_all(&vm_dir).unwrap();
+    }
+
     /// The boot script puts the node bin dir first and keeps the claude entry as-is.
     #[test]
     fn boot_script_puts_node_first() {
         assert!(
-            BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:$PATH""#),
+            BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
             "node first, claude entry unchanged"
         );
+    }
+
+    /// The guest's service CLI is the agentd binary under its argv0 name (issue #700): linked onto
+    /// the exported PATH before the agent runs, so the runner's first shell already has it.
+    #[test]
+    fn boot_script_puts_the_service_cli_on_the_path() {
+        let link = BOOT_SCRIPT
+            .find("ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc")
+            .expect("the colonizer-svc symlink");
+        let path = BOOT_SCRIPT.find(r#"export PATH="#).expect("the PATH export");
+        let exec = BOOT_SCRIPT
+            .find("exec /opt/colonizer/bin/colonizer-agentd")
+            .expect("the exec of agentd");
+        assert!(
+            path < link && link < exec,
+            "the link sits between the PATH export ({path}) and the exec ({exec})"
+        );
+        // `set -u` is not `set -e`: a failed link must say so, not vanish.
+        let fallback = BOOT_SCRIPT[link..exec].find("|| echo \"colonizer: could not link colonizer-svc");
+        assert!(fallback.is_some(), "a failed colonizer-svc link is loud");
+    }
+
+    /// The boot script's own link lines, run by `sh` against a stand-in bin dir: the link lands
+    /// where the PATH export looks, and a dir the guest cannot write (here: absent) makes a loud
+    /// line on stderr while the boot carries on to exec agentd (`set -u`, not `set -e`).
+    #[cfg(unix)]
+    #[test]
+    fn boot_script_links_colonizer_svc_and_says_so_when_it_cannot() {
+        let start = BOOT_SCRIPT.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let end = BOOT_SCRIPT.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let lines = &BOOT_SCRIPT[start..end];
+        let root = std::env::temp_dir().join(format!("colonizer-svc-link-{}", crate::util::short_id()));
+        let run = |bin: &std::path::Path| {
+            let script = format!(
+                "set -u\n{}echo booted",
+                lines.replace("/opt/colonizer/bin", &bin.display().to_string())
+            );
+            std::process::Command::new("sh").arg("-c").arg(script).output().unwrap()
+        };
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("colonizer-agentd"), b"").unwrap();
+        let ok = run(&bin);
+        assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), "booted");
+        assert!(ok.stderr.is_empty(), "{}", String::from_utf8_lossy(&ok.stderr));
+        assert_eq!(
+            std::fs::read_link(bin.join("colonizer-svc")).unwrap(),
+            bin.join("colonizer-agentd")
+        );
+        let failed = run(&root.join("absent"));
+        assert_eq!(
+            String::from_utf8_lossy(&failed.stdout).trim(),
+            "booted",
+            "the boot carries on"
+        );
+        let stderr = String::from_utf8_lossy(&failed.stderr);
+        assert!(stderr.contains("colonizer: could not link colonizer-svc"), "{stderr}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// The path policy is enforced in the guest before the agent starts, and every kind the host

@@ -161,6 +161,15 @@ impl App {
     }
 }
 
+/// The hardening every host-side git carries, as a blocking command with no credentials: the clean
+/// config and environment allowlist of [`git_hardened`] (which also drops a colony sandbox's
+/// `GIT_DIR` / `GIT_WORK_TREE` / `GIT_INDEX_FILE`), the [`HOST_GIT_NO_EXEC`] overrides and no
+/// terminal prompt. Code that holds no [`App`] and only reads a local repository (the fleet repo
+/// fingerprint, `repo_identity.rs`) uses it directly.
+pub(crate) fn host_git_offline() -> std::process::Command {
+    git_hardened_std(std::env::vars_os())
+}
+
 /// `-c` overrides that stop host-side git from executing anything a repository (or a colony that
 /// can write into it) controls: no hooks, no fsmonitor, no auto gc or maintenance. Every git the
 /// host runs against a colony's worktree or mirror carries these.
@@ -226,7 +235,12 @@ const GIT_ENV_KEEP: &[&str] = &[
 /// [`GIT_ENV_KEEP`] allowlist, hooks, fsmonitor and gc are off ([`HOST_GIT_NO_EXEC`]), and git
 /// never prompts. Anything a caller sets after construction still wins.
 fn git_hardened(base: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
-    let mut c = Command::new("git");
+    Command::from(git_hardened_std(base))
+}
+
+/// [`git_hardened`] as a blocking command, for callers outside the async runtime.
+fn git_hardened_std(base: impl IntoIterator<Item = (OsString, OsString)>) -> std::process::Command {
+    let mut c = std::process::Command::new("git");
     c.env_clear();
     for (key, value) in base {
         if GIT_ENV_KEEP
@@ -407,13 +421,20 @@ pub enum Denial {
     /// prompts off, git gives up at once — permanent until someone connects GitHub, so it must
     /// fail the boot rather than be retried.
     NoCredential,
+    /// GitHub has suspended the account: a 403 whose body says so. Reconnecting the same account
+    /// does not help, so it is told apart from a refused credential.
+    Suspended,
 }
 
 /// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
 /// GitHub, and so the wording lives in one place.
 pub fn classify(error: &str) -> Option<Denial> {
     let text = error.to_ascii_lowercase();
-    if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
+    // Checked first: GitHub answers a suspended account with a 403, which would otherwise read as a
+    // refused credential and send the operator off to reconnect an account that cannot be used.
+    if text.contains("suspended") && (text.contains("http 403") || text.contains("account")) {
+        Some(Denial::Suspended)
+    } else if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
         Some(Denial::NotVisible)
     } else if text.contains("http 401")
         || text.contains("http 403")
@@ -440,6 +461,14 @@ pub fn classify(error: &str) -> Option<Denial> {
 pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow::Error {
     let raw = format!("{error:#}");
     let Some(denial) = classify(&raw) else { return error };
+    if denial == Denial::Suspended {
+        // No `gh api user` here: it would be refused the same way, and the suspension is the message.
+        return anyhow!(
+            "GitHub has suspended the account signed in on this machine, so {repo} cannot be read. Reconnecting \
+             the same account will not help; a colony that already has a worktree keeps it and can still be \
+             resumed. (GitHub said: {raw})"
+        );
+    }
     let who = match viewer(app).await {
         Ok(user) => user["login"]
             .as_str()
@@ -453,7 +482,8 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
              to it — GitHub answers the same way to all three. The colony's worktree is kept, so it can be resumed \
              once access is back; otherwise delete the colony. (GitHub said: {raw})"
         ),
-        Denial::BadCredential => anyhow!(
+        // `Suspended` returned above; listed here so the match stays exhaustive.
+        Denial::BadCredential | Denial::Suspended => anyhow!(
             "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
              (GitHub said: {raw})"
         ),
@@ -705,6 +735,9 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
     }
     log.info("fetching origin").await;
     exec(app.git_authed(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    // Issue #765: a fetch may have brought a force-push of a colony branch; re-point the links of
+    // any colony here whose branch tip moved (one `rev-parse` each, and only colonies with links).
+    crate::commit_links::after_sync(app, repo).await;
     Ok(())
 }
 
@@ -2067,6 +2100,15 @@ impl PublishOps for GitPublishOps<'_> {
                 .info(format!("parent PR merged; rebased {moved} commit(s) onto {dest}"))
                 .await;
         }
+        // Issue #765: the commits now on origin are recorded with their patch-ids, so the link from
+        // each back to this colony survives the rebases and force-pushes that follow. Best effort:
+        // the push has landed, and a lost record is a warning, never a failed publish.
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        match crate::commit_links::record_for_session(self.app, &self.s.id, &self.admin, &base).await {
+            Ok(0) => {}
+            Ok(n) => self.log.info(format!("recorded {n} commit link(s)")).await,
+            Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
+        }
         Ok(())
     }
 
@@ -2941,6 +2983,11 @@ mod tests {
         assert_eq!(
             classify("gh: Resource not accessible (HTTP 403)"),
             Some(Denial::BadCredential)
+        );
+        // A suspended account is its own answer, not a credential to reconnect.
+        assert_eq!(
+            classify("gh: Sorry. Your account was suspended. (HTTP 403)"),
+            Some(Denial::Suspended)
         );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);

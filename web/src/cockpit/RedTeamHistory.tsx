@@ -5,9 +5,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { Button, Spinner, cx, sameOrg, type Tone } from "../components/ui";
 import { formatCost } from "../spend";
-import type { NewRedTeamSchedule, RedTeamRun, RedTeamSchedule, Session } from "../types";
+import type { NewRedTeamSchedule, PreScan, RedTeamRun, RedTeamSchedule, Session } from "../types";
 import { RED_TEAM_SYNTHESIS } from "../redTeam";
-import { describeCadence, runCost } from "./redTeamPlan";
+import { CHECKLIST_LABEL, SECURITY_FOCUSES, describeCadence, presetOf, runCost } from "./redTeamPlan";
 
 const ACTIVE = new Set(["armed", "waiting", "running", "draining"]);
 
@@ -127,6 +127,7 @@ export function HistoryBody({
       model: s.model,
       subagent_model: s.subagent_model,
       autofix: s.autofix,
+      preset: presetOf(s),
       cadence: s.cadence,
       enabled: !s.enabled,
     };
@@ -170,6 +171,7 @@ export function HistoryBody({
                     <div className="truncate text-[12px] text-muted">
                       {s.repos.map((r) => r.split("/")[1]).join(", ")} · {s.swarm_size} hunters{s.model ? ` · ${s.model}` : ""}
                       {s.autofix ? " · autofix" : ""}
+                      {presetOf(s) === "security" ? " · security" : ""}
                     </div>
                     <div className="text-[12px] text-faint">
                       {s.enabled ? `Next ${new Date(s.next_run_at).toLocaleString()}` : "Paused"}
@@ -205,6 +207,7 @@ export function HistoryBody({
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                       <span className="text-[13.5px] font-medium">{r.repo.split("/")[1] ?? r.repo}</span>
                       <span className={cx("rounded-full px-2 py-px text-[11px] font-medium", active ? "bg-accent-soft text-accent" : r.state === "done" ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{r.state}</span>
+                      {presetOf(r) === "security" && <span className="rounded-full bg-err/15 px-2 py-px text-[11px] font-medium text-err">security</span>}
                       {r.schedule_id && <span className="text-[11.5px] text-faint">scheduled</span>}
                       <span className="ml-auto text-[12px] tabular-nums text-muted">{new Date(r.created_at).toLocaleString()}</span>
                     </div>
@@ -240,6 +243,7 @@ export function HistoryBody({
                         )}
                       </div>
                     )}
+                    {r.prescan && <SecurityReport prescan={r.prescan} />}
                     {synth && (
                       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
                         <span className={cx("rounded-full px-2 py-px text-[11px] font-medium", TONE_PILL[RED_TEAM_SYNTHESIS[synth.state].tone])}>{RED_TEAM_SYNTHESIS[synth.state].label}</span>
@@ -279,6 +283,68 @@ export function HistoryBody({
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+/**
+ * A security run's report sections: the pre-scan's leads (heuristics, dealt to the hunter whose focus
+ * they match) and the operator checklist of what code cannot prove. A checklist item is never shown
+ * as passed — there is no such state.
+ */
+export function SecurityReport({ prescan }: { prescan: PreScan }) {
+  const scanner =
+    prescan.secret_scanner === "gitleaks" ? "secrets by gitleaks" : prescan.secret_scanner === "builtin" ? "secrets by the built-in fallback" : "not run";
+  return (
+    <div className="mt-2 space-y-2">
+      <details className="rounded-lg border border-border px-3 py-2 text-[12px]" open={prescan.leads.length > 0 && prescan.leads.length <= 5}>
+        <summary className="cursor-pointer font-medium text-text">
+          Pre-scan leads · {prescan.leads.length} · {scanner}
+        </summary>
+        <p className="mt-1 text-faint">Deterministic heuristics run before the hunt. Each is a lead for a hunter to confirm, not a confirmed vulnerability.</p>
+        {prescan.notes.length > 0 && (
+          <ul className="mt-1 space-y-0.5 text-warn">
+            {prescan.notes.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        )}
+        {prescan.leads.length > 0 && (
+          <ul className="mt-1.5 space-y-1">
+            {prescan.leads.map((l) => (
+              <li key={l.id} className="flex gap-2">
+                <span className="shrink-0 font-mono text-faint">{l.id}</span>
+                <span className="min-w-0">
+                  <span className="font-mono text-text">
+                    {l.path}
+                    {l.line != null ? `:${l.line}` : ""}
+                  </span>{" "}
+                  <span className="text-muted">{l.message}</span>
+                  <span className="block text-faint">→ {SECURITY_FOCUSES[l.focus] ?? "unassigned"}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </details>
+      <section aria-label="operator checklist" className="rounded-lg border border-border px-3 py-2 text-[12px]">
+        <h4 className="font-medium text-text">Operator checklist</h4>
+        <p className="text-faint">What the code cannot prove. Check each one yourself; none is marked done here.</p>
+        <ul className="mt-1.5 space-y-1">
+          {prescan.checklist.map((item) => (
+            <li key={item.id} className="flex items-start gap-2">
+              <input type="checkbox" disabled aria-label={item.title} className="mt-0.5" />
+              <span className="min-w-0">
+                <span className="text-text">{item.title}</span>{" "}
+                <span className={cx("rounded-full px-1.5 py-px text-[10.5px]", item.status === "needs_review" ? "bg-warn/15 text-warn" : "bg-panel-3 text-muted")}>
+                  {CHECKLIST_LABEL[item.status]}
+                </span>
+                <span className="block text-muted">{item.evidence}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
 }

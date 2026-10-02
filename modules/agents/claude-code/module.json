@@ -136,6 +136,20 @@
         "description": "Ask an optional external classifier for a second opinion on model-tier routing and record it for comparison — never applied to the actual decision. Off by default; requires a JEV_API_KEY secret. Vendor unverified as of this writing — enable only if you have a real account with the provider.",
         "default": false
       },
+      "jev_routing_act": {
+        "type": "boolean",
+        "title": "Let Jev pick the model tier (experimental)",
+        "description": "Ask the Jev classifier for its tier opinion (as shadow mode does) and use it instead of the rule's tier when it is at least as confident as the threshold below. It never routes a task below its floor: a task whose paths need a vetted or trusted provider keeps at least the rule's tier, and an unknown sandbox preset never goes to the small-task model. An explicit tier chosen for the colony still wins. Off by default; requires a JEV_API_KEY secret.",
+        "default": false
+      },
+      "jev_routing_act_confidence": {
+        "type": "number",
+        "title": "Jev tier confidence threshold",
+        "description": "Minimum confidence Jev's tier opinion needs before it replaces the rule's tier. Only used when Jev may pick the model tier.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.8
+      },
       "delegate": {
         "type": "string",
         "title": "Delegation",

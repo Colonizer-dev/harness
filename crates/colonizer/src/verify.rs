@@ -13,9 +13,15 @@
 //!
 //! **Contradicted** when the branch disagrees with the claim — the description names files in the
 //! repository and **none** of them is on the branch or in the diff, so the work it describes is not
-//! there — or the tests fail in the fresh checkout; **confirmed** only when the tests ran green;
-//! **unverifiable** otherwise — an empty branch, no known command, or infra that broke, which is not
-//! the colony's fault. `verify: none` records `unverifiable` by declaration without any work.
+//! there — or the tests fail in the fresh checkout in a way the base commit does not; **confirmed**
+//! only when the checks ran green; **inconclusive** when a check fails on the base commit too, so
+//! the failure predates the change; **unverifiable** otherwise — an empty branch, no check that
+//! applies to the diff, or infra that broke, which is not the colony's fault. `verify: none`
+//! records `unverifiable` by declaration without any work.
+//!
+//! The checks are diff-scoped: the files the branch changes (merge-base..snapshot) pick which
+//! commands run, and where — `cargo test` at the changed Rust code's nearest Cargo.toml ancestor,
+//! a touched JavaScript package's own test script, the root `make test` for what neither covers.
 //!
 //! A described path that is missing while other described paths *are* there is only an
 //! **advisory** (`advisories`): pull request descriptions routinely name files that were
@@ -31,12 +37,15 @@ use anyhow::{Result, bail};
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    process::Command,
+};
 
 /// How long one host-side git read may take before the verification gives up on it.
 const GIT_LIMIT: Duration = Duration::from_secs(30);
@@ -50,6 +59,9 @@ const FILES_CAP: usize = 50;
 pub enum Verdict {
     Confirmed,
     Contradicted,
+    /// A check fails on the base commit as well: the failure predates the change, so it is not
+    /// the colony's. Publishes, with a note for the reviewer.
+    Inconclusive,
     Unverifiable,
 }
 
@@ -65,6 +77,10 @@ pub struct Verification {
     /// that is not on the branch while other described paths are. Never changes the verdict.
     #[serde(default)]
     pub advisories: Vec<String>,
+    /// Checks that fail on the base commit as well, as reviewer-ready clauses — the failure
+    /// predates the change, so it is not attributed to it. Never changes the verdict to a hold.
+    #[serde(default)]
+    pub inconclusive: Vec<String>,
     pub command: Option<String>,
     /// `"config"` (an explicit command), the base branch file that declared it, or null.
     pub command_source: Option<String>,
@@ -93,6 +109,7 @@ impl Verification {
             summary: String::new(),
             contradictions: Vec::new(),
             advisories: Vec::new(),
+            inconclusive: Vec::new(),
             command: None,
             command_source: None,
             exit_code: None,
@@ -110,11 +127,14 @@ impl Verification {
     }
 }
 
-/// The verdict from the pieces: contradicted if anything contradicts, confirmed only on a green
-/// fresh run, unverifiable otherwise. Pure so the transitions are tested directly.
-fn decide(contradictions: &[String], green: Option<bool>) -> Verdict {
+/// The verdict from the pieces: contradicted if anything contradicts, inconclusive when a check's
+/// failure is the base's too, confirmed only on a green fresh run, unverifiable otherwise. Pure so
+/// the transitions are tested directly.
+fn decide(contradictions: &[String], inconclusive: bool, green: Option<bool>) -> Verdict {
     if !contradictions.is_empty() {
         Verdict::Contradicted
+    } else if inconclusive {
+        Verdict::Inconclusive
     } else if green == Some(true) {
         Verdict::Confirmed
     } else {
@@ -333,6 +353,185 @@ pub(crate) fn declared_test_command(files: &BaseFiles) -> Option<Declared> {
     None
 }
 
+/// The base branch's tree as far as check selection reads it: every file path, plus the contents
+/// of the few files that declare commands. Read out of git before the pure [`select_checks`], so
+/// the selection itself is testable without a repository.
+#[derive(Debug, Default)]
+pub(crate) struct BaseTree {
+    /// Every path in the base tree.
+    pub files: HashSet<String>,
+    /// `package.json` / `yarn.lock` / `Makefile` contents, by path.
+    pub contents: HashMap<String, String>,
+}
+
+impl BaseTree {
+    fn carries(&self, path: &str) -> bool {
+        self.files.contains(path)
+    }
+
+    fn content(&self, path: &str) -> Option<&str> {
+        self.contents.get(path).map(String::as_str)
+    }
+}
+
+/// `dir/name`, the way a path sits in the tree.
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_string()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// A file's directory and every ancestor up to the root: `"web/src"` → `"web/src"`, `"web"`, `""`;
+/// a root file's single ancestor is the root itself.
+fn ancestors(dir: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(Some(dir), |d| match d.rsplit_once('/') {
+        Some((parent, _)) => Some(parent),
+        None => (!d.is_empty()).then_some(""),
+    })
+}
+
+/// Whether cargo owns a changed file: Rust source, a manifest, or the lockfile.
+fn is_rust_path(path: &str) -> bool {
+    matches!(path.rsplit('/').next().unwrap_or(path), "Cargo.toml" | "Cargo.lock") || path.ends_with(".rs")
+}
+
+/// What one directory of the base tree declares, so [`declared_test_command`] answers for a
+/// package, not just the root.
+pub(crate) fn dir_files(base: &BaseTree, dir: &str) -> BaseFiles {
+    let at = |name: &str| join(dir, name);
+    let package_json = base.content(&at("package.json")).map(str::to_string);
+    let lockfiles: Vec<String> = JS_LOCKFILES
+        .iter()
+        .filter(|l| base.carries(&at(l)))
+        .map(|l| l.to_string())
+        .collect();
+    let yarn_berry_lock = lockfiles.iter().any(|l| l == "yarn.lock")
+        && base
+            .content(&at("yarn.lock"))
+            .is_some_and(|lock| lock.lines().any(|l| l.starts_with("__metadata:")));
+    let bun = lockfiles.iter().any(|l| l.starts_with("bun.lock"))
+        || package_manager(package_json.as_deref()).is_some_and(|(name, _)| name == "bun");
+    let prefix = format!("{dir}/");
+    BaseFiles {
+        bun_test_files: bun
+            && usable_script(package_json.as_deref()).is_none()
+            && base.files.iter().any(|p| p.starts_with(&prefix) && is_bun_test_file(p)),
+        cargo_toml: base.carries(&at("Cargo.toml")),
+        makefile: base.content(&at("Makefile")).map(str::to_string),
+        package_json,
+        lockfiles,
+        yarn_berry_lock,
+    }
+}
+
+/// One test check a fresh checkout owes: the directory to run it in (repo-root-relative, `""` =
+/// the root) and the command to run there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Check {
+    pub dir: String,
+    pub command: String,
+    pub source: &'static str,
+    pub needs: Option<&'static Needs>,
+    /// The command runs an entry a branch could rewrite to grade itself (`scripts.test`, a
+    /// Makefile `test:` target).
+    pub runs_script: bool,
+}
+
+/// The checks a diff owes, chosen purely from the changed files (merge-base..snapshot) against the
+/// base tree: a changed Rust file runs `cargo test` at its nearest ancestor carrying a Cargo.toml;
+/// any other file runs its nearest `package.json` ancestor's declared test command (a package that
+/// declares none gets none); a file covered by neither gets the root `make test`, only when the
+/// root declares it. Deduplicated, in the changed files' order.
+pub(crate) fn select_checks(changed: &[String], base: &BaseTree) -> Vec<Check> {
+    let mut out: Vec<Check> = Vec::new();
+    let mut push = |check: Check| {
+        if !out.contains(&check) {
+            out.push(check);
+        }
+    };
+    for path in changed {
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+        if is_rust_path(path)
+            && let Some(cargo_dir) = ancestors(dir).find(|d| base.carries(&join(d, "Cargo.toml")))
+        {
+            push(Check {
+                dir: cargo_dir.to_string(),
+                command: "cargo test".into(),
+                source: "Cargo.toml",
+                needs: Some(&CARGO),
+                runs_script: false,
+            });
+            continue;
+        }
+        if let Some(pkg_dir) = ancestors(dir).find(|d| base.carries(&join(d, "package.json"))) {
+            if let Some(declared) = declared_test_command(&dir_files(base, pkg_dir)) {
+                push(Check {
+                    dir: pkg_dir.to_string(),
+                    command: declared.command,
+                    source: declared.source,
+                    needs: Some(declared.needs),
+                    runs_script: declared.runs_script,
+                });
+            }
+            continue;
+        }
+        // Covered by neither — docs, config: only a root Makefile `test:` target speaks for them.
+        if base
+            .content("Makefile")
+            .is_some_and(|m| m.lines().any(|l| l.starts_with("test:")))
+        {
+            push(Check {
+                dir: String::new(),
+                command: "make test".into(),
+                source: "Makefile",
+                needs: Some(&MAKE),
+                runs_script: false,
+            });
+        }
+    }
+    out
+}
+
+/// The evidence a failing run leaves behind: the last lines of the guest's output, written to the
+/// session's `out` directory. Roughly two hundred lines is what a reviewer reads.
+const LOG_LINES: usize = 200;
+/// How many failing tests a contradiction message names before it says "and N more".
+const NAME_CAP: usize = 5;
+
+/// The base branch's tree for check selection: every file path, plus the few contents that declare
+/// commands. Read from the base ref only, never the colony's branch.
+async fn base_tree(app: &App, admin: &Path, cwd: &Path, base_ref: &str, changed: &[String]) -> Result<BaseTree> {
+    let files: HashSet<String> = read(app, admin, cwd, &["ls-tree", "-r", "--name-only", base_ref])
+        .await?
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let mut contents = HashMap::new();
+    let mut wanted = vec!["Makefile".to_string()];
+    for path in changed {
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+        if is_rust_path(path) && ancestors(dir).any(|d| files.contains(&join(d, "Cargo.toml"))) {
+            continue;
+        }
+        if let Some(pkg_dir) = ancestors(dir).find(|d| files.contains(&join(d, "package.json"))) {
+            for name in ["package.json", "yarn.lock"] {
+                let path = join(pkg_dir, name);
+                if files.contains(&path) && !wanted.contains(&path) {
+                    wanted.push(path);
+                }
+            }
+        }
+    }
+    for path in wanted {
+        if let Some(text) = file_at(app, admin, cwd, base_ref, &path).await {
+            contents.insert(path, text);
+        }
+    }
+    Ok(BaseTree { files, contents })
+}
+
 /// The paths a pull request description claims to have touched: backtick tokens that look like
 /// paths (they contain `/`, the last segment has an extension, no spaces, `*` or `:`), with
 /// `:123` line suffixes (and `:12-30` ranges) and a leading `./` stripped.
@@ -407,11 +606,17 @@ fn names_a_changed_file(claim: &str, changed: &[String]) -> bool {
     })
 }
 
-/// The published pull request's verification notes: the advisories, when there are any, as a
-/// quoted block a reviewer reads before merging. `None` when there is nothing to note.
+/// The published pull request's verification notes: the inconclusive checks and the advisories,
+/// when there are any, as a quoted block a reviewer reads before merging. `None` when there is
+/// nothing to note.
 pub(crate) fn pr_notes(verification: Option<&Verification>) -> Option<String> {
-    let v = verification.filter(|v| !v.advisories.is_empty())?;
+    let v = verification.filter(|v| !v.advisories.is_empty() || !v.inconclusive.is_empty())?;
     let mut out = String::from("> **Verification notes** (advisory; they did not change the verdict):");
+    for note in &v.inconclusive {
+        out.push_str(&format!(
+            "\n> - Verification was inconclusive: {note}, so the failure is not attributed to this change."
+        ));
+    }
     for note in &v.advisories {
         out.push_str(&format!("\n> - {note}"));
     }
@@ -488,50 +693,6 @@ async fn file_at(app: &App, admin: &Path, cwd: &Path, rev: &str, path: &str) -> 
     exec_within(GIT_LIMIT, &mut git_at(app, admin, cwd, &["show", at.as_str()]))
         .await
         .ok()
-}
-
-/// What the base branch says about its test command: package.json, which lockfiles sit at its
-/// root, whether a yarn.lock is Yarn 2+'s, whether bun would find tests of its own, and the
-/// Cargo.toml/Makefile fallbacks. Read from the base ref only, never the colony's branch.
-async fn base_files(app: &App, admin: &Path, cwd: &Path, base_ref: &str) -> BaseFiles {
-    let root: HashSet<String> = read(app, admin, cwd, &["ls-tree", "--name-only", base_ref])
-        .await
-        .map(|out| out.lines().map(str::to_string).collect())
-        .unwrap_or_default();
-    let package_json = match root.contains("package.json") {
-        true => file_at(app, admin, cwd, base_ref, "package.json").await,
-        false => None,
-    };
-    let lockfiles: Vec<String> = JS_LOCKFILES
-        .iter()
-        .filter(|l| root.contains(**l))
-        .map(|l| l.to_string())
-        .collect();
-    let yarn_berry_lock = root.contains("yarn.lock")
-        && file_at(app, admin, cwd, base_ref, "yarn.lock")
-            .await
-            .is_some_and(|lock| lock.lines().any(|l| l.starts_with("__metadata:")));
-    let mut files = BaseFiles {
-        package_json,
-        lockfiles,
-        yarn_berry_lock,
-        bun_test_files: false,
-        cargo_toml: root.contains("Cargo.toml"),
-        makefile: match root.contains("Makefile") {
-            true => file_at(app, admin, cwd, base_ref, "Makefile").await,
-            false => None,
-        },
-    };
-    // Only a bun repository without a `scripts.test` asks bun's own runner, and only then is the
-    // whole tree worth listing.
-    let bun = files.lockfiles.iter().any(|l| l.starts_with("bun.lock"))
-        || package_manager(files.package_json.as_deref()).is_some_and(|(name, _)| name == "bun");
-    if bun && usable_script(files.package_json.as_deref()).is_none() {
-        files.bun_test_files = read(app, admin, cwd, &["ls-tree", "-r", "--name-only", base_ref])
-            .await
-            .is_ok_and(|out| out.lines().any(is_bun_test_file));
-    }
-    files
 }
 
 /// One host-side git read against the worktree's admin dir.
@@ -647,78 +808,162 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
         contradictions
     };
 
-    // The command: explicit configuration first, then the repository's own declaration on the
-    // base branch.
-    let files = base_files(app, admin, &cwd, &base_ref).await;
-    let declared = (configured == "auto").then(|| declared_test_command(&files)).flatten();
-    let (command, source) = match (configured, &declared) {
-        ("auto", Some(d)) => (d.command.clone(), d.source),
-        ("auto", None) => (String::new(), ""),
-        _ => (configured.to_string(), "config"),
+    // The checks: an explicit `verify` setting is one root check; `auto` picks the base branch's
+    // own declarations for the directories the diff touches.
+    let tree = match base_tree(app, admin, &cwd, &base_ref, &changed).await {
+        Ok(tree) => tree,
+        Err(e) => unverifiable!(format!("could not read {base_ref} to pick the checks: {e:#}")),
     };
-    record.command = (!command.is_empty()).then_some(command.clone());
-    record.command_source = (!source.is_empty()).then_some(source.to_string());
+    let mut checks = match configured {
+        "auto" => select_checks(&changed, &tree),
+        command => vec![Check {
+            dir: String::new(),
+            command: command.to_string(),
+            source: "config",
+            needs: None,
+            runs_script: false,
+        }],
+    };
+    // A diff that deletes a package directory the base declared tests for leaves a check pointing
+    // at a directory the snapshot no longer has: dropped, so the `cd`'s exit 1 cannot contradict.
+    checks.retain(|check| check.dir.is_empty() || on_branch.iter().any(|p| p.starts_with(&format!("{}/", check.dir))));
+    record.command = checks.first().map(|c| c.command.clone());
+    record.command_source = checks.first().map(|c| c.source.to_string());
 
     // The colony must not grade its own homework: an `auto` command is the base branch's, so a
     // branch that rewrote the entry defining it would run its own replacement. (`cargo test`
     // has no entry to rewrite, and an explicit command is the operator's choice.)
-    let self_graded = if declared.as_ref().is_some_and(|d| d.runs_script)
-        && scripts_test(files.package_json.as_deref())
-            != scripts_test(file_at(app, admin, &cwd, &snapshot, "package.json").await.as_deref())
-    {
-        Some("the branch changes `scripts.test`, the command this check would run")
-    } else if source == "Makefile" && files.makefile != file_at(app, admin, &cwd, &snapshot, "Makefile").await {
-        Some("the branch changes the `test` target, the command this check would run")
-    } else {
-        None
-    };
-
-    // Contradictions settle it without paying for a VM run; the verdict is the same either way.
-    let mut forced = self_graded.map(str::to_string); // an infra-style unverifiable summary
-    let mut green = None;
-    if contradictions.is_empty() && forced.is_none() {
-        if command.is_empty() {
-            forced = Some(format!(
-                "no test command is known for this repository (nothing usable on {base})"
-            ));
+    let mut forced: Option<String> = None; // an infra-style unverifiable summary
+    for check in &checks {
+        let graded = if check.runs_script {
+            let path = join(&check.dir, "package.json");
+            scripts_test(tree.content(&path)) != scripts_test(file_at(app, admin, &cwd, &snapshot, &path).await.as_deref())
+        } else if check.source == "Makefile" {
+            tree.content("Makefile") != file_at(app, admin, &cwd, &snapshot, "Makefile").await.as_deref()
         } else {
-            let needs = declared.as_ref().map(|d| d.needs);
-            match run_tests(app, s, admin, &cwd, &snapshot, &command, needs, runner).await {
-                Ok(Ran {
-                    sandbox,
-                    reported,
-                    missing_tool,
-                    ms,
-                }) => {
-                    record.tests_ms = Some(ms);
-                    record.exit_code = reported;
-                    match reported {
-                        // The guest's own report decides; the sandbox's exit corroborates.
-                        None => forced = Some("the runner did not report an exit code".into()),
-                        // The package manager the repository asked for is not in the image: the
-                        // image's gap, not the colony's, so nothing ran and nothing contradicts.
-                        Some(127) if missing_tool => {
-                            forced = Some(format!(
-                                "`{}` (picked from `{source}`) is not in the colony image, so `{command}` could not run (exit 127)",
-                                needs.map_or("the test tool", |n| n.tool)
-                            ))
-                        }
-                        Some(127) => forced = Some(format!("`{command}` is not present in the colony image (exit 127)")),
-                        Some(0) if sandbox == 0 => green = Some(true),
-                        Some(0) => forced = Some(format!("the sandbox itself exited {sandbox}")),
-                        Some(code) => contradictions.push(format!("`{command}` exited {code} in a fresh checkout")),
-                    }
-                }
-                Err(e) => forced = Some(format!("could not run the tests: {e:#}")),
-            }
+            continue;
+        };
+        if graded {
+            let entry = if check.runs_script {
+                "`scripts.test`"
+            } else {
+                "the `test` target"
+            };
+            forced = Some(format!("the branch changes {entry}, the command this check would run"));
+            break;
         }
     }
+
+    // Contradictions settle it without paying for a VM run; the verdict is the same either way.
+    let mut green: Option<bool> = None;
+    let (mut ran_any, mut all_green) = (false, true);
+    let mut first_failure: Option<i32> = None;
+    let mut reported_zero = true;
+    // Focused-first (#584): which check goes first, and what each check cost and said.
+    let focus = crate::verify_focus::mode(app).await;
+    let candidates = crate::verify_focus::focus_candidates(&checks, &changed);
+    let chosen = crate::verify_focus::choose(&candidates);
+    let mut runs: Vec<crate::verify_focus::Run> = Vec::new();
+    if contradictions.is_empty() && forced.is_none() {
+        if checks.is_empty() {
+            forced = Some(format!(
+                "no test command applies to the files this diff touches (nothing usable on {base})"
+            ));
+        } else {
+            let mut order: Vec<usize> = (0..checks.len()).collect();
+            if let (crate::verify_focus::Mode::Act, Some(first)) = (focus, chosen) {
+                order.retain(|&i| i != first);
+                order.insert(0, first);
+            }
+            for &index in &order {
+                let check = &checks[index];
+                let (check_started, contradicted_before) = (Instant::now(), contradictions.len());
+                let ran = match run_tests(
+                    app,
+                    s,
+                    admin,
+                    &cwd,
+                    &snapshot,
+                    &check.dir,
+                    &check.command,
+                    check.needs,
+                    runner,
+                )
+                .await
+                {
+                    Ok(ran) => ran,
+                    Err(e) => {
+                        forced = Some(format!("could not run the tests: {e:#}"));
+                        break;
+                    }
+                };
+                ran_any = true;
+                record.tests_ms = Some(record.tests_ms.unwrap_or(0) + ran.ms);
+                first_failure = first_failure.or(ran.reported.filter(|code| *code != 0));
+                reported_zero &= ran.reported.is_some();
+                match classify(&ran) {
+                    Outcome::Green => {}
+                    // A failure the base shares is not this change's: the same check runs on the
+                    // merge-base, in the same kind of fresh checkout, before a hold.
+                    Outcome::Failed(code) => {
+                        all_green = false;
+                        match base_run(app, s, admin, &cwd, &merge_base, check, runner).await {
+                            BaseOut::FailsToo => record
+                                .inconclusive
+                                .push(format!("`{}` fails on the base commit as well", check.command)),
+                            BaseOut::Passes => contradictions.push(head_failure(&cwd, check, code, ran.tail).await),
+                            BaseOut::Unchecked(why) => contradictions.push(format!(
+                                "{} (the base commit could not be checked: {why})",
+                                head_failure(&cwd, check, code, ran.tail).await
+                            )),
+                        }
+                    }
+                    // Everything else is the image's or the sandbox's: unverifiable, named plainly.
+                    Outcome::MissingTool => {
+                        forced = Some(format!(
+                            "`{}` (picked from `{}`) is not in the colony image, so `{}` could not run (exit 127)",
+                            check.needs.map_or("the test tool", |n| n.tool),
+                            check.source,
+                            check.command
+                        ));
+                        break;
+                    }
+                    Outcome::Absent => {
+                        forced = Some(format!("`{}` is not present in the colony image (exit 127)", check.command));
+                        break;
+                    }
+                    Outcome::NoReport => {
+                        forced = Some("the runner did not report an exit code".into());
+                        break;
+                    }
+                    Outcome::Sandbox(sandbox) => {
+                        forced = Some(format!("the sandbox itself exited {sandbox}"));
+                        break;
+                    }
+                }
+                let failed = contradictions.len() > contradicted_before;
+                runs.push(crate::verify_focus::Run {
+                    check: index,
+                    ms: check_started.elapsed().as_millis() as u64,
+                    failed,
+                });
+                // Act: the focused check's own contradiction settles the verdict, so the rest of
+                // the suite is not paid for. Nothing else stops early.
+                if failed && focus == crate::verify_focus::Mode::Act && Some(index) == chosen {
+                    break;
+                }
+            }
+            // Confirmed needs the whole suite: a check that never ran can never count as green.
+            green = ran_any.then_some(all_green && runs.len() == checks.len());
+        }
+    }
+    record.exit_code = first_failure.or_else(|| (ran_any && reported_zero).then_some(0));
 
     record.contradictions = contradictions;
     record.verdict = if forced.is_some() {
         Verdict::Unverifiable
     } else {
-        decide(&record.contradictions, green)
+        decide(&record.contradictions, !record.inconclusive.is_empty(), green)
     };
     record.summary = forced.unwrap_or_else(|| match record.verdict {
         Verdict::Contradicted => format!(
@@ -729,10 +974,229 @@ async fn verify_claim(app: &App, s: &Session, runner: &VmRunner) -> Verification
                 more => format!(" (and {} more)", more - 1),
             }
         ),
-        Verdict::Confirmed => format!("changes passed `{command}` in a fresh checkout"),
+        Verdict::Confirmed => format!("changes passed `{}` in a fresh checkout", checks[0].command),
+        Verdict::Inconclusive => format!("inconclusive: {}", record.inconclusive.join("; ")),
         Verdict::Unverifiable => "the tests could not be judged".into(),
     });
-    record.finished(started)
+    let record = record.finished(started);
+    if focus != crate::verify_focus::Mode::Off && !runs.is_empty() {
+        crate::verify_focus::record(app, &s.id, focus, &candidates, chosen, &runs, record.verdict, record.ms).await;
+    }
+    record
+}
+
+/// What one fresh-checkout run said — the same reading for the head and the base: the guest's own
+/// report decides, and everything but a green or red command is the image's or the sandbox's
+/// trouble, not the colony's.
+enum Outcome {
+    Green,
+    Failed(i32),
+    /// Exit 127 with the missing-tool marker: the package manager is not in the image.
+    MissingTool,
+    /// Exit 127 without it: the command itself is not in the image.
+    Absent,
+    NoReport,
+    Sandbox(i32),
+}
+
+fn classify(ran: &Ran) -> Outcome {
+    match ran.reported {
+        None => Outcome::NoReport,
+        Some(127) if ran.missing_tool => Outcome::MissingTool,
+        Some(127) => Outcome::Absent,
+        Some(0) if ran.sandbox == 0 => Outcome::Green,
+        Some(0) => Outcome::Sandbox(ran.sandbox),
+        Some(code) => Outcome::Failed(code),
+    }
+}
+
+/// What the same check answered on the merge-base commit, separating a failure this change
+/// introduced from one it inherited.
+enum BaseOut {
+    /// Green on the base: the failure is new, and contradicts the claim.
+    Passes,
+    /// Red on the base too: inconclusive, not contradicted.
+    FailsToo,
+    /// The base could not be judged (infra): the head failure still contradicts, caveated.
+    Unchecked(String),
+}
+
+/// Base-check answers, keyed by worktree, image, merge-base, dir and command, so the same failing
+/// branch need not pay for a second base VM. Exit codes only — infra trouble is never cached.
+static BASE_RESULTS: LazyLock<Mutex<HashMap<String, i32>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Runs one check on the merge-base's own fresh checkout (`git archive` of it), answering whether
+/// the head failure is the base's too. Never contradicts; at worst it could not be checked.
+async fn base_run(
+    app: &App,
+    s: &Session,
+    admin: &Path,
+    cwd: &Path,
+    merge_base: &str,
+    check: &Check,
+    runner: &VmRunner,
+) -> BaseOut {
+    let modules = app.modules.read().await.clone();
+    let image = s
+        .boot_image
+        .clone()
+        .unwrap_or_else(|| crate::sandbox::configured_image(app, &modules));
+    let key = format!("{}\0{image}\0{merge_base}\0{}\0{}", s.worktree, check.dir, check.command);
+    let cache = || BASE_RESULTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(code) = cache().get(&key).copied() {
+        return if code == 0 { BaseOut::Passes } else { BaseOut::FailsToo };
+    }
+    let out = match run_tests(
+        app,
+        s,
+        admin,
+        cwd,
+        merge_base,
+        &check.dir,
+        &check.command,
+        check.needs,
+        runner,
+    )
+    .await
+    {
+        Ok(ran) => match classify(&ran) {
+            Outcome::Green => BaseOut::Passes,
+            Outcome::Failed(_) => BaseOut::FailsToo,
+            Outcome::MissingTool => BaseOut::Unchecked("the base image is missing the tool the check needs".into()),
+            Outcome::Absent => BaseOut::Unchecked("the base image does not carry the command".into()),
+            Outcome::NoReport => BaseOut::Unchecked("the base run did not report an exit code".into()),
+            Outcome::Sandbox(sandbox) => BaseOut::Unchecked(format!("the base sandbox itself exited {sandbox}")),
+        },
+        Err(e) => BaseOut::Unchecked(format!("could not run it: {e:#}")),
+    };
+    if let BaseOut::Passes | BaseOut::FailsToo = out {
+        let code = i32::from(matches!(out, BaseOut::FailsToo));
+        let mut results = cache();
+        if results.len() >= 256 {
+            results.clear();
+        }
+        results.insert(key, code);
+    }
+    out
+}
+
+/// A filesystem-safe log name for a check: `cargo test` at the root gives `cargo-test`,
+/// an `npm test` in `web` gives `web-npm-test`.
+fn check_slug(check: &Check) -> String {
+    let mut slug = String::new();
+    for c in format!("{} {}", check.dir, check.command).chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').chars().take(48).collect()
+}
+
+/// The contradiction a failing head check earns, with its evidence: the failing tests the output
+/// names, and where the last lines of the run live (written to the session's `out` directory).
+async fn head_failure(cwd: &Path, check: &Check, code: i32, tail: Option<String>) -> String {
+    let mut msg = format!("`{}` exited {code} in a fresh checkout", check.command);
+    let Some(tail) = tail.filter(|t| !t.trim().is_empty()) else {
+        return msg;
+    };
+    let (names, extra) = failing_tests(&tail);
+    if !names.is_empty() {
+        msg.push_str("; failing: ");
+        msg.push_str(&names.join(", "));
+        if extra > 0 {
+            msg.push_str(&format!(" and {extra} more"));
+        }
+    }
+    let file = format!("verify-{}.log", check_slug(check));
+    let _ = tokio::fs::create_dir_all(cwd.join("out")).await;
+    if tokio::fs::write(cwd.join("out").join(&file), format!("{tail}\n"))
+        .await
+        .is_ok()
+    {
+        msg.push_str(&format!(" (last {LOG_LINES} lines in out/{file})"));
+    }
+    msg
+}
+
+/// Strips ANSI escape sequences (colour, cursor movement) so run output matches plainly.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut it = text.chars();
+    while let Some(c) = it.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            // CSI: parameter and intermediate bytes, then one final byte @ through ~.
+            Some('[') => {
+                for c in it.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: a title or hyperlink, closed by BEL or ST.
+            Some(']') => {
+                let mut prev = ' ';
+                for c in it.by_ref() {
+                    if c == '\x07' || prev == '\x1b' {
+                        break;
+                    }
+                    prev = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The failing tests a run's output names, deduplicated in order, capped at [`NAME_CAP`] with the
+/// count of the rest: cargo's `test <path> ... FAILED` lines and vitest/jest's `FAIL  file >
+/// suite` and `×`/`✕`/`✗` marks.
+fn failing_tests(output: &str) -> (Vec<String>, usize) {
+    let mut names: Vec<String> = Vec::new();
+    for line in strip_ansi(output).lines() {
+        let line = line.trim();
+        let name = line
+            .strip_prefix("test ")
+            .and_then(|rest| rest.strip_suffix(" ... FAILED"))
+            .map(|name| name.trim().to_string())
+            .or_else(|| {
+                ["FAIL ", "×", "✕", "✗"].iter().find_map(|mark| {
+                    line.strip_prefix(mark)
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_string)
+                })
+            })
+            .filter(|name| !names.contains(name));
+        if let Some(name) = name {
+            names.push(name);
+        }
+    }
+    let extra = names.len().saturating_sub(NAME_CAP);
+    (names.into_iter().take(NAME_CAP).collect(), extra)
+}
+
+/// The last `lines` lines of a file — the evidence a failing run leaves. `None` when there is
+/// nothing to read. A giant log is read from its tail only.
+async fn tail_lines(path: &Path, lines: usize) -> Option<String> {
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let len = file.metadata().await.ok()?.len();
+    file.seek(std::io::SeekFrom::Start(len.saturating_sub(1 << 20))).await.ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).await.ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let mut all: Vec<&str> = text.lines().collect();
+    if len > 1 << 20 {
+        all.remove(0); // the seek may have landed mid-line
+    }
+    let start = all.len().saturating_sub(lines);
+    Some(all[start..].join("\n"))
 }
 
 /// What one fresh-checkout run answered.
@@ -743,28 +1207,41 @@ struct Ran {
     reported: Option<i32>,
     /// The guest found the tool the command needs missing, and ran nothing.
     missing_tool: bool,
+    /// The last lines of the command's combined output, when it failed — the evidence.
+    tail: Option<String>,
     ms: u64,
 }
 
-/// The guest's script: into the fresh checkout, check for the tool the command needs (a miss
-/// leaves a `missing` marker beside the report and stands in exit 127 for the command), run the
-/// command, and report its exit number where only this harness reads it.
-fn guest_script(command: &str, needs: Option<&Needs>) -> String {
+/// Single-quotes a path for the guest's `sh`, so any check directory reaches the script verbatim.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The guest's script: into the fresh checkout (the check's own subdirectory when it has one),
+/// check for the tool the command needs (a miss leaves a `missing` marker and stands in exit 127),
+/// run the command with its combined output in the report mount, and report its exit number where
+/// only this harness reads it. The redirect is on the command's subshell, so `$?` survives.
+fn guest_script(dir: &str, command: &str, needs: Option<&Needs>) -> String {
+    let cd = if dir.is_empty() {
+        "cd /workspace".to_string()
+    } else {
+        format!("cd {}", shell_quote(&format!("/workspace/{dir}")))
+    };
     match needs {
         Some(needs) => format!(
-            "cd /workspace && if {}; then ({command}); else touch /colonizer-verify/missing; (exit 127); fi; \
-             echo $? > /colonizer-verify/exit",
+            "{cd} && if {}; then ({command}) >/colonizer-verify/output 2>&1; else touch /colonizer-verify/missing; \
+             (exit 127); fi; echo $? > /colonizer-verify/exit",
             needs.check
         ),
-        None => format!("cd /workspace && ({command}); echo $? > /colonizer-verify/exit"),
+        None => format!("{cd} && ({command}) >/colonizer-verify/output 2>&1; echo $? > /colonizer-verify/exit"),
     }
 }
 
-/// Exports the snapshot into a fresh temp dir under the session directory (no `.git`, nothing
-/// shared with the agent's worktree), boots a one-shot microVM from the colony's image with that
-/// dir mounted at `/workspace` and a second, empty dir at `/colonizer-verify`, and runs
-/// [`guest_script`] there. On a timeout the VM is removed here rather than left to
-/// `--max-duration`.
+/// Exports the snapshot (or the merge-base, for a base run) into a fresh temp dir under the
+/// session directory (no `.git`, nothing shared with the agent's worktree), boots a one-shot
+/// microVM from the colony's image with that dir mounted at `/workspace` and a second, empty dir
+/// at `/colonizer-verify`, and runs [`guest_script`] there. On a timeout the VM is removed here
+/// rather than left to `--max-duration`.
 #[allow(clippy::too_many_arguments)]
 async fn run_tests(
     app: &App,
@@ -772,6 +1249,7 @@ async fn run_tests(
     admin: &Path,
     cwd: &Path,
     snapshot: &str,
+    dir: &str,
     command: &str,
     needs: Option<&Needs>,
     runner: &VmRunner,
@@ -827,7 +1305,7 @@ async fn run_tests(
         // `npm ci` / `cargo test` can fetch dependencies, and no host or mesh rules: this VM talks
         // to nothing of the harness's. Left empty, msb's own default would decide instead.
         net_profiles: vec!["public".into()],
-        command: vec!["sh".into(), "-c".into(), guest_script(command, needs)],
+        command: vec!["sh".into(), "-c".into(), guest_script(dir, command, needs)],
         ..Default::default()
     };
     let started = Instant::now();
@@ -848,11 +1326,18 @@ async fn run_tests(
             bail!("the test run timed out after {} minutes", TEST_LIMIT.as_secs() / 60);
         }
     };
+    // The evidence comes off the report mount before it is swept: the tail of a failing run's
+    // output is what a contradiction shows the reviewer.
+    let tail = match reported {
+        Some(code) if code > 0 => tail_lines(&report.join("output"), LOG_LINES).await,
+        _ => None,
+    };
     clean_up(&[&checkout, &report]).await;
     Ok(Ran {
         sandbox,
         reported,
         missing_tool,
+        tail,
         ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -958,22 +1443,28 @@ pub(crate) mod tests {
     #[test]
     fn the_verdict_never_confirms_without_a_green_run() {
         let contradiction = vec!["described `src/absent.rs` is not on the branch".to_string()];
-        assert_eq!(decide(&[], Some(true)), Verdict::Confirmed);
+        assert_eq!(decide(&[], false, Some(true)), Verdict::Confirmed);
         // A contradiction wins even over a green run: the branch disagrees with the claim.
-        assert_eq!(decide(&contradiction, Some(true)), Verdict::Contradicted);
-        assert_eq!(decide(&[], None), Verdict::Unverifiable);
+        assert_eq!(decide(&contradiction, false, Some(true)), Verdict::Contradicted);
+        // An inconclusive failure wins over green — it is not a confirmation — but loses to a
+        // contradiction; nothing inconclusive and no green run leaves the claim unjudged.
+        assert_eq!(decide(&[], true, Some(true)), Verdict::Inconclusive);
+        assert_eq!(decide(&contradiction, true, None), Verdict::Contradicted);
+        assert_eq!(decide(&[], false, None), Verdict::Unverifiable);
         // A failing run reaches decide as a contradiction (verify_claim pushes one), so this
         // branch is the belt to that braces.
-        assert_eq!(decide(&[], Some(false)), Verdict::Unverifiable);
+        assert_eq!(decide(&[], false, Some(false)), Verdict::Unverifiable);
         // The event's shape is the contract the cockpit renders (web/src/types.ts): the record's
-        // thirteen fields plus its `type`, no more.
+        // fields plus its `type`, no more.
         let event = Verification::blank().event();
         assert_eq!(event["type"], "verification");
         assert_eq!(event["advisories"], json!([]));
-        assert_eq!(event.as_object().unwrap().len(), 14);
-        // A record persisted before advisories existed still loads.
+        assert_eq!(event["inconclusive"], json!([]));
+        assert_eq!(event.as_object().unwrap().len(), 15);
+        // A record persisted before advisories or inconclusive checks existed still loads.
         let mut old = serde_json::to_value(Verification::blank()).unwrap();
         old.as_object_mut().unwrap().remove("advisories");
+        old.as_object_mut().unwrap().remove("inconclusive");
         assert_eq!(serde_json::from_value::<Verification>(old).unwrap(), Verification::blank());
     }
 
@@ -1000,6 +1491,44 @@ pub(crate) mod tests {
 
     fn dead_runner() -> VmRunner {
         Arc::new(|_| Box::pin(async { anyhow::bail!("microsandbox is not installed") }))
+    }
+
+    /// A runner that answers `(sandbox, reported)` differently for the head checkout and the base
+    /// one, told apart by a file only the head snapshot carries; a non-empty `head_output` is
+    /// written beside the report on the head run — the evidence a failing run leaves.
+    fn phased_runner(
+        marker: &'static str,
+        base: (i32, Option<i32>),
+        head: (i32, Option<i32>),
+        head_output: &'static str,
+    ) -> VmRunner {
+        Arc::new(move |spec| {
+            assert_eq!(spec.net_profiles, ["public"]);
+            Box::pin(async move {
+                let workspace = &spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/workspace")
+                    .expect("the fresh checkout is mounted at /workspace")
+                    .source;
+                let head_run = tokio::fs::try_exists(workspace.join(marker)).await.unwrap_or(false);
+                let (sandbox, reported) = if head_run { head } else { base };
+                let report = spec
+                    .mounts
+                    .iter()
+                    .find(|m| m.target == "/colonizer-verify")
+                    .expect("the report mount")
+                    .source
+                    .clone();
+                if head_run && !head_output.is_empty() {
+                    tokio::fs::write(report.join("output"), head_output).await?;
+                }
+                if let Some(code) = reported {
+                    tokio::fs::write(report.join("exit"), code.to_string()).await?;
+                }
+                Ok(sandbox)
+            })
+        })
     }
 
     #[test]
@@ -1213,20 +1742,27 @@ pub(crate) mod tests {
     #[test]
     fn the_guest_checks_the_tool_before_it_runs_the_command() {
         assert_eq!(
-            guest_script("true", None),
-            "cd /workspace && (true); echo $? > /colonizer-verify/exit"
+            guest_script("", "true", None),
+            "cd /workspace && (true) >/colonizer-verify/output 2>&1; echo $? > /colonizer-verify/exit"
         );
         assert_eq!(
-            guest_script("bun install && bun run test", Some(&BUN)),
-            "cd /workspace && if command -v bun >/dev/null 2>&1; then (bun install && bun run test); \
-             else touch /colonizer-verify/missing; (exit 127); fi; echo $? > /colonizer-verify/exit"
+            guest_script("web", "bun install && bun run test", Some(&BUN)),
+            "cd '/workspace/web' && if command -v bun >/dev/null 2>&1; then (bun install && bun run test) \
+             >/colonizer-verify/output 2>&1; else touch /colonizer-verify/missing; (exit 127); fi; \
+             echo $? > /colonizer-verify/exit"
         );
-        // Run for real: a present tool runs the command, a missing one reports 127 and the marker.
+        // The directory is quoted, so anything in it reaches the script verbatim.
+        assert_eq!(
+            guest_script("weird dir", "true", None),
+            "cd '/workspace/weird dir' && (true) >/colonizer-verify/output 2>&1; echo $? > /colonizer-verify/exit"
+        );
+        // Run for real: a present tool runs the command, a missing one reports 127 and the marker,
+        // and the command's own output — not its $? — is what lands in the report mount.
         let dir = std::env::temp_dir().join(format!("colonizer-guest-{}", short_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let run = |needs: &Needs, command: &str| {
             let _ = std::fs::remove_file(dir.join("missing"));
-            let script = guest_script(command, Some(needs))
+            let script = guest_script("", command, Some(needs))
                 .replace("cd /workspace", &format!("cd {}", dir.display()))
                 .replace("/colonizer-verify", &dir.display().to_string());
             let out = std::process::Command::new("sh").args(["-c", &script]).status().unwrap();
@@ -1235,7 +1771,8 @@ pub(crate) mod tests {
             (code, dir.join("missing").exists())
         };
         let sh = needs("sh", "command -v sh >/dev/null 2>&1");
-        assert_eq!(run(&sh, "exit 3"), (3, false));
+        assert_eq!(run(&sh, "echo hello; exit 3"), (3, false));
+        assert_eq!(std::fs::read_to_string(dir.join("output")).unwrap(), "hello\n");
         assert_eq!(run(&sh, "true"), (0, false));
         let absent = needs("no-such-tool", "command -v colonizer-no-such-tool >/dev/null 2>&1");
         assert_eq!(run(&absent, "true"), (127, true));
@@ -1311,6 +1848,17 @@ pub(crate) mod tests {
             Some(
                 "> **Verification notes** (advisory; they did not change the verdict):\n\
                  > - described `docs/remote-access.md` is not on the branch"
+            )
+        );
+        // An inconclusive check is noted too, so the reviewer knows the failure is not this change's.
+        let mut v = Verification::blank();
+        v.inconclusive = vec!["`cargo test` fails on the base commit as well".into()];
+        assert_eq!(
+            pr_notes(Some(&v)).as_deref(),
+            Some(
+                "> **Verification notes** (advisory; they did not change the verdict):\n\
+                 > - Verification was inconclusive: `cargo test` fails on the base commit as well, \
+                 so the failure is not attributed to this change."
             )
         );
     }
@@ -1429,7 +1977,7 @@ pub(crate) mod tests {
             "temp index, checkout and report are cleaned up: {leftovers:?}"
         );
 
-        let red = verify(&app, &fake_runner(3, Some(3))).await;
+        let red = verify(&app, &phased_runner("uncommitted.txt", (0, Some(0)), (3, Some(3)), "")).await;
         assert_eq!(red.verdict, Verdict::Contradicted, "{red:?}");
         assert_eq!(red.exit_code, Some(3));
         assert!(red.summary.contains("exited 3 in a fresh checkout"), "{}", red.summary);
@@ -1685,10 +2233,11 @@ pub(crate) mod tests {
             "an unverifiable claim does not hold autopilot"
         );
 
-        // With bun in the image the same run decides as usual: green confirms, red contradicts.
+        // With bun in the image the same run decides as usual: green confirms, and a red the base
+        // commit does not share contradicts.
         let v = verify(&app, &fake_runner(0, Some(0))).await;
         assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
-        let v = verify(&app, &fake_runner(1, Some(1))).await;
+        let v = verify(&app, &phased_runner("src/fix.ts", (0, Some(0)), (1, Some(1)), "")).await;
         assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
         assert_eq!(
             v.contradictions,
@@ -1731,12 +2280,418 @@ pub(crate) mod tests {
         assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
         assert!(v.summary.contains("the sandbox itself exited 2"), "{}", v.summary);
 
-        // `auto` with nothing usable on the base branch names no command to run.
+        // `auto` with nothing that applies to the diff names no command to run.
         worktree_fixture(&app, None, "did the work", true).await;
         let v = verify(&app, &panicking_runner()).await;
         assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
-        assert!(v.summary.contains("no test command is known"), "{}", v.summary);
+        assert!(
+            v.summary.contains("no test command applies to the files this diff touches"),
+            "{}",
+            v.summary
+        );
         assert_eq!(v.command, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A branch that deletes a package directory the base declares tests for leaves the check
+    /// pointing at a directory the snapshot no longer has: skipped — the `cd`'s own exit 1 must
+    /// never become a contradiction.
+    #[tokio::test]
+    async fn a_deleted_package_directory_is_skipped_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let repo = worktree_fixture(&app, None, "removed the web package", false).await;
+        std::fs::create_dir_all(repo.join("web/src")).unwrap();
+        std::fs::write(repo.join("web/package.json"), r#"{"scripts": {"test": "vitest"}}"#).unwrap();
+        std::fs::write(repo.join("web/package-lock.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("web/src/a.ts"), "export {};\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "a web package");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["rm", "-q", "-r", "web"]);
+        git_commit(&repo, "remove web");
+
+        let v = verify(&app, &panicking_runner()).await;
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.summary.contains("no test command applies"), "{}", v.summary);
+        assert_eq!(v.exit_code, None, "no VM booted to fail in a deleted directory");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Two crates on the base, `a` and `b`; the branch changes one file in `a` and two in `b`, so
+    /// the diff's order runs `a` first while focus (#584) picks `b`. `mode` is `verify_focus`.
+    async fn two_crate_fixture(app: &crate::Shared, mode: &str) {
+        app.modules
+            .write()
+            .await
+            .publish
+            .settings
+            .insert("verify_focus".into(), json!(mode));
+        let repo = worktree_fixture(app, None, "did the work", false).await;
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(repo.join(dir).join("src")).unwrap();
+            std::fs::write(repo.join(dir).join("Cargo.toml"), "[package]\n").unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "two crates");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        for file in ["a/src/x.rs", "b/src/y.rs", "b/src/z.rs"] {
+            std::fs::write(repo.join(file), "fn main() {}\n").unwrap();
+        }
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "work");
+    }
+
+    /// Each run a [`crate_runner`] saw, as `(dir, head?)`, in order.
+    type Calls = Arc<Mutex<Vec<(String, bool)>>>;
+
+    /// A runner for [`two_crate_fixture`] that logs each run and fails the head run in `failing`
+    /// (the base always passes, so that failure contradicts).
+    fn crate_runner(failing: Option<&'static str>) -> (VmRunner, Calls) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = calls.clone();
+        let runner: VmRunner = Arc::new(move |spec| {
+            let log = log.clone();
+            Box::pin(async move {
+                let ws = spec.mounts.iter().find(|m| m.target == "/workspace").unwrap().source.clone();
+                let head = tokio::fs::try_exists(ws.join("b/src/y.rs")).await.unwrap_or(false);
+                let dir = if spec.command[2].contains("/workspace/a'") { "a" } else { "b" };
+                log.lock().unwrap().push((dir.to_string(), head));
+                let code = i32::from(head && failing == Some(dir));
+                let report = spec.mounts.iter().find(|m| m.target == "/colonizer-verify").unwrap();
+                tokio::fs::write(report.source.join("exit"), code.to_string()).await?;
+                Ok(code)
+            })
+        });
+        (runner, calls)
+    }
+
+    fn focus_rows(app: &crate::Shared) -> Vec<Value> {
+        std::fs::read_to_string(app.jev_focus_file())
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn runs(calls: &Calls) -> Vec<(String, bool)> {
+        calls.lock().unwrap().clone()
+    }
+
+    /// Act: the focused check runs first; its contradiction stops the verification there.
+    #[tokio::test]
+    async fn act_mode_stops_at_the_focused_checks_failure() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(Some("b"));
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(runs(&calls), [("b".into(), true), ("b".into(), false)], "a never ran");
+        let rows = focus_rows(&app);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["mode"], "act");
+        assert_eq!(rows[0]["chosen"], "b: cargo test");
+        assert_eq!(rows[0]["would_catch"], true);
+        assert_eq!(rows[0]["checks_run"], 1);
+        assert_eq!(rows[0]["candidates"][1], json!({"label": "b: cargo test", "owned": 2}));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The acceptance test for #584: in act mode a confirmed verdict still ran the full suite.
+    #[tokio::test]
+    async fn act_mode_confirms_only_after_the_full_suite() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(None);
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Confirmed, "{v:?}");
+        assert_eq!(
+            runs(&calls),
+            [("b".into(), true), ("a".into(), true)],
+            "focused first, then the rest"
+        );
+        assert_eq!(focus_rows(&app)[0]["would_catch"], Value::Null, "nothing failed");
+        // A failure outside the focused check is still found by the rest of the suite.
+        two_crate_fixture(&app, "act").await;
+        let (runner, calls) = crate_runner(Some("a"));
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(runs(&calls), [("b".into(), true), ("a".into(), true), ("a".into(), false)]);
+        assert_eq!(focus_rows(&app)[1]["would_catch"], false);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Shadow runs exactly what off runs, in the same order, with the same verdict — and only
+    /// records what focus would have done.
+    #[tokio::test]
+    async fn shadow_mode_changes_nothing_but_the_ledger() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let mut seen = Vec::new();
+        for mode in ["off", "shadow"] {
+            two_crate_fixture(&app, mode).await;
+            let (runner, calls) = crate_runner(Some("b"));
+            let v = verify(&app, &runner).await;
+            seen.push((v.verdict, v.contradictions, runs(&calls)));
+            assert_eq!(focus_rows(&app).len(), usize::from(mode == "shadow"), "off records nothing");
+        }
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[1].0, Verdict::Contradicted);
+        assert_eq!(seen[1].2, [("a".into(), true), ("b".into(), true), ("b".into(), false)]);
+        let row = &focus_rows(&app)[0];
+        assert_eq!(
+            (&row["mode"], &row["chosen"], &row["would_catch"]),
+            (&json!("shadow"), &json!("b: cargo test"), &json!(true))
+        );
+        assert_eq!(row["verdict"], "contradicted");
+        assert_eq!(row["checks_run"], 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A base tree for the pure selection: the listed paths carry, the pairs read as contents.
+    fn tree(files: &[&str], contents: &[(&str, &str)]) -> BaseTree {
+        BaseTree {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            contents: contents.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect(),
+        }
+    }
+
+    fn picked(paths: &[&str], base: &BaseTree) -> Vec<(String, String)> {
+        select_checks(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), base)
+            .into_iter()
+            .map(|c| (c.dir, c.command))
+            .collect()
+    }
+
+    /// The checks are diff-scoped: a Rust file runs cargo at its nearest Cargo.toml ancestor and
+    /// never a package's test; a touched package runs its own declared test; a lockfile wakes only
+    /// its own package; docs wake nothing the base does not declare at the root.
+    #[test]
+    fn checks_follow_the_diff_not_the_whole_tree() {
+        let package = |test: &str| format!(r#"{{"scripts": {{"test": "{test}"}}}}"#);
+        let monorepo = tree(
+            &[
+                "Cargo.toml",
+                "crates/colonizer/Cargo.toml",
+                "package.json",
+                "web/package.json",
+                "web/package-lock.json",
+            ],
+            &[
+                ("package.json", package("node --test").as_str()),
+                ("web/package.json", package("vitest").as_str()),
+            ],
+        );
+        // Rust changes run cargo — at the nearest manifest's directory, not the workspace root's —
+        // and nothing else.
+        assert_eq!(
+            picked(&["crates/colonizer/src/verify.rs"], &monorepo),
+            vec![("crates/colonizer".into(), "cargo test".into())]
+        );
+        // A web-only change runs the web package's own declared test: no cargo, no root npm.
+        assert_eq!(
+            picked(&["web/src/a.ts"], &monorepo),
+            vec![("web".into(), "npm ci && npm test".into())]
+        );
+        // The lockfile alone is a web change all the same; a module's lockfile wakes only that
+        // module, and only when it declares a test.
+        assert_eq!(
+            picked(&["web/package-lock.json"], &monorepo),
+            vec![("web".into(), "npm ci && npm test".into())]
+        );
+        let with_module = tree(
+            &["modules/agents/pi/package.json", "modules/agents/pi/package-lock.json"],
+            &[("modules/agents/pi/package.json", package("node --test").as_str())],
+        );
+        assert_eq!(
+            picked(&["modules/agents/pi/package-lock.json"], &with_module),
+            vec![("modules/agents/pi".into(), "npm ci && npm test".into())]
+        );
+        let mute_module = tree(
+            &["modules/agents/pi/package.json", "modules/agents/pi/package-lock.json"],
+            &[("modules/agents/pi/package.json", r#"{"name": "pi"}"#)],
+        );
+        assert_eq!(picked(&["modules/agents/pi/package-lock.json"], &mute_module), vec![]);
+
+        // Docs (or anything covered by neither) run only a root Makefile `test:` the base declares.
+        let docs = tree(&["docs/guide.md"], &[]);
+        assert_eq!(picked(&["docs/guide.md"], &docs), vec![]);
+        assert_eq!(
+            picked(
+                &["docs/guide.md"],
+                &tree(
+                    &["docs/guide.md", "Makefile"],
+                    &[("Makefile", "build:\n\techo\ntest: build\n")]
+                )
+            ),
+            vec![("".into(), "make test".into())]
+        );
+    }
+
+    /// ANSI is stripped before matching (CSI and OSC, truncated sequences included); cargo's
+    /// FAILED lines, vitest/jest `FAIL` chains and `×`/`✕`/`✗` marks are the failing tests,
+    /// deduplicated, capped at five plus the count.
+    #[test]
+    fn failing_test_names_come_from_the_run_output() {
+        assert_eq!(
+            strip_ansi("\x1b[31mred\x1b[0m \x1b]8;;http://x\x07link\x1b]8;;\x07 plain \x1b[31"),
+            "red link plain "
+        );
+        let output = "\x1b[1mrunning 4 tests\x1b[0m\n\
+                      test a::b ... \x1b[31mFAILED\x1b[0m\n\
+                      test c::d ... FAILED\n\
+                      \n\
+                      FAIL  web/src/a.test.ts > suite > name\n\
+                      × other > case 12ms\n\
+                      ✕ jest style\n\
+                      ✗ bun style\n\
+                      test a::b ... FAILED\n\
+                      test result: FAILED. 1 passed; 5 failed\n";
+        assert_eq!(
+            failing_tests(output),
+            (
+                vec![
+                    "a::b".to_string(),
+                    "c::d".to_string(),
+                    "web/src/a.test.ts > suite > name".to_string(),
+                    "other > case 12ms".to_string(),
+                    "jest style".to_string(),
+                ],
+                1
+            )
+        );
+        assert!(
+            failing_tests("all green\ntest x ... ok\ntest result: ok. 2 passed\n")
+                .0
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_checks_log_name_is_its_place_and_command() {
+        let at = |dir: &str, command: &str| {
+            check_slug(&Check {
+                dir: dir.into(),
+                command: command.into(),
+                source: "config",
+                needs: None,
+                runs_script: false,
+            })
+        };
+        assert_eq!(at("", "cargo test"), "cargo-test");
+        // Whatever the command says, the name stays filesystem-safe and short.
+        assert_eq!(at("", "script --weird --flags ../../etc"), "script-weird-flags-etc");
+    }
+
+    /// A check that fails on the base commit as well predates the change: inconclusive — published,
+    /// never a hold. The same failure on a base that passes is the change's own: contradicted.
+    #[tokio::test]
+    async fn a_failure_the_base_shares_is_inconclusive_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 3"), "did the work", true).await;
+        let v = verify(&app, &phased_runner("uncommitted.txt", (3, Some(3)), (3, Some(3)), "")).await;
+        assert_eq!(v.verdict, Verdict::Inconclusive, "{v:?}");
+        assert_eq!(v.exit_code, Some(3));
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.inconclusive, vec!["`exit 3` fails on the base commit as well".to_string()]);
+        assert_eq!(v.summary, "inconclusive: `exit 3` fails on the base commit as well");
+        assert_eq!(crate::events::verdict_step(&v.verdict), crate::events::Autopilot::Publish);
+
+        // A different repository (the cache is per repo): the base passes, the head fails.
+        worktree_fixture(&app, Some("exit 3"), "did the work", true).await;
+        let v = verify(&app, &phased_runner("uncommitted.txt", (0, Some(0)), (3, Some(3)), "")).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(
+            crate::events::verdict_step(&v.verdict),
+            crate::events::Autopilot::Hold("the completion claim was contradicted")
+        );
+        assert_eq!(v.contradictions, vec!["`exit 3` exited 3 in a fresh checkout".to_string()]);
+        assert!(v.inconclusive.is_empty(), "{v:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The base answer is paid for once: a second verification of the same branch re-asks only the
+    /// head, with a runner that must never see a base checkout — and still answers the same.
+    #[tokio::test]
+    async fn the_base_answer_is_cached_across_verifications() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 3"), "did the work", true).await;
+        let first = verify(&app, &phased_runner("uncommitted.txt", (3, Some(3)), (3, Some(3)), "")).await;
+        assert_eq!(first.verdict, Verdict::Inconclusive, "{first:?}");
+        let head_only: VmRunner = Arc::new(|spec| {
+            Box::pin(async move {
+                let ws = spec.mounts.iter().find(|m| m.target == "/workspace").unwrap().source.clone();
+                assert!(
+                    tokio::fs::try_exists(ws.join("uncommitted.txt")).await.unwrap_or(false),
+                    "the base answer must come from the cache, not a second boot"
+                );
+                let report = spec.mounts.iter().find(|m| m.target == "/colonizer-verify").unwrap();
+                tokio::fs::write(report.source.join("exit"), "3").await?;
+                Ok(3)
+            })
+        });
+        let second = verify(&app, &head_only).await;
+        assert_eq!(second.verdict, Verdict::Inconclusive, "{second:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When the base run itself hits infra trouble (here: the base sandbox exits nonzero) the head
+    /// failure still contradicts, saying the base could not be checked — never downgraded.
+    #[tokio::test]
+    async fn a_base_run_that_cannot_be_judged_leaves_the_head_failure_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 3"), "did the work", true).await;
+        let v = verify(&app, &phased_runner("uncommitted.txt", (2, Some(0)), (3, Some(3)), "")).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        assert_eq!(
+            v.contradictions,
+            vec![
+                "`exit 3` exited 3 in a fresh checkout (the base commit could not be checked: \
+                 the base sandbox itself exited 2)"
+                    .to_string()
+            ]
+        );
+        assert!(v.inconclusive.is_empty(), "{v:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A failing run leaves its evidence: the last 200 lines in the session's out directory, the
+    /// failing tests named in the contradiction, capped at five plus the count of the rest.
+    #[tokio::test]
+    async fn a_failing_run_leaves_its_tail_and_the_failing_tests_names() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        worktree_fixture(&app, Some("exit 101"), "did the work", true).await;
+        let mut output = String::new();
+        for i in 0..206 {
+            output.push_str(&format!("\x1b[31mtest verify::case_{i:03} ... \x1b[0mFAILED\n"));
+        }
+        let runner = phased_runner(
+            "uncommitted.txt",
+            (0, Some(0)),
+            (101, Some(101)),
+            Box::leak(output.into_boxed_str()),
+        );
+        let v = verify(&app, &runner).await;
+        assert_eq!(v.verdict, Verdict::Contradicted, "{v:?}");
+        let log = app.session_dir("abc").join("out").join("verify-exit-101.log");
+        let saved = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            saved.lines().count(),
+            LOG_LINES,
+            "the log carries the last 200 lines, not all 206"
+        );
+        assert!(saved.contains("case_205"), "the tail keeps the last failures");
+        assert!(!saved.contains("case_005"), "the head of the run is cut");
+        // The names are read off the tail that was kept, not the whole run.
+        let names = (6..6 + NAME_CAP)
+            .map(|i| format!("verify::case_{i:03}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(
+            v.contradictions,
+            vec![format!(
+                "`exit 101` exited 101 in a fresh checkout; failing: {names} and 195 more \
+                 (last 200 lines in out/verify-exit-101.log)"
+            )]
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

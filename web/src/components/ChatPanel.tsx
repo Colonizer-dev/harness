@@ -14,6 +14,7 @@ import {
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useToast } from "../context";
+import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { useModels } from "../useModels";
 import {
   ASK_USER_TOOL,
@@ -70,6 +71,14 @@ const AskUserToolUI = makeAssistantToolUI<AskUserArgs, AskUserResult>({
 
 type RenderedMessage = { id: string; content: readonly { type: string; text?: string }[]; createdAt?: Date };
 
+/** A command this panel queued with the service worker while the colony's socket was down. */
+interface QueuedEntry {
+  id: string;
+  kind: "message" | "answer";
+  /** The message text, for the queued bubble. */
+  text?: string;
+}
+
 function messageText(message: RenderedMessage): string {
   return message.content.map((part) => (part.type === "text" ? (part.text ?? "") : "")).join("");
 }
@@ -89,6 +98,29 @@ export function ChatPanel({
   const thread = useMemo(() => buildThread(state), [state]);
   const connected = state.connection === "open";
   const isRunning = state.agentState === "working";
+  // What this panel has handed to the worker's outbox while offline: shown as queued bubbles and
+  // notes until the worker reports each item delivered — or dropped, which is said out loud.
+  const outbox = useOutbox();
+  const [queued, setQueued] = useState<QueuedEntry[]>([]);
+  const queuedRef = useRef<QueuedEntry[]>([]);
+  const addQueued = (entry: QueuedEntry) => {
+    queuedRef.current = [...queuedRef.current, entry];
+    setQueued(queuedRef.current);
+  };
+  useEffect(() => {
+    const { delivered, dropped } = outbox;
+    if (delivered.length === 0 && dropped.length === 0) return;
+    const gone = new Set<string>([...delivered, ...dropped.map((drop) => drop.id)]);
+    for (const drop of dropped) {
+      const entry = queuedRef.current.find((queued) => queued.id === drop.id);
+      if (entry) toast(droppedText(entry.kind, drop.status), "error");
+    }
+    const next = queuedRef.current.filter((entry) => !gone.has(entry.id));
+    if (next.length !== queuedRef.current.length) {
+      queuedRef.current = next;
+      setQueued(next);
+    }
+  }, [outbox, toast]);
   // Plain language by default: most people watching a colony work are not reading the commands.
   const [simple, setSimple] = useState(() => stored("colonizer.chat-simple") !== "0");
   const toggleView = () => {
@@ -116,33 +148,37 @@ export function ChatPanel({
         .join("\n")
         .trim();
       if (!text) return;
-      if (!stream?.send({ type: "user_message", text })) {
-        toast("Not connected to the colony — your message was not sent.", "error");
-      }
+      const outcome = sendOrQueue(stream, { type: "user_message", text });
+      if (outcome.status === "failed") toast("Not connected to the colony — your message was not sent.", "error");
+      if (outcome.status === "queued") addQueued({ id: outcome.id, kind: "message", text });
     },
     onCancel: async () => {
       stream?.send({ type: "interrupt" });
     },
   });
 
-  const questionActions = useMemo<QuestionActions>(
-    () => ({
-      answer: (questionId, answers, response) => {
+  const questionActions = useMemo<QuestionActions>(() => {
+    // Offline is no longer a wall (issue #746): with the worker's outbox the answer queues and
+    // sends on reconnect, so the card stays open — and owns up to the queueing.
+    const queueing = !connected && live && canQueue();
+    return {
+      answer: (questionId, answers, response, questions) => {
         try {
-          const sent = stream?.send({ type: "answer", question_id: questionId, answers, response }) ?? false;
-          if (!sent) toast("Not connected to the colony — try again in a moment.", "error");
-          return sent;
+          const outcome = sendOrQueue(stream, { type: "answer", question_id: questionId, answers, response }, questions);
+          if (outcome.status === "failed") toast("Not connected to the colony — try again in a moment.", "error");
+          if (outcome.status === "queued") addQueued({ id: outcome.id, kind: "answer" });
+          return outcome.status !== "failed";
         } catch (error) {
           toast(errorMessage(error), "error");
           return false;
         }
       },
       submitting: state.submitting,
-      canAnswer: connected && live,
-      blockedBy: !live ? "ended" : !connected ? "disconnected" : null,
-    }),
-    [stream, state.submitting, connected, live, toast],
-  );
+      canAnswer: (connected || queueing) && live,
+      willQueue: queueing,
+      blockedBy: !live ? "ended" : !connected && !queueing ? "disconnected" : null,
+    };
+  }, [stream, state.submitting, connected, live, toast]);
 
   return (
     <QuestionActionsContext.Provider value={questionActions}>
@@ -154,6 +190,11 @@ export function ChatPanel({
           {state.connection === "reconnecting" && (
             <div className="flex items-center gap-2 border-b border-border bg-warn-soft px-4 py-1.5 text-[12.5px] text-warn">
               <Spinner /> Reconnecting to the colony…
+            </div>
+          )}
+          {queued.length > 0 && (
+            <div role="status" className="flex items-center gap-2 border-b border-border bg-panel-2 px-4 py-1.5 text-[12.5px] text-muted">
+              <Spinner className="text-faint" /> Queued — sends when you're back online
             </div>
           )}
           <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border px-4 py-1.5">
@@ -213,6 +254,9 @@ export function ChatPanel({
                 <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
               ))}
               <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
+              {/* What the outbox is still holding from this panel: the messages as queued bubbles,
+                  the answer as a note at the foot, until the worker reports them delivered. */}
+              {queued.map((entry) => (entry.kind === "message" ? <QueuedMessage key={entry.id} text={entry.text ?? ""} /> : <QueuedAnswerNote key={entry.id} />))}
             </div>
           </ThreadPrimitive.Viewport>
           <Composer
@@ -340,6 +384,29 @@ function UserMessage({ origin }: { origin?: Origin }) {
         </div>
       </div>
     </MessagePrimitive.Root>
+  );
+}
+
+/** A message the socket could not take, drawn where it will sit once the worker delivers it — dashed until then. */
+function QueuedMessage({ text }: { text: string }) {
+  return (
+    <div className="my-4 flex justify-end">
+      <div className="max-w-[85%]">
+        <div className="mb-1 text-right text-[11px] font-semibold uppercase tracking-wide text-faint">Queued</div>
+        <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-dashed border-border-strong bg-accent-soft/60 px-3.5 py-2 text-[14px] leading-relaxed text-muted">
+          {text}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The note under an answer queued while offline: the card above stays open until the worker's POST lands. */
+function QueuedAnswerNote() {
+  return (
+    <div className="flex flex-wrap items-center gap-2 py-2 pl-10 text-[13px] font-medium text-accent">
+      <IconQuestion size={15} /> Your answer was queued — it sends when you're back online
+    </div>
   );
 }
 

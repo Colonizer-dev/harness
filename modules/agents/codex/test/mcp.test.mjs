@@ -71,7 +71,7 @@ test('the tool list follows the switches, and memory_search reads the mounted no
   const srv = startServer({ COLONIZER_MEMORY_DIR: dir });
   try {
     assert.equal((await srv.call('initialize', {})).result.protocolVersion, '2024-11-05');
-    assert.deepEqual((await srv.call('tools/list', {})).result.tools.map((t) => t.name), ['ask_user', 'memory_search', 'memory_propose', 'wait']);
+    assert.deepEqual((await srv.call('tools/list', {})).result.tools.map((t) => t.name), ['ask_user', 'memory_briefing', 'memory_changes', 'memory_search', 'memory_propose', 'wait']);
     const hit = await srv.call('tools/call', { name: 'memory_search', arguments: { query: 'waitrooms' } });
     assert.equal(hit.result.isError, undefined);
     assert.match(resultText(hit), /\[repo\] Wait rooms \(/);
@@ -80,6 +80,27 @@ test('the tool list follows the switches, and memory_search reads the mounted no
     assert.equal(resultText(miss), 'No shared memory matches that query.');
     const unknown = await srv.call('tools/call', { name: 'nope', arguments: {} });
     assert.equal(unknown.error.code, -32602);
+  } finally {
+    srv.stop();
+  }
+});
+
+test('memory_briefing and memory_changes return sourced entries from the mounted notes.json (issue #766)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-mcp-mem-'));
+  mkdirSync(join(dir, 'repo'), { recursive: true });
+  const note = (id, title, created) => ({ id, scope: 'repo', key: 'o/r', kind: 'failure', title, content: `${title}, in detail.`, created_at: created, source: { session_id: 'col-a', repo: 'o/r', commit: 'abc1234', reviewed: true } });
+  writeFileSync(join(dir, 'repo', 'notes.json'), JSON.stringify([note('r1', 'Flaky seed step', '2026-09-01T00:00:00Z')]));
+  const srv = startServer({ COLONIZER_MEMORY_DIR: dir });
+  try {
+    const brief = await srv.call('tools/call', { name: 'memory_briefing', arguments: {} });
+    assert.match(resultText(brief), /\[repo\/failure\] Flaky seed step: .*\n {2}source: colony col-a o\/r @ abc1234, reviewed; id r1/);
+    assert.match(resultText(await srv.call('tools/call', { name: 'memory_changes', arguments: {} })), /^No shared-memory changes since /);
+    // The mothership revokes r1 and approves r2.
+    writeFileSync(join(dir, 'repo', 'notes.json'), JSON.stringify([note('r2', 'Cache the toolchain', '2026-09-02T00:00:00Z')]));
+    const diff = resultText(await srv.call('tools/call', { name: 'memory_changes', arguments: {} }));
+    assert.match(diff, /Cache the toolchain/);
+    assert.match(diff, /revoked or removed: Flaky seed step \(repo\/r1\)/);
+    assert.doesNotMatch(resultText(await srv.call('tools/call', { name: 'memory_briefing', arguments: {} })), /Flaky seed step/);
   } finally {
     srv.stop();
   }
