@@ -91,47 +91,14 @@ pub struct JevOpinion {
 }
 
 /// The decision point a routing record is about, so a report reading `routing.jsonl` can tell this
-/// one apart from any other point that later records its decisions the same way.
-pub const DECISION_POINT: &str = "routing.tier";
+/// one apart from any other point that later records its decisions the same way. It is the routing
+/// point's own id in the shared decision layer (`decide.rs`).
+pub const DECISION_POINT: &str = crate::decide::ROUTING_TIER.id;
 
-/// What the boot path does with Jev's tier opinion (issue #583).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JevMode {
-    /// Not asked.
-    #[default]
-    Off,
-    /// Asked and recorded, never applied.
-    Shadow,
-    /// Asked, and its tier is used when it is confident enough — never below the floor.
-    Act,
-}
-
-impl JevMode {
-    /// The mode from the two module settings: `jev_routing_act` wins, then `jev_shadow_mode`.
-    pub fn from_settings(act: bool, shadow: bool) -> JevMode {
-        if act {
-            JevMode::Act
-        } else if shadow {
-            JevMode::Shadow
-        } else {
-            JevMode::Off
-        }
-    }
-
-    /// Whether the boot path should ask Jev at all: act needs the opinion just as shadow does.
-    pub fn asks(&self) -> bool {
-        *self != JevMode::Off
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            JevMode::Off => "off",
-            JevMode::Shadow => "shadow",
-            JevMode::Act => "act",
-        }
-    }
-}
+/// What the boot path does with Jev's tier opinion (issue #583). The mode is the shared decision
+/// layer's ([`crate::decide::Mode`]), re-exported under its old name so every caller and every
+/// serialized record reads exactly as before.
+pub use crate::decide::Mode as JevMode;
 
 /// Per-task routing as configured. Resolved by the caller from module settings and the colony record.
 #[derive(Clone, Copy, Debug, PartialEq)]

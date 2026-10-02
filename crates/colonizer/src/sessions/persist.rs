@@ -42,6 +42,13 @@ impl App {
         self.cfg.data_dir.join("jev_focus.jsonl")
     }
 
+    /// Every Jev decision point's ask (issue #582), one JSON line each: what the point asked, the
+    /// pick or why there was none, and what the harness did with it. In the data dir like the routing
+    /// ledger, so it outlives per-colony cleanup and spans every point, not just routing.
+    pub(crate) fn decisions_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("decisions.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }
