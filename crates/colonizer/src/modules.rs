@@ -262,10 +262,10 @@ fn parse_requires(manifest: &Value) -> Result<Requires, String> {
     })
 }
 
-/// The Claude Code build the harness stages as `bin/claude-guest`, pinned in vendor/claude-code.lock
+/// The Claude Code build the harness stages as `bin/claude-guest`, pinned in crates/colonizer/claude-code.lock
 /// (same six columns as images.lock: name, version, platform, kind, sha256, url). Compiled in, so
 /// the pin always matches the harness that was built.
-const CLAUDE_LOCK: &str = include_str!("../../../vendor/claude-code.lock");
+const CLAUDE_LOCK: &str = include_str!("../claude-code.lock");
 
 /// The version the lock pins the Claude Code guest build to: its `agent` rows, whose version is the
 /// same on both platforms. `None` when the lock names no build, which only a hand-edited tree causes.
@@ -288,7 +288,7 @@ pub struct StagedBinary {
     pub version: Option<String>,
 }
 
-/// What the harness stages, read off the config: `claude`, at the version vendor/claude-code.lock
+/// What the harness stages, read off the config: `claude`, at the version crates/colonizer/claude-code.lock
 /// pins when the vendored guest build is present.
 pub fn harness_staged_binaries(cfg: &crate::config::Settings) -> Vec<StagedBinary> {
     vec![StagedBinary {

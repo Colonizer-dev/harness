@@ -612,7 +612,7 @@ test('subagent effort redefines the built-in agents the orchestrator delegates t
   }
   assert.equal(options.env.CLAUDE_CODE_SUBAGENT_MODEL, 'claude-opus-5-5');
   // Explore stays read-only: the prompt says so and the deny list enforces it. The list must never be
-  // narrower than the built-in's, extracted from the Claude Code build vendor/claude-code.lock pins.
+  // narrower than the built-in's, extracted from the Claude Code build crates/colonizer/claude-code.lock pins.
   const builtIns = JSON.parse(readFileSync(new URL('../../../../vendor/claude-code-builtins.json', import.meta.url), 'utf8'));
   for (const tool of builtIns.Explore.disallowedTools) assert.ok(options.agents.Explore.disallowedTools.includes(tool), tool);
   assert.equal(options.agents['general-purpose'].disallowedTools, undefined);

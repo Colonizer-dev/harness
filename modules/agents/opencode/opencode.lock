@@ -1,7 +1,7 @@
 # The OpenCode builds colonies run, pinned so every install of the same Colonizer release
 # gets the same agent. Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
 #
-# Like vendor/claude-code.lock this file is read where the agent is fetched (here the runner itself,
+# Like crates/colonizer/claude-code.lock this file is read where the agent is fetched (here the runner itself,
 # at colony boot) rather than bundled: a release carries no OpenCode code. The runner downloads the
 # row for its architecture from registry.npmjs.org into a scratch dir, checks the sha256, and only
 # then extracts `package/bin/opencode`. `linux-x64-baseline` is the same build for x64 CPUs without

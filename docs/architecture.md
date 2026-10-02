@@ -718,7 +718,7 @@ spawns a hardened child and asserts the `EPERM` classes — no KVM needed.
 `eb59b1ba4184ce70`); `colonizer-agentd --exec-hardened -- sh` in a colony terminal reproduces the
 agent's view for the manual matrix (`unshare -U`, io_uring, `mount`, `cat /proc/kallsyms`, strace
 of agentd), and `scripts/seccomp-evidence.sh -- <workload>` straces a workload and lists any
-denylisted syscall it made. Re-run on a `vendor/claude-code.lock` bump, an `images.lock` digest
+denylisted syscall it made. Re-run on a `crates/colonizer/claude-code.lock` bump, an `images.lock` digest
 change, a microsandbox/libkrunfw bump (`vendor/vendor.lock`), or a runner change under
 `modules/agents/*`.
 

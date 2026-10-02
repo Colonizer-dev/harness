@@ -239,7 +239,7 @@ can install it.
 | [`modules/agents/codex`](modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the `codex` CLI must be present in the colony image | `SHIPPING` |
 | [`modules/agents/acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
-| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and the pin for the guest Claude Code build (`claude-code.lock`) with a snapshot of its built-in subagents (`claude-code-builtins.json`) | `SHIPPING` |
+| [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and a snapshot of the built-in subagents of the guest Claude Code build (`claude-code-builtins.json`) | `SHIPPING` |
 | [`scripts`](scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
 
 ## Modules
@@ -378,7 +378,7 @@ sets four release checkpoints ([docs/audit.md](docs/audit.md)).
 | Git objects and worktree metadata | Mounted read-only: `git status`, `diff` and `log` work in the colony, commits don't. |
 | Colony output | Untrusted until published: `.git` rewritten, nested `.git` removed, no hooks or fsmonitor, `pr.md` must be a regular file. |
 | Prompt screening (screen module) | Off until you configure it. When on, it reads the colony's diff and PR body at publish time, classifies hidden code points, and holds (`block`) or annotates (`warn`) the publish. It sees colony output, holds no credentials, and sends nothing anywhere — no network, no model ([docs/prompt-screening.md](docs/prompt-screening.md)). |
-| What a colony runs | Pinned, not floating: the image by OCI digest (`crates/colonizer/images.lock`), the guest Claude Code build by sha256 (`vendor/claude-code.lock`), the vendored tools by sha256 (`vendor/vendor.lock`). Pins move only through a reviewed pull request. |
+| What a colony runs | Pinned, not floating: the image by OCI digest (`crates/colonizer/images.lock`), the guest Claude Code build by sha256 (`crates/colonizer/claude-code.lock`), the vendored tools by sha256 (`vendor/vendor.lock`). Pins move only through a reviewed pull request. |
 | Release downloads | Checked against the release's `SHA256SUMS`, which itself carries a build-provenance attestation the installer verifies whenever `gh` can reach a verdict ([docs/install.md](docs/install.md)). |
 | Mesh | Own Headscale and userspace `tailscaled`, own state and socket, `--no-logs-no-support`. Mothership reaches colonies; colonies can't reach each other. |
 | colonizer-agentd | Per-colony bearer token, even inside the mesh. |

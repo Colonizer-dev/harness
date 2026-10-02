@@ -49,7 +49,7 @@ the VM).
 ## Egress
 
 The `egress` declaration in `module.json` comes from a live capture, not from the CLI's documented
-requirements: on 2026-09-28, Claude Code 2.1.280 (the `vendor/claude-code.lock` pin) ran inside a
+requirements: on 2026-09-28, Claude Code 2.1.280 (the `crates/colonizer/claude-code.lock` pin) ran inside a
 colony sandbox behind a logging forward proxy (`HTTPS_PROXY`, HTTP CONNECT), with tcpdump on udp/53
 and socket sampling as backstops for anything bypassing the proxy and a fresh `HOME` per run. The
 scenarios were the runner's own invocation, CLI defaults, no credentials at all, `claude auth login`

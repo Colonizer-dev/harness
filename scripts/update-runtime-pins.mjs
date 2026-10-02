@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Proposes new pins for the colony images (crates/colonizer/images.lock) and the guest Claude Code
-// build (vendor/claude-code.lock) when their upstreams move.
+// build (crates/colonizer/claude-code.lock) when their upstreams move.
 //
 //   node scripts/update-runtime-pins.mjs                       report what moved upstream (changes nothing, exits 1 when stale)
 //   node scripts/update-runtime-pins.mjs --check               the same check, named for CI
@@ -33,7 +33,7 @@ const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
 const imagesPath = option('--images') ?? join(root, 'crates/colonizer/images.lock');
-const agentPath = option('--agent') ?? join(root, 'vendor/claude-code.lock');
+const agentPath = option('--agent') ?? join(root, 'crates/colonizer/claude-code.lock');
 
 // --check names the read-only mode the default already is, so CI can say what it means; it refuses
 // to travel with --write, which asks for the opposite.
@@ -287,7 +287,7 @@ async function main() {
       summary,
       changed
         ? [
-            'Upstream moved for these runtime pins. `crates/colonizer/images.lock` and `vendor/claude-code.lock` below pin the new digests and checksums.',
+            'Upstream moved for these runtime pins. `crates/colonizer/images.lock` and `crates/colonizer/claude-code.lock` below pin the new digests and checksums.',
             '',
             'These pins are what a release runs: images.lock is compiled into the mothership (include_str! in src/presets.rs), so a digest bump is a binary change, and every colony built from the next release boots the exact bytes the new digest names. Nothing here merges on its own — read the digest-to-digest diffs before merging.',
             '',

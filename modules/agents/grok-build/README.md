@@ -141,7 +141,7 @@ keyed on the same verdict the test asserts.
 
 ## What remains
 
-- Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `vendor/claude-code.lock`
+- Binary fetch/lock/mount like `scripts/fetch-agent-binary.sh` + `crates/colonizer/claude-code.lock`
   ([#602](https://github.com/Colonizer-dev/harness/issues/602)), so a colony does not depend on grok
   being preinstalled in the image. (The harness now refuses a launch
   or boot on a stock preset image, where grok is never present; a custom image is still only

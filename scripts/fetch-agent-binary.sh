@@ -5,7 +5,7 @@
 # a Mac's is Mach-O and cannot execute in the guest, so the Linux build of the same agent is fetched
 # here — at install time, never at runtime, and verified against the sha256 pinned beside its version.
 #
-# The version and checksum come from vendor/claude-code.lock, so every install of the same Colonizer
+# The version and checksum come from crates/colonizer/claude-code.lock, so every install of the same Colonizer
 # release gets the same agent. scripts/update-runtime-pins.mjs checks Anthropic's stable channel daily
 # and proposes a new version by pull request; a human merges it. That bounds how stale the agent can
 # get without giving up a reproducible release — the same trade the vendored plugins make.
@@ -43,8 +43,8 @@ while read -r name ver plat kind sha pinned_url; do
   [ -n "$pinned_url" ] || continue
   version=$ver expected=$sha url=$pinned_url
   break
-done < "$root/vendor/claude-code.lock"
-[ -n "$url" ] || { echo "no Claude Code build pinned for $platform in vendor/claude-code.lock" >&2; exit 1; }
+done < "$root/crates/colonizer/claude-code.lock"
+[ -n "$url" ] || { echo "no Claude Code build pinned for $platform in crates/colonizer/claude-code.lock" >&2; exit 1; }
 
 mkdir -p "$(dirname "$out")"
 tmp="$out.part"
