@@ -3834,3 +3834,23 @@ mothership sets `COLONIZER_LOOP=true`, and `mcp__colonizer_loop__loop_next` only
 `COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build and OpenCode runners
 gate the same two tools on the same env under their own names. A self-paced loop whose colony never
 calls `loop_next` runs again a day later.
+
+### Docs & README loop
+
+The built-in docs loop ([loops.md](loops.md#docs--readme)), saved in `<config_dir>/docs-loop.json`.
+Owner only: a scoped API token reaches none of these routes.
+
+| Route | What it does |
+|---|---|
+| `GET /api/docs-loop` | `{name, settings: {allow, interval_hours, cooldown_hours}, enabled, next_run_at, last_report, history: [{id, at, trigger, summary}], limits}`. `enabled` is `allow` being non-empty; `last_report` is the newest run's full report, or null. |
+| `PUT /api/docs-loop` | Replaces the settings: `allow` (repositories `owner/name` and orgs `owner`, at most 100), `interval_hours` (1–168, default 24), `cooldown_hours` (1–720, default 24). **400** for anything else. |
+| `POST /api/docs-loop/enable` · `POST /api/docs-loop/disable` | `{target}`: adds a repository or org to the allowlist, or removes one (**404** when it is not there). A loop that becomes enabled runs 10 minutes later; removing the last entry switches it off. |
+| `POST /api/docs-loop/run` | `{dry_run?}` (default false): runs over the allowlist now and answers the report. A dry run launches nothing and records nothing. **409** while the loop is off or a run is in progress. |
+
+A report is `{id, at, trigger: "schedule"|"run_now"|"dry_run", dry_run, external_writes_blocked,
+repos: [{repo, head, since, findings: [{kind, file?, line?, change?, message, advisory?}], more, action,
+reason, colony}]}`. An `advisory` finding (a missing changelog fragment) is reported but never
+dispatches a colony on its own. `kind` is `undocumented_change`, `broken_link`, `broken_anchor`, `missing_command`,
+`routes_drift`, `changelog` or `docs_map`; `action` is `clean`, `dispatched`, `skipped`,
+`report_only` or `error`; `more` counts the findings past the 40 a report keeps. The colony a run
+dispatches carries the origin `docs-loop`.

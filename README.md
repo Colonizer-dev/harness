@@ -345,6 +345,7 @@ Stated here rather than buried.
 | superpowers vendored, with its bootstrap in the system prompt instead of a hook ([#44](https://github.com/Colonizer-dev/harness/issues/44)) | `SHIPPING` |
 | Google's skills vendored and loaded on demand from a pinned local catalog ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
 | Daily proposals for vendored plugin updates, described in skills added, removed and changed ([#43](https://github.com/Colonizer-dev/harness/issues/43)) | `SHIPPING` |
+| Docs & README loop: off until enabled per repository or org; finds docs drift on the mothership's clone without a model, then dispatches one docs-only colony per repository ([docs/loops.md](docs/loops.md#docs--readme)) | `SHIPPING` |
 | Token savings: terse replies (caveman) and compact command output (rtk), each a switch | `SHIPPING` |
 | Token savings: Headroom compacting tool results, its bundle downloaded when switched on ([#53](https://github.com/Colonizer-dev/harness/issues/53)) | `SHIPPING` |
 | Live map of motherships, off until you switch it on: the heartbeat and its receiver | `SHIPPING` |

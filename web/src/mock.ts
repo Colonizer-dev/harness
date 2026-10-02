@@ -4,6 +4,7 @@ import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import { defaultPushPrefs, mergePushPrefs } from "./push";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
+import { mockDocsLoop } from "./cockpit/docsLoopMock";
 import { defaultMergeLoopSettings } from "./cockpit/mergeLoop";
 import type {
   MergeLoopReport,
@@ -4164,6 +4165,7 @@ export function createMockApi(): Api {
       return clone(report);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
+    ...mockDocsLoop(now),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);

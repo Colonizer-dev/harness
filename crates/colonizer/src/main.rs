@@ -35,6 +35,7 @@ mod config;
 mod deja;
 mod deps;
 mod diagnosis;
+mod docs_loop;
 mod egress;
 mod epic;
 mod events;
