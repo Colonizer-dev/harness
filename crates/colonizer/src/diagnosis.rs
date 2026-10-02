@@ -175,7 +175,16 @@ pub(crate) async fn tail_events_within(path: &Path, bytes: u64) -> Vec<Value> {
     } else {
         text.split_once('\n').map_or("", |(_, rest)| rest)
     };
-    tail.lines().filter_map(|line| serde_json::from_str(line).ok()).collect()
+    // #761: a rotated `events-N.jsonl` written before redaction existed can still carry a secret,
+    // and this tail feeds the cockpit's diagnosis and a resumed colony's prompt, so every event is
+    // redacted field by field on its way out. A line written since is already clean and unchanged.
+    tail.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .map(|mut event| {
+            crate::redact::redact_value(&mut event);
+            event
+        })
+        .collect()
 }
 
 /// The last [`MAX_EVENTS`] digests, oldest first; `None` when the tail digests to nothing.

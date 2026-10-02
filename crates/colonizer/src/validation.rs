@@ -79,6 +79,9 @@ pub(crate) fn parse_verdict(text: &str) -> Option<Verdict> {
     if body.is_empty() {
         return None;
     }
+    // #761: the review body is model output that lands in `review.md` and, on a fail, in a public
+    // PR comment, so a credential the reviewer quoted is redacted before either sees it.
+    let body = crate::redact::redact_text(&body).into_owned();
     Some(Verdict { vote, body })
 }
 
@@ -605,6 +608,10 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
         // The review travels to GitHub by file — the body is review-length, not argv-length — and a
         // copy stays in the session directory so the text survives even a posting failure.
         let body_path = app.session_dir(fix_id).join("review.md");
+        // #761: the body was redacted as it was parsed; a review that quoted a secret is said out loud.
+        if let Some(note) = crate::redact::redaction_note("review.md", &verdict.body, "posting") {
+            app.session_log(fix_id, "warn", note).await;
+        }
         std::fs::write(&body_path, &verdict.body)?;
         let mut cmd = app.gh(["pr", "comment", pr_url.as_str(), "--body-file"]);
         cmd.arg(&body_path);
@@ -729,6 +736,20 @@ mod tests {
         assert!(parse_verdict(r#"{"verdict":"maybe","body":"hmm"}"#).is_none());
         assert!(parse_verdict(r#"{"verdict":"pass"}"#).is_none(), "a review says something");
         assert!(parse_verdict("looks good to me").is_none());
+    }
+
+    /// #761: a credential quoted in a review never reaches `review.md` or the PR comment.
+    #[test]
+    fn a_secret_quoted_in_a_review_is_redacted_before_review_md() {
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let reply = json!({"verdict": "fail", "body": format!("the test fixture hard-codes {secret}")}).to_string();
+        let verdict = parse_verdict(&reply).unwrap();
+        assert!(!verdict.body.contains(secret), "{}", verdict.body);
+        assert!(
+            verdict.body.starts_with("the test fixture hard-codes [REDACTED:"),
+            "{}",
+            verdict.body
+        );
     }
 
     /// What GitHub's mergeability licenses: merge now, queue an auto-merge, update from the base

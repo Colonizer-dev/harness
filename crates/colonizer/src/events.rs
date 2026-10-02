@@ -502,8 +502,27 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 let errored = is_error;
                 let open_question = rt.open_question.lock().await.is_some();
                 let step = autopilot_step(errored, interrupted, open_question, pr_written);
+                // #761: a description that redaction changed is published only after a person has
+                // looked — the colony had a secret in hand, and the diff is not redacted.
+                let secret_note = (step == Autopilot::Publish)
+                    .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
+                    .flatten();
                 if s.autopilot && s.status.is_live() {
                     match step {
+                        Autopilot::Publish if secret_note.is_some() => {
+                            let note = secret_note.as_deref().unwrap_or_default();
+                            app.session_log(
+                                id,
+                                "warn",
+                                format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
+                            )
+                            .await;
+                            app.update_session(id, |x| {
+                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            })
+                            .await;
+                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
+                        }
                         // Issue #84: the kill-switch holds the publish without flagging the colony.
                         Autopilot::Publish if crate::authority::external_writes_blocked() => {
                             app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
@@ -926,6 +945,11 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             crate::authority::GRANT_TTL_SECS,
         )
     };
+    // #761: the finding reached here redacted; one that carried a secret is said out loud.
+    let text = format!("{}\n{}\n{}", finding.title, finding.body, finding.evidence);
+    if let Some(note) = crate::redact::redaction_note("finding-body.md", &text, "filing") {
+        app.session_log(&id, "warn", note).await;
+    }
     let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md"), &grant).await;
     let (level, message, entry) = match &outcome {
         Ok(findings::Filed::Issue(url)) => (
@@ -1366,6 +1390,41 @@ mod tests {
             crate::providers::quota_status(&app).await.paused,
             "the account record alone pauses with zero providers"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #761: a secret in `pr.md` is redacted, and autopilot holds the publish for a person with a
+    /// log line naming what was redacted, instead of publishing the redacted text silently.
+    #[tokio::test]
+    async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        app.update_session("abc", |x| x.autopilot = true).await;
+        // The runtime remembers the description it booted with; the turn below writes a new one.
+        let rt = app.runtime("abc").await;
+        let out = app.session_dir("abc").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        std::fs::write(
+            out.join("pr.md"),
+            format!("# Rotate the CI token\n\nThe old one was {secret}.\n"),
+        )
+        .unwrap();
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            github::read_pr_description(&out, &s).1,
+            "The old one was [REDACTED:github_token].",
+            "the text that would be published is redacted"
+        );
+        let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+        handle_agent_event(&app, "abc", &rt, end).await;
+        let attention = app.session("abc").await.unwrap().attention.expect("the colony is flagged");
+        assert_eq!(attention["reason"], "autopilot_held");
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(
+            log.contains("autopilot: not publishing, pr.md contained 1 secret (github token), redacted before publishing"),
+            "{log}"
+        );
+        assert!(!log.contains(secret), "{log}");
         let _ = std::fs::remove_dir_all(root);
     }
 

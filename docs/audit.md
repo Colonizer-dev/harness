@@ -95,6 +95,19 @@ limits.
   second line behind keeping secrets out of the colony, not a replacement
   (`crates/colonizer/src/redact.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
   written, and a fleet export redacts the logs it carries.
+  The same redactor covers the other text the mothership keeps or sends from agent and model
+  output: a filed finding (`finding-body.md` and the issue), an independent review (`review.md`
+  and the PR comment), the commit subject and pull request taken from `pr.md` (`pr-body.md` and
+  the PR itself), chat transcripts (`chats/<id>.jsonl`), colony summaries (`sessions.json`) and
+  the activity log (`activity.jsonl`). Redaction does not hide the leak: when it changed
+  `pr.md`, `review.md` or a finding, the colony's log gets a warning naming what went (`pr.md
+  contained 1 secret (github token), redacted before publishing`), and autopilot does not publish
+  such a `pr.md`: it holds the colony (`autopilot_held`) for a person to press Create PR, since the
+  colony had the secret in hand and the diff itself is not redacted. A rotated `events-N.jsonl` is renamed, not rewritten, so it
+  holds what was written: one from before redaction existed is redacted whenever it is read back
+  (the cockpit's diagnosis and a resumed colony's prompt) or bundled. Not covered: the rest of
+  `sessions.json` (a colony's `error` and its pending question), architecture maps, and the
+  numeric stats files (routing, spend, jev ladder).
 - **Credentials stay in the session directory.** An archive bundle or a fleet export never holds
   a session's `vm/token`, `gateway-token`, `vm/mesh-authkey` or `vm/session.json`, nor any file
   there named like a credential (`*token*`, `*authkey*`, `*.key`, `*.pem`, `secrets*`)
