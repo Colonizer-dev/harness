@@ -7,9 +7,10 @@ environment is under [Settings](#settings).
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
-  or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
-  aarch64-only. On Linux the host also needs glibc 2.28 or newer, which the pinned microsandbox
-  binary requires.
+  or an Apple Silicon Mac. On a stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
+  `kvm` group and log back in: `sudo usermod -aG kvm "$USER"`. An Intel Mac can't run Colonizer, because
+  microsandbox's libkrun backend is aarch64-only. On Linux the host also needs glibc 2.28 or newer,
+  which the pinned microsandbox binary requires.
 - **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar` (with xz support, for the
   Node.js runtime the installer unpacks). The installer also uses `gh`, when it is present, to verify
   a release's build provenance ([Install a release](#install-a-release)). A build from source also

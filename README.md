@@ -76,11 +76,13 @@ is in [docs/hosted.md](docs/hosted.md).
 
 ## Run it
 
-On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git` and `gh`. The install command at the top
-of this page installs the latest
+On Linux x86_64 with KVM, or an Apple Silicon Mac, with `git`, `gh`, `curl` and `tar`. On Linux, give
+your user `/dev/kvm` (`sudo usermod -aG kvm "$USER"`, then log out and back in) and install native
+Claude Code, which colonies run. The install command at the top of this page installs the latest
 [release](https://github.com/Colonizer-dev/harness/releases); run `colonizer` and it prints a sign-in
-link and opens it (`colonizer open` reprints it). To build from source instead, you also need Node.js
-20+ and Rust 1.88+:
+link and opens it (`colonizer open` reprints it). The installer links `~/.local/bin/colonizer`; if
+`~/.local/bin` is not on your `PATH`, run that path. To build from source instead, you also need
+Node.js 20.19+ (or 22.12+) and Rust 1.88+:
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness
