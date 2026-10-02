@@ -12,7 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { configToml, createBridge, parseVersion, resolveModel, startTurn, turnArgs, untrustableWorkspace } from '../runner.mjs';
+import { configToml, createBridge, parseRoutes, parseVersion, resolveModel, startTurn, turnArgs, untrustableWorkspace } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -96,6 +96,28 @@ const count = (type, n) => (events) => {
   return matches.length >= n ? matches[n - 1] : undefined;
 };
 
+// The routes a boot would push (docs/protocol.md §6.5), one per wire; keys are obviously fake.
+const ROUTES = parseRoutes(
+  JSON.stringify([
+    {
+      provider: 'strix',
+      prefix: 'strix/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/strix',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+      wire: 'openai',
+    },
+    {
+      provider: 'anth',
+      prefix: 'anth/',
+      base_url: 'http://host.microsandbox.internal:41750/providers/anth',
+      auth: 'none',
+      headers: { 'x-colonizer-colony': 'colony-token-1' },
+    },
+  ]),
+);
+const ROUTES_JSON = JSON.stringify(ROUTES.routes);
+
 /** A workspace carrying every project-scope grok surface the folder-trust gate covers: a `.grok/`
  * with an MCP server, a plugin path, a hook and a skill, plus a `.mcp.json` beside them. */
 function projectScopeWorkspace(dir) {
@@ -121,6 +143,27 @@ test('resolveModel accepts xai-grok and bare ids, and refuses other providers by
   assert.deepEqual(resolveModel('  grok-4.6 '), { model: 'grok-4.6' });
   assert.deepEqual(resolveModel(''), {});
   assert.match(resolveModel('deepseek/deepseek-flash').error, /^GROK_MODEL_PROVIDER:/);
+});
+
+test('parseRoutes validates the route array like the hermes and pi runners do, defaulting the wire to anthropic', () => {
+  assert.deepEqual(parseRoutes('not json'), { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] });
+  assert.equal(parseRoutes('{}').routes.length, 0);
+  assert.match(parseRoutes('{}').warnings[0], /expected a JSON array/);
+  const bad = parseRoutes(JSON.stringify([{ prefix: 'x', base_url: 'ftp://x' }, { prefix: 'ok/', base_url: 'http://ok', wire: 'websocket' }]));
+  assert.equal(bad.routes.length, 0);
+  assert.equal(bad.warnings.length, 2, 'a bad prefix and an unknown wire each drop their route');
+  const good = parseRoutes(JSON.stringify([{ prefix: 'p/', base_url: 'http://p', headers: { 'X-Colonizer-Colony': 'tok', bad_name: 'dropped' } }]));
+  assert.deepEqual(good.routes, [{ provider: 'p', prefix: 'p/', base_url: 'http://p', headers: { 'x-colonizer-colony': 'tok' }, wire: 'anthropic' }]);
+});
+
+test('resolveModel sends an openai-wire route through the gateway, keeps xai-grok and bare ids direct, and refuses the rest', () => {
+  const routed = resolveModel('strix/grok-4.5', ROUTES.routes);
+  assert.equal(routed.model, 'grok-4.5', 'the prefix is stripped before -m');
+  assert.equal(routed.route.wire, 'openai');
+  assert.deepEqual(resolveModel('grok-4.6', ROUTES.routes), { model: 'grok-4.6' }, 'bare ids stay direct');
+  assert.deepEqual(resolveModel('xai-grok/grok-4.5', ROUTES.routes), { model: 'grok-4.5' }, 'xai-grok/ with no xai-grok/ route stays direct');
+  assert.match(resolveModel('anth/claude-sonnet-5', ROUTES.routes).error, /^GROK_MODEL_PROVIDER:.*anthropic wire/);
+  assert.match(resolveModel('deepseek/deepseek-flash', ROUTES.routes).error, /Settings → Model providers/);
 });
 
 test('untrustableWorkspace refuses only a workspace that is the home directory or the filesystem root', () => {
@@ -245,6 +288,60 @@ test('the second turn resumes the first turn’s grok session, with cumulative c
   assert.deepEqual(pair(turns[1].argv, '-r'), ['-r', 'sess-fake-1'], 'the second turn resumes the end event’s sessionId');
   assert.equal(second.cost_usd, 0.02, 'cost_usd is cumulative for the colony');
   assert.deepEqual(second.model_usage, { 'grok-4.5': { input_tokens: 20, output_tokens: 10, cache_read_tokens: 4, cache_write_tokens: 0 } });
+
+  await stop(runner);
+});
+
+test('a routed openai-wire model rides the gateway: base URL and colony-token bearer, no direct key', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'strix/grok-4.5', COLONIZER_MODEL_ROUTES: ROUTES_JSON, XAI_API_KEY: '' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'turn one' });
+  await runner.waitUntil(count('turn_end', 1), 'the first turn to finish');
+  runner.send({ type: 'user_message', id: 'u-2', text: 'turn two' });
+  await runner.waitUntil(count('turn_end', 2), 'the second turn to finish');
+
+  const turns = runner.turns();
+  assert.equal(turns.length, 2);
+  for (const [i, invocation] of turns.entries()) {
+    assert.equal(invocation.env.GROK_MODELS_BASE_URL, 'http://host.microsandbox.internal:41750/providers/strix/v1', `turn ${i + 1} points at the gateway passthrough`);
+    assert.equal(invocation.env.GROK_CODE_XAI_API_KEY, 'set', `turn ${i + 1} authenticates with the colony token from the route headers`);
+    assert.equal(invocation.env.XAI_API_KEY, 'unset', `turn ${i + 1} never carries the direct api.x.ai key`);
+    assert.deepEqual(pair(invocation.argv, '-m'), ['-m', 'grok-4.5'], `turn ${i + 1} passes the bare model id`);
+  }
+  assert.equal(runner.events.filter((e) => e.type === 'turn_end' && e.is_error).length, 0, 'both turns succeed without any credential of our own');
+
+  await stop(runner);
+});
+
+test('an anthropic-wire route and an unknown prefix are refused by name, and grok never runs', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'anth/claude-sonnet-5', COLONIZER_MODEL_ROUTES: ROUTES_JSON });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  runner.send({ type: 'user_message', id: 'u-1', text: 'hello?' });
+  const turnEnd = await runner.waitUntil(first('turn_end'), 'the refused turn');
+  assert.equal(turnEnd.is_error, true);
+  assert.match(turnEnd.result, /^GROK_MODEL_PROVIDER:/);
+  assert.match(turnEnd.result, /anthropic wire/);
+
+  runner.send({ type: 'set_model', model: 'deepseek/deepseek-flash' });
+  const refusal = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'error'), 'the unrouted refusal');
+  assert.match(refusal.message, /no gateway route/, 'set_model is refused too');
+  assert.equal(runner.turns().length, 0, 'no grok process may run for a refused model');
+
+  await stop(runner);
+});
+
+test('malformed route JSON is warned about and the bare model runs direct', async (t) => {
+  const runner = startRunner({ COLONIZER_MODEL: 'grok-4.5', COLONIZER_MODEL_ROUTES: 'not json' });
+  t.after(() => runner.child.kill('SIGKILL'));
+
+  const warning = await runner.waitUntil((events) => events.find((e) => e.type === 'log' && e.level === 'warn'), 'the routes warning');
+  assert.match(warning.message, /ignoring COLONIZER_MODEL_ROUTES: not valid JSON/);
+  runner.send({ type: 'user_message', id: 'u-1', text: 'go' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  assert.deepEqual(pair(runner.turns()[0].argv, '-m'), ['-m', 'grok-4.5'], 'the turn runs direct, as without routes');
+  assert.equal(runner.turns()[0].env.XAI_API_KEY, 'set', 'the direct path still uses the credential');
 
   await stop(runner);
 });
