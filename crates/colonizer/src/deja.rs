@@ -202,7 +202,8 @@ fn copy_transcripts(data_dir: &Path, session: &str, org: &str, repo: &str, secre
 
 /// Replaces every known secret value with [`REDACTED`], in both the raw form and the JSON-escaped
 /// form a transcript actually carries the value in. Values below [`MIN_SECRET_LEN`] are left alone.
-fn scrub(text: &str, secrets: &[String]) -> String {
+/// Shared with services.rs, which owes the same promise for the restore spec's commands (issue #700).
+pub(crate) fn scrub(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
     for secret in secrets {
         if secret.len() < MIN_SECRET_LEN {

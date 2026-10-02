@@ -244,7 +244,9 @@ pub(crate) enum AgentEvent {
     /// A proposed shared-memory note (§6.2). An absent or null `scope` means `repo`, the schema's
     /// default, and absent `tags` mean none. `origin` names who asked — `orchestrator`, a
     /// `subagent:<name>`, a `background:<name>` — and absent means a runner from before the field
-    /// existed, which could only have been the orchestrator.
+    /// existed, which could only have been the orchestrator. `kind` is one of the memory kinds
+    /// (issue #766; absent means `convention`) and `confidence` how sure the colony is, 0 to 1
+    /// (absent means 0: it can never promote a global note).
     MemoryProposal {
         #[serde(default)]
         scope: Option<String>,
@@ -254,6 +256,10 @@ pub(crate) enum AgentEvent {
         tags: Vec<String>,
         #[serde(default)]
         origin: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        confidence: Option<f64>,
     },
     /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
     /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
@@ -713,7 +719,9 @@ mod tests {
                 title: "t".into(),
                 content: "c".into(),
                 tags: vec![],
-                origin: None
+                origin: None,
+                kind: None,
+                confidence: None
             }
         );
         let nulled =

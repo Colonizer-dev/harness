@@ -2,7 +2,7 @@
 // the UTC cadence the mothership stores, describing a cadence back in local time, and estimating what
 // a run costs from the runs that came before it. Kept apart from the components so it is testable.
 import { sessionCost } from "../spend";
-import type { RedTeamCadence, RedTeamRun, Session } from "../types";
+import type { ChecklistStatus, RedTeamCadence, RedTeamPreset, RedTeamRun, Session } from "../types";
 
 export const WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
 
@@ -90,3 +90,40 @@ export function estimateCost(
   const avg = colony.reduce((a, b) => a + b, 0) / colony.length;
   return { low: avg * swarm * repos, basis: "colonies" };
 }
+
+/** The presets a run can use, as the wizard offers them. */
+export const PRESETS: { id: RedTeamPreset; name: string; blurb: string }[] = [
+  {
+    id: "general",
+    name: "General",
+    blurb: "Eight bug-hunting focus areas: edge cases, races, injection, leaks, auth, logic, silent failures and contracts.",
+  },
+  {
+    id: "security",
+    name: "Security",
+    blurb: "Eight security focus areas, a deterministic pre-scan before launch that hands its leads to the matching hunter, and an operator checklist in the report.",
+  },
+];
+
+/** The security preset's focus areas, in the mothership's order (redteam.rs); a pre-scan lead's `focus` indexes it. */
+export const SECURITY_FOCUSES = [
+  "auth on every route",
+  "object-level access (IDOR)",
+  "sessions, tokens and secrets",
+  "input handling and injection",
+  "the web boundary",
+  "abuse and cost limits",
+  "AI and agent safety",
+  "failure and leakage",
+] as const;
+
+/** A run's preset; runs made before presets read as general. */
+export function presetOf(run: { preset?: RedTeamPreset }): RedTeamPreset {
+  return run.preset ?? "general";
+}
+
+/** How the report labels a checklist item. There is no "passed" state to label: code cannot prove these. */
+export const CHECKLIST_LABEL: Record<ChecklistStatus, string> = {
+  needs_review: "Needs review",
+  not_verifiable: "Not verifiable from the repo",
+};

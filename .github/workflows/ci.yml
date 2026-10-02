@@ -72,6 +72,34 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+  # The Mac build: every other job is Linux, so a Linux-only `cfg` import once broke
+  # colonizer-agentd on macOS (#771) while main stayed green. Compile and lint only — no tests, no
+  # KVM, no microVM — so the job stays cheap. Making it a required status check on main is a
+  # repository-settings change.
+  rust-macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/bin
+            target
+          key: cargo-check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-check-${{ runner.os }}-
+
+      - name: Check
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
   # Both agent modules' adapters, as named steps so a red run names the module: the Claude Code
   # adapter (driven through a fake SDK) and the Pi adapter (driven through a fake Pi process).
   # Neither touches the network. One job, not a matrix: `runner` is a required status check on main,

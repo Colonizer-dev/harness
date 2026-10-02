@@ -14,17 +14,19 @@ import { DEMO } from "./demo";
 import { Button, cx, isLive, orgOf, sameOrg, store, stored, useMediaQuery } from "./components/ui";
 import {
   NOTIFICATIONS_KEY,
+  applyAppBadge,
   applyFavicon,
   applyTabTitle,
+  attentionCount,
   diffEvents,
   eventText,
-  needsYou,
   orgFilterForTarget,
   parseNotificationPrefs,
   playQuestionBlip,
   serializeNotificationPrefs,
   showColonyNotification,
   snapshotOf,
+  unseenFailure,
   type NotificationPrefs,
   type SessionSnapshot,
 } from "./notifications";
@@ -37,6 +39,7 @@ import {
   type LiveConnection,
 } from "./liveStream";
 import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
+import { usePushPresence } from "./push";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { UpdatePrompt } from "./components/UpdatePrompt";
 import { useAppUpdate } from "./installApp";
@@ -378,10 +381,16 @@ export function App() {
   // The in-tab layer. With the layer off App passes 0, which is today's look exactly: tabTitle(0) is
   // the static "Colonizer" and faviconHref(false) the href index.html ships with.
   useEffect(() => {
-    const count = notifyPrefs.inTab ? sessions.filter(needsYou).length : 0;
+    const count = notifyPrefs.inTab ? attentionCount(sessions) : 0;
     applyTabTitle(count);
     applyFavicon(count > 0);
   }, [sessions, notifyPrefs.inTab]);
+
+  // The app badge carries the count whatever the in-tab switch does (issue #744): hiding it from
+  // this tab's title should not empty the dock icon of another desktop's screen.
+  useEffect(() => {
+    applyAppBadge(attentionCount(sessions));
+  }, [sessions]);
 
   // The Setup view, derived once from the same state the dialog renders. `pull.status` and the
   // module list ride along so the checklist reacts to a finished download or a stack change.
@@ -568,6 +577,36 @@ export function App() {
   }, []);
 
   const current = sessions.find((s) => s.id === selectedId) ?? null;
+
+  // The focused-tab report (issue #743): tells the mothership which colony this tab has open and
+  // whether it could show a notification itself, so a push for it can be held back. A no-op where
+  // push cannot work and in mock mode.
+  usePushPresence(api, current?.id ?? null);
+
+  // An unseen failure is resolved by looking at it (issue #744): with the failed colony open in
+  // front of you, the seen route fires once — dropping it from the badge here while the mothership
+  // tells every other device. Every open (strip, list, a tapped notification) ends in this
+  // selection, so this one effect covers them all and only ever fires for `unseenFailure` — an
+  // open question is not closed by a visit. The ref keeps it to one call per watch, a hidden tab
+  // never fires, and a failed call resets the ref so the next poll retries.
+  const seenWhileWatching = useRef<string | null>(null);
+  useEffect(() => {
+    const see = () => {
+      if (!current || !unseenFailure(current)) {
+        // Watch over: forget the colony, so a later unseen failure of the same one asks again.
+        if (seenWhileWatching.current === current?.id) seenWhileWatching.current = null;
+        return;
+      }
+      if (seenWhileWatching.current === current.id || document.visibilityState !== "visible") return;
+      seenWhileWatching.current = current.id;
+      void api.seenSession(current.id).catch(() => {
+        seenWhileWatching.current = null;
+      });
+    };
+    see();
+    document.addEventListener("visibilitychange", see);
+    return () => document.removeEventListener("visibilitychange", see);
+  }, [api, current]);
 
   const storageAlert = visibleStorageAlert(status?.storage, dismissedStorage);
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;

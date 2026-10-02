@@ -36,6 +36,12 @@ impl App {
         self.cfg.data_dir.join("jev_ladder.jsonl")
     }
 
+    /// Every verification's focused-first measurement (#584), one JSON line each, kept in the data
+    /// dir like the ladder ledger so the speed-up can be judged across colonies.
+    pub(crate) fn jev_focus_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("jev_focus.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }
@@ -54,6 +60,7 @@ impl App {
             // against the day it happened, so it survives the cleanup or delete that forgets the
             // colony itself.
             let was_terminal = session.status.is_terminal();
+            let was_failed = session.status == SessionStatus::Failed;
             let before = session.clone();
             let result = f(session);
             if session_contents_equal(&before, session) {
@@ -65,6 +72,11 @@ impl App {
                 return Some((session, result));
             }
             let returned = !was_terminal && session.status.is_terminal();
+            // A move into `Failed` from a non-failed status marks the failure unseen (issue #744);
+            // updates inside `failed` — a longer message, the reclaim — are not new failures.
+            if !was_failed && session.status == SessionStatus::Failed {
+                session.unseen_failure = true;
+            }
             session.updated_at = Utc::now();
             (session.clone(), (returned, before.status), result)
         };
@@ -323,6 +335,33 @@ mod tests {
         app.update_session("def", |s| s.status = SessionStatus::Merged).await;
         assert_eq!(ledger(&app).len(), 1, "a colony that skipped routing gets no actual row");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #744: the crossing into `Failed` marks the failure unseen — that is what the app
+    /// badge counts until `POST /api/sessions/{id}/seen` clears it. Later updates inside
+    /// `failed` are not new failures, and a terminal move that is not a failure marks nothing.
+    #[tokio::test]
+    async fn moving_into_failed_marks_the_failure_unseen() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        assert!(!app.session("abc").await.unwrap().unseen_failure);
+        app.update_session("abc", |s| s.status = SessionStatus::Failed).await.unwrap();
+        assert!(app.session("abc").await.unwrap().unseen_failure, "the crossing is unseen");
+        app.update_session("abc", |s| s.unseen_failure = false).await.unwrap();
+        app.update_session("abc", |s| s.error = Some("a longer message".into()))
+            .await
+            .unwrap();
+        assert!(
+            !app.session("abc").await.unwrap().unseen_failure,
+            "a later update inside `failed` is not a new failure"
+        );
+        let (other, other_root) = app_with_colony("def", SessionStatus::Running).await;
+        other
+            .update_session("def", |s| s.status = SessionStatus::Stopped)
+            .await
+            .unwrap();
+        assert!(!other.session("def").await.unwrap().unseen_failure, "stopping is not failing");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(other_root);
     }
 
     #[tokio::test]

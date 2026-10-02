@@ -2,7 +2,7 @@
 // is the part a stub cannot stand in for.
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { after, before, describe, it } from 'node:test';
 import { join } from 'node:path';
@@ -81,7 +81,7 @@ describe('resolveUnderWorkspace', () => {
   let workspace;
 
   before(() => {
-    workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-ws-'));
+    workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-ws-')));
     mkdirSync(join(workspace, 'sub'));
     writeFileSync(join(workspace, '.env'), 'SECRET=1\n');
     writeFileSync(join(workspace, 'sub', 'note.md'), 'hi\n');
@@ -132,7 +132,7 @@ describe('evaluatePathPolicy', () => {
   let workspace;
 
   before(() => {
-    workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-eval-'));
+    workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-eval-')));
     mkdirSync(join(workspace, '.git'), { recursive: true });
     mkdirSync(join(workspace, '.vscode'), { recursive: true });
     mkdirSync(join(workspace, '.claude'), { recursive: true });
@@ -190,7 +190,7 @@ describe('evaluatePathPolicy', () => {
   });
 
   it('sees a masked target through an alias: the report names the resolved path', () => {
-    const workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-eval-'));
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-eval-')));
     try {
       writeFileSync(join(workspace, '.env'), 'SECRET=1\n');
       symlinkSync('.env', join(workspace, 'secrets.env'));

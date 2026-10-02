@@ -250,9 +250,15 @@ async fn run_hub(app: Shared, hub: Hub) {
 }
 
 /// `GET /api/stream`: authenticated by `host_guard` like every other `/api/` route, then upgraded.
-pub async fn handler(State(app): State<Shared>, ws: WebSocketUpgrade) -> Response {
+pub async fn handler(
+    State(app): State<Shared>,
+    revocation: Option<axum::Extension<crate::auth::Revocation>>,
+    ws: WebSocketUpgrade,
+) -> Response {
     app.stream.ensure_running(&app);
-    ws.on_upgrade(move |socket| serve(app, socket))
+    // A revoked phone's feed closes at once (issue #746).
+    let revocation = revocation.map(|axum::Extension(r)| r);
+    ws.on_upgrade(move |socket| crate::auth::Revocation::until(revocation, serve(app, socket)))
 }
 
 fn text(frame: &str) -> Message {
