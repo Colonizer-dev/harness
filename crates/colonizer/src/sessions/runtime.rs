@@ -39,6 +39,10 @@ pub struct Runtime {
     /// `judged_questions`: after a mothership restart the watchlist is empty, so rereads that would
     /// have landed after it are simply not counted — a lost measurement, never a wrong one.
     pub(crate) jev_ladder: Mutex<crate::jev_ladder::Watch>,
+    /// Jev brief-pick watch state (#585, brief_pick.rs): the memory notes and skill packs the boot
+    /// picker armed, and which of them the colony has not yet been seen to use. In memory only, like
+    /// `jev_ladder`: after a restart a use that would have landed is simply not counted.
+    pub(crate) brief_pick: Mutex<crate::brief_pick::Watch>,
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
@@ -208,6 +212,7 @@ impl Runtime {
             question_holds_tool_call: std::sync::atomic::AtomicBool::new(open_question.is_some() && holds_tool_call),
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
+            brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),

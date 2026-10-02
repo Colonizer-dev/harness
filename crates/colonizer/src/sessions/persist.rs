@@ -36,6 +36,13 @@ impl App {
         self.cfg.data_dir.join("jev_ladder.jsonl")
     }
 
+    /// Every Jev brief-pick measurement (#585), one JSON line each: what a colony's boot offered and
+    /// picked, and the notes and packs it was later seen to use. Kept in the data dir like the other
+    /// Jev ledgers, for the bench-wide report (`scripts/bench.mjs brief`).
+    pub(crate) fn brief_picks_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("brief_picks.jsonl")
+    }
+
     /// Every verification's focused-first measurement (#584), one JSON line each, kept in the data
     /// dir like the ladder ledger so the speed-up can be judged across colonies.
     pub(crate) fn jev_focus_file(&self) -> PathBuf {

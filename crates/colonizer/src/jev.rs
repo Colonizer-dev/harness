@@ -107,7 +107,7 @@ impl JevClient {
     }
 
     #[cfg(test)]
-    fn with_base_url(api_key: String, base_url: String) -> Self {
+    pub(crate) fn with_base_url(api_key: String, base_url: String) -> Self {
         Self::build(api_key, base_url)
     }
 
@@ -134,13 +134,52 @@ impl JevClient {
     }
 
     async fn ask_inner(&self, state: &CondensedState) -> Option<JevOpinion> {
+        let options: Vec<String> = CHOICES.iter().map(|choice| choice.to_string()).collect();
+        let answer = self.ask_choice_inner(QUESTION_ID, &options, state).await?;
+        let tier = Tier::parse(&answer.choice)?;
+        // A rough token estimate from the request payload's size (~4 characters per token), times the
+        // unverified price above — not metered billing, just enough to keep the cost of asking visible.
         let serialized = serde_json::to_string(state).ok()?;
+        let estimated_tokens = serialized.len() as f64 / 4.0;
+        Some(JevOpinion {
+            tier,
+            model: answer.model,
+            confidence: answer.confidence,
+            estimated_cost_usd: estimated_tokens * JEV_PRICE_PER_MTOK_USD / 1_000_000.0,
+        })
+    }
+
+    /// Asks one `choice` question — the shared body of every Jev ask, the routing tier question and
+    /// the boot brief picker (#585) alike. Never returns `Err`, and a choice outside `options` is
+    /// treated as a failed call rather than an answer, so the brief picker's callers can trust a pick
+    /// is one they offered. The check lives here, not in `parse_choice`, so the routing ask still
+    /// reads its own choice through `Tier::parse`'s case- and whitespace-tolerant parsing.
+    pub(crate) async fn ask_choice<S: Serialize>(
+        &self,
+        question_id: &str,
+        options: &[String],
+        state: &S,
+    ) -> Option<(String, f64)> {
+        let answer = tokio::time::timeout(
+            Duration::from_millis(1800),
+            self.ask_choice_inner(question_id, options, state),
+        )
+        .await
+        .ok()
+        .flatten()?;
+        options
+            .iter()
+            .any(|option| option == &answer.choice)
+            .then_some((answer.choice, answer.confidence))
+    }
+
+    async fn ask_choice_inner<S: Serialize>(&self, question_id: &str, options: &[String], state: &S) -> Option<ChoiceAnswer> {
         let body = json!({
             "model": JEV_MODEL,
             "question": {
-                "id": QUESTION_ID,
+                "id": question_id,
                 "type": "choice",
-                "options": CHOICES,
+                "options": options,
             },
             "state": state,
         });
@@ -164,7 +203,7 @@ impl JevClient {
             let status = response.status();
             if status.is_success() {
                 let value: Value = response.json().await.ok()?;
-                return parse_opinion(&value, &serialized);
+                return parse_choice(&value, question_id);
             }
             let retryable = matches!(status.as_u16(), 429 | 529);
             if retryable && attempt < 2 {
@@ -178,24 +217,28 @@ impl JevClient {
     }
 }
 
+/// One answered `choice` question: the chosen option, its confidence, and the model the vendor
+/// echoed — the request never carries one back, and the tier opinion reports it.
+struct ChoiceAnswer {
+    choice: String,
+    confidence: f64,
+    model: String,
+}
+
 /// Defensively parses a response: the vendor is unverified, so nothing here assumes the exact real
 /// response shape. Looks for a top-level `model` string and an `answers` object carrying this
 /// question's id with a `choice` string and a `confidence` number — anything missing or malformed is
-/// a failed call, not a panic or an error.
-fn parse_opinion(value: &Value, request_json: &str) -> Option<JevOpinion> {
+/// a failed call, not a panic or an error. Whether the choice is one the caller offered is checked by
+/// the caller ([`JevClient::ask_choice`]); the routing ask does not, reading it through `Tier::parse`.
+fn parse_choice(value: &Value, question_id: &str) -> Option<ChoiceAnswer> {
     let model = value.get("model")?.as_str()?.to_string();
-    let answer = value.get("answers")?.get(QUESTION_ID)?;
-    let tier = Tier::parse(answer.get("choice")?.as_str()?)?;
+    let answer = value.get("answers")?.get(question_id)?;
+    let choice = answer.get("choice")?.as_str()?.to_string();
     let confidence = answer.get("confidence")?.as_f64()?;
-    // A rough token estimate from the request payload's size (~4 characters per token), times the
-    // unverified price above — not metered billing, just enough to keep the cost of asking visible.
-    let estimated_tokens = request_json.len() as f64 / 4.0;
-    let estimated_cost_usd = estimated_tokens * JEV_PRICE_PER_MTOK_USD / 1_000_000.0;
-    Some(JevOpinion {
-        tier,
-        model,
+    Some(ChoiceAnswer {
+        choice,
         confidence,
-        estimated_cost_usd,
+        model,
     })
 }
 
@@ -222,14 +265,17 @@ pub async fn shadow_opinion(enabled: bool, title: &str, labels: &[String], signa
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
     use std::time::Instant;
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     fn good_body() -> Value {
         json!({
@@ -239,7 +285,7 @@ mod tests {
     }
 
     #[derive(Clone, Copy)]
-    enum Mode {
+    pub(crate) enum Mode {
         Ok,
         FailOnceThenOk,
         AlwaysStatus(u16),
@@ -250,12 +296,17 @@ mod tests {
     struct MockState {
         mode: Mode,
         attempts: Arc<AtomicUsize>,
+        /// Scripted success bodies, popped one per 200 in `Ok` mode; empty falls back to [`good_body`].
+        answers: Arc<Mutex<VecDeque<Value>>>,
     }
 
     async fn handle(State(state): State<MockState>, Json(_body): Json<Value>) -> axum::response::Response {
         let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
         match state.mode {
-            Mode::Ok => (axum::http::StatusCode::OK, Json(good_body())).into_response(),
+            Mode::Ok => {
+                let scripted = state.answers.lock().unwrap().pop_front();
+                (axum::http::StatusCode::OK, Json(scripted.unwrap_or_else(good_body))).into_response()
+            }
             Mode::FailOnceThenOk => {
                 if attempt == 0 {
                     axum::http::StatusCode::TOO_MANY_REQUESTS.into_response()
@@ -271,18 +322,36 @@ mod tests {
         }
     }
 
-    /// Serves the mock on a loopback port and returns the full URL `JevClient` should post to.
-    async fn serve(mode: Mode) -> (String, Arc<AtomicUsize>) {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let state = MockState {
-            mode,
-            attempts: attempts.clone(),
-        };
+    /// Serves a mock on a loopback port and returns the full URL `JevClient` should post to.
+    async fn spawn_mock(state: MockState) -> String {
         let router = Router::new().route("/v1/systemone", post(handle)).with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        (format!("http://{addr}/v1/systemone"), attempts)
+        format!("http://{addr}/v1/systemone")
+    }
+
+    /// Serves the mock in `mode` and returns the full URL plus the attempt counter.
+    pub(crate) async fn serve(mode: Mode) -> (String, Arc<AtomicUsize>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let url = spawn_mock(MockState {
+            mode,
+            attempts: attempts.clone(),
+            answers: Arc::new(Mutex::new(VecDeque::new())),
+        })
+        .await;
+        (url, attempts)
+    }
+
+    /// Serves a mock that returns each of `answers` in turn — for a caller asking several questions
+    /// down one connection, the routing tier ask or the brief picker's rounds.
+    pub(crate) async fn serve_scripted(answers: Vec<Value>) -> String {
+        spawn_mock(MockState {
+            mode: Mode::Ok,
+            attempts: Arc::new(AtomicUsize::new(0)),
+            answers: Arc::new(Mutex::new(answers.into())),
+        })
+        .await
     }
 
     fn state() -> CondensedState {

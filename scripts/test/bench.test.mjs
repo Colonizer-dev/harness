@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { actTier, formatComparison, formatJevReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { actTier, briefMetrics, briefReport, formatBriefReport, formatComparison, formatJevReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -319,6 +319,58 @@ test('parseArgs takes the jev subcommand: a threshold, --json and the run files'
   assert.throws(() => parseArgs(['jev', '--threshold']), /--threshold needs a value/);
   assert.throws(() => parseArgs(['jev', '--threshold', 'soon']), /--threshold needs a number/);
   assert.throws(() => parseArgs(['jev', '--json=false']), /unknown argument/);
+});
+
+// The brief-pick ledger rows the mothership writes (#585): one pick row per colony boot, and a used row
+// per watched note or skill pack the colony was later seen to touch. briefMetrics grades the picks against
+// those uses; a total pools the counts and recomputes the rates, and carries the per-colony means.
+const pickRow = (session_id, mandatory, candidates, picks) => ({ kind: 'pick', session_id, at: '2026-10-01T00:00:00Z', model: 'jev-1.13.0', mandatory, candidates, picks, would_load: [...mandatory, ...picks], rounds: picks.length, missed: false });
+const usedRow = (session_id, item) => ({ kind: 'used', session_id, at: '2026-10-01T00:00:01Z', item, via: 'Read' });
+const BRIEF = [
+  pickRow('s1', ['house-rule'], ['note:repo/a', 'note:repo/b', 'skill:pack'], ['note:repo/a', 'skill:pack']),
+  usedRow('s1', 'note:repo/a'),
+  usedRow('s1', 'note:repo/b'),
+  usedRow('s1', 'house-rule'),
+  pickRow('s2', ['security'], ['note:repo/c'], []),
+  usedRow('s2', 'note:repo/c'),
+];
+const briefRun = { label: 'one', results: [{ session_id: 's1', id: 'add-helper', agent: 'claude-code', model: 'zai/glm-5.3-flash' }, { session_id: 's2', id: 'readme-typo', agent: 'codex', model: null }] };
+
+test('briefMetrics grades pick against use, with mandatory notes out of the universe', () => {
+  const m = briefMetrics(BRIEF[0], ['note:repo/a', 'note:repo/b', 'house-rule']);
+  assert.deepEqual({ candidates: m.candidates, picks: m.picks, mandatory: m.mandatory, tp: m.tp, fp: m.fp, fn: m.fn }, { candidates: 3, picks: 2, mandatory: 1, tp: 1, fp: 1, fn: 1 }, 'a picked the colony used; a used one it did not pick; a picked one it never used; the mandatory use is ignored');
+  assert.equal(m.precision, 0.5);
+  assert.equal(m.recall, 0.5);
+});
+
+test('no picks leaves precision undefined, and an unpicked need is still a miss', () => {
+  const m = briefMetrics(BRIEF[4], ['note:repo/c']);
+  assert.deepEqual({ tp: m.tp, fp: m.fp, fn: m.fn }, { tp: 0, fp: 0, fn: 1 });
+  assert.equal(m.precision, null, 'nothing was picked: undefined, not a zero score');
+  assert.equal(m.recall, 0);
+});
+
+test('the brief report groups under its run and pools the counts into a total', () => {
+  const report = briefReport(BRIEF, [briefRun]);
+  assert.deepEqual(report.runs.map((r) => r.run), ['one']);
+  assert.equal(report.runs[0].colonies.length, 2);
+  const s1 = report.runs[0].colonies[0];
+  assert.equal(s1.task, 'add-helper', 'the task, agent and model ride from the run result for display');
+  assert.deepEqual({ tp: report.total.tp, fp: report.total.fp, fn: report.total.fn, precision: report.total.precision, recall: report.total.recall }, { tp: 1, fp: 1, fn: 2, precision: 0.5, recall: 1 / 3 });
+  assert.deepEqual({ candidates: report.total.mean_candidates, picks: report.total.mean_picks, mandatory: report.total.mean_mandatory }, { candidates: 2, picks: 1, mandatory: 1 });
+  const text = formatBriefReport(report);
+  assert.match(text, /# Jev brief picks, graded against the notes and packs the colony used/);
+  assert.match(text, /\| Run \| Colony \| Task \| Harness · model \| Candidates \| Picks \| Mandatory \| TP \| FP \| FN \| Precision \| Recall \|/);
+  assert.match(text, /\| one \| s1 \| add-helper \| claude-code · zai\/glm-5\.3-flash \| 3 \| 2 \| 1 \| 1 \| 1 \| 1 \| 0\.50 \| 0\.50 \|/);
+  assert.match(text, /\| one \| s2 \| readme-typo \| codex · – \| 1 \| 0 \| 1 \| 0 \| 0 \| 1 \| – \| 0\.00 \|/);
+  assert.match(text, /\| overall \| {2}\| {2}\| {2}\| 2\.0 \| 1\.0 \| 1\.0 \| 1 \| 1 \| 2 \| 0\.50 \| 0\.33 \|/);
+});
+
+test('parseArgs takes the brief subcommand, its run files and --json', () => {
+  const args = parseArgs(['brief', '--json', 'bench-one.json']);
+  assert.equal(args.command, 'brief');
+  assert.equal(args.json, true);
+  assert.deepEqual(args.files, ['bench-one.json']);
 });
 
 // The routing fixture ledger (scripts/test/fixtures/routing.jsonl): old-format rows with no jev_agrees, a

@@ -136,6 +136,12 @@
         "description": "Ask an optional external classifier for a second opinion on model-tier routing and record it for comparison — never applied to the actual decision. Off by default; requires a JEV_API_KEY secret. Vendor unverified as of this writing — enable only if you have a real account with the provider.",
         "default": false
       },
+      "jev_brief_shadow": {
+        "type": "boolean",
+        "title": "Jev brief picks, shadow (experimental, #585)",
+        "description": "At boot, ask the optional external classifier which shared-memory notes and skill packs a colony should load (up to five, one at a time), record the picks and which of them the colony actually reads later, so the bench can grade the picks' precision and recall. Shadow only — nothing a colony sees changes, and memory stays pull-only. Notes tagged house-rule or security are always loaded and never offered. Off by default; requires a JEV_API_KEY secret and shared memory on for the org. Vendor unverified as of this writing.",
+        "default": false
+      },
       "jev_routing_act": {
         "type": "boolean",
         "title": "Let Jev pick the model tier (experimental)",
