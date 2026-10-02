@@ -527,6 +527,8 @@ pub(crate) async fn attempt_auto_rebase(
         Ok(_) => {
             app.session_log(session_id, "info", format!("auto-rebased onto {main_sha} and pushed"))
                 .await;
+            // Issue #765: the rebase rewrote every colony commit; re-point their links.
+            crate::commit_links::reconcile_session(app, session_id).await;
             app.update_session(session_id, |x| {
                 x.needs_rebase = false;
                 x.rebase_orphaned = false;
@@ -655,6 +657,12 @@ pub async fn watch_pull_requests(app: Shared) {
                             apply_pr_facts(x, &info);
                         })
                         .await;
+                    }
+                    // Issue #765: a head that moved since the last reading (the colony's own
+                    // force-push, GitHub's update-branch, a rewrite from elsewhere) fetches the branch
+                    // into the host mirror and re-points the colony's commit links, off this tick.
+                    if info.state == github::PrState::Open {
+                        crate::commit_links::head_seen(&app, &s.id, info.head_ref_oid.as_deref());
                     }
                     let (state, mergeability, pr_merged_at, base_ref_oid) =
                         (info.state, info.mergeability, info.merged_at, info.base_ref_oid);

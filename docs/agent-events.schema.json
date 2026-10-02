@@ -235,7 +235,9 @@
         "title": { "type": "string" },
         "content": { "type": "string" },
         "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
-        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." }
+        "origin": { "type": ["string", "null"], "description": "Who proposed: \"orchestrator\", \"subagent:<name>\" or \"background:<name>\". Absent on runners from before the field existed, which could only be the orchestrator." },
+        "kind": { "enum": ["plan", "decision", "file_change", "failure", "architecture", "convention"], "default": "convention", "description": "What the entry is (issue #766)." },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure the colony is that the entry holds beyond its task (issue #766). A global proposal is promoted to fleet-wide memory only when colonies in two distinct repositories propose it at 0.8 or more; absent counts as 0." }
       },
       "required": ["type", "title", "content"]
     },

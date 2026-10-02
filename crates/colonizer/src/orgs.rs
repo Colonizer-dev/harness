@@ -181,7 +181,7 @@ pub struct KnownOrg {
 }
 
 impl App {
-    fn orgs_file(&self) -> PathBuf {
+    pub(crate) fn orgs_file(&self) -> PathBuf {
         self.cfg.config_dir.join("orgs.json")
     }
 
@@ -193,7 +193,7 @@ impl App {
         self.all_org_settings().remove(org).unwrap_or_default()
     }
 
-    async fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
+    pub(crate) async fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
         crate::util::write_atomic(&self.orgs_file(), &serde_json::to_vec_pretty(all)?).await
     }

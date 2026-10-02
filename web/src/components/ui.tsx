@@ -395,7 +395,7 @@ export function attentionText(attention: Attention): string {
     case "waiting_for_answer":
       return "Waiting for your answer";
     case "autopilot_held":
-      return "Autopilot held the PR";
+      return attention.detail?.trim() || "Autopilot held the PR";
     case "hold_timeout":
       return "Held too long — parked, resume to continue";
     default:

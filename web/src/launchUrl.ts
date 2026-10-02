@@ -5,6 +5,8 @@
 //   over the persisted one;
 // - `?share_title=/share_text=/share_url=`, what Android's share sheet puts there for the
 //   manifest's share_target: somewhere in them, a GitHub issue or pull request url;
+// - `?welcome=phone`, what a freshly paired phone lands on (issue #746): the cockpit offers its
+//   install-and-notify sheet once;
 // - `?mock=1` and `?colony=`, which other code owns (the in-browser mock and the push deep link).
 //
 // Everything here is pure string work so the tests can pin it without a browser; Cockpit applies it
@@ -108,8 +110,21 @@ export function holdingSession(sessions: Session[], shared: SharedIssue): Sessio
   return heldByFor(sessions, shared.repo, shared.number);
 }
 
+/**
+ * The `?welcome=phone` a freshly paired phone lands on (issue #746): the phone is signed in and the
+ * cockpit shows its install-and-notify sheet once. Anything else — no param, or a value naming a
+ * welcome this build does not know — is null, and nothing is offered.
+ */
+export function welcomeFromUrl(url: string): "phone" | null {
+  try {
+    return new URL(url, "https://colonizer.invalid").searchParams.get("welcome") === "phone" ? "phone" : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The query parameters this module reads, which Cockpit strips once it has applied them. */
-export const LAUNCH_PARAMS: readonly string[] = ["view", "share_title", "share_text", "share_url"];
+export const LAUNCH_PARAMS: readonly string[] = ["view", "share_title", "share_text", "share_url", "welcome"];
 
 /** The url with the launch params dropped, the rest (`?mock=1`, `?colony=`) kept. */
 export function stripLaunchParams(url: string): string {

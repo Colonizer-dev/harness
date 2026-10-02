@@ -315,6 +315,11 @@ pub struct Session {
     /// `needs_rebase` on its own. Cleared wherever `needs_rebase` is cleared.
     #[serde(default)]
     pub rebase_orphaned: bool,
+    /// Whether the failure that put the colony here has been seen by a person (issue #744): set
+    /// by [`App::update_session`] at the crossing itself, cleared by `POST /api/sessions/{id}/seen`,
+    /// read by the app badge (`push::needs_you`). A failure already on record was seen long ago.
+    #[serde(default)]
+    pub unseen_failure: bool,
     /// The live same-repo colony a fresh colony queued behind for overlap (issue #453): it starts
     /// once that colony is no longer live. `None` once started; stacked colonies never carry one —
     /// they already wait on their parent.
@@ -432,6 +437,13 @@ pub struct Session {
     /// queue and the resume route leave the colony where it is. `None` for a colony no merge covered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded: Option<crate::supersede::Supersession>,
+    /// Set by the claim that sends a colony to boot (lifecycle's resume, the queue's restore):
+    /// whether the colony was suspended when it was claimed (issue #700). The boot reads it for
+    /// session.json's `restore` key, so the guest can tell a suspension's restore from a plain
+    /// resume — the claim itself has just cleared `suspended`. Transient on purpose: not
+    /// persisted, and a harness restart between claim and boot only ever loses it towards "no".
+    #[serde(skip)]
+    pub was_suspended: bool,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -506,6 +518,7 @@ impl Default for Session {
             publishing_holds_slot: false,
             needs_rebase: false,
             rebase_orphaned: false,
+            unseen_failure: false,
             queued_behind: None,
             claim_wait: false,
             verify: None,
@@ -533,6 +546,7 @@ impl Default for Session {
             pending_answer: None,
             supply_chain: None,
             superseded: None,
+            was_suspended: false,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,
