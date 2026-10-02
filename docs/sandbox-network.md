@@ -306,8 +306,9 @@ bracketed IPv6, or a CIDR of either (bracketed for IPv6). `:port` is TCP 1-65535
 means every port. Single-label names are refused: in msb's grammar those words are destination
 groups, not hostnames. An org may pin its own `mode` and add to both lists in its settings
 (`orgs.json`, `egress`), never remove from them — resolution (`egress::resolve`) takes the org's
-mode when it set one and unions the lists, and drops entries a hand-edited file let in that do not
-parse: an invalid entry can only shrink a colony's reach, never widen it.
+mode when it set one and unions the lists, adds the running agent module's declared hosts in
+`allowlist` mode (see [below](#hosts-an-agent-module-declares)), and drops entries a hand-edited
+file let in that do not parse: an invalid entry can only shrink a colony's reach, never widen it.
 
 | Mode | Flags | Behaviour |
 | :--- | :--- | :--- |
@@ -320,24 +321,37 @@ ingress too ([`types.rs:272-279`][policy-none]), and the mesh-off published port
 allow, rules: <the --net-rule tokens> }` with no profile rules
 ([`common.rs:848-967`][cli-netpolicy]).
 
-Each boot records what it resolved — mode, allow, block, sources, always_blocked, rules,
+Each boot records what it resolved — mode, allow, block, sources, module, always_blocked, rules,
 profiles, `applied_at` — at `<session dir>/egress.json`, and `GET /api/sessions/{id}/egress`
 serves it (404 for a colony that last booted before this existed), so the fleet view can answer
-what a colony could reach without reading its boot log.
+what a colony could reach, and whose hosts widened it, without reading the boot log.
 
-### Hosts an agent module declares (not enforced)
+### Hosts an agent module declares
 
-Each agent module's `module.json` can list the hosts its runner needs under `egress`, in four
+Each agent module's `module.json` lists the hosts its runner needs under `egress`, in four
 optional arrays: `api`, `auth`, `telemetry` and `extra`. Entries are bare hostnames; a leading
 `*.` covers subdomains. The claude-code module, for example, declares `api.anthropic.com` as its
 API host and `*.sentry.io` among its telemetry hosts. Loading a module checks the section: an
 unknown category or a non-hostname entry is refused, and every host in the module's
 `secrets[].hosts` must be covered (`parse_egress` and `read_agent` in `crates/colonizer/src/modules.rs`).
 
-The declaration is not wired into the fence yet. No boot reads it, and allowlist mode does not add
-these hosts for you: in allowlist mode, put the hosts your agent needs in `egress_allow`. When a
-tool call is denied, the claude-code runner adds a `denial: {class, hint}` field to the errored
-`tool_result` event and tells the agent the same hint once per class; see
+The running module's declaration is part of the fence (#601). In `allowlist` mode a colony's allow
+list is the union of the module's `api`, `auth` and `extra` hosts and the operator's `egress_allow`
+(global and org), so the agent reaches its vendor's hosts without the operator restating them. The
+module's `telemetry` hosts are deliberately left out: there is no opt-in concept for telemetry, so
+an operator who wants those hosts lists them in `egress_allow` themselves. A module host is
+validated and compiled exactly as an operator entry is — lowercased, with a bare `*.` a suffix rule
+— and a host `egress_allow` already names is not repeated. Nothing here can reopen a blocked
+destination: the operator's `egress_block` and the always-blocked deny set still compile ahead of
+every allow, module-declared or not. `open` mode is unchanged, because the `public` profile already
+covers these hosts.
+
+Each boot records which module contributed and the entries it added: the `module` object,
+`{agent, allow}`, in `<session dir>/egress.json`, served by `GET /api/sessions/{id}/egress` (see
+[Modes and settings](#modes-and-settings)).
+
+When a tool call is denied, the claude-code runner adds a `denial: {class, hint}` field to the
+errored `tool_result` event and tells the agent the same hint once per class; see
 [boundaries.md](boundaries.md) for what is a boundary and what is only guidance.
 
 ### Runtime changes under the policy
