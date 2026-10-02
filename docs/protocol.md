@@ -305,14 +305,18 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
-| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` — everything the Settings → Fleet pane renders |
+| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
 | `POST /api/fleet/pending/{id}/approve` · `…/reject` | The owner's decision on a redeemed invite. Approve answers `{member}` and mints the member's `fleet`-scoped token, handed over exactly once; reject leaves the joiner's next confirm reading `rejected` |
 | `DELETE /api/fleet/members/{id}` | End one membership from the owner's side: the member's fleet token is revoked, its local data stays |
 | `POST /api/fleet/join` · `POST /api/fleet/join/confirm` · `DELETE /api/fleet/join` | Redeem an owner's invite (`{owner_url, code, name?, url?}` → `{confirm_code, status: "pending"}`; **409** while already in a fleet, or an owner with members), poll for the owner's decision (`{status: "joined"\|"pending"\|"rejected"\|"expired"}`), cancel |
 | `POST /api/fleet/leave` | A member ends its own membership; the token is revoked and every local colony and setting stays |
+| `GET /api/fleet/sync` · `POST /api/fleet/sync` | A member's history push (Fleet history push, below): where it stands — `{member, consent, enabled, status, detail, acknowledged, retired, last_drain_at, last_synced_at, next_attempt_at}` — and drain now, answering the drain report; **409** when this mothership has not joined a fleet, or its operator has not consented |
+| `GET /api/fleet/sync/preview` · `POST /api/fleet/sync/consent` | What the history push would send — `{owner_url, colonies, payloads, payload_bytes, omitted_payloads, row_bytes, total_bytes, pending_colonies, pending_bytes, includes, excludes}`, sending nothing — and the operator's consent for this membership (`{enabled}` → the status); both **409** when not a member |
+| `GET /api/fleet/history` · `GET /api/fleet/history/{member}/{row_id}` · `…/logs/{name}` | The owner's view of what members synced (Fleet history on the owner, below): the filtered, paged list with totals per member and repository, one colony's record and its logs, and one log streamed; owner-only |
+| `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | The owner's ingest for a member's history push, on the member's `fleet` token: one log payload stored by its hash (**204**), then a batch of colony rows upserted by id (`{rows}` → `{accepted, rejected}`); **403** for a token that belongs to no member |
 | `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
 | `PUT /api/modules/{kind}` | `{provider, enabled (default true), settings}` → saves config and answers the module as `GET` lists it. **400** for an unknown provider or setting, a value of the wrong type or out of range, or switching off a kind that must stay on (`source`, `sandbox`, `agent`, `publish`) |
@@ -1164,8 +1168,10 @@ every poll and stays cheap without a cache.
 
 Without the API token this endpoint answers a reduced body, and only that: `version`, `queue_depth`,
 `host` with `microvms_live`, `microvms_ceiling` and the numeric capacity figures (no `id`, `hostname`,
-`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, and `storage` with only `ok`.
-It always uses the cached probes and ignores `?fresh`. This is what fleet peers read.
+`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, `storage` with only `ok`,
+`runner` with `last_tick_age_s`, and — on a fleet member only — `fleet_sync` (both described under
+[Member health](#member-health-issue-764)). It always uses the cached probes and ignores `?fresh`.
+This is what fleet peers read.
 
 ### `GET /api/hosts`
 
@@ -1255,8 +1261,8 @@ The table above names each one; the shapes:
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
   `{status: "approved", token, member_id}` exactly once (a second poll reads **404**), or the
   rejection. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
-  `GET /api/hosts` and `POST /api/fleet/peer/leave`, never minted by `POST /api/tokens`, and never
-  the member's local cockpit token.
+  `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
+  never minted by `POST /api/tokens`, and never the member's local cockpit token.
 - `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
   revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
   enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](fleet.md).
@@ -1267,6 +1273,134 @@ as u32, mod 1,000,000. The owner knows the invite code and learns the nonce at t
 joiner generated both. The digits are a compare for two people looking at two screens, not an
 authentication — a stolen invite redeemed by someone else is consumed, so the real joiner sees an
 error and the owner sees a request nobody vouches for.
+
+### Fleet history push (issue #762)
+
+A member drains its finished colonies' history to its fleet's owner on the `fleet` token its
+pairing minted; the design is in [fleet.md](fleet.md#history-push). Two owner routes take it, both
+`fleet`-scoped and both answering **403** to a token that names no current member (the owner's own
+cockpit token included). What arrives lands under `<data_dir>/fleet-ingest/<member_id>/` on the
+owner.
+
+- `PUT /api/fleet/peer/payloads/{sha256}` — the body is one log ledger's raw bytes (at most 32 MiB),
+  keyed by the lowercase hex SHA-256 of those bytes. **204** once stored (or already held); **400**
+  when the key is malformed or the body does not hash to it; **413** past the size limit. Stored
+  as `payloads/<sha256>`, so a re-upload is a no-op.
+- `POST /api/fleet/peer/rows` — `{"rows": [{id, record, payloads}]}`, at most 500 rows and 4 MiB.
+  `record` is the same allowlist projection of a colony the export bundle's history carries
+  ([§6.11](#611-fleet-export-bundle-687)), and `id` is its `<origin_host>:<original_id>`.
+  `payloads` lists the colony's logs — `{name, sha256, bytes}` with `name` one of `events.jsonl`,
+  `harness.jsonl`, `gateway.jsonl`, or `{name, bytes, omitted: true}` for a log too large to send.
+  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}]}`: accepted rows
+  are upserted by id into `sessions.json` (a re-sent row replaces itself, never duplicates), and a
+  row whose payloads are not all held is refused by name with the hashes it lacks. A body that
+  cannot be read as rows is refused whole (**400**/**422**, or **413** past the limits) — the
+  member splits such a batch to find the row that caused it. A refusal may name the row itself
+  with a top-level `"row": id`.
+
+The member reads the other answers as states: **401** stops the drain and asks for attention,
+**403** stops syncing (removed from the fleet), and **429**/**503** wait out `Retry-After`
+(seconds or an HTTP date).
+
+A removed member's token keeps a tombstone on the owner (its SHA-256, kept in
+`<config_dir>/fleet.json` after the token itself is revoked), so every API request presenting it
+answers **403** `{"error": "removed from the fleet"}`; a token the owner never knew, or one that
+left by itself, answers the usual **401**.
+
+Nothing is pushed until the member's operator consents, per membership:
+`GET /api/fleet/sync/preview` counts what would be sent (finished colonies, their logs, bytes in
+all and not yet acknowledged) from the same collection the drain sends, and
+`POST /api/fleet/sync/consent` `{"enabled": true|false}` records the answer on the membership in
+`<config_dir>/fleet.json`. A new join starts with it off; until it is on, `GET /api/fleet/sync`
+reads `status: "consent_required"` and `POST /api/fleet/sync` answers **409**.
+
+### Fleet history on the owner (issue #762)
+
+What members pushed, read back on the owner ([fleet.md](fleet.md#reading-it-on-the-owner)). All
+three routes are owner-only: a scoped token — a member's `fleet` token included — answers **403**.
+
+- `GET /api/fleet/history?member=&repo=&status=&since=&until=&limit=&cursor=` — every member's
+  synced colonies, newest `record.updated_at` first. `member` is a member id, `repo` the record's
+  `owner/name`, `status` its status (`merged`, `pr_opened`, …); `since`/`until` bound the finish
+  time, each RFC 3339 or `YYYY-MM-DD` (`until`'s day is inclusive). Pagination follows
+  `GET /api/sessions`: `limit` 1–100 (default 20), `cursor` the last entry's `key`, `next_cursor`
+  null at the end; a malformed filter or a cursor naming no entry is **400**. The answer:
+  `{colonies: [{key, member_id, member_name, member_removed, id, received_at, record, payloads}],
+  next_cursor, stats: {total, members: [{member_id, name, removed, …}], repos: [{repo, …}]},
+  members: [{id, name, removed}], repos: [..], retention_days}`, where each total is
+  `{colonies, merged, cost_usd}` over every filtered row (`cost_usd` null when no row carries a
+  cost), and `key` is `<member_id>/<row id>`. `member_removed` marks a member the owner removed.
+- `GET /api/fleet/history/{member}/{row_id}` — one entry as above plus
+  `logs: [{name, sha256, bytes, omitted, stored}]`; **404** for an unknown member or row.
+- `GET /api/fleet/history/{member}/{row_id}/logs/{name}` — one stored log, streamed as
+  `text/plain` exactly as the member sent it (no owner-side redaction); **404** when the row names
+  no such log, it was omitted, or the owner does not hold it.
+
+Rows are pruned `COLONIZER_FLEET_INGEST_RETENTION_DAYS` (default 90, `0` = never) after
+`received_at` by the reclaim tick, together with the payloads only they referenced.
+
+### Member health (issue #764)
+
+Each entry of `GET /api/fleet`'s `members` carries one verdict:
+
+```json
+{"id": "mem_…", "name": "worker", "url": "http://10.0.0.2:7878", "joined_at": "…",
+ "health": {"state": "degraded", "code": "no_heartbeat", "reason": "No heartbeat for 12 min", "hint": "the machine may be asleep"}}
+```
+
+`state` is `ok`, `unknown`, `degraded` or `stopped`; `code`, `reason` and `hint` are `null`
+exactly when it is `ok`. `note` is independent of the state: something worth knowing that is not a
+fault — today only `"History sync off"`, when the member's operator has not consented to the
+history push — else `null`. `unknown` means no poll has checked the member yet: it is never reported
+as `ok` on no evidence. `code` is stable; `reason` and `hint` are for showing verbatim. Reading the view never dials a
+member: it evaluates what the owner already holds (`crates/colonizer/src/fleet_health.rs`), and
+every signal that fires is a finding. The worst state wins (`stopped` over `degraded` over `unknown` over `ok`); findings of the same state break ties in
+the order below.
+
+| Order | `code` | Fires when | State | Hint | Wired |
+|---|---|---|---|---|---|
+| 1 | `token_revoked` | the member's fleet token is gone from the registry | stopped | re-pair this machine | yes |
+| 2 | `sync_rejected` | the member's last sync drew a 401 (`unauthorized`) or a 403 (`removed`); reason "Token revoked" | stopped | re-pair this machine | yes |
+| 3 | `runner_down` | the member's queue loop last ticked ≥ 5 min ago; reason "Colony runner not ticking" | degraded | restart colonizer on this machine | yes |
+| 4 | `disk_full` | disk ≥ 90% used (≥ 95% stopped); without a total, < 5 GB free (< 1 GB stopped) | degraded / stopped | clean target/ dirs | yes |
+| 5 | `no_heartbeat` | the member last answered ≥ 5 min before the owner's latest poll (≥ 30 min stopped) | degraded / stopped | the machine may be asleep | yes |
+| 6 | `unreachable` | the owner's latest poll went unanswered | degraded | check that it is awake and on the network | yes |
+| 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
+| 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
+| 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
+| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+
+The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
+A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
+because nobody looked; before the first poll those signals are unmeasured, so the member reads `unknown` (any other
+finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. `GET /api/hosts` rows gained
+`disk_total_bytes` (omitted when unknown) for the disk percentage.
+
+The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
+caller without the API token gets) carries two more keys, both ages, counts and classes only:
+
+```json
+{"runner": {"last_tick_age_s": 3},
+ "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
+                "last_error_class": "error", "consent": true}}
+```
+
+- `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
+  tick). The loop ticks every 5 s and stamps the time before it starts queued colonies, so a tick
+  that wedges leaves the stamp to age.
+- `fleet_sync` — present only on a fleet member, read from its drain state
+  (`<data_dir>/fleet-sync.json`) without collecting or hashing anything. `state` is the drain
+  status of [the history push](#fleet-history-push-issue-762) (`consent_required` while the
+  operator has not said yes). `backlog_rows` is how many rows the last drain left unsent, and
+  `oldest_unsent_age_s` how long every drain since has ended with a backlog — a lower bound on the
+  oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
+  `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
+  `consent` is the operator's answer; with it off, no backlog is claimed.
+
+`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
+peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
+signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
+grows from it does.
 
 ### `GET /api/version`
 
@@ -1669,8 +1803,10 @@ The decision is recorded three ways:
 - an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
   body, no checklist items, 1 path named`), naming the model when it differs from `model`, the
   cost gate when it kept the colony on `model`, and the rule's tier when an override disagrees;
-- a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
-  agent, misroute, signals, jev, cost, sensitivity}`, where `source` is `off`/`rule`/`override`,
+- a `model_routing` object on the session record — `{point, jev_mode, jev_agrees, floor, tier,
+  rule, source, score, reason, model, agent, misroute, signals, jev, cost, sensitivity}`, where
+  `point` is always `"routing.tier"`, the first four are §6.1c's, `source` is
+  `off`/`rule`/`override`/`jev`,
   `model` is set only when the tier changed it, `agent` names the agent module — the harness — the
   decision was made for, the same name the spend journal's colony rows carry (§6.8), so a routing
   decision can be joined with what the colony went on to spend, `misroute` is true when an operator
@@ -1701,14 +1837,15 @@ added after boot has none, and its requests go to Anthropic like any unrouted mo
 ### 6.1c Jev second opinion (shadow mode)
 
 An optional, default-off external classifier ("Jev", `crates/colonizer/src/jev.rs`) can be consulted
-for a second opinion on the tier §6.1b's rule already picked, in shadow mode only: the opinion is
+for a second opinion on the tier §6.1b's rule already picked. In shadow mode the opinion is
 attached to `Signals`/`Decision` as `jev: Option<JevOpinion>` (tier, model, confidence, an estimated
-cost) and recorded alongside the rule's own decision, but `decide` never reads it — it stays exactly
-the synchronous, pure function §6.1b describes, with no model and no network call inside it. The
+cost) and recorded alongside the rule's own decision without changing the tier; act mode (below)
+lets it pick the tier. Either way `decide` stays the synchronous, pure function §6.1b describes,
+with no model and no network call inside it. The
 network call happens once, in the async boot path in `boot.rs`, before `decide` runs.
 
-Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` (a `claude-code`
-module setting, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
+Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` or
+`jev_routing_act` (`claude-code` module settings, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
 itself, so the key never enters a colony. A missing key, the setting left off, or any
 failure of the call all resolve to `jev: None`; none of them is an error, and none of them blocks or
 meaningfully slows boot. The whole exchange is bounded by a roughly 1.8-second hard timeout, with a
@@ -1723,13 +1860,30 @@ credentials: the issue title with credential-looking tokens redacted, its labels
 "latest" alias, since a second opinion's calibration is specific to one model version and is not
 assumed to carry over to the next. Each call's `estimated_cost_usd` is a rough token estimate against
 an unverified per-token price, logged so the cost of asking stays visible — it is not metered billing,
-and it is not folded into a colony's own routed cost, since this opinion never chooses a model.
+and it is not folded into a colony's own routed cost, since the opinion is a classifier call, not
+the model the colony runs on.
 
-This ships shadow mode only: zero applied decisions. Promoting Jev's tier to an actual input to
-`decide` is a separate, later change, and needs measured evidence first — comparing `routing.jsonl`
-records where `jev.tier` disagreed with `rule` against those sessions' eventual `actual_cost_usd` and
-misroute outcomes over a meaningful sample, to show the second opinion would have beaten the heuristic
-before anything is asked to act on it.
+**Act mode** (issue #583, experimental, default off). `jev_routing_act` (a `claude-code` boolean,
+default `false`) lets the opinion pick the tier: it asks Jev exactly as shadow mode does, with or
+without `jev_shadow_mode`, and when the opinion's `confidence` is at least
+`jev_routing_act_confidence` (a number in 0–1, default `0.8`) `decide` uses Jev's tier instead of
+the rule's, with `source: "jev"`. An opinion that lands on the rule's own tier leaves `source:
+"rule"`. Below the threshold, with no opinion, or in shadow mode, the rule's tier stands. An
+operator's `model_tier` still wins, and routing off still runs on `model`. The #470 cost gate
+applies to a low tier Jev picked just as it does to the rule's. Jev's tier is never below the
+task's **floor**:
+
+- a task is sensitive when the minimum provider mark its class demands of this org's gateway is
+  above `any` (`sensitivity::required_mark` — `vetted` and `restricted` by default, or any class an
+  org's overrides raise). A sensitive task's floor is the rule's own tier: Jev may raise it, never
+  lower it, since the tier picks the model and so the provider the colony starts on;
+- an unknown sandbox preset floors at `medium`, the same clamp the rule applies to itself;
+- both: the higher of the two. Neither: no floor.
+
+Every `routing.jsonl` decision row and `model_routing` record carries `point: "routing.tier"`,
+`jev_mode` (`off`/`shadow`/`act`), `jev_agrees` (whether Jev's tier equals the rule's, `null` with
+no opinion) and `floor` (a tier, or `null`), so Jev-acted decisions can be compared with rule ones
+against each session's `actual_cost_usd` and misroute outcomes.
 
 This second opinion and Jev compaction (Token savings) are separate features sharing only the
 `JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
@@ -1939,6 +2093,8 @@ pull requests small; they will adopt the red-team runs of
 | `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
+| `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
+| `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
@@ -2098,7 +2254,10 @@ gains `last_activity_at` and `attention`:
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
-`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
+`nudges_exhausted` — the flag is written with the log line that says the colony needs you, and
+gateway traffic alone (a request in flight) does not clear it again; only agent progress does. A
+colony blocked on an exhausted provider is flagged `provider_quota_exhausted` instead of being nudged
+(§6.5, Provider out of quota cards). A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. A flag carries a `detail` when the mothership can say why in one line: a claim
@@ -2244,7 +2403,14 @@ root or, when it belongs to a subdirectory's own package, from that subdirectory
 - **Covered by neither:** the root Makefile's `test:` target → `make test`, and nothing at all when
   the repository declares none.
 
-The checks run sequentially, one microVM each. Each fresh-checkout VM checks for the tool the command
+The checks run sequentially, one microVM each, in the diff's order unless the `publish` module's
+`verify_focus` setting says otherwise ([#584](https://github.com/Colonizer-dev/harness/issues/584)): `act` runs first the check owning the most changed
+files and, when it contradicts the claim, skips the rest; `shadow` (the default) keeps the order and
+only measures; `off` does neither. Shadow and act append one row per verification that ran a check
+to the data dir's `jev_focus.jsonl` — `{kind: "focus", ts, session, mode, candidates: [{label,
+owned}], chosen, would_catch, verdict, actual_first_failure_ms, focused_first_failure_ms, total_ms,
+checks_run}`, `chosen` being `full` when there is nothing to focus on (fewer than two checks) —
+and `confirmed` still needs every check run green. Each fresh-checkout VM checks for the tool the command
 needs before running it: a tool the colony image does not carry (the default node image has no bun or
 pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
 rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own
@@ -2468,7 +2634,10 @@ are estimates.
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
 `fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes,
-because a fallback request goes to the API as is). `quota` is where to read what is left in a prepaid token
+because a fallback request goes to the API as is — or, for quota exhaustion only, `<provider>/<model>` on another
+configured provider that lists the model and speaks the same wire, which the gateway retries itself; see Quota
+exhaustion below. A cross-wire, unknown-provider, own-provider or unlisted fallback is a `400` on save, and only a
+Claude fallback reaches the colony's route, so only it covers an unreachable, timed-out or full connection). `quota` is where to read what is left in a prepaid token
 plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
@@ -2574,9 +2743,16 @@ restart keeps it; a record whose reset has passed or whose TTL has run out is dr
 the reset the message named — or, when the message names none, a 15-minute TTL after which the record
 lapses and the queue re-probes — and the answer carries `x-colonizer-quota-exhausted` (the reset
 words, or `exhausted`). An upstream 2xx clears the record at once. When the
-provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
-provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
-failover happens at request level, so an operator opts a role out by unsetting that role's
+provider has a Claude `fallback_model` the answer also carries `x-colonizer-fallback:
+provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504. When
+its `fallback_model` is `<provider>/<model>` ([#767]) the gateway retries the request itself, once:
+the same body with `model` set to the fallback's model, to that provider, which must speak the same
+wire (anthropic to anthropic, openai to openai — the gateway has no path that re-shapes a response for
+the other wire mid-request). The retry is the operator's hop, so the colony's recorded
+`allowed_providers`/`allowed_models` do not refuse it; sensitivity, key and budget checks apply as
+to any request, and it is audited as its own request to the fallback provider. The colony gets the
+fallback's answer; a fallback provider that is itself exhausted, missing or on another wire is not
+tried, and the original answer (without `x-colonizer-fallback`) stands. Failover happens at request level, so an operator opts a role out by unsetting that role's
 provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
 `GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
 provider, and there a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
@@ -2591,6 +2767,78 @@ resumes parked colonies whose provider recovered — reset passed, or the provid
 ones whose park discarded the microVM and routing a kept-VM park through the resume endpoint, which
 resumes it warm when it can and falls back to cold otherwise. Colonies whose provider is still
 exhausted stay parked.
+
+**Provider out of quota cards** ([#767]). The maintainer answers an exhausted provider on one
+dedicated card per provider, not on a free-form question from an agent. The gateway ties colonies to
+the exhaustion: a colony whose request came back quota-exhausted with no `fallback_model` retry on
+offer is *blocked* on that provider until one of its own requests succeeds (in memory; the provider's
+record above is what survives a restart). A card lists every colony in play (live, queued or parked,
+not cleaned up) that is blocked on the provider, or parked with `attention.reason`
+`provider_quota_exhausted` naming it (in `attention.provider`, or in the park's `error`). Only a
+provider with an active record and at least one such colony gets a card; the Claude account's own cap
+keeps its banner (`quota.kind: "account"`).
+
+`GET /api/attention` answers `{"quota_cards": [card]}`, and `GET /api/status` carries the same list as
+`quota_cards`, so the cockpit needs no second poll:
+
+```json
+{"provider": "bailian", "provider_name": "Bailian", "models": ["qwen3.8-max"],
+ "title": "bailian · qwen3.8-max is out of quota", "reset_at": "Oct 1, 16:00 UTC", "reset_unix": 1790870400,
+ "colonies": [{"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "issue_title": "…",
+               "status": "running", "hits": 3, "waiting": false, "resume_unix": null}],
+ "orgs": ["acme"], "waiting": 0, "resume_unix": null, "fallback_model": null, "wire": "anthropic",
+ "alternatives": [{"id": "sonnet", "label": "Claude Sonnet (latest)", "provider": "anthropic", "wire": null,
+                   "failure_pct": 0.0, "rated": false, "degraded": false, "healthy": true}]}
+```
+
+`models` are the provider's models the colonies run, most used first; `hits` is a colony's quota
+answers in a row; `waiting`/`resume_unix` count the colonies parked for the reset and the earliest
+scheduled resume. `alternatives` is every model `/api/models` offers that is not on an exhausted
+provider, with its provider's usage health (Claude's models read degraded only while the account's
+own cap holds), healthy ones first.
+
+`POST /api/providers/{id}/quota-action` answers the card with
+`{action: "switch"|"wait"|"stop", model?, scope?: "colonies"|"org"|"all", colonies?: [id], org?, remember?}`
+and replies `{action, provider, colonies: [id], failed: [{id, ok: false, error}], changes: [change]}`. `colonies` limits
+the action to some of the card's colonies (an id not on the card is a `400`); `org` limits it to one
+org.
+
+- `switch` needs `model`, one of the card's `alternatives` (a model on the exhausted provider, or one
+  not on offer, is a `400`). Each colony's role on the provider moves: `model_override` when its
+  orchestrator model is there (or no role visibly is — a tier or background model), and
+  `subagent_model_override` when its subagent model is. The colony is then restarted — a live or
+  parked one stopped and resumed cold, a stopped one resumed, a queued one simply boots with it — so
+  boot re-derives `allowed_providers`/`allowed_models` from the new settings. `scope: "org"` also
+  moves the colonies' orgs' `model`, `subagent_model` and `background_model` overrides that route to
+  the provider, so the orgs' next colonies start on the new model. `remember: true` saves `model` as
+  the provider's `fallback_model`: a Claude model, or a model on another provider of the same wire
+  (the rules of Provider fields above; `400` otherwise, before anything changes). `scope: "all"`
+  ([#767]) moves every model role on the provider install-wide: each of the agent module's
+  `model`, `subagent_model`, `background_model`, `summary_model`, `model_low` and `model_high`
+  settings that routes to the provider (saved through `PUT /api/modules/agent`'s own handler and
+  validation), every org's `model`, `subagent_model` and `background_model` override that does (every
+  org, not only the card's), and the card's colonies as above. Every role is checked before anything
+  changes — the module's schema, a `model_map` that must list the model, and `summary_model` on a
+  Claude model needing an Anthropic provider or API key (summaries never use the login) — so a model
+  one role cannot take is a `400` with nothing moved. Any other `scope` is a `400`.
+
+  A switch's reply also carries `changes: [{scope, target, key, was, now}]`, one per setting it
+  moved, with the value it replaced (`was`, null when unset): `scope` is `install` (target: the agent
+  module), `org` (target: the org), `colony` (target: the colony id; `was` is the model the role
+  resolved to) or `provider` (target: the provider; key `fallback_model`, from `remember`). The
+  mothership logs the same list. There is no undo; the cockpit shows each as "was X → now Y".
+- `wait` parks every live colony (`status` `parked`, the worktree kept — suspended, not failed) and
+  re-stamps an already-parked one: `attention` gains `provider`, `action: "wait"`, `reset_at` and
+  `resume_unix` (the provider's `reset_unix`). The queue's 5 s resume pass requeues it once
+  `resume_unix` has passed or the provider recovered, whichever is first; a reset-less record resumes
+  it when the record's TTL lapses. A queued colony is reported under `failed`: the queue already holds it.
+- `stop` stops every colony as `POST /api/sessions/{id}/stop` does; a pre-#213 `stopped` park loses its
+  quota flag, so it is not resumed later.
+
+A blocked colony that is live — `starting` included, when its agent never got a turn out — is
+flagged by the watchdog's minute tick with `attention.reason` `provider_quota_exhausted`,
+`attention.provider` and the reset, and a log line saying it needs the maintainer; the watchdog does
+not nudge it, since another request cannot be answered until the plan resets ([#760]).
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 

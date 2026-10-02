@@ -66,6 +66,7 @@ node scripts/bench.mjs run  --repo owner/bench --label before
 node scripts/bench.mjs run  --repo owner/bench --label after
 node scripts/bench.mjs compare bench-before.json bench-after.json
 node scripts/bench.mjs jev  bench-before.json bench-after.json   # grade Jev compaction across the runs
+node scripts/bench.mjs routing                          # is Jev routing act mode justified? (below)
 node scripts/bench.mjs clean --repo owner/bench         # close the bench's pull requests and delete their branches
 ```
 
@@ -74,7 +75,7 @@ task, and answers the questions it asks by itself: it picks the option matching 
 else the first one, and records what it chose. It authenticates with `COLONIZER_API_TOKEN`, else the
 `api-token` file in `COLONIZER_CONFIG_DIR` (default `~/.config/colonizer`). `--only a,b` runs a subset,
 `--timeout` bounds a colony in seconds (default 1200), `--data <dir>` names the mothership's data
-directory the colony report, trajectory monitor and `jev`'s ledger read (default `COLONIZER_DATA_DIR`,
+directory the colony report, trajectory monitor, `jev`'s and `routing`'s ledgers read (default `COLONIZER_DATA_DIR`,
 else `~/.local/share/colonizer`), and `--heldout <dir>` scores the held-out suite below (`--max-gap`,
 default 0.25, sets its threshold). Results go to `bench-<label>.json`.
 
@@ -138,6 +139,44 @@ recall is the share of re-issued chunks the pass predicted to keep. A zero denom
 0: undefined, not a bad score. The counts sit beside the rates because one colony in one run is a small
 sample; a `total` row pools them, so ten colonies' one-decision runs begin to say something. A reread only
 ever grades decisions from its own session.
+
+## Judging Jev routing
+
+The mothership appends a `decision` row to `<data dir>/routing.jsonl` for every routed boot — the rule's
+tier, the `source` that won, and Jev's second opinion when one was asked
+([protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)) — and an `actual` row with what the
+colony really spent when it ends. `routing` joins that ledger to each colony's outcome in `sessions.json`
+and asks whether `jev_routing_act` should be on:
+
+```sh
+node scripts/bench.mjs routing                    # --data <dir> names a non-default mothership
+node scripts/bench.mjs routing --threshold 0.7    # the act confidence to judge at (default 0.8)
+node scripts/bench.mjs routing --json             # the same report as JSON
+```
+
+It reports how often Jev agrees with the rule (overall and per rule tier), its mean and median confidence
+when it agrees and when it does not, and how many colonies `act` at the threshold would have put on another
+tier — never under an operator override or with routing off, and never below the decision's `floor`. Each
+disagreement gets a row: the rule's tier, Jev's, the confidence, the tier that ran, the tier act would run,
+the outcome (`merged`; `pr-open`; `failed`, which includes a pull request closed unmerged; `other` for no
+changes, stopped or parked; `pending` while it runs) and the actual cost. Rows from before the ledger
+recorded `jev_agrees` have it recomputed as `jev.tier == rule`; a colony booted twice is judged on its last
+decision.
+
+The evidence is the confident disagreements judged in shadow: the rule's tier ran, the colony has an
+outcome, and act would have changed the tier. They split by direction, and the verdict reads **justified**
+only when
+
+- there are at least 20 of them, and
+- every direction with at least 5 says the rule was wrong: where Jev would go **lower**, the rule's tier
+  merged at least 90% of the time (the task was easy, so the cheaper tier was likely enough); where Jev
+  would go **higher**, the rule's tier failed at least 15 points more often than the baseline of every
+  shadow colony with an outcome. At least one direction must have the 5.
+
+Anything less reads "not yet justified" with the reason. Shadow outcomes only say what the rule's tier did,
+never what Jev's would have done, so the real test is the bench run both ways: `run --label rule` with
+`jev_routing_act` off, `run --label jev` with it on, then `compare bench-rule.json bench-jev.json` for the
+cost, working time, clean-resolved rate and gap per run.
 
 ## Held-out suite
 

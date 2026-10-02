@@ -1,6 +1,7 @@
 /api/activity                                        GET    unauth=401    token=owner            activity=-
 /api/archive                                         GET    unauth=401    token=owner            activity=-
 /api/archive/retention                               POST   unauth=401    token=owner            activity=-
+/api/attention                                       GET    unauth=401    token=owner            activity=-
 /api/burn-down                                       GET    unauth=401    token=owner            activity=-
 /api/burn-down/stop                                  POST   unauth=401    token=owner            activity=burn_down.stop
 /api/chat                                            GET    unauth=401    token=owner            activity=-
@@ -35,6 +36,9 @@
 /api/editor/settings                                 PUT    unauth=401    token=owner            activity=-
 /api/findings                                        GET    unauth=401    token=owner            activity=-
 /api/fleet                                           GET    unauth=401    token=owner            activity=-
+/api/fleet/history                                   GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}                 GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}/logs/{name}     GET    unauth=401    token=owner            activity=-
 /api/fleet/invites                                   POST   unauth=401    token=owner            activity=-
 /api/fleet/invites/{id}                              DELETE unauth=401    token=owner            activity=-
 /api/fleet/join                                      DELETE unauth=401    token=owner            activity=-
@@ -44,9 +48,15 @@
 /api/fleet/members/{id}                              DELETE unauth=401    token=owner            activity=-
 /api/fleet/peer/leave                                POST   unauth=401    token=fleet            activity=-
 /api/fleet/peer/pairings/{id}                        POST   unauth=415    token=owner            activity=-
+/api/fleet/peer/payloads/{sha256}                    PUT    unauth=401    token=fleet            activity=-
 /api/fleet/peer/redeem                               POST   unauth=415    token=owner            activity=-
+/api/fleet/peer/rows                                 POST   unauth=401    token=fleet            activity=-
 /api/fleet/pending/{id}/approve                      POST   unauth=401    token=owner            activity=-
 /api/fleet/pending/{id}/reject                       POST   unauth=401    token=owner            activity=-
+/api/fleet/sync                                      GET    unauth=401    token=owner            activity=-
+/api/fleet/sync                                      POST   unauth=401    token=owner            activity=-
+/api/fleet/sync/consent                              POST   unauth=401    token=owner            activity=-
+/api/fleet/sync/preview                              GET    unauth=401    token=owner            activity=-
 /api/headroom                                        GET    unauth=401    token=owner            activity=-
 /api/headroom/download                               POST   unauth=401    token=owner            activity=-
 /api/hosts                                           GET    unauth=401    token=fleet            activity=-
@@ -103,6 +113,7 @@
 /api/providers/{id}                                  DELETE unauth=401    token=owner            activity=settings.remove
 /api/providers/{id}                                  PUT    unauth=401    token=owner            activity=settings.save
 /api/providers/{id}/health                           GET    unauth=401    token=owner            activity=-
+/api/providers/{id}/quota-action                     POST   unauth=401    token=owner            activity=settings.save
 /api/push/answer                                     POST   unauth=415    token=owner            activity=-
 /api/push/key                                        GET    unauth=401    token=owner            activity=-
 /api/push/presence                                   POST   unauth=401    token=owner            activity=-

@@ -179,6 +179,16 @@ async fn settings(app: &Shared) -> (bool, Option<Route>) {
     (true, choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key))
 }
 
+/// Whether a plain Claude model can write summaries on this install: through an Anthropic provider
+/// or a real API key, never the subscription login (see [`choose`]). A switch that would move
+/// `summary_model` onto Claude checks it first (issue #767).
+pub(crate) fn claude_summaries_possible(app: &Shared) -> bool {
+    let has_anthropic = app.providers().iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    has_anthropic || app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some())
+}
+
 /// The cheap model the install would write summaries with, whether or not summaries are switched
 /// on: the default for anything else that wants a quick, inexpensive answer (the cockpit's chat).
 pub async fn cheap_route(app: &Shared) -> Option<Route> {

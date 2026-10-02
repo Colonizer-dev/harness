@@ -25,6 +25,96 @@ export interface Attention {
   nudges: number;
   /** Why, in the mothership's own words — the failing checks and where their output went for `autopilot_held` (issue #672). Absent otherwise and on older motherships. */
   detail?: string;
+  /** `provider_quota_exhausted` (issue #767): the provider the colony is blocked or parked on. */
+  provider?: string;
+  /** `provider_quota_exhausted` parked from its card: `"wait"`, with the scheduled resume. */
+  action?: "wait";
+  resume_unix?: number | null;
+  reset_at?: string | null;
+}
+
+/** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */
+export interface QuotaAlternative {
+  /** A Claude alias/id, or `<provider>/<model>`. */
+  id: string;
+  label: string;
+  /** `anthropic` for Claude's own models. */
+  provider: string;
+  /** The provider's wire; null for Claude's own models, which any provider can fall back to. */
+  wire?: "anthropic" | "openai" | null;
+  failure_pct: number;
+  rated: boolean;
+  degraded: boolean;
+  healthy: boolean;
+}
+
+/** One colony on a "Provider out of quota" card. */
+export interface QuotaCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  /** Quota answers in a row since its last success; null for a colony only parked on the provider. */
+  hits: number | null;
+  /** Parked on the provider (by the card's Wait, or on its own). */
+  waiting: boolean;
+  /** When a Wait scheduled it back; null otherwise. */
+  resume_unix: number | null;
+}
+
+/** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
+export interface QuotaCard {
+  provider: string;
+  provider_name: string;
+  /** The provider's models the colonies run, most used first. */
+  models: string[];
+  /** e.g. "bailian · qwen3.8-max is out of quota". */
+  title: string;
+  reset_at: string | null;
+  reset_unix: number | null;
+  colonies: QuotaCardColony[];
+  orgs: string[];
+  /** How many of the colonies wait for the reset, and the earliest scheduled resume. */
+  waiting: number;
+  resume_unix: number | null;
+  fallback_model: string | null;
+  /** The provider's wire: a remembered fallback on another provider must speak the same one. */
+  wire?: "anthropic" | "openai";
+  alternatives: QuotaAlternative[];
+}
+
+/** POST /api/providers/{id}/quota-action. */
+export interface QuotaActionRequest {
+  action: "switch" | "wait" | "stop";
+  model?: string;
+  /** `colonies` (default), `org` (their orgs' model settings too) or `all` (every model role on the
+   *  provider install-wide: the agent module's settings and every org's overrides, plus the colonies). */
+  scope?: "colonies" | "org" | "all";
+  colonies?: string[];
+  org?: string;
+  /** Save the model as the provider's `fallback_model`: a Claude model, or one on a provider of the same wire. */
+  remember?: boolean;
+}
+
+/** One setting a quota switch changed, with the value it replaced. */
+export interface QuotaChange {
+  /** `install` (target: the agent module), `org`, `colony` or `provider` (the remembered fallback). */
+  scope: "install" | "org" | "colony" | "provider";
+  target: string;
+  key: string;
+  was: string | null;
+  now: string;
+}
+
+export interface QuotaActionReply {
+  action: string;
+  provider: string;
+  colonies: string[];
+  failed: { id: string; ok: false; error: string }[];
+  /** What a switch changed and what it replaced; older builds omit it. */
+  changes?: QuotaChange[];
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
@@ -289,6 +379,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
+  quota_cards?: QuotaCard[];
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
@@ -409,6 +501,8 @@ export interface FleetHost {
   queue_depth: number;
   /** Absent when the peer has never reported it. */
   disk_free_bytes: number | null;
+  /** The disk's size (issue #764); absent when unknown. */
+  disk_total_bytes?: number;
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
@@ -443,12 +537,31 @@ export interface FleetPending {
   status: "pending" | "approved" | "rejected";
 }
 
+/** GET /api/fleet member `health.state` (issue #764): the worst of what the owner observed; `unknown` until a poll has checked the member. */
+export type FleetMemberHealthState = "ok" | "unknown" | "degraded" | "stopped";
+
+/**
+ * GET /api/fleet member `health` (issue #764): one state, and when it is not `ok`, why and what to do.
+ * `code` is a stable key (`token_revoked`, `no_heartbeat`, `unreachable`, `disk_full`, `unwatched`, `not_checked`, …);
+ * `reason` and `hint` are for showing verbatim, e.g. "No heartbeat for 12 min" / "the machine may be asleep".
+ */
+export interface FleetMemberHealth {
+  state: FleetMemberHealthState;
+  code: string | null;
+  reason: string | null;
+  hint: string | null;
+  /** Something worth knowing that is not a fault, whatever the state: "History sync off". Absent from an older owner. */
+  note?: string | null;
+}
+
 /** A mothership that joined this one's fleet; it hosts colonies and sees the fleet view. */
 export interface FleetMember {
   id: string;
   name: string;
   url: string | null;
   joined_at: string;
+  /** Absent from owners built before issue #764. */
+  health?: FleetMemberHealth;
 }
 
 /** GET /api/fleet `membership`: this mothership's place in the fleet it joined. */
@@ -456,6 +569,130 @@ export interface FleetMembership {
   owner_url: string;
   member_id: string;
   joined_at: string;
+  /** Whether this machine's operator consented to pushing its history to the owner (issue #762). Off at every join. */
+  history_sync: boolean;
+}
+
+/** GET /api/fleet/sync/preview (issue #762): what turning the history push on would send — read from the same collection the push sends. */
+export interface FleetSyncPreview {
+  owner_url: string;
+  /** Finished colonies, one row each. */
+  colonies: number;
+  /** Their log files, and those files' bytes. */
+  payloads: number;
+  payload_bytes: number;
+  /** Logs over the size limit: named on their row, never sent. */
+  omitted_payloads: number;
+  row_bytes: number;
+  total_bytes: number;
+  /** What the owner has not acknowledged yet. */
+  pending_colonies: number;
+  pending_bytes: number;
+  includes: string;
+  excludes: string;
+}
+
+/** GET /api/fleet/sync's `status`: where the history push stands. */
+export type FleetSyncState = "idle" | "synced" | "backoff" | "unauthorized" | "removed" | "error" | "consent_required";
+
+/** GET /api/fleet/sync, and POST /api/fleet/sync/consent's answer. */
+export interface FleetSyncStatus {
+  member: boolean;
+  consent: boolean;
+  enabled: boolean;
+  status: FleetSyncState;
+  detail: string | null;
+  acknowledged: number;
+  retired: { id: string; error: string; attempts: number; at: string }[];
+  last_drain_at: string | null;
+  last_synced_at: string | null;
+  next_attempt_at: string | null;
+}
+
+// Fleet history (issue #762, the owner's view): what members pushed with history sync on, read
+// back from <data_dir>/fleet-ingest/ by GET /api/fleet/history… (docs/fleet.md). Owner-only.
+
+/** A synced colony's record: the allowlist projection the member sent (`ImportedSession`). */
+export interface FleetHistoryRecord {
+  /** `<origin_host>:<original_id>`. */
+  id: string;
+  origin_host: string;
+  original_id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  branch: string;
+  base?: string | null;
+  pr_url: string | null;
+  pr_opened_at?: string | null;
+  merged_at: string | null;
+  summary: string | null;
+  error: string | null;
+  cost_usd: number | null;
+  model_tier?: string | null;
+  agent: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One log a synced colony carries; `omitted` was too large to travel. */
+export interface FleetHistoryPayload {
+  name: string;
+  sha256: string;
+  bytes: number;
+  omitted?: boolean;
+}
+
+/** One synced colony in GET /api/fleet/history. `key` (`<member_id>/<row id>`) is its cursor. */
+export interface FleetHistoryEntry {
+  key: string;
+  member_id: string;
+  member_name: string;
+  /** The member was removed from the fleet; its history stays. */
+  member_removed: boolean;
+  id: string;
+  received_at: string;
+  record: FleetHistoryRecord;
+  payloads: FleetHistoryPayload[];
+}
+
+/** Totals over the filtered history; `cost_usd` is null when no row carried a cost. */
+export interface FleetHistoryTotals {
+  colonies: number;
+  merged: number;
+  cost_usd: number | null;
+}
+
+/** GET /api/fleet/history's filters and page; every field optional. Dates are YYYY-MM-DD or RFC 3339, on the colony's finish. */
+export interface FleetHistoryQuery {
+  member?: string;
+  repo?: string;
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** GET /api/fleet/history: one page, newest finish first, the totals over every filtered row, and the filter options. */
+export interface FleetHistoryPage {
+  colonies: FleetHistoryEntry[];
+  next_cursor: string | null;
+  stats: {
+    total: FleetHistoryTotals;
+    members: (FleetHistoryTotals & { member_id: string; name: string; removed: boolean })[];
+    repos: (FleetHistoryTotals & { repo: string })[];
+  };
+  members: { id: string; name: string; removed: boolean }[];
+  repos: string[];
+  retention_days: number;
+}
+
+/** GET /api/fleet/history/{member}/{row_id}: the entry, and each log with whether the owner holds it. */
+export interface FleetHistoryDetail extends FleetHistoryEntry {
+  logs: (FleetHistoryPayload & { omitted: boolean; stored: boolean })[];
 }
 
 /** GET /api/fleet `joining`: a join this mothership started and has not finished; both screens show `confirm_code` until the owner decides. */

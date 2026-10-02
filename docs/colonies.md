@@ -346,6 +346,13 @@ one colony at launch.
 - `none` records every claim as unverifiable without checking.
 - Any other text is the test command itself, replacing the diff-scoped checks.
 
+**Which check first.** When the diff owes more than one check, the **Publish** module's
+`verify_focus` setting decides the order. `shadow` (the default) runs them as above and records, in
+the data dir's `jev_focus.jsonl` and the colony's log, which check would have gone first — the one
+owning most of the changed files — and whether it would have caught the failure sooner. `act` runs
+that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
+every check to pass.
+
 **Limits.** If the colony image lacks the tool a check needs, that check is unverifiable. A branch
 that rewrites the file a check's command is read from (`scripts.test`, the Makefile) cannot grade
 its own homework: that check comes back unverifiable and nothing runs. A check whose directory the
@@ -563,7 +570,8 @@ the tool and its input are exactly the same. The bench-wide report that grades c
 each other is `bench.mjs jev`
 ([bench.md, Grading Jev compaction](bench.md#grading-jev-compaction)). This is separate from the
 Jev routing second opinion (`jev_shadow_mode`,
-[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is also shadow-only.
+[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is shadow-only unless
+`jev_routing_act` lets it pick the tier.
 
 ## Rate limits on notifications and the judge
 

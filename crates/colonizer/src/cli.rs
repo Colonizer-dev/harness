@@ -241,6 +241,21 @@ enum FleetCommand {
         #[arg(long)]
         preview: bool,
     },
+    /// Push this member's colony history to its fleet's owner: preview it, consent, drain now, or show where it stands
+    Sync {
+        /// Show the push's status, and send nothing
+        #[arg(long, conflicts_with_all = ["preview", "enable", "disable"])]
+        status: bool,
+        /// Show what the push would send (colonies, logs, bytes), and send nothing
+        #[arg(long, conflicts_with_all = ["enable", "disable"])]
+        preview: bool,
+        /// Consent to pushing this machine's history to the owner (prints the preview first)
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Withdraw that consent: nothing more is sent
+        #[arg(long)]
+        disable: bool,
+    },
     /// Preview a fleet bundle, then import it into this machine's data dir
     Import {
         /// The .tar.zst bundle to import
@@ -1420,8 +1435,113 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         Command::Loop { command } => loop_command(cli, command).await,
         Command::Redteam { command } => redteam_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
+        Command::Fleet {
+            command:
+                FleetCommand::Sync {
+                    status,
+                    preview,
+                    enable,
+                    disable,
+                },
+        } => {
+            let action = match (status, preview, enable, disable) {
+                (true, ..) => SyncAction::Status,
+                (_, true, ..) => SyncAction::Preview,
+                (_, _, true, _) => SyncAction::Consent(true),
+                (_, _, _, true) => SyncAction::Consent(false),
+                _ => SyncAction::Drain,
+            };
+            fleet_sync_command(cli, action).await
+        }
         Command::Fleet { command } => fleet_command(cli, command),
     }
+}
+
+/// What `fleet sync` was asked to do.
+#[derive(Clone, Copy)]
+enum SyncAction {
+    Drain,
+    Status,
+    Preview,
+    Consent(bool),
+}
+
+/// Prints `fleet sync --preview`'s answer for a person.
+fn print_sync_preview(preview: &Value) {
+    let mib = |key: &str| preview[key].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0);
+    println!(
+        "{} finished colonies, {} log files, {:.1} MiB in all would go to {}",
+        preview["colonies"].as_u64().unwrap_or(0),
+        preview["payloads"].as_u64().unwrap_or(0),
+        mib("total_bytes"),
+        preview["owner_url"].as_str().unwrap_or("the owner"),
+    );
+    println!(
+        "not yet sent: {} colonies, {:.1} MiB",
+        preview["pending_colonies"].as_u64().unwrap_or(0),
+        mib("pending_bytes")
+    );
+    if let Some(what) = preview["includes"].as_str() {
+        println!("includes: {what}");
+    }
+    if let Some(what) = preview["excludes"].as_str() {
+        println!("never sent: {what}");
+    }
+}
+
+/// `fleet sync`: the running mothership's history push to its fleet's owner (issue #762) —
+/// preview what it would send, consent or withdraw, drain now, or show where it stands.
+async fn fleet_sync_command(cli: &Cli, action: SyncAction) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let answer = match action {
+            SyncAction::Status => machine.get("/api/fleet/sync").await?,
+            SyncAction::Preview => machine.get("/api/fleet/sync/preview").await?,
+            SyncAction::Consent(enabled) => {
+                if enabled && !json {
+                    print_sync_preview(&machine.get("/api/fleet/sync/preview").await?);
+                }
+                let body = json!({ "enabled": enabled });
+                machine
+                    .post("/api/fleet/sync/consent", Some(&body))
+                    .await?
+                    .unwrap_or(Value::Null)
+            }
+            SyncAction::Drain => machine.post("/api/fleet/sync", None).await?.unwrap_or(Value::Null),
+        };
+        if json {
+            println!("{}", pretty(&answer)?);
+            return Ok(EXIT_OK);
+        }
+        let status = answer["status"].as_str().unwrap_or("?");
+        match action {
+            SyncAction::Preview => print_sync_preview(&answer),
+            SyncAction::Status | SyncAction::Consent(_) => println!(
+                "{status}: history sync {}; {} rows acknowledged, {} retired",
+                if answer["consent"].as_bool() == Some(true) {
+                    "on"
+                } else {
+                    "off"
+                },
+                answer["acknowledged"].as_u64().unwrap_or(0),
+                answer["retired"].as_array().map_or(0, Vec::len)
+            ),
+            SyncAction::Drain => println!(
+                "{status}: sent {} rows and {} payloads; {} pending, {} retired",
+                answer["sent"].as_u64().unwrap_or(0),
+                answer["payloads"].as_u64().unwrap_or(0),
+                answer["pending"].as_u64().unwrap_or(0),
+                answer["retired"].as_array().map_or(0, Vec::len)
+            ),
+        }
+        if !matches!(action, SyncAction::Preview)
+            && let Some(detail) = answer["detail"].as_str()
+        {
+            eprintln!("{detail}");
+        }
+        Ok(EXIT_OK)
+    })
+    .await
 }
 
 /// `fleet export` and `fleet import` run on this machine's own data dir (`Settings::from_env`),
@@ -1450,6 +1570,7 @@ fn fleet_command(cli: &Cli, command: FleetCommand) -> i32 {
             crate::fleet_export::cli_export(&cfg, cli.json, out, cats, preview)
         }
         FleetCommand::Import { file, preview } => crate::fleet_export::cli_import(&cfg, &file, preview, cli.json),
+        FleetCommand::Sync { .. } => unreachable!("`fleet sync` talks to the mothership: fleet_sync_command"),
     };
     match result {
         Ok(code) => code,

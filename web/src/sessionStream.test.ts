@@ -717,6 +717,23 @@ describe("buildThread", () => {
     expect(view.subagents["m1"].crew).toBeNull();
   });
 
+  it("a tool-call id repeated across the thread is emitted once (assistant-ui keys by it)", () => {
+    // A subagent can reuse a tool-call id that also appears in the orchestrator's blocks. assistant-ui's
+    // useResources keys tool-call parts by toolCallId, so emitting both throws
+    // "Duplicate key toolCallId-… in useResources" and blanks the cockpit. The first wins; repeats drop.
+    const view = buildThread(
+      thread([orchestrator("m1", tool("dup"), tool("only-a")), settlerSaid("m2", scout("a1"), tool("dup"), tool("only-b"))]),
+    );
+    const toolIds = view.messages
+      .flatMap((m) => m.content as ReadonlyArray<{ type: string; toolCallId?: string }>)
+      .filter((p) => p.type === "tool-call")
+      .map((p) => p.toolCallId as string);
+    expect(toolIds).toEqual([...new Set(toolIds)]);
+    expect(toolIds.filter((id) => id === "dup")).toHaveLength(1);
+    expect(toolIds).toContain("only-a");
+    expect(toolIds).toContain("only-b");
+  });
+
   it("an unanswered question holds the thread for the user", () => {
     const view = buildThread(thread([orchestrator("m1", text("Shall I push?"), questionBlock("q1"))], { agentState: "waiting_for_answer" }));
     expect(view.hasOpenQuestion).toBe(true);

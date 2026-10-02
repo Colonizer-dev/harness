@@ -713,6 +713,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             json!({"type": "object", "properties": {
                 "autopilot": {"type": "boolean", "title": "Open the PR automatically", "description": "Default for new colonies: when the agent finishes cleanly and has written its PR description, push its colonizer/ branch and open the pull request. Can be switched off per colony at launch.", "default": true},
                 "verify": {"type": "string", "title": "Verify completion claims", "description": "Default for new colonies: when an agent finishes cleanly and has written its PR description, the mothership verifies the claim before autopilot publishes — it checks the described files are on the branch and runs the repository's test command in a fresh sandbox. `auto` (the default) resolves the command from package.json, Cargo.toml or a Makefile on the base branch; `none` records the claim as unverifiable without checking; any other string is the test command itself. Can be overridden per colony at launch.", "default": "auto"},
+                "verify_focus": {"type": "string", "title": "Focused checks first", "enum": ["off", "shadow", "act"], "description": "When a diff owes more than one check, the check owning most of the changed files can run first. `shadow` (the default) runs the checks as before and only records, in the data dir's jev_focus.jsonl and the colony's log, which check would have gone first and whether it would have caught the failure sooner; `act` runs it first and stops at its failure; `off` records nothing. A confirmed verdict always needs every check to pass.", "default": "shadow"},
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false},
                 "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true},
                 "autofix": {"type": "boolean", "title": "Autofix validated findings", "description": "When a colony files a validated finding, spawn a fix colony for it: a fresh colony whose pull request is reviewed by an independent session before anything merges. Can be switched off per colony at launch.", "default": false},
@@ -892,11 +893,11 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
 
 #[derive(Deserialize)]
 pub struct UpdateModule {
-    provider: String,
+    pub(crate) provider: String,
     #[serde(default = "yes")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    settings: Map<String, Value>,
+    pub(crate) settings: Map<String, Value>,
 }
 
 fn yes() -> bool {
@@ -969,7 +970,7 @@ fn check_plugin_dirs(cfg: &Settings, schema: &Value, settings: &Map<String, Valu
 /// Keeps known keys (plus anything already stored) and checks types, enums and ranges. An unknown
 /// key is refused naming it and what the provider does take, never dropped: a setting the operator
 /// sent and lost to a typo would otherwise read as the default silently (#326).
-fn validate_settings(
+pub(crate) fn validate_settings(
     provider: &str,
     schema: &Value,
     input: &Map<String, Value>,
