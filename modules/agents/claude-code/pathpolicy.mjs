@@ -7,8 +7,8 @@
 // already enforcing when this runs. Pure module — every decision follows from the bind-list text
 // and the tool input, so tests drive it without an SDK.
 
-import { readFileSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 
 /** Where the boot mounts the colony's bind list (BOOT_SCRIPT in crates/colonizer/src/boot.rs). */
 export const PATH_POLICY_FILE = '/colonizer/path-policy';
@@ -101,31 +101,91 @@ export function loadPathPolicy(env = process.env, { readFile = readTextCapped } 
   };
 }
 
+/** How many symlinks one path may pass through before it is refused — the kernel's own limit, so
+ * a loop or an over-long chain fails closed here exactly where a real open would fail. */
+const MAX_SYMLINKS = 40;
+
+/**
+ * `abs` with every symlink along it resolved, component by component, or null for a loop or a
+ * chain over MAX_SYMLINKS. Unlike realpath it also follows a DANGLING link: the link's target is
+ * read and resolved against the link's own directory, so a link to a file that does not exist yet
+ * resolves to where a write through it would create that file. The first component that does not
+ * exist ends the walk — nothing below it can be a link — and the rest re-appends lexically.
+ * @param {string} abs  absolute
+ * @returns {string | null}
+ */
+function resolveSymlinks(abs) {
+  let done = parse(abs).root;
+  const pending = abs.split(sep).filter(Boolean);
+  let links = 0;
+  while (pending.length) {
+    const name = pending.shift();
+    if (name === '.') continue;
+    if (name === '..') {
+      done = dirname(done);
+      continue;
+    }
+    const next = join(done, name);
+    let info;
+    try {
+      info = lstatSync(next);
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return resolve(next, ...pending);
+      return null;
+    }
+    if (!info.isSymbolicLink()) {
+      done = next;
+      continue;
+    }
+    if (++links > MAX_SYMLINKS) return null;
+    let target;
+    try {
+      target = readlinkSync(next);
+    } catch {
+      return null;
+    }
+    pending.unshift(...target.split(sep).filter(Boolean));
+    if (isAbsolute(target)) done = parse(target).root;
+  }
+  return done;
+}
+
+/**
+ * The absolute path `target` names with every symlink resolved — dangling ones included — or
+ * null when that lands outside the workspace (compared as realpaths on both sides), passes a
+ * symlink loop, or the workspace itself is gone. The one confinement walk: ACP's `confine` and
+ * the path-policy report below both go through it.
+ * @param {string} workspace  absolute
+ * @param {string} target     as the tool input spelled it, relative or absolute
+ * @returns {{ root: string, full: string } | null}  `root` is the workspace's realpath
+ */
+export function resolveInWorkspace(workspace, target) {
+  let root;
+  try {
+    root = realpathSync(workspace);
+  } catch {
+    return null;
+  }
+  const full = resolveSymlinks(resolve(workspace, String(target ?? '')));
+  if (full === null || (full !== root && !full.startsWith(root + sep))) return null;
+  return { root, full };
+}
+
 /**
  * The workspace-relative path `target` names, or null when it does not name one inside the
- * workspace. Symlinks resolve through the longest existing ancestor — the same walk ACP's
- * `confine` makes — so a link pointing out of the tree cannot dress an outside path up as a
- * relative one (and cannot hide a masked target either: the mount binds resolved targets).
+ * workspace. Symlinks resolve component by component through `resolveInWorkspace` — the same
+ * walk ACP's `confine` makes — so a link pointing out of the tree, dangling or not, cannot dress
+ * an outside path up as a relative one (and cannot hide a masked target either: the mount binds
+ * resolved targets).
  * @param {string} workspace  absolute
  * @param {string} target     as the tool input spelled it, relative or absolute
  * @returns {string | null}
  */
 export function resolveUnderWorkspace(workspace, target) {
-  let abs = resolve(workspace, String(target ?? ''));
-  const tail = [];
-  for (;;) {
-    try {
-      const full = join(realpathSync(abs), ...tail);
-      if (full !== workspace && !full.startsWith(workspace + sep)) return null;
-      const rel = relative(workspace, full);
-      return rel === '' ? null : rel.split(sep).join('/');
-    } catch {
-      tail.unshift(basename(abs));
-      const parent = dirname(abs);
-      if (parent === abs) return null;
-      abs = parent;
-    }
-  }
+  const inside = resolveInWorkspace(workspace, target);
+  if (!inside) return null;
+  const rel = relative(inside.root, inside.full);
+  return rel === '' ? null : rel.split(sep).join('/');
 }
 
 /**
