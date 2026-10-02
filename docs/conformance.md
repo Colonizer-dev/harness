@@ -11,79 +11,75 @@ the suite, `uhp-conformance` `2026.9.12.post2`, is not on PyPI and is installed 
 
 ## The claim
 
-> Colonizer is **not conformant** (no class) at spec 2026-09-12, measured 2026-09-28 with suite
-> 2026.9.12.post2.
+> Colonizer is **not conformant** (no class) at spec 2026-09-12, measured 2026-09-29 with suite
+> 2026.9.12.post2. Every hermetic core check passes except D-05 — by choice: streaming and
+> cancellation are the follow-up, and the discovery document reports them false rather than
+> claiming them. The core's other skips are the task-bearing checks, which need a harness to run
+> against and stay the manual gate; a class claim needs those too.
 
 The target claim is the **core** class, then **extended**; **full is not targeted**. Classes are
 cumulative — core 40 checks, extended 49, full 75 — and a skip is never a pass.
 
 | Class | Checks | Pass | Fail | Skip | Error |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| core | 40 | 3 | 12 | 25 | 0 |
-| extended (cumulative) | 49 | 6 | 12 | 31 | 0 |
-| full (cumulative) | 75 | 6 | 13 | 56 | 0 |
+| core | 40 | 15 | 1 | 24 | 0 |
+| extended (cumulative) | 49 | 18 | 1 | 30 | 0 |
+| full (cumulative) | 75 | 18 | 2 | 55 | 0 |
 
 Per-check outcomes are in [uhp-conformance.json](uhp-conformance.json) — machine-readable, written
-by the script below and compared check by check in CI. Measured 2026-09-28, build commit `54264fa`,
-Debian 12, Linux 6.12.99 x86_64, rustc 1.98.1, a debug `cargo build -p colonizer-harness --locked`.
-The mothership was booted on loopback without KVM and without agent credentials, so no colony ever
-started — none was needed, since every task check skips before it reaches a task. A rerun gives
-identical counts in about 0.1 s. This run re-measures after #651 landed the first §7 surface: the
-§7.2 session list and the §7.5 artifact reads answer under `/uhp/v1/…`, and every other protocol
-path answers a JSON 404 instead of the cockpit's page.
+by the script below and compared check by check in CI. Measured 2026-09-29 on build commit
+`7e5c1a5` with the #650 change applied, macOS 27.0 (Darwin arm64), rustc 1.98.1, a debug
+`cargo build -p colonizer-harness --locked`. The mothership was booted on loopback without a
+microVM runtime and without agent credentials, so no colony ever started — none was needed, since
+every task check skips before it reaches a task. This run re-measures after #650 served the
+read-side core next to #651's session page and artifact reads: discovery, version negotiation, the
+error envelope on every `/uhp` answer, harnesses, models and the single colony
+(`crates/colonizer/src/uhp.rs`), probed under `/uhp`.
 
 ## What fails
 
 | Check | Spec chapter | What the suite saw |
 | :--- | :--- | :--- |
-| D-01 | lifecycle §2 | `GET /v1/uhp` answered 401, expected 200 — there is no discovery document |
-| D-02 | lifecycle §2 | discovery requires authentication; a client must be able to probe first |
-| D-03–D-05 | lifecycle §2, schema.md | no discovery document; nothing to validate or advertise |
-| V-01 | lifecycle §1 | the responses the suite saw (all refusals) carry no `UHP-Version` header |
-| V-03 | lifecycle §1 | an unsupported version hits the 401 wall, expected a JSON 400 |
-| A-02 | architecture §5 | the 401 body is Colonizer's error JSON, not the UHP envelope (no `error.type`) |
-| E-02 | errors §3.1 | an unknown harness reports `not_found`, expected `harness_not_found` |
-| E-03 | errors §3.1 | an unknown response reports `not_found`, expected `response_not_found` |
-| H-01 | harnesses §1 | `GET /v1/harnesses` answers 404 — the route does not exist |
-| H-03 | harnesses §3 | `GET /v1/models` answers 404 — no model catalogue |
-| F-02 | harnesses §4.1 | harness creation 404s, so an unsupported base cannot be refused with 400 (full class, not targeted) |
+| D-05 | lifecycle §2 | the discovery document claims class core but reports `streaming` and `cancellation` false — honest, and the follow-up flips it |
+| F-02 | harnesses §4.1 | `POST /v1/harnesses` is not served (405), so creating a harness with an unsupported base is not refused with 400/422 (full class, not targeted) |
 
-The remaining failures share one cause: the capability does not exist at the protocol path. There
-is a `/uhp` surface now — sessions and artifacts answer there, and any other `/uhp` path answers a
-JSON 404 (never the SPA page, which is why E-01 and X-08 pass) — but discovery (D), version
-negotiation (V), the token wall's envelope shape (A-02), harnesses and models (H), and
-harness/response-specific error codes (E-02, E-03) have no route behind them yet, and a refusal
-with the wrong code is still a failure. The passes are A-01 (missing credential refused with 401),
-E-01 (errors use the structured envelope), E-04 (no stack traces in error bodies), X-01 (the
-session listing is served and well formed), X-02 (the listing reports its end with `next_cursor`)
-and X-08 (artifact ids do not traverse outside their container).
+Everything else that failed is fixed: D-01–D-04, V-01–V-03 and A-02 pass since the discovery
+document, the `UHP-Version` negotiation and the 401 envelope exist (`crates/colonizer/src/uhp.rs`,
+`host_guard` in `crates/colonizer/src/server.rs`); E-02 and E-03 pass because an unknown harness or
+response is a 404 envelope with its resource-specific code; H-01 and H-03 pass on the harness list
+and the (empty) model catalogue. A-01, E-01, E-04, X-01, X-02 and X-08 passed before and still do.
 
-The skips, by family: V-02, because discovery advertised no version to negotiate. H-02 and H-04,
-X-05, X-06 and X-09, F-01 and F-03–F-08, and R-01–R-08 skip because the harness listing they build
-on does not exist. X-07 skips because no task ever ran, so its session produced no artifacts to
-download. X-03 and X-04 have no session id from an earlier task, for the same reason. T-01–T-10,
-S-01–S-09 and C-01–C-03 all need a harness to run a task against. P-01–P-10 skip on their face:
-the plugins capability is absent, and the Plugins chapter is optional at every class.
+The skips, by family: T-01–T-10, S-01–S-09 and C-01–C-03 all need a harness to run a task against,
+and the hermetic boot has none (no bundled assets, so the harness list is empty). H-02 and H-04
+skip the same way — they fetch a harness the listing must name. X-03–X-07 have no session id from
+an earlier task, and X-09 skips on its face because discovery reports `files_input` false. F-01
+and F-03–F-08 build on harness CRUD; R-01–R-08 on session sharing, reported false. P-01–P-10 skip
+on their face: the plugins capability is absent, and the Plugins chapter is optional at every
+class.
 
 ## The gaps, in Colonizer terms
 
-**Core** — discovery/lifecycle, versioning, auth/errors, harnesses, tasks, streaming,
-continuation/cancellation. The `/uhp` surface exists as a routing family with the version header
-and the §7.7 envelope, but only sessions and artifacts live in it: there is no discovery document,
-no harness or model listing, no responses/tasks endpoint, no streaming. Follow-up:
-*UHP core class: implement the /uhp/v1 surface proposed in docs/protocol.md §7 (discovery,
-harnesses, responses, streaming, errors)*.
+**Core** — discovery/lifecycle, versioning, auth/errors, harnesses and session listing are served
+under `/uhp/v1` since #650 (`crates/colonizer/src/uhp.rs`, `crates/colonizer/routes.snap`), under
+the same scoped-token limits as the `/api` routes. What keeps the core class is D-05, and what
+keeps D-05 is the missing half of the surface: creating and continuing responses
+(`POST /uhp/v1/responses`), SSE streaming (§7.4) and cancellation (§7.6) are still the follow-up,
+and the discovery document says so in its capabilities. Follow-up: *UHP core class: responses,
+streaming and cancellation on /uhp/v1 (docs/protocol.md §7.3, §7.4, §7.6)*.
 
-The SPA-fallback half of this gap closed alongside #651: unmatched `/uhp` paths now answer the
-same JSON 404 unmatched `/api/*` paths have answered since #641, so a protocol miss no longer
-reads as the cockpit's page. What remains is the surface itself.
+Unknown paths inside `/uhp` do not fall through to the SPA fallback — `api_not_found` in
+`crates/colonizer/src/server.rs` answers them as 404 envelopes (since #651), the way it has
+answered unmatched `/api/*` since #641; since #650 a miss under `/uhp/v1/responses` or
+`/uhp/v1/containers` carries the resource's own code. Paths outside both prefixes still serve the
+cockpit's page, which is the SPA's job and stays.
 
 **Extended** — sessions, files, artifacts. Landed with #651: `GET /api/sessions` takes `limit`
 and `cursor` (and still answers the bare array without them), and the artifact reads — list,
 single download capped at 16 MiB, plain-tar archive — answer at both their `/api/sessions/{id}/files…`
-names and their `/uhp/v1` aliases with traversal refused. Still unbuilt: input-file uploads
-(§7.5's `POST /api/files`, probed by X-05 and X-09), and X-06/X-07 need a task-bearing run — the
-manual gate below — to exercise artifacts of a session that actually produced some.
+names and their `/uhp/v1` aliases with traversal refused; discovery reports `files_output` true for
+them since #650. Still unbuilt: input-file uploads (§7.5's `POST /api/files`, probed by X-05 and
+X-09), and X-06/X-07 need a task-bearing run — the manual gate below — to exercise artifacts of a
+session that actually produced some.
 
 **Full**, accepted as not targeted:
 
@@ -114,7 +110,8 @@ fixture (`modules/agents/claude-code/test/fixtures/events.jsonl`) against
 [agent-events.schema.json](agent-events.schema.json) (draft 2020-12). That schema is the internal
 runner→agentd contract; UHP's bundled one describes the client-facing Responses-style stream,
 overlapping only semantically (text deltas, reasoning, tool calls). The UHP stream checks (S-*)
-all skip until the core surface exists, so there is nothing to cross-check yet.
+still all skip — streaming is the part of the surface not served yet (see D-05 above), so there is
+nothing to cross-check yet.
 
 ## The manual gate
 
