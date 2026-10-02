@@ -558,6 +558,19 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   let memoryLine = false; // the next prompt leads with MEMORY_PROMPT_APPEND
   if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
+  // The one place a model is selected: the module's `model` setting at session start and the
+  // cockpit's live `set_model` command both send the same request and announce the same event. A
+  // refusal warns; it never fails the run.
+  const applyModel = async (model) => {
+    try {
+      await acp.request('session/set_model', { sessionId, modelId: model });
+      emit({ type: 'model_changed', model, previous: currentModel });
+      currentModel = model;
+    } catch (err) {
+      emit({ type: 'log', level: 'warn', message: `set_model ${model} failed: ${err?.message ?? err}` });
+    }
+  };
+
   // The handshake: negotiate ACP, then the session — `session/load` for §1's COLONIZER_RESUME_SESSION
   // when the agent advertises loadSession, `session/new` otherwise and as the fallback on a failed
   // load. agent_session is announced only when the session could be resumed again (§2 rules).
@@ -600,6 +613,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         currentModel = String(session.models.currentModelId);
         emit({ type: 'model_changed', model: currentModel, previous: null });
       }
+      // The module's `model` setting (COLONIZER_MODEL, issue #603): pick it at session start with the
+      // same request the cockpit's live set_model sends. An agent that advertised no models cannot
+      // select one — one warning, and it stays on its own default.
+      const wantedModel = String(env.COLONIZER_MODEL ?? '').trim();
+      if (wantedModel && modelSupported) await applyModel(wantedModel);
+      else if (wantedModel) emit({ type: 'log', level: 'warn', message: `ignored COLONIZER_MODEL ${wantedModel}: the agent did not advertise model selection at session/new` });
     } catch (err) {
       if (!dead) {
         const auth = authProblem(preset, err);
@@ -695,13 +714,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         } else if (!acp || !modelSupported) {
           emit({ type: 'log', level: 'warn', message: `ignored set_model ${model}: the agent did not advertise model selection at session/new` });
         } else {
-          try {
-            await acp.request('session/set_model', { sessionId, modelId: model });
-            emit({ type: 'model_changed', model, previous: currentModel });
-            currentModel = model;
-          } catch (err) {
-            emit({ type: 'log', level: 'warn', message: `set_model ${model} failed: ${err?.message ?? err}` });
-          }
+          await applyModel(model);
         }
         break;
       }

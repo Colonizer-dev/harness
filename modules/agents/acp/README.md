@@ -86,7 +86,7 @@ bytes), truncated from the beginning past the limit with the `truncated` flag se
 | :--- | :--- | :--- |
 | `agent` | `COLONIZER_ACP_AGENT` | `gemini` (`gemini --experimental-acp`), `grok` (`grok agent stdio`) or `custom` |
 | `command` | `COLONIZER_ACP_COMMAND` | With `custom`: the full command line including arguments, quotes respected |
-| `model` | `COLONIZER_MODEL` | Meant to pick the model with `session/set_model` at boot, but **not applied yet**: the runner never reads `COLONIZER_MODEL`, so the agent runs on its own default. Switching the model from the cockpit (a `set_model` command) does work, when the agent advertises models |
+| `model` | `COLONIZER_MODEL` | Picks the model with `session/set_model` at session start, when the agent advertises model selection at `session/new` (gemini and grok do); an agent that advertises no models keeps its own default and the runner logs one warning. Switching the model from the cockpit (a `set_model` command) works the same way |
 | `exec_policy` | `COLONIZER_EXEC_POLICY` | The layered exec policy rules ([below](#exec-policy)) |
 
 ## Exec policy
