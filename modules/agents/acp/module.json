@@ -71,7 +71,7 @@
       "model": {
         "type": "string",
         "title": "Model",
-        "description": "Model id meant for session/set_model after session/new. Not applied yet: the runner does not read this setting, so the agent runs on its own default model. Switching the model on a running colony works when the agent advertises model selection at session/new; otherwise it is a logged warning.",
+        "description": "Model id applied with session/set_model after session/new, when the agent advertises model selection there (the gemini and grok presets do). An agent that advertises no models cannot select one: it keeps its own default and the runner logs a warning. Switching the model on a running colony works the same way.",
         "default": "",
         "env": "COLONIZER_MODEL"
       },

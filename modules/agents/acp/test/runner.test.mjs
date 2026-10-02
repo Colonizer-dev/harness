@@ -791,6 +791,34 @@ test('set_model rides session/set_model only when the agent advertised models', 
   await stop(silent);
 });
 
+test('the model setting applies at session start, or warns once when models are not advertised', async (t) => {
+  const advertised = startRunner({
+    env: { COLONIZER_MODEL: 'gemini-3-flash' },
+    script: {
+      models: { currentModelId: 'gemini-3-pro', availableModels: [{ modelId: 'gemini-3-flash', name: 'Gemini 3 Flash' }] },
+      turns: { '*': {} },
+    },
+  });
+  t.after(() => advertised.child.kill('SIGKILL'));
+  await advertised.waitRecord((r) => r.some((x) => x.method === 'session/set_model'), 'the boot set_model to reach the agent');
+  assert.deepEqual(advertised.records().filter((x) => x.method === 'session/set_model').map((x) => x.params), [{ sessionId: 'sess-fake-1', modelId: 'gemini-3-flash' }]);
+  await advertised.waitUntil(count('model_changed', 2), 'the switch announcement');
+  assert.deepEqual(count('model_changed', 2)(advertised.events), { type: 'model_changed', model: 'gemini-3-flash', previous: 'gemini-3-pro' });
+  await stop(advertised);
+
+  const silent = startRunner({ env: { COLONIZER_MODEL: 'whatever' }, script: { turns: { '*': {} } } });
+  t.after(() => silent.child.kill('SIGKILL'));
+  await silent.waitRecord((r) => r.some((x) => x.method === 'session/new'), 'the handshake');
+  const warns = await silent.waitUntil((events) => {
+    const found = events.filter((e) => e.type === 'log' && e.level === 'warn' && e.message.includes('COLONIZER_MODEL'));
+    return found.length ? found : undefined;
+  }, 'the warning');
+  assert.equal(warns.length, 1, 'exactly one warning');
+  assert.match(warns[0].message, /did not advertise/);
+  assert.ok(!silent.records().some((r) => r.method === 'session/set_model'), 'no request leaves for an agent without models');
+  await stop(silent);
+});
+
 test('the agent dying mid-turn and while idle both end in a named error and exit 1', async (t) => {
   const midTurn = startRunner({ script: { turns: { '*': { updates: [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'par' } }], die: 3 } } } });
   t.after(() => midTurn.child.kill('SIGKILL'));
