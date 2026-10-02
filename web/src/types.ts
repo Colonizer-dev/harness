@@ -1378,6 +1378,19 @@ export interface NewSessionRequest {
 }
 
 /**
+ * One commit a colony wrote (GET /api/sessions/{id}/commits, issue #765): where the link points now,
+ * the shas it pointed at before a rebase or amend re-pointed it, and whether it was kept unmatched —
+ * a squash or a rewrite left no single commit with the same patch-id, so the link was not guessed.
+ */
+export interface CommitLink {
+  sha: string;
+  previous: string[];
+  orphaned: boolean;
+  agent_session?: string;
+  recorded_at: string;
+}
+
+/**
  * One line of a colony's finding ledger (GET /api/sessions/{id}/findings). The ledger is append-only:
  * as a finding moves validated → filed (or rejected/duplicate) → fix_colony → review → merged, a new
  * line is written and nothing is rewritten, so one finding — keyed by `title` — is the several lines

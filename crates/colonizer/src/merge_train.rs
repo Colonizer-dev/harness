@@ -633,6 +633,10 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
     let mut first: Option<String> = None;
     for s in &ordered {
         let reading = read_pr(app, s, &base).await;
+        // Issue #765: the train reads each head too; a moved one re-points the colony's links.
+        if let Ok(f) = &reading {
+            crate::commit_links::head_seen(app, &s.id, f.info.head_ref_oid.as_deref());
+        }
         let (title, decision) = match &reading {
             Ok(f) => {
                 let title = if f.info.title.trim().is_empty() {

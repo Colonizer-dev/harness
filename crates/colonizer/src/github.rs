@@ -557,6 +557,9 @@ pub async fn sync_repo(app: &App, repo: &str, bare: &FsPath, log: &SessionLogger
     }
     log.info("fetching origin").await;
     exec(app.git(bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    // Issue #765: a fetch may have brought a force-push of a colony branch; re-point the links of
+    // any colony here whose branch tip moved (one `rev-parse` each, and only colonies with links).
+    crate::commit_links::after_sync(app, repo).await;
     Ok(())
 }
 
@@ -1902,6 +1905,15 @@ impl PublishOps for GitPublishOps<'_> {
             self.log
                 .info(format!("parent PR merged; rebased {moved} commit(s) onto {dest}"))
                 .await;
+        }
+        // Issue #765: the commits now on origin are recorded with their patch-ids, so the link from
+        // each back to this colony survives the rebases and force-pushes that follow. Best effort:
+        // the push has landed, and a lost record is a warning, never a failed publish.
+        let base = self.base.lock().expect("publish base poisoned").clone();
+        match crate::commit_links::record_for_session(self.app, &self.s.id, &self.admin, &base).await {
+            Ok(0) => {}
+            Ok(n) => self.log.info(format!("recorded {n} commit link(s)")).await,
+            Err(e) => self.log.warn(format!("could not record commit links: {e:#}")).await,
         }
         Ok(())
     }

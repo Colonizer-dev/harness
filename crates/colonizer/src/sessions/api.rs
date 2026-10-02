@@ -1068,6 +1068,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     super::files::routes()
         .route("/api/sessions", routing::get(list).post(create))
         .route("/api/sessions/{id}", routing::get(get))
+        .route("/api/sessions/{id}/commits", routing::get(crate::commit_links::api_commits))
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
         .route("/api/sessions/{id}/seen", routing::post(seen))
