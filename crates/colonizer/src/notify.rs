@@ -758,17 +758,9 @@ async fn deliver(
     if post_webhook(app, client, payload, session, settings, reasons).await {
         sent = true;
     }
-    // Push has no settings of its own: a subscription is the opt-in (issue #516). The payload
-    // carries the same event name and the same one line the other channels do.
-    if push::deliver(
-        app,
-        client,
-        payload["event"].as_str().unwrap_or("notify"),
-        text,
-        session.map(|s| s.id.as_str()),
-    )
-    .await
-    {
+    // Push carries the same event name and the same one line the other channels do, and each
+    // device's own preferences decide whether it wants this event, repo and hour.
+    if push::deliver(app, client, payload["event"].as_str().unwrap_or("notify"), text, session).await {
         sent = true;
     }
     sent

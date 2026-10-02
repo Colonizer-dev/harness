@@ -8,11 +8,12 @@ import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
 import type { OrgEntry } from "../orgs";
 import type { RedTeamRun, RedTeamSchedule, Session } from "../types";
-import { HistoryBody } from "./RedTeamHistory";
+import { HistoryBody, SecurityReport } from "./RedTeamHistory";
 import { WizardBody } from "./RedTeamWizard";
 import { OverviewView } from "./OverviewView";
 import { compareDelta } from "./dash";
-import { describeCadence, estimateCost, runCost, toUtcCadence } from "./redTeamPlan";
+import { describeCadence, estimateCost, presetOf, runCost, toUtcCadence } from "./redTeamPlan";
+import type { PreScan } from "../types";
 
 const api = createMockApi();
 const noop = () => {};
@@ -130,6 +131,91 @@ describe("the red-team wizard", () => {
     expect(html).toContain("Once, now");
     expect(html).toContain("Weekly");
     expect(html).toContain("Monthly");
+  });
+});
+
+describe("the security preset", () => {
+  const wizardWith = (step: 0 | 2, preset?: "general" | "security") =>
+    renderToStaticMarkup(
+      <ApiContext.Provider value={api}>
+        <WizardBody org="acme" sessions={hunterSessions} runs={[]} onClose={noop} onDone={noop} onOpenHistory={noop} initialStep={step} initialPreset={preset} />
+      </ApiContext.Provider>,
+    );
+
+  it("the wizard's first step offers a preset picker with general picked by default", () => {
+    const html = wizardWith(0);
+    expect(html).toContain('aria-label="Preset"');
+    expect(html).toMatch(/role="radio" aria-checked="true"[^>]*>[\s\S]*?General/);
+    expect(html).toMatch(/role="radio" aria-checked="false"[^>]*>[\s\S]*?Security/);
+    expect(html).toContain("pre-scan before launch");
+  });
+
+  it("picking security checks it, and the review step says what the pre-scan does", () => {
+    expect(wizardWith(0, "security")).toMatch(/role="radio" aria-checked="true"[^>]*>[\s\S]*?Security/);
+    const review = wizardWith(2, "security");
+    expect(review).toContain("pre-scans the repository");
+    expect(review).toContain("no model tokens");
+    expect(review).toContain("· security");
+    expect(wizardWith(2)).not.toContain("pre-scans the repository");
+  });
+
+  it("the mock API keeps the preset a start names, and a run with none reads as general", async () => {
+    const mock = createMockApi();
+    const started = await mock.startRedTeamRun({ repo: "acme/fresh-repo", arm: true, preset: "security" });
+    expect(started.preset).toBe("security");
+    expect(presetOf(run())).toBe("general");
+  });
+
+  const prescan: PreScan = {
+    ran_at: "2026-09-30T10:00:00Z",
+    commit: "0123456789abcdef",
+    secret_scanner: "builtin",
+    notes: ["gitleaks is not installed on the host; secrets were scanned with the built-in provider-prefix fallback, which knows fewer key shapes"],
+    leads: [
+      { id: "P1", check: "string_built_sql", focus: 3, path: "src/db.js", line: 12, commit: null, message: "SQL text built from strings in code — lead: check whether user input reaches it unparameterised" },
+      { id: "P2", check: "env_file", focus: 2, path: ".env", line: null, commit: null, message: "`.env` is committed — lead: env files usually hold real values" },
+    ],
+    checklist: [
+      { id: "key_rotation", title: "Keys rotated after any exposure", status: "needs_review", evidence: "1 possible exposure(s) in .env; rotation happens at each provider and is not verifiable from the repo" },
+      { id: "backups_restore_tested", title: "Backups restore-tested", status: "not_verifiable", evidence: "no backup job found in repo; not verifiable from the repo" },
+    ],
+  };
+
+  it("the report's pre-scan section lists leads as leads with their focus, and says which secret scanner ran", () => {
+    const html = renderToStaticMarkup(<SecurityReport prescan={prescan} />);
+    expect(html).toContain("Pre-scan leads · 2 · secrets by the built-in fallback");
+    expect(html).toContain("not a confirmed vulnerability");
+    expect(html).toContain("gitleaks is not installed");
+    expect(html).toContain("src/db.js:12");
+    expect(html).toContain("→ input handling and injection");
+    expect(html).toContain("→ sessions, tokens and secrets");
+  });
+
+  it("the operator checklist shows evidence or not-verifiable, and nothing is ever passed or ticked", () => {
+    const html = renderToStaticMarkup(<SecurityReport prescan={prescan} />);
+    expect(html).toContain("Operator checklist");
+    expect(html).toContain("Needs review");
+    expect(html).toContain("Not verifiable from the repo");
+    expect(html).toContain("no backup job found in repo");
+    expect(html.toLowerCase()).not.toContain("passed");
+    expect(html).not.toContain("checked=");
+  });
+
+  it("the history shows the sections and a security badge on a security run only", () => {
+    const history = (runs: RedTeamRun[]) =>
+      renderToStaticMarkup(
+        <ApiContext.Provider value={api}>
+          <HistoryBody org="acme" sessions={hunterSessions} runs={runs} onClose={noop} onOpenColony={noop} onNew={noop} initialSchedules={[]} />
+        </ApiContext.Provider>,
+      );
+    const security = history([run({ preset: "security", prescan })]);
+    expect(security).toContain(">security<");
+    expect(security).toContain("Pre-scan leads");
+    expect(security).toContain("Operator checklist");
+    const general = history([run()]);
+    expect(general).not.toContain("Pre-scan leads");
+    expect(general).not.toContain("Operator checklist");
+    expect(general).not.toContain(">security<");
   });
 });
 

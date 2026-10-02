@@ -590,6 +590,8 @@ pub async fn create(
         publishing_holds_slot: false,
         needs_rebase: false,
         rebase_orphaned: false,
+        // A fresh colony has no failure behind it, unseen or otherwise.
+        unseen_failure: false,
         queued_behind,
         // Set by admission when the launch waits for the issue's holder (issue #321).
         claim_wait: false,
@@ -623,6 +625,8 @@ pub async fn create(
         parked: None,
         agent_session: None,
         pending_answer: None,
+        // A fresh colony has no suspension behind it for the boot's `restore` to name (issue #700).
+        was_suspended: false,
         last_activity_at: None,
         boot_timing: None,
         boot_cpus: None,

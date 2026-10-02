@@ -129,6 +129,8 @@ impl Mem0 {
                 "scope": note.scope,
                 "key": note.key,
                 "title": note.title,
+                "kind": note.kind,
+                "confidence": note.confidence,
                 "tags": note.tags,
                 "source": note.source,
                 "created_at": note.created_at,
@@ -238,6 +240,10 @@ fn note_from(memory: &Value) -> Option<Note> {
         key: meta["key"].as_str().unwrap_or_default().to_string(),
         title: title.to_string(),
         content: content.to_string(),
+        kind: crate::memory::parse_kind(meta["kind"].as_str())
+            .unwrap_or(crate::memory::DEFAULT_KIND)
+            .to_string(),
+        confidence: meta["confidence"].as_f64(),
         tags: meta["tags"]
             .as_array()
             .map(|t| t.iter().filter_map(|t| t.as_str().map(String::from)).collect())

@@ -1,0 +1,80 @@
+[
+  { "name": "running plain", "session": { "status": "running" }, "needs_you": false },
+  { "name": "waiting on a question", "session": { "status": "waiting_for_answer" }, "needs_you": true },
+  {
+    "name": "answered while suspended, queued for a slot (issue #667)",
+    "session": {
+      "status": "waiting_for_answer",
+      "suspended": { "at": "2026-09-26T10:00:00Z", "snapshot": null, "reason": "waiting_for_answer", "path": "session_resume" },
+      "pending_answer": { "question_id": "q1", "prompt": "Ship it?", "answered_at": "2026-09-26T10:05:00Z" }
+    },
+    "needs_you": false
+  },
+  {
+    "name": "suspended with the answer not stored yet",
+    "session": {
+      "status": "waiting_for_answer",
+      "suspended": { "at": "2026-09-26T10:00:00Z", "snapshot": null, "reason": "waiting_for_answer", "path": "session_resume" }
+    },
+    "needs_you": true
+  },
+  {
+    "name": "stalled while running",
+    "session": { "status": "running", "attention": { "reason": "stalled", "since": "2026-09-26T10:00:00Z", "nudges": 1 } },
+    "needs_you": true
+  },
+  {
+    "name": "out of nudges while running",
+    "session": { "status": "running", "attention": { "reason": "nudges_exhausted", "since": "2026-09-26T10:00:00Z", "nudges": 4 } },
+    "needs_you": true
+  },
+  {
+    "name": "model error while running — may still recover",
+    "session": { "status": "running", "attention": { "reason": "model_error", "since": "2026-09-26T10:00:00Z", "nudges": 0 } },
+    "needs_you": false
+  },
+  {
+    "name": "model error while starting — may still recover",
+    "session": { "status": "starting", "attention": { "reason": "model_error", "since": "2026-09-26T10:00:00Z", "nudges": 0 } },
+    "needs_you": false
+  },
+  {
+    "name": "model error on an idle colony — the turn has stopped",
+    "session": { "status": "idle", "attention": { "reason": "model_error", "since": "2026-09-26T10:00:00Z", "nudges": 0 } },
+    "needs_you": true
+  },
+  {
+    "name": "pr opened with a stale attention flag",
+    "session": { "status": "pr_opened", "attention": { "reason": "stalled", "since": "2026-09-26T10:00:00Z", "nudges": 1 } },
+    "needs_you": false
+  },
+  {
+    "name": "failed, not looked at yet",
+    "session": { "status": "failed", "unseen_failure": true },
+    "needs_you": true
+  },
+  {
+    "name": "failed already looked at",
+    "session": { "status": "failed", "unseen_failure": false },
+    "needs_you": false
+  },
+  {
+    "name": "failed, field absent (older mothership)",
+    "session": { "status": "failed" },
+    "needs_you": false
+  },
+  {
+    "name": "failed and unseen, with a stale attention flag",
+    "session": {
+      "status": "failed",
+      "unseen_failure": true,
+      "attention": { "reason": "stalled", "since": "2026-09-26T10:00:00Z", "nudges": 1 }
+    },
+    "needs_you": true
+  },
+  {
+    "name": "merged although unseen_failure is set",
+    "session": { "status": "merged", "unseen_failure": true },
+    "needs_you": false
+  }
+]
