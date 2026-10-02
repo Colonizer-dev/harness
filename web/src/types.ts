@@ -1289,6 +1289,12 @@ export interface OrgSettings {
    * colonies stay listed and resumable. Absent and null mean on, like every field above.
    */
   enabled?: boolean | null;
+  /**
+   * Whether this org's colonies may consult Jev at any decision point (issue #582). False turns every
+   * point off for the org's colonies — no network call — while absent, null or true follows the
+   * module settings, point by point.
+   */
+  jev?: boolean | null;
 }
 
 export interface OrgInfo {
@@ -2926,6 +2932,9 @@ export type ActivityKind =
   | "chat.issue"
   | "colonize.issue"
   | "colonize.colony"
+  | "decision.shadow"
+  | "decision.act"
+  | "decision.fallback"
   | "loop.create"
   | "loop.update"
   | "loop.pause"

@@ -784,6 +784,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         flag("jev_routing_act").unwrap_or(false),
         flag("jev_shadow_mode").unwrap_or(false),
     );
+    // The routing point's ask (issue #582): `None` only when the mode is off, so a short-circuit the
+    // decision layer handles without a network call still produces a ledger row below. The org's own
+    // switch (`org_settings.jev`) can turn every point off for its colonies.
+    let routing_ask = crate::jev::shadow_opinion(
+        jev_mode,
+        org_settings.jev != Some(false),
+        &s.issue_title,
+        &task_labels,
+        &task_signals,
+    )
+    .await;
     let route_settings = crate::routing::RoutingSettings {
         enabled: flag("route_per_task").unwrap_or(true),
         chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
@@ -794,7 +805,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         sensitive: crate::sensitivity::required_mark(sensitivity, org_settings.sensitivity.as_ref())
             > crate::sensitivity::ProviderMark::Any,
     };
-    task_signals.jev = crate::jev::shadow_opinion(jev_mode.asks(), &s.issue_title, &task_labels, &task_signals).await;
+    task_signals.jev = routing_ask.as_ref().and_then(|ask| ask.opinion.clone());
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
     let model = setting_str(&agent_choice, &agent.schema, "model");
@@ -939,6 +950,18 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // A lost routing record is a lost measurement, not a failed boot: say so and carry on.
     if let Err(e) = append_line(&app.routing_file(), &line).await {
         log.error(format!("could not save the routing decision: {e:#}")).await;
+    }
+    // The shared decision ledger (issue #582): one row per ask at any point, saying what was picked
+    // or why nothing was, and what the harness did about it. `did` is `jev` only when the routing
+    // decision's tier came from Jev's opinion, so a report can compare the two sources by outcome.
+    if let Some(ask) = &routing_ask {
+        let did = if tier_decision.source == crate::routing::Source::Jev {
+            "jev"
+        } else {
+            "rule"
+        };
+        let row = crate::decide::row(&crate::decide::ROUTING_TIER, &s, jev_mode, ask.options, &ask.result, did);
+        crate::decide::record(app, &row).await;
     }
     let gateway_token = random_token();
     let routing = providers::colony_routes(app, &gateway_token);

@@ -32,6 +32,7 @@ mod colonize;
 mod colony_secrets;
 mod commit_links;
 mod config;
+mod decide;
 mod deja;
 mod deps;
 mod diagnosis;
