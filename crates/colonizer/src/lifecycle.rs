@@ -995,7 +995,9 @@ pub async fn resume(
             x.mesh = None;
             x.local_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
-            // the boot; any held answer stays on the record, and the boot delivers it.
+            // the boot; any held answer stays on the record, and the boot delivers it. The boot is
+            // told whether it is restoring a suspension (issue #700) before the flag goes.
+            x.was_suspended = x.suspended.is_some();
             x.suspended = None;
             // A parked colony stops being parked here (issue #213): the record had its say — the
             // cold path below tears down a microVM the park kept — and the resumed colony is not

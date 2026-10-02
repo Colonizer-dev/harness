@@ -115,6 +115,9 @@ pub struct App {
     /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
     /// `gh` or a disk walk: see [`cached_answer`].
     pub answer_cache: AnswerCache,
+    /// One-shot answer tokens carried by question pushes (issue #742, answer_tokens.rs), in
+    /// memory only: a restart drops them and old notifications answer 401.
+    pub answer_tokens: crate::answer_tokens::Registry,
     /// Scoped API tokens handed to CLIs and automations (issue #508, api_tokens.rs), saved to
     /// `<config_dir>/api-tokens.json`; `host_guard` checks a Bearer against them when it is not
     /// the owner token.
@@ -177,6 +180,9 @@ pub struct App {
     pub orgs_failed_at: Mutex<Option<std::time::Instant>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// Phones paired through Settings → Add your phone (phone.rs, issue #746): the open invites and
+    /// pairings in memory, the paired phones in `<config_dir>/phones.json`.
+    pub phones: crate::phone::PhoneStore,
     /// Boot-time provider probe results, keyed on provider id + base URL
     /// (`crate::gateway::probe_cache_key`) so repointing a provider never serves the old endpoint's
     /// answer. Both reachable and unreachable answers are kept for [`crate::gateway::PROVIDER_PROBE_TTL`];
@@ -241,6 +247,7 @@ impl App {
             // ---- Module state: one line per module, in alphabetical order.
             activity: crate::activity::ActivityLog::new(),
             answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
+            answer_tokens: crate::answer_tokens::Registry::default(),
             api_tokens: crate::api_tokens::Registry::load(&cfg.config_dir),
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
@@ -264,6 +271,7 @@ impl App {
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
             orgs_refreshed: Mutex::new(None),
+            phones: crate::phone::PhoneStore::load(&cfg.config_dir),
             provider_probe_cache: Mutex::new(HashMap::new()),
             pull: Mutex::new(Default::default()),
             redteam: crate::redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),

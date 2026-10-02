@@ -11,6 +11,7 @@ import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
 import { DiskCleanupDialog, DiskCleanupRow, type DiskCleanupTab } from "./DiskCleanupLoop";
 import { diskCleanupBody, isDiskCleanup, reportSummary, toggleAction } from "./diskCleanup";
@@ -154,6 +155,8 @@ export function LoopsView({
             New loop
           </Button>
         </div>
+
+        <MergeLoopCard repos={repos} />
 
         {builtin && (
           <ul className="m-0 mt-6 list-none overflow-hidden rounded-xl border border-border p-0" aria-label="Built-in loops">
