@@ -124,6 +124,7 @@ With **All workspaces** chosen, Overview shows everything at once:
   red-team buttons ([Red team](#red-team)),
 - **Colonies**: every colony in a table,
 - a system strip about the host,
+- the fleet panel and the [fleet colony list](fleet.md#the-fleet-colony-list), when there is a fleet,
 - the [storage panel](#storage).
 
 The range picker switches between 7, 30 and 90 days. **Compare** overlays the previous period of
