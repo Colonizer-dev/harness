@@ -88,7 +88,7 @@ Exit codes:
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`update`, `open`, `login-item`, `telemetry`) read them; the client commands take --host and --token-file.";
+(`update`, `open`, `login-item`, `telemetry`, `migrate-store`) read them; the client commands take --host and --token-file.";
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -113,6 +113,18 @@ enum Command {
         /// show, on or off
         #[arg(value_enum)]
         action: TelemetryAction,
+    },
+    /// Copy this machine's colonies into another local session store (docs/session-store.md)
+    MigrateStore {
+        /// The store to copy from (default: this install's data dir, `COLONIZER_DATA_DIR`)
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// The store to copy into; it must be empty
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Count what would move and write nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print a shell completion script for this command (source it from your shell's rc)
     Completions {
@@ -1150,6 +1162,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 TelemetryAction::Off => crate::usage::cli_set(&cfg.config_dir, false),
             };
             await_local(result)
+        }
+        Command::MigrateStore { from, to, dry_run } => {
+            let cfg = match Settings::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => return await_local(Err(e)),
+            };
+            await_local(crate::store::cli_migrate(&cfg, from, to, dry_run, cli.json).await)
         }
         Command::Completions { shell } => {
             // The generator writes straight through and panics on a failed write of its own, so

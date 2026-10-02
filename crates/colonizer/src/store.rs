@@ -4,12 +4,10 @@
 //! the copy. Issue #325's first slice: same semantics, swappable store. The per-operation
 //! contract and the migration procedure are in docs/session-store.md.
 
-// Most of this module has no caller in the harness yet: this slice wires only `persist_sessions`
-// through `LocalDirStore::write_index`, and the tests drive the rest — later slices of #325.
-#![allow(dead_code)]
-
+use crate::config::Settings;
 use crate::util;
-use anyhow::Error;
+use anyhow::{Error, Result, bail};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io;
@@ -44,6 +42,7 @@ pub(crate) trait SessionStore: Send + Sync {
     /// The session's files, relative and `/`-separated (`vm/token`), sorted, recursive.
     fn list_files<'a>(&'a self, id: &'a str) -> StoreFuture<'a, Vec<String>>;
     /// Removes a session and everything in it; removing an unknown id is `Ok`.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn remove_session<'a>(&'a self, id: &'a str) -> StoreFuture<'a, ()>;
     /// Moves an unusable index aside to `sessions.json.corrupt-<unix-ts>` — a forward-moving
     /// stamp, so an aside from an earlier second is never overwritten — and returns that name;
@@ -272,11 +271,13 @@ async fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
 /// whole-object puts, prefix listings, and one read-modify-write per append (safe under the
 /// one-writer-per-session rule; a real backend adds a conditional put on the etag). What the
 /// local layout had that a flat namespace does not is tabulated in docs/session-store.md.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Default)]
 pub(crate) struct MemoryObjectStore {
     objects: std::sync::Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl MemoryObjectStore {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -392,6 +393,7 @@ impl SessionStore for MemoryObjectStore {
 
 /// The unix-seconds stamp every quarantine appends — the same shape the mothership's startup
 /// move-aside uses. One-second resolution: an aside from an earlier second is never overwritten.
+#[cfg_attr(not(test), allow(dead_code))]
 fn quarantine_stamp() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
@@ -445,7 +447,7 @@ pub(crate) async fn migrate(src: &dyn SessionStore, dst: &dyn SessionStore, dry_
 }
 
 /// What one migration moved (or would move): colonies, files, bytes — the index's bytes too.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct MigrationReport {
     pub sessions: usize,
     pub files: usize,
@@ -478,13 +480,88 @@ async fn verify_copy(src: &dyn SessionStore, dst: &dyn SessionStore, sessions: &
     Ok(())
 }
 
-/// The store speaks `io::Result`; the fs helpers speak `anyhow`. A bare `io::Error` (an injected
-/// fault, say) keeps its kind; anything wrapped in context is flattened into the message, because
-/// callers report these errors with `{e:#}` — the text they saw before this module.
+/// `colonizer migrate-store`: copy this machine's colonies into another local store, or with
+/// `--dry-run` count what would move and write nothing (docs/session-store.md, "Migration and
+/// rollback"). Runs off `Settings::from_env` — no mothership, no token. `from` defaults to the
+/// configured data dir, the store the running mothership writes.
+pub(crate) async fn cli_migrate(cfg: &Settings, from: Option<PathBuf>, to: PathBuf, dry_run: bool, json: bool) -> Result<()> {
+    let from = from.unwrap_or_else(|| cfg.data_dir.clone());
+    if same_dir(&from, &to) {
+        bail!(
+            "--from and --to name the same store ({}); there is nothing to copy",
+            to.display()
+        );
+    }
+    // A migration only ever reads its source, so what must not happen is a running mothership
+    // writing that source while it is copied — the single-writer rule. When the source is the
+    // configured data dir, a listener on the mothership's port is the tell; the port could be held
+    // by something else, so the guard only warns off the likely case. Bind it, then drop the
+    // listener at once, so nothing listens on the strength of this check.
+    if same_dir(&from, &cfg.data_dir) {
+        match tokio::net::TcpListener::bind(&cfg.bind).await {
+            Ok(listener) => drop(listener),
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse => bail!(
+                "something is listening on {}, most likely a running mothership: stop it before migrating its \
+                 store, or the colonies it is writing would be lost from the copy — then run this again.",
+                cfg.bind
+            ),
+            // Bound for some other reason (the bind is malformed, or the port is momentarily taken):
+            // not evidence of a mothership, so not this command's guard to raise.
+            Err(_) => {}
+        }
+    }
+    let src = LocalDirStore::new(from.clone());
+    let dst = LocalDirStore::new(to.clone());
+    let report = migrate(&src, &dst, dry_run).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if dry_run {
+        println!(
+            "would copy {} colonies, {} files, {} from {} to {}",
+            report.sessions,
+            report.files,
+            util::format_disk_size(report.bytes),
+            from.display(),
+            to.display()
+        );
+    } else {
+        println!(
+            "copied {} colonies, {} files, {} from {} to {}",
+            report.sessions,
+            report.files,
+            util::format_disk_size(report.bytes),
+            from.display(),
+            to.display()
+        );
+        // The copy never touched the source, so this is a switch, not a move: it is the operator's
+        // to make, and rollback is pointing the mothership back at what it wrote before.
+        println!(
+            "point the mothership at the new store with COLONIZER_DATA_DIR={} (the old store is untouched; roll back by pointing back at it)",
+            to.display()
+        );
+    }
+    Ok(())
+}
+
+/// Whether two paths name the same directory. Canonicalized when both exist, so `./data`, an
+/// absolute path and a symlink to the one directory all compare equal; the raw paths otherwise,
+/// which is a `--to` the migration is about to create (it cannot canonicalize what is not there).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// The store speaks `io::Result`; the fs helpers speak `anyhow`. The kind of a bare `io::Error` (an
+/// injected fault) is what callers and tests act on — a full disk must still read `StorageFull` —
+/// so it is carried across; the message is the whole `{e:#}` chain, so a wrapped write keeps its
+/// "could not append to …/events.jsonl: Permission denied" rather than collapsing to the os error
+/// alone, which is the text a caller reporting it with `{e:#}` means to show.
 fn into_io_error(e: Error) -> io::Error {
-    match e.downcast::<io::Error>() {
-        Ok(io) => io,
-        Err(e) => io::Error::other(format!("{e:#}")),
+    match e.downcast_ref::<io::Error>() {
+        Some(io) => io::Error::new(io.kind(), format!("{e:#}")),
+        None => io::Error::other(format!("{e:#}")),
     }
 }
 
@@ -758,6 +835,58 @@ mod tests {
         let index = source.read_index().await.unwrap().unwrap();
         assert_eq!(index, br#"[{"id":"a1b2c3d4"},{"id":"e5f60718"}]"#);
         cleanup(&source_root);
+    }
+
+    /// The settings `cli_migrate` reads: only `data_dir` and `bind` matter, and `data_dir` is left
+    /// pointing somewhere other than the test's source, so the running-mothership guard is skipped.
+    fn cli_settings(data_dir: PathBuf) -> Settings {
+        Settings {
+            bind: "127.0.0.1:0".into(),
+            data_dir,
+            config_dir: PathBuf::new(),
+            runtime_dir: PathBuf::new(),
+            assets: None,
+            msb: "msb".into(),
+            claude_bin: None,
+            gateway_bind: "127.0.0.1:0".parse().unwrap(),
+            allowed_hosts: Vec::new(),
+            fleet_peers: Vec::new(),
+            bench_pool: None,
+        }
+    }
+
+    /// `colonizer migrate-store`: `--dry-run` counts without touching the destination, the real run
+    /// copies the same colonies in, and a store cannot be its own destination.
+    #[tokio::test]
+    async fn the_migrate_store_command_dry_runs_then_copies() {
+        let source_root = temp_root("cli-src");
+        let source = LocalDirStore::new(&source_root);
+        seed(&source).await;
+        let target_root = temp_root("cli-dst");
+        let cfg = cli_settings(temp_root("cli-cfg"));
+
+        // Dry run: nothing lands in the destination, which stays a first-run store.
+        cli_migrate(&cfg, Some(source_root.clone()), target_root.clone(), true, false)
+            .await
+            .unwrap();
+        let target = LocalDirStore::new(&target_root);
+        assert_eq!(target.read_index().await.unwrap(), None);
+        assert!(target.list_sessions().await.unwrap().is_empty(), "a dry run writes nothing");
+
+        // Real run: the copy verifies itself, and the destination now holds the same colonies.
+        cli_migrate(&cfg, Some(source_root.clone()), target_root.clone(), false, false)
+            .await
+            .unwrap();
+        assert_eq!(target.read_index().await.unwrap(), source.read_index().await.unwrap());
+        assert_eq!(target.list_sessions().await.unwrap(), source.list_sessions().await.unwrap());
+
+        // A store cannot be copied into itself.
+        let err = cli_migrate(&cfg, Some(target_root.clone()), target_root.clone(), false, false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("the same store"), "{err}");
+        cleanup(&source_root);
+        cleanup(&target_root);
     }
 
     #[tokio::test]

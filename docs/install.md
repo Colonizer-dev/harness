@@ -144,6 +144,7 @@ this machine and read the same environment the mothership does:
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
+| `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
 
@@ -290,7 +291,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`) read the same variables.
+`telemetry`, `migrate-store`) read the same variables.
 
 ### The mothership
 

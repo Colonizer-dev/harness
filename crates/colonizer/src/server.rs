@@ -444,7 +444,10 @@ pub(crate) async fn serve() -> Result<()> {
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    let (mut sessions, corrupt) = load_sessions(&cfg.data_dir.join("sessions.json"))?;
+    // The one store this run reads and writes through (docs/session-store.md): built once here and
+    // threaded into startup and the `App`, so every later save and append answers by the same name.
+    let store: Arc<dyn crate::store::SessionStore> = Arc::new(crate::store::LocalDirStore::new(cfg.data_dir.clone()));
+    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &cfg.data_dir.join("sessions.json")).await?;
     for s in &mut sessions {
         if s.org.is_empty() {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
@@ -488,6 +491,7 @@ pub(crate) async fn serve() -> Result<()> {
         agent_problems,
         load_damage,
         api_token,
+        store,
     };
     let app = Arc::new(App::new(cfg, boot)?);
 

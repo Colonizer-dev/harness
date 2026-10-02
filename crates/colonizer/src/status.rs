@@ -407,7 +407,8 @@ mod tests {
         let root = temp_root();
         let path = root.join("data/sessions.json");
         std::fs::write(&path, b"this is not json").unwrap();
-        let (_, damage) = load_sessions(&path).unwrap();
+        let store = crate::store::LocalDirStore::new(root.join("data"));
+        let (_, damage) = load_sessions(&store, &path).await.unwrap();
         let mut app = test_app(&root);
         Arc::get_mut(&mut app).unwrap().load_damage = damage;
 
