@@ -98,6 +98,9 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  TsAnyLoop,
+  TsAnyReport,
+  TsAnySettings,
   LoginItemStatus,
   PushSubscriptionSummary,
   PushSubscribeBody,
@@ -508,6 +511,12 @@ export interface Api {
   runLoopNow(id: string): Promise<Session>;
   /** GET /api/loops/{id}/runs: the loop's colonies, newest first. */
   loopRuns(id: string): Promise<Session[]>;
+  /** GET /api/ts-any-loop: the built-in "TypeScript: remove any" loop. */
+  tsAnyLoop(): Promise<TsAnyLoop>;
+  /** PUT /api/ts-any-loop: replaces its settings (off, with an empty allowlist, by default). */
+  saveTsAnyLoop(settings: TsAnySettings): Promise<TsAnyLoop>;
+  /** POST /api/ts-any-loop/run: a run now, or a dry run that writes nothing. 409 while one runs. */
+  runTsAnyLoop(body: { dry_run: boolean; repo?: string }): Promise<TsAnyReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
   /** GET /api/merge-train/loop: the merge-train loop's settings, paused repositories and run history (issue #754). */
@@ -842,6 +851,9 @@ export const httpApi: Api = {
   deleteLoop: (id) => del(`/api/loops/${enc(id)}`),
   runLoopNow: (id) => post(`/api/loops/${enc(id)}/run-now`),
   loopRuns: (id) => request(`/api/loops/${enc(id)}/runs`),
+  tsAnyLoop: () => request("/api/ts-any-loop"),
+  saveTsAnyLoop: (settings) => put("/api/ts-any-loop", settings),
+  runTsAnyLoop: (body) => post("/api/ts-any-loop/run", body),
   mergeTrain: () => request("/api/merge-train"),
   mergeLoop: () => request("/api/merge-train/loop"),
   saveMergeLoop: (settings) => put("/api/merge-train/loop", settings),

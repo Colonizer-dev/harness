@@ -542,6 +542,9 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
+        // The built-in TypeScript any loop's settings, last report and trend: a watch. Changing its
+        // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
+        ["api", "ts-any-loop"] if get => Need::Bare(Scope::Read),
         // Loops (issue #627): listing loops and reading a loop's runs is a watch; creating,
         // editing, deleting or running a loop can each start a colony, so they need launch —
         // operate never reaches a loop mutation. Which loops a token may touch, and what its runs

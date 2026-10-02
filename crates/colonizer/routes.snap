@@ -209,6 +209,9 @@
 /api/tokens/self                                     GET    unauth=401    token=read             activity=-
 /api/tokens/{id}                                     DELETE unauth=401    token=owner            activity=-
 /api/touched                                         GET    unauth=401    token=owner            activity=-
+/api/ts-any-loop                                     GET    unauth=401    token=read             activity=-
+/api/ts-any-loop                                     PUT    unauth=401    token=owner            activity=loop.update
+/api/ts-any-loop/run                                 POST   unauth=401    token=owner            activity=loop.run_now
 /api/update                                          GET    unauth=401    token=owner            activity=-
 /api/update                                          PUT    unauth=401    token=owner            activity=settings.save
 /api/update/apply                                    POST   unauth=401    token=owner            activity=app.update

@@ -80,6 +80,8 @@ import type {
   SpendTokens,
   StartRedTeamRunRequest,
   TelemetryStatus,
+  TsAnyLoop,
+  TsAnyReport,
   UpdateStatus,
   UsageStatus,
   LoginItemStatus,
@@ -2302,6 +2304,60 @@ export function createMockApi(): Api {
     ended_reason: null,
     created_at: created,
   });
+
+  // The built-in TypeScript any loop: off, with an empty allowlist, and one sample report and a
+  // short history so the demo has a trend to draw.
+  const tsAnySample: TsAnyReport = {
+    id: "tsa_demo01",
+    started_at: ago(60 * 7),
+    finished_at: ago(60 * 7 - 1),
+    dry_run: true,
+    trigger: "manual",
+    blocked: false,
+    repos: [
+      {
+        repo: "acme/webshop",
+        sha: "4f2c9a1",
+        typescript: true,
+        method: "token_scan",
+        method_note: "token scan: node_modules/typescript is absent and offline installs are off",
+        ts_version: null,
+        total: 57,
+        implicit: null,
+        as_casts: 12,
+        suppressions: 3,
+        ts_files: 214,
+        forms: { annotation: 31, as: 12, array: 6, record: 5, type_argument: 3 },
+        modules: [
+          { module: "src/api", explicit: 24, files: 5 },
+          { module: "src/checkout", explicit: 17, files: 4 },
+          { module: "src/lib", explicit: 9, files: 3 },
+        ],
+        files: [{ path: "src/api/client.ts", module: "src/api", explicit: 11, implicit: null, as_casts: 2, suppressions: 0 }],
+        previous: [61, 64],
+        notes: [],
+        error: null,
+      },
+    ],
+    total: 57,
+    dispatched: [{ repo: "acme/webshop", module: "src/api", session: null, title: "TypeScript: remove any in src/api (20 of 24)", occurrences: 20, module_total: 24 }],
+    skipped: [],
+    checks: [],
+    attention: [],
+    note: null,
+  };
+  let tsAnyLoop: TsAnyLoop = {
+    name: "TypeScript: remove any",
+    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 7, minute: 43 }, batch_cap: 20, max_per_run: 3, cooldown_hours: 20, implicit: false, offline_install: true, autopilot: true },
+    next_run_at: null,
+    running: false,
+    node: true,
+    blocked: false,
+    last_report: tsAnySample,
+    history: [64, 61, 57].reverse().map((total, i) => ({ id: `tsa_h${i}`, at: ago(60 * 24 * i + 60 * 7), trigger: "schedule", total, totals: { "acme/webshop": total }, dispatched: 1, skipped: 0, flagged: 0, summary: `1 TypeScript repository: ${total} explicit any` })),
+    attention: [],
+    trend: {},
+  };
   /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
   const nextRun = (cadence: RedTeamCadence, from: Date): string => {
     const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
@@ -4067,6 +4123,22 @@ export function createMockApi(): Api {
       const l = loopList.find((x) => x.id === id);
       if (!l) throw new ApiError("no such loop", 404);
       throw new ApiError("the mock mothership does not launch colonies from loops", 409);
+    },
+    tsAnyLoop: () => later(() => clone(tsAnyLoop)),
+    saveTsAnyLoop: async (settings) => {
+      await sleep(150);
+      if (settings.cadence.every === "interval" && settings.cadence.minutes < 60) throw new ApiError("the TypeScript any loop runs at most hourly", 400);
+      const active = settings.enabled && settings.allow.length > 0;
+      tsAnyLoop = { ...tsAnyLoop, settings: clone(settings), next_run_at: active ? new Date(Date.now() + 6 * 3_600_000).toISOString() : null };
+      return clone(tsAnyLoop);
+    },
+    runTsAnyLoop: async (body) => {
+      await sleep(400);
+      const report: TsAnyReport = { ...tsAnySample, id: `tsa_${Math.random().toString(16).slice(2, 8)}`, dry_run: body.dry_run, trigger: "manual", started_at: now(), finished_at: now() };
+      // The mock never starts colonies: a real run says what it would have started, like a dry run.
+      report.dispatched = report.dispatched.map((d) => ({ ...d, session: null }));
+      if (!body.dry_run) tsAnyLoop = { ...tsAnyLoop, last_report: report };
+      return clone(report);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),

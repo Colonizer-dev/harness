@@ -10,6 +10,7 @@ import { Button, SESSION_STATUS, Spinner, Switch, cx } from "../components/ui";
 import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
+import { TsAnyLoopCard } from "./TsAnyLoop";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
 import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
@@ -181,6 +182,8 @@ export function LoopsView({
             </ul>
           )}
         </div>
+
+        <TsAnyLoopCard onOpenColony={onOpenColony} />
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
     </Page>
