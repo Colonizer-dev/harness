@@ -1825,14 +1825,15 @@ mod tests {
         assert_eq!(pin.version, "1.0.34");
         assert_eq!(pin.install.as_deref(), Some("https://x.ai/cli/install.sh"));
         // acp pins a package name that is not a required binary: carried as declared, matched to
-        // no binary by the preflight.
+        // no binary by the preflight. The gemini preset's CLI is fetched by the runner, so the
+        // fetched marker must list it and the preflight must leave it alone.
         const ACP: &str = include_str!("../../../modules/agents/acp/module.json");
         let acp: Value = serde_json::from_str(ACP).unwrap();
         let requires = parse_requires(&acp).unwrap();
         assert_eq!(requires.binaries, ["gemini"]);
         assert_eq!(requires.pins.keys().next().map(String::as_str), Some("@google/gemini-cli"));
         assert!(!requires.pins.contains_key("gemini"), "{:?}", requires.pins);
-        assert!(requires.fetched_by_runner.is_empty());
+        assert_eq!(requires.fetched_by_runner, ["gemini"]);
         // opencode fetches its own binary at runtime, so the preflight must leave it alone.
         const OPENCODE: &str = include_str!("../../../modules/agents/opencode/module.json");
         let opencode: Value = serde_json::from_str(OPENCODE).unwrap();

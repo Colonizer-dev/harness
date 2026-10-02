@@ -10,11 +10,12 @@
 // overrides of every turn); its asks park on this runner's loopback bridge until the matching
 // `answer` command. The pin lives in module.json; every flag and event field is cited in the README.
 
-import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -113,9 +114,55 @@ export function readPin() {
   return pin;
 }
 
-/** Where the codex binary is: COLONIZER_CODEX_BIN wins, else `codex` on the PATH. */
-export function codexBin(env) {
-  return String(env.COLONIZER_CODEX_BIN ?? '').trim() || 'codex';
+/** The lock row for this machine: x64 takes linux-x64, arm64 linux-arm64 — the only two Codex
+ * builds. Unlike OpenCode there is no AVX2 split, so no cpuinfo is consulted. */
+export function archPlatform(arch = process.arch) {
+  return arch === 'arm64' ? 'linux-arm64' : arch === 'x64' ? 'linux-x64' : null;
+}
+
+const execTar = (args) => new Promise((resolve, reject) => { execFile('tar', args, (error) => (error ? reject(error) : resolve())); });
+
+/** Disk cache for the fetched binary: the colony's /tmp is a small tmpfs, so the tarball and the
+ * binary live under the cache dir instead (os.tmpdir() only when HOME is unset). */
+export function defaultCacheDir(env = process.env) {
+  const base = env.XDG_CACHE_HOME || (env.HOME ? join(env.HOME, '.cache') : null);
+  return base ? join(base, 'colonizer', 'codex') : join(tmpdir(), 'colonizer-codex');
+}
+
+/** The codex binary: COLONIZER_CODEX_BIN, then `codex` on the PATH, then the pinned build for this
+ * arch — downloaded from the GitHub release assets, sha256-checked before extraction. */
+export async function resolveCodex({ env = process.env, lockText, version = readPin().version, arch = process.arch, fetchImpl = fetch, runTar = execTar, cacheDir = defaultCacheDir(env), log = () => {} } = {}) {
+  const explicit = String(env.COLONIZER_CODEX_BIN ?? '').trim(); // an all-whitespace value counts as unset, like grok's resolveGrok
+  if (explicit) return explicit;
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'codex'))) return join(dir, 'codex');
+  const platform = archPlatform(arch);
+  const row = String(lockText ?? '').split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length >= 6 && !c[0].startsWith('#')).map(([, v, p, , sha256, url]) => ({ version: v, platform: p, sha256, url })).find((r) => r.platform === platform && r.version === version);
+  if (!row) throw new Error(`no pinned Codex ${version} build for platform ${platform ?? arch}`);
+  const dest = join(cacheDir, row.version, row.platform);
+  const bin = join(dest, 'codex');
+  if (existsSync(bin)) return bin;
+  log({ level: 'info', message: `downloading Codex ${row.version} (${row.platform})` });
+  const res = await fetchImpl(row.url);
+  if (!res?.ok) throw new Error(`Codex download failed: HTTP ${res?.status ?? 'no response'}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error(`Codex ${row.version} (${row.platform}) refused: sha256 mismatch`);
+  mkdirSync(dest, { recursive: true });
+  const tgz = join(dest, 'pkg.tgz');
+  writeFileSync(tgz, bytes);
+  const member = row.url.slice(row.url.lastIndexOf('/') + 1).replace(/\.tar\.gz$/, ''); // the archive root holds one binary, named after the tarball
+  try {
+    await runTar(['-xzf', tgz, '-C', dest, member]);
+    renameSync(join(dest, member), bin);
+  } finally {
+    rmSync(tgz, { force: true }); // gone on success and on failure: it is a tmpfs otherwise
+  }
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+/** The codex.lock text next to this module; '' when it is missing (resolveCodex then reports the gap). */
+function readLock() {
+  try { return readFileSync(join(here, 'codex.lock'), 'utf8'); } catch { return ''; }
 }
 
 /** The first X.Y.Z in `codex --version`'s output ("codex-cli 0.156.1"), whatever else surrounds it. */
@@ -136,38 +183,50 @@ function versionOf(bin, spawnFn) {
   });
 }
 
-/** The checks that must pass before any codex process is spawned: fail loudly, not on a prompt. */
-export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
+/** The checks that must pass before any codex process is spawned: fail loudly, not on a prompt.
+ * Resolves the binary too (COLONIZER_CODEX_BIN, then PATH, then the pinned build fetched into the
+ * cache), returning it alongside any problem, so the caller spawns exactly what was checked. */
+export async function preflight({ env, spawnFn = spawn, pin = readPin(), lockText = readLock(), resolve = resolveCodex, log = () => {} } = {}) {
   // Either secret name is a credential, and an empty one counts as absent — the same rule the
   // error below states, and the same rule childEnv applies when it names the key for the child.
   // A model routed through the gateway needs neither: the colony token in its headers is the
   // credential (§6.5), so the check only gates direct api.openai.com runs.
   const routed = resolveModel(env.COLONIZER_MODEL, parseRoutes(env.COLONIZER_MODEL_ROUTES).routes).route;
   const credential = String(env.CODEX_API_KEY ?? '').trim() || String(env.OPENAI_API_KEY ?? '').trim();
+  const install = `npm install -g @openai/codex@${pin.version}`;
   if (!credential && !routed) {
     return {
-      code: MISSING_CREDENTIAL,
-      message:
-        'CODEX_API_KEY is unset or empty, and the colony never runs browser OAuth (codex login). Add an OpenAI API key ' +
-        'from platform.openai.com as a colony secret named CODEX_API_KEY for host api.openai.com, so the mothership ' +
-        'injects it into this colony (README, "Credential story").',
+      problem: {
+        code: MISSING_CREDENTIAL,
+        message:
+          'CODEX_API_KEY is unset or empty, and the colony never runs browser OAuth (codex login). Add an OpenAI API key ' +
+          'from platform.openai.com as a colony secret named CODEX_API_KEY for host api.openai.com, so the mothership ' +
+          'injects it into this colony (README, "Credential story").',
+      },
     };
   }
-  const bin = codexBin(env);
+  let bin;
+  try {
+    bin = await resolve({ env, lockText, version: pin.version, log });
+  } catch (error) {
+    return { problem: { code: MISSING_BINARY, message: `the codex CLI could not be fetched (${error?.message ?? error}); install the pinned version: ${install}` } };
+  }
   const text = await versionOf(bin, spawnFn);
-  const install = `npm install -g @openai/codex@${pin.version}`;
   if (text === undefined) {
-    return { code: MISSING_BINARY, message: `the codex CLI was not found at "${bin}". Install the pinned version: ${install}` };
+    return { bin, problem: { code: MISSING_BINARY, message: `the codex CLI was not found at "${bin}". Install the pinned version: ${install}` } };
   }
   const found = parseVersion(text);
   if (found !== pin.version) {
     return {
-      code: VERSION_DRIFT,
-      message: `codex --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
-        `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: ${install}`,
+      bin,
+      problem: {
+        code: VERSION_DRIFT,
+        message: `codex --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
+          `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: ${install}`,
+      },
     };
   }
-  return null;
+  return { bin };
 }
 
 /** The `-m` value for a model setting, plus the gateway route it rides when one applies. A bare
@@ -401,7 +460,7 @@ export function mergeUsage(totals, model, usage) {
  * `thread.started` names one, so the colony's record carries it before the turn ends (§2).
  * `interrupt()` SIGINTs the child (codex saves the session rollout continuously) and escalates to
  * SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, announceSession = () => {}, spawnFn = spawn, totals, mcp = [], disabledTools = [], route = null }) {
+export function startTurn({ prompt, model, threadId, messageId, env, bin, home, emit, announceSession = () => {}, spawnFn = spawn, totals, mcp = [], disabledTools = [], route = null }) {
   let child = null;
   let interrupted = false;
   // The thread id the child actually named: whatever `thread.started` carried last. Null when it
@@ -416,7 +475,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
     let completed = null;
     let failed = null;
     let failure = null;
-    child = spawnFn(codexBin(env), turnArgs({ model, threadId, mcp, disabledTools, route }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawnFn(bin, turnArgs({ model, threadId, mcp, disabledTools, route }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
     // The prompt rides stdin (`-` as the prompt argument): an issue brief can be far larger than
     // an argv slot, and a child that exits early must not turn a broken pipe into a crash.
     child.stdin.on('error', () => {});
@@ -546,7 +605,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   setStatus('idle');
   const { routes, warnings } = parseRoutes(env.COLONIZER_MODEL_ROUTES);
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
-  const problem = await preflight({ env, spawnFn });
+  const { problem, bin } = await preflight({ env, spawnFn, log: (m) => emit({ type: 'log', level: m.level, message: m.message }) });
   // The persisted colony home (§2's session_resume dir): sanitized to its rollout store before any
   // codex child runs, so a rollout written last boot is readable by this boot's `resume` and no
   // stale config is.
@@ -619,7 +678,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           if (seeded && event.type === 'turn_end') heldEnd = event;
           else emit(event);
         };
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit: emitFor, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, bin, home, emit: emitFor, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
         try {
           let result = await turn.done;
           if (seeded && result.failure && !result.threadId && !result.interrupted) {
@@ -629,7 +688,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
             // user stopped must not start over on the fresh thread.
             heldEnd = null; // dropped here: only the failed attempt's turn_end was held back
             emit({ type: 'log', level: 'warn', message: `codex has no rollout for thread ${threadId} in the persisted CODEX_HOME; starting a fresh thread: ${clip(result.failure ?? 'unknown failure', 300)}` });
-            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, home, emit, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
+            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, bin, home, emit, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
             result = await turn.done;
             // The seed is proven dead: carry only what the retry named, so a retry that also ended
             // before naming a thread hands the next turn a fresh one instead of the dead id.

@@ -131,9 +131,9 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
 `modules/agents/acp` ([#509](https://github.com/Colonizer-dev/harness/issues/509)) drives any
 [Agent Client Protocol](https://agentclientprotocol.com) agent — JSON-RPC 2.0 over stdio — and maps
 it onto the runner protocol. It is a useful example of the checklist above, and it may save you
-writing a runner at all. Its status is **planned**: the runner and its tests are in the tree, but
-nothing stages the `gemini` binary into the colony image yet and no end-to-end colony run has
-happened (module README).
+writing a runner at all. Its status is **planned**: the runner and its tests are in the tree, and
+nothing stages the `gemini` binary into the colony image, but the `gemini` preset fetches its
+pinned bundle on first boot, and no end-to-end colony run has happened (module README).
 
 - **Settings.** `agent` (`COLONIZER_ACP_AGENT`): `gemini` runs `gemini --experimental-acp` and
   `grok` runs `grok agent stdio` (both verified at the handshake; a full turn with a real key has
@@ -147,8 +147,9 @@ happened (module README).
 - **Preflight.** It refuses an unknown preset or an empty custom command (`ACP_AGENT_UNKNOWN`) and
   a preset without its credential (`ACP_CREDENTIAL_MISSING`: `GEMINI_API_KEY` for `gemini`,
   `XAI_API_KEY` for `grok`); a credential the agent refuses at the handshake is
-  `ACP_AUTH_FAILED`. It does not probe the binary first: a missing `gemini` shows up as
-  `ACP_AGENT_FAILED` when the spawn fails.
+  `ACP_AUTH_FAILED`. The `gemini` preset resolves and, when it is not on `PATH`, fetches its pinned
+  bundle here (a fetch failure is `ACP_AGENT_FAILED`); otherwise it does not probe the binary first,
+  so a missing agent shows up as `ACP_AGENT_FAILED` when the spawn fails.
 - **Questions.** `session/request_permission` becomes a `question` with 2–4 options, its `risk`
   taken from the ACP tool kind (`read`, `search`, `fetch`, `think` are `read_only`, everything
   else `workspace_write`). ACP has no free-text answer, so "Other" replies `cancelled`.

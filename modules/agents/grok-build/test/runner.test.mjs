@@ -5,14 +5,15 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 
-import { configToml, createBridge, parseRoutes, parseVersion, resolveModel, startTurn, turnArgs, untrustableWorkspace } from '../runner.mjs';
+import { configToml, createBridge, defaultCacheDir, parseRoutes, parseVersion, resolveGrok, resolveModel, startTurn, turnArgs, untrustableWorkspace } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -176,6 +177,49 @@ test('untrustableWorkspace refuses only a workspace that is the home directory o
   const nested = join(home, 'nested');
   mkdirSync(nested, { recursive: true });
   assert.equal(untrustableWorkspace(nested, home), null, 'a checkout inside $HOME keys on itself and gates');
+});
+
+test('resolveGrok prefers env and PATH, refuses a bad sha256 before decompressing, and reuses the cache', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'grok-test-resolve-'));
+  const binary = Buffer.from('#!/bin/sh\necho "grok 1.0.34"\n');
+  const gz = gzipSync(binary);
+  const { createHash } = await import('node:crypto');
+  const sha = createHash('sha256').update(gz).digest('hex');
+  const lock = (hash) => `grok  1.0.34  linux-arm64  agent  ${hash}  https://example.invalid/g.gz`;
+  let fetches = 0;
+  const fetchImpl = async () => { fetches += 1; return { ok: true, arrayBuffer: async () => gz }; };
+
+  assert.equal(await resolveGrok({ env: { COLONIZER_GROK_BIN: '/custom/grok' }, lockText: '' }), '/custom/grok');
+  mkdirSync(join(dir, 'pathdir'), { recursive: true });
+  writeFileSync(join(dir, 'pathdir', 'grok'), 'x');
+  assert.equal(await resolveGrok({ env: { PATH: join(dir, 'pathdir') }, lockText: '', arch: 'arm64' }), join(dir, 'pathdir', 'grok'));
+
+  await assert.rejects(resolveGrok({ env: {}, lockText: lock('0'.repeat(64)), arch: 'arm64', fetchImpl, cacheDir: join(dir, 'bad') }), /sha256 mismatch/);
+  assert.equal(fetches, 1, 'the bad download was never cached'); // decompression never ran on it
+  assert.ok(!existsSync(join(dir, 'bad')), 'a refused artifact leaves nothing behind');
+
+  const bin = await resolveGrok({ env: {}, lockText: lock(sha), arch: 'arm64', fetchImpl, cacheDir: join(dir, 'good'), log: () => {} });
+  assert.ok(bin.endsWith(join('1.0.34', 'linux-arm64', 'grok')));
+  assert.equal(readFileSync(bin, 'utf8'), binary.toString(), 'the cache holds the decompressed ELF');
+  assert.equal(statSync(bin).mode & 0o777, 0o755, 'the binary is executable');
+  assert.deepEqual(readdirSync(dirname(bin)), ['grok'], 'the tmp file was renamed away, not left behind');
+
+  const again = await resolveGrok({ env: {}, lockText: lock(sha), arch: 'arm64', fetchImpl, cacheDir: join(dir, 'good') });
+  assert.equal(again, bin, 'a second boot reuses the cached binary');
+  assert.equal(fetches, 2, 'reuse makes no second request');
+
+  await assert.rejects(resolveGrok({ env: {}, lockText: lock(sha), arch: 'x64', fetchImpl, cacheDir: join(dir, 'x64') }), /no pinned grok 1\.0\.34 build for platform linux-x64/);
+  assert.equal(defaultCacheDir({ XDG_CACHE_HOME: '/x' }), '/x/colonizer/grok');
+  assert.equal(defaultCacheDir({ HOME: '/h' }), '/h/.cache/colonizer/grok');
+  assert.ok(defaultCacheDir({ PATH: '/bin' }).endsWith('colonizer-grok'));
+});
+
+test('module.json declares the grok binary as runner-fetched and allows the download host', () => {
+  const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
+  assert.deepEqual(manifest.requires.fetched_by_runner, ['grok'], 'the harness must not refuse a stock-image launch for a binary the runner fetches');
+  assert.ok(manifest.egress.extra.includes('x.ai'), 'a colony on an allowlist must be able to reach the download host');
+  const lock = readFileSync(join(moduleDir, 'grok.lock'), 'utf8');
+  assert.match(lock, new RegExp(`^grok\\s+${manifest.requires.pins.grok.version}\\s+linux-x64\\s+agent\\s+[0-9a-f]{64}\\s+https://x\\.ai/`, 'm'));
 });
 
 test('turnArgs carries every nesting flag, the model, and the resume id', () => {

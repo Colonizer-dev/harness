@@ -214,9 +214,9 @@ settings → Agent module; without a pick, the mothership's agent choice applies
 | Agent | What it is | Status |
 | :--- | :--- | :--- |
 | [`claude-code`](modules/agents/claude-code) | Anthropic's Claude Code via the Claude Agent SDK, with questions to the user as choice cards | `SHIPPING` |
-| [`codex`](modules/agents/codex) | OpenAI's Codex CLI, headless: one `codex exec` process per turn, resumed into a single thread; the `codex` CLI must be present in the colony image | `SHIPPING` |
-| [`grok-build`](modules/agents/grok-build) | xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session | `PLANNED` |
-| [`acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio, one long-lived process per colony; verified against Google's Gemini CLI (`gemini --experimental-acp`) | `PLANNED` |
+| [`codex`](modules/agents/codex) | OpenAI's Codex CLI, headless: one `codex exec` process per turn, resumed into a single thread; the runner fetches the pinned CLI on first boot | `SHIPPING` |
+| [`grok-build`](modules/agents/grok-build) | xAI's Grok Build CLI, headless: one grok process per turn, resumed into a single session; the runner fetches the pinned CLI on first boot | `PLANNED` |
+| [`acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio, one long-lived process per colony; verified against Google's Gemini CLI (`gemini --experimental-acp`), whose pinned bundle the runner fetches on first boot | `PLANNED` |
 
 ---
 
@@ -238,7 +238,7 @@ can install it.
 | [`modules/agents/opencode`](modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
 | [`modules/agents/hermes`](modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
-| [`modules/agents/codex`](modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the `codex` CLI must be present in the colony image | `SHIPPING` |
+| [`modules/agents/codex`](modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
 | [`modules/agents/acp`](modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
 | [`web`](web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and a snapshot of the built-in subagents of the guest Claude Code build (`claude-code-builtins.json`) | `SHIPPING` |

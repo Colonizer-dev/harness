@@ -1,0 +1,12 @@
+# The Grok Build CLI builds colonies run, pinned so every install of the same Colonizer release gets
+# the same agent. Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+#
+# Like crates/colonizer/claude-code.lock this file is read where the agent is fetched (here the runner
+# itself, at colony boot) rather than bundled: a release carries no grok code. Upstream publishes no
+# GitHub releases — the url is the artifact the official installer (https://x.ai/cli/install.sh) pulls,
+# a single gzip'd static ELF rather than a tarball. The runner downloads the row for its architecture
+# from x.ai into a scratch dir, checks the sha256 of the compressed download, and only then
+# decompresses it (node:zlib gunzipSync) into the cache. There is no baseline build, so the two guest
+# architectures map one to one.
+grok  1.0.34  linux-x64    agent  088b1fe60e0fdcb7714fb6757581ccd20c596a1e943d393123693089cddfa64a  https://x.ai/cli/grok-1.0.34-linux-x86_64.gz
+grok  1.0.34  linux-arm64  agent  7508b738fd83c19c7d6ef63715dd544d9b28558ecb8b1c8d5781ce7173d2cfce  https://x.ai/cli/grok-1.0.34-linux-aarch64.gz
