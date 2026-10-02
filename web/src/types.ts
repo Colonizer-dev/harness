@@ -1867,10 +1867,13 @@ export interface Loop {
   repo: string;
   prompt: string;
   cadence: LoopCadence;
-  /** What a run starts: a colony from `prompt` (the default), or the repository's architecture map. */
-  kind?: "colony" | "map";
+  /** What a run starts: a colony from `prompt` (the default), the repository's architecture map, or —
+   * for the one built-in loop, id `disk-cleanup` — the mothership's own disk cleanup. */
+  kind?: LoopKind;
   /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
   pending?: string[];
+  /** The built-in disk-cleanup loop only: its settings, run history and attention item. */
+  disk_cleanup?: DiskCleanupState;
   tz_offset_minutes: number;
   model: string | null;
   subagent_model: string | null;
@@ -1886,6 +1889,61 @@ export interface Loop {
   last_note: string | null;
   ended_reason: string | null;
   created_at: string;
+}
+
+export type LoopKind = "colony" | "map" | "disk_cleanup";
+
+/** What the built-in disk-cleanup loop may clean, each with its own switch. */
+export type DiskCleanupCategory = "build_output" | "worktrees" | "microvms" | "archives" | "host_paths";
+
+/** The disk-cleanup loop's settings (PUT /api/loops/disk-cleanup's `disk_cleanup`). */
+export interface DiskCleanupSettings {
+  /** Run early when free space is under this percent of the disk; 0 is off. */
+  trigger_free_pct: number;
+  build_output: boolean;
+  stopped_after_days: number;
+  worktrees: boolean;
+  microvms: boolean;
+  archives: boolean;
+  archive_keep_days: number;
+  archive_max_gb: number | null;
+  /** Owner only, off by default: Cargo target/ dirs under `extra_paths`. */
+  host_paths: boolean;
+  extra_paths: string[];
+  host_min_age_days: number;
+}
+
+export interface DiskCleanupCategoryReport {
+  category: DiskCleanupCategory;
+  enabled: boolean;
+  items: { path: string; bytes: number | null; colony?: string }[];
+  count: number;
+  /** Freed, or in a dry run, would be freed. */
+  bytes: number;
+  held?: { path: string; reason: string }[];
+  failed?: string[];
+  note?: string;
+}
+
+/** POST /api/loops/disk-cleanup/run-now[?dry_run=1], and each entry of the loop's history. */
+export interface DiskCleanupReport {
+  at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "low_disk" | "manual" | string;
+  bytes: number;
+  categories: DiskCleanupCategoryReport[];
+  free_bytes_after?: number;
+  used_pct_after?: number;
+  attention?: string;
+}
+
+export interface DiskCleanupState {
+  settings: DiskCleanupSettings;
+  /** Real runs, newest first. */
+  history: DiskCleanupReport[];
+  attention: string | null;
+  /** When a dry run was last shown; null until the owner has seen one. */
+  previewed_at: string | null;
 }
 
 // The built-in "Dependencies & supply chain" loop (GET/PUT /api/supply-chain-loop,
@@ -1997,8 +2055,9 @@ export interface NewLoop {
   repo: string;
   prompt: string;
   cadence: LoopCadence;
-  /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. */
-  kind?: "colony" | "map";
+  /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. `disk_cleanup`
+   * only on the built-in loop's own PUT. */
+  kind?: LoopKind;
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;
@@ -2006,6 +2065,8 @@ export interface NewLoop {
   max_runs?: number | null;
   end_at?: string | null;
   enabled?: boolean;
+  /** The built-in disk-cleanup loop only; left out, its settings are kept. */
+  disk_cleanup?: DiskCleanupSettings;
 }
 
 // The built-in "TypeScript: remove any" loop (GET/PUT /api/ts-any-loop,

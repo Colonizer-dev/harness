@@ -35,6 +35,7 @@ mod config;
 mod deja;
 mod deps;
 mod diagnosis;
+mod disk_cleanup;
 mod docs_loop;
 mod egress;
 mod epic;

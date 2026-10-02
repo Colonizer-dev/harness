@@ -541,10 +541,18 @@ enum LoopCommand {
         disabled: bool,
     },
     /// Start the loop's next run now, whatever its schedule; while a run is live this is a conflict (exit 5)
-    Run { id: String },
-    /// Pause a loop: its settings are kept, and nothing runs until `loop start`
+    Run {
+        id: String,
+        /// The built-in disk-cleanup loop only: list what a run would remove, with sizes, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Pause a loop: its settings are kept, and nothing runs until `loop start` (alias: disable)
+    #[command(alias = "disable")]
     Stop { id: String },
-    /// Enable a paused or ended loop again; the next run is booked from its cadence
+    /// Enable a paused or ended loop again; the next run is booked from its cadence (alias: enable).
+    /// `colonizer loop enable disk-cleanup` switches on the built-in disk cleanup
+    #[command(alias = "enable")]
     Start { id: String },
     /// Delete a loop. Its past colonies stay.
     Delete { id: String },
@@ -1840,11 +1848,17 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                         .as_str()
                         .map(|iso| local_stamp(iso, offset))
                         .unwrap_or_else(|| "—".into());
+                    // The built-in disk cleanup runs on this host, not on a repository.
+                    let scope = match l["repo"].as_str() {
+                        Some("") if l["kind"] == json!("disk_cleanup") => "(this host)",
+                        Some(repo) => repo,
+                        None => "?",
+                    };
                     println!(
                         "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {}",
                         l["id"].as_str().unwrap_or("?"),
                         util::truncate(l["name"].as_str().unwrap_or("?"), 26),
-                        l["repo"].as_str().unwrap_or("?"),
+                        scope,
                         describe_cadence(&l["cadence"], offset),
                         state,
                         next
@@ -1920,13 +1934,20 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 }
                 Ok(EXIT_OK)
             }
-            LoopCommand::Run { id } => {
+            LoopCommand::Run { id, dry_run } => {
+                let path = if dry_run {
+                    format!("/api/loops/{id}/run-now?dry_run=1")
+                } else {
+                    format!("/api/loops/{id}/run-now")
+                };
                 let session = machine
-                    .post(&format!("/api/loops/{id}/run-now"), None)
+                    .post(&path, None)
                     .await?
                     .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
                 if json {
                     println!("{}", pretty(&session)?);
+                } else if session["categories"].is_array() {
+                    print_cleanup_report(&session);
                 } else {
                     println!(
                         "colony {} started for loop {id} ({})",
@@ -1951,6 +1972,42 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
         }
     })
     .await
+}
+
+/// A disk-cleanup run (or dry run) for a person: one line per category with what went or would
+/// go, then the paths, then anything held back and why.
+fn print_cleanup_report(report: &Value) {
+    let dry = report["dry_run"] == json!(true);
+    let size = |v: &Value| v.as_u64().map(util::format_disk_size).unwrap_or_else(|| "?".into());
+    println!("{} {}", if dry { "would free" } else { "freed" }, size(&report["bytes"]));
+    for c in report["categories"].as_array().cloned().unwrap_or_default() {
+        let name = c["category"].as_str().unwrap_or("?").replace('_', " ");
+        if c["enabled"] != json!(true) {
+            println!("  {name}: off");
+            continue;
+        }
+        println!(
+            "  {name}: {} item(s), {}",
+            c["count"].as_u64().unwrap_or(0),
+            size(&c["bytes"])
+        );
+        for item in c["items"].as_array().cloned().unwrap_or_default() {
+            println!("    {}  {}", size(&item["bytes"]), item["path"].as_str().unwrap_or("?"));
+        }
+        for held in c["held"].as_array().cloned().unwrap_or_default() {
+            println!(
+                "    kept  {} ({})",
+                held["path"].as_str().unwrap_or("?"),
+                held["reason"].as_str().unwrap_or("?")
+            );
+        }
+        if let Some(note) = c["note"].as_str() {
+            println!("    note: {note}");
+        }
+    }
+    if let Some(attention) = report["attention"].as_str() {
+        println!("{attention}");
+    }
 }
 
 const MERGE_LOOP: &str = "/api/merge-train/loop";
