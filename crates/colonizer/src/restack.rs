@@ -123,13 +123,19 @@ pub async fn rebase_onto(git: &mut impl GitRun, branch: &str, fork: &str, dest: 
         .parse::<usize>()
         .context("could not count the branch's own commits")?;
     if git
-        .run_git(vec![
-            "rebase".to_string(),
-            "--onto".to_string(),
-            format!("origin/{dest}"),
-            fork.to_string(),
-            branch.to_string(),
-        ])
+        .run_git(
+            crate::github::HOST_GIT_IDENTITY
+                .iter()
+                .map(|s| s.to_string())
+                .chain([
+                    "rebase".to_string(),
+                    "--onto".to_string(),
+                    format!("origin/{dest}"),
+                    fork.to_string(),
+                    branch.to_string(),
+                ])
+                .collect(),
+        )
         .await
         .is_err()
     {

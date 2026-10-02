@@ -414,7 +414,7 @@ async fn refresh_base(app: &Shared, repo: &str, bare: &std::path::Path, base: &s
     let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
     let fetched = crate::util::exec_within(
         BASE_REFRESH_LIMIT,
-        app.git(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
+        app.git_authed(bare).args(["fetch", "--quiet", "origin", refspec.as_str()]),
     )
     .await;
     if let Err(e) = fetched {
@@ -598,13 +598,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     } else {
         let lock = app.repo_lock(&s.repo).await;
         let _guard = lock.lock().await;
-        github::with_boot_retry(
+        let synced = github::with_boot_retry(
             &format!("syncing the local clone of {}", s.repo),
             Some(&log),
             boot_started_at,
             || github::sync_repo(app, &s.repo, &bare, &log),
         )
-        .await?;
+        .await;
+        if let Err(e) = synced {
+            return Err(github::access_error(app, &s.repo, e).await);
+        }
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
         github::with_boot_retry(
