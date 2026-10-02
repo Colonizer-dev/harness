@@ -988,6 +988,16 @@ export interface ModelProvider extends ProviderLimits {
   pricing?: ProviderPricing | null;
   /** null = no probe: the first sign of an exhausted plan stays the colonies failing over. */
   quota?: ProviderQuotaProbe | null;
+  /**
+   * Whether the operator vetted this connection to carry restricted-sensitivity work — secrets,
+   * `.env` files, infra config (issue #472). Defaults to false: a connection is not trusted with a
+   * colony's secrets just because it is configured.
+   */
+  trusted: boolean;
+  /** Canonical model id → the name sent on the wire (issue #295). Empty serves any canonical as-is. */
+  model_map?: Record<string, string>;
+  /** Claude Code tool names the gateway strips from every request through this connection (issue #295). */
+  disabled_tools?: string[];
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -1086,6 +1096,12 @@ export interface SaveProviderRequest {
   queue_timeout_secs?: number | null;
   context_tokens?: number | null;
   fallback_model?: string | null;
+  /** Whether the connection may carry restricted-sensitivity work (issue #472). Omitted keeps the saved mark. */
+  trusted?: boolean;
+  /** Canonical model id → wire name (issue #295); omitted keeps the saved map, `{}` clears it. */
+  model_map?: Record<string, string>;
+  /** Claude Code tools stripped through this connection (issue #295); omitted keeps the list, `[]` clears it. */
+  disabled_tools?: string[];
 }
 
 /** GET /api/providers/{id}/health */

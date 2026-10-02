@@ -37,10 +37,9 @@ is sent verbatim, so a provider that only knows its own branding can be addresse
 name every setting uses. A non-empty `model_map` is authoritative: the connection serves only the
 canonicals it lists, and boot refuses a model that is not among them.
 
-The cockpit's provider form does not show `model_map` or `disabled_tools` yet. Set them with
-`PUT /api/providers/{id}` or by editing `providers.json`; saving the provider from the cockpit keeps
-whatever is there, because a `PUT` that leaves a field out keeps its saved value (an explicit empty
-value clears it).
+Settings → Providers has a **Model map** editor for this (canonical → wire rows), in the form's
+Connection policy group; `PUT /api/providers/{id}` and `providers.json` take it too. A `PUT` that
+leaves a field out keeps its saved value; an explicit empty value clears it.
 
 ## Taking tools away: two levels
 
@@ -89,9 +88,10 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
 
 ## Plans, quotas and trust
 
-A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers.
-`trusted`, like `model_map` and `disabled_tools`, is not in the cockpit yet: the API accepts it
-(`PUT /api/providers/{id}`) and `providers.json` holds it, but `GET /api/providers` does not return it.
+A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers,
+as are `trusted`, `model_map` and `disabled_tools` (the form's Connection policy group); the API
+(`PUT /api/providers/{id}`) and `providers.json` hold them all, and `GET /api/providers` returns
+them so the form prefills.
 
 - **Which colonies may use it.** A colony's gateway token opens only the connections its model settings
   route to, and only for the models they name: both are recorded at boot, before the token is written,
