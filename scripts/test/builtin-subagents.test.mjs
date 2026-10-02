@@ -12,12 +12,12 @@ const snapshot = JSON.parse(readFileSync(SNAPSHOT, 'utf8'));
 
 test('the built-in snapshot is of the Claude Code build the lock pins', () => {
   const rows = lockRows(LOCK).filter((row) => row.kind === 'agent');
-  assert.ok(rows.length, 'vendor/claude-code.lock pins no Claude Code build');
+  assert.ok(rows.length, 'crates/colonizer/claude-code.lock pins no Claude Code build');
   for (const row of rows) {
     assert.equal(
       snapshot.version,
       row.version,
-      `vendor/claude-code.lock pins ${row.version} (${row.platform}) but vendor/claude-code-builtins.json is from ${snapshot.version}: ` +
+      `crates/colonizer/claude-code.lock pins ${row.version} (${row.platform}) but vendor/claude-code-builtins.json is from ${snapshot.version}: ` +
         `re-extract it with \`${REFRESH}\` and bring modules/agents/claude-code/subagents.mjs in step`,
     );
   }
@@ -48,7 +48,7 @@ test('a built-in that denies more, or reads differently, is stale and shows the 
 test('a file the lock does not pin is refused', () => {
   const run = spawnSync(process.execPath, [join(ROOT, 'scripts/builtin-subagents.mjs'), fileURLToPath(import.meta.url)], { encoding: 'utf8' });
   assert.equal(run.status, 1);
-  assert.match(run.stderr, /builtin-subagents\.test\.mjs \(sha256 [0-9a-f]{64}\) is not a build vendor\/claude-code\.lock pins/);
+  assert.match(run.stderr, /builtin-subagents\.test\.mjs \(sha256 [0-9a-f]{64}\) is not a build crates\/colonizer\/claude-code\.lock pins/);
 });
 
 // Two chunks shaped like 2.1.280's: the agent objects import their tool names (one renamed on each

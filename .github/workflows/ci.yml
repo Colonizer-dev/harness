@@ -65,6 +65,17 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      # The crates the release publishes (release.yml `crates`), in the order it publishes them, built
+      # from their own packaged source the way crates.io gets it. A workspace build reads the whole
+      # repository, so an include_str! of a file outside the crate passes every step above and fails
+      # only `cargo publish` on the tag: v0.1.10 and v0.1.11 never reached crates.io that way. The
+      # verify build shares target/ with the test build, so only the crates themselves recompile.
+      - name: Package
+        run: |
+          for crate in colonizer-agentd colonizer-harness; do
+            cargo publish --dry-run --locked -p "$crate"
+          done
+
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

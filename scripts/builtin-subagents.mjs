@@ -3,7 +3,7 @@
 // against the copies modules/agents/claude-code/subagents.mjs redefines them with (to set their effort).
 // A Claude Code bump can rewrite a built-in under those copies, and a deny list the built-in grew would
 // leave our Explore wider than the agent it replaces. vendor/claude-code-builtins.json is the snapshot
-// for the build vendor/claude-code.lock pins; scripts/test/builtin-subagents.test.mjs fails CI while the
+// for the build crates/colonizer/claude-code.lock pins; scripts/test/builtin-subagents.test.mjs fails CI while the
 // lock, the snapshot and subagents.mjs disagree.
 //
 //   node scripts/builtin-subagents.mjs <claude>                    compare, and print the result as Markdown (exits 1 when stale)
@@ -29,7 +29,7 @@ import vm from 'node:vm';
 import { subagentDefinitions } from '../modules/agents/claude-code/subagents.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const LOCK = join(root, 'vendor/claude-code.lock');
+export const LOCK = join(root, 'crates/colonizer/claude-code.lock');
 export const SNAPSHOT = join(root, 'vendor/claude-code-builtins.json');
 const SUBAGENTS = 'modules/agents/claude-code/subagents.mjs';
 export const REFRESH = 'sh scripts/fetch-agent-binary.sh && node scripts/builtin-subagents.mjs --write dist/bin/claude-guest';
@@ -230,7 +230,7 @@ function main() {
     const buf = readFileSync(binary);
     const sha = createHash('sha256').update(buf).digest('hex');
     const row = lockRows(LOCK).find((r) => r.kind === 'agent' && r.sha === sha);
-    if (!row) throw new Error(`${binary} (sha256 ${sha}) is not a build vendor/claude-code.lock pins; fetch one with sh scripts/fetch-agent-binary.sh`);
+    if (!row) throw new Error(`${binary} (sha256 ${sha}) is not a build crates/colonizer/claude-code.lock pins; fetch one with sh scripts/fetch-agent-binary.sh`);
     const stubbed = [];
     const builtins = extractBuiltins(readBunModules(buf), stubbed);
     const differences = compare(builtins, ours());

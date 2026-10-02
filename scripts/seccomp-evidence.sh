@@ -2,7 +2,7 @@
 # Runs CMD under strace and reports which syscalls colonizer-agentd's runner seccomp profile would
 # have rejected outright: the no-regression evidence for the in-guest runner hardening
 # (crates/colonizer-agentd/src/harden.rs), meant for a test colony terminal on every
-# vendor/claude-code.lock, images.lock or runner change. Exits 1 when such a call was made, so a
+# crates/colonizer/claude-code.lock, images.lock or runner change. Exits 1 when such a call was made, so a
 # lock bump that starts probing io_uring again cannot land unnoticed. The arg-gated syscalls
 # (clone/prctl/ioctl) and the clone3 ENOSYS override are excluded: every multithreaded process
 # makes those, and the profile lets them through unless the dangerous argument is present.

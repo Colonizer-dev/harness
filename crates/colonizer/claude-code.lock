@@ -7,6 +7,10 @@
 # scripts/install-release.sh for a prebuilt one), and the lock itself is copied into dist/ so both
 # read the same pin.
 #
+# Compiled into the mothership (crates/colonizer/src/modules.rs), so it lives in this crate and is
+# published with it, like images.lock: `cargo publish` packages only what is inside the crate, and an
+# include_str! of a file outside it builds from the repository but not from the crates.io source package.
+#
 # The checksums are the values from Anthropic's own release manifest for the version, not sums taken
 # offline once. scripts/update-runtime-pins.mjs checks Anthropic's stable channel daily and proposes
 # a new version by pull request; a human merges it. That is what bounds staleness: a release stays

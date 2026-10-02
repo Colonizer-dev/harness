@@ -23,7 +23,7 @@ boundary crossing — but it is still recorded here.
   is honoured, whether a bare placeholder 401s at `api.anthropic.com`) get the
   manual procedure at the end of this page and are signed off per release.
 - **On a pin move, re-run the affected vectors.** A change to
-  `crates/colonizer/images.lock`, `vendor/vendor.lock`, `vendor/claude-code.lock`,
+  `crates/colonizer/images.lock`, `vendor/vendor.lock`, `crates/colonizer/claude-code.lock`,
   `vendor/node.lock`, `boot.rs`'s `BOOT_SCRIPT`, `mesh.rs`, `gateway.rs`,
   `egress.rs` or `harden.rs` invalidates the sign-off for the vectors it touches.
 - **Every `blocked` names its mechanism** (file + config) so a later code change
@@ -112,7 +112,7 @@ anything allowlists or pins it.
 
 *Result / mechanism.* Trusted inputs are pinned by digest at install time —
 `crates/colonizer/images.lock` (image, `:1-14`), `vendor/vendor.lock` (microsandbox
-/ headscale / tailscale), `vendor/claude-code.lock`, `vendor/node.lock` — and
+/ headscale / tailscale), `crates/colonizer/claude-code.lock`, `vendor/node.lock` — and
 `PATH` puts the pinned binaries first (`boot.sh`, `export PATH=/opt/node/bin:...`).
 Pre-exec validation of the agent binary is ELF-magic only
 (`crates/colonizer/src/config.rs:119-131`); there is no per-exec digest check.

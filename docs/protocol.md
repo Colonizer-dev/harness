@@ -992,7 +992,7 @@ open it, closing the issue once a run finds nothing to change. It never merges.
 **Keeping the runtime pins current.** The same model covers the two runtime locks:
 `crates/colonizer/images.lock`, which pins each preset's colony image by multi-arch OCI index digest:
 one pin serves both linux/amd64 and linux/arm64 colonies, and the lock is compiled into the mothership,
-and `vendor/claude-code.lock`, which pins the Linux Claude Code build colonies run by version and sha256.
+and `crates/colonizer/claude-code.lock`, which pins the Linux Claude Code build colonies run by version and sha256.
 `scripts/update-runtime-pins.mjs` checks both upstreams, the registry's manifest API for the images and
 Anthropic's `stable` channel for Claude Code, and stages the newly pinned Claude Code build through
 `scripts/fetch-agent-binary.sh`, so an update that fails the checksum check a real install does never
