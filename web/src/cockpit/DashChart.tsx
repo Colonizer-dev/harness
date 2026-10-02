@@ -844,6 +844,11 @@ export function ColonyRow({
         <span className="truncate" style={{ color: TONE_COLOR[meta.tone] }} title={parkLine ?? undefined}>
           {meta.label}
         </span>
+        {session.placement && (
+          <span className="max-w-full truncate text-[11.5px] leading-tight text-faint" title={session.placement}>
+            {session.placement}
+          </span>
+        )}
         {parkLine != null && <span className="text-[11.5px] leading-tight text-faint">{parkLine}</span>}
         {parkLine != null && onResume && (
           <button

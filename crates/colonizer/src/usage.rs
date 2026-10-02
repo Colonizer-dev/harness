@@ -900,6 +900,7 @@ mod tests {
             stack_fork: None,
             origin: None,
             launched_by_token: None,
+            placement: None,
             worktree: "/home/me/.local/share/colonizer/worktrees/acme-corp/secret-project/issue-42-a1b2c3d4".into(),
             git_admin_dir: Some("/home/me/.local/share/colonizer/repos/git-admin".into()),
             sandbox: "colonizer-a1b2c3d4".into(),

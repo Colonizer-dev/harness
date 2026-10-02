@@ -19,9 +19,35 @@ This page is the overview. The routes are documented in
 
 Joining a fleet today means pairing and the fleet view. It does **not** enroll the joining machine
 into the owner's embedded headscale mesh, and it does not let colonies migrate between machines.
-Cross-machine enrollment is a follow-up tied to the outposts design gate,
+Placement ([below](#placement)) is decided and shown, but a colony still runs on the member that
+launched it. Cross-machine enrollment is a follow-up tied to the outposts design gate,
 [#298](https://github.com/Colonizer-dev/harness/issues/298) — see
 [outposts.md](outposts.md) for the control/execution seam it would slot into.
+
+## Placement
+
+Where a colony would run is decided at launch, and why is recorded on the colony as `placement`
+(shown under the status on its cockpit card). A member can take a colony when it is online, can boot
+the colony microVM image — Linux with a working `/dev/kvm`, macOS on Apple Silicon — and has a free
+slot. A Linux member publishes its `/dev/kvm` verdict as `host.kvm_ok` in the reduced `/api/status`
+allowlist, and `GET /api/hosts` rows carry it as `kvm` (omitted where there is nothing to check).
+
+**Unpinned**, the launching member wins when it is eligible — the worktree and the publish stay
+where the colony runs — and otherwise placement names, in the reason, the reachable peer with the
+most free slots. Nothing launches on another member yet, so the colony still runs or queues here,
+and the reason says so.
+
+**Pinned**, `POST /api/sessions` takes a `host` — a member's id or name — and never falls back.
+Pinning to this member is today's behaviour; a pin to another member is a **409** that names why
+that host cannot take the colony (it is unreachable, full, or cannot boot the image), or says
+cross-member launch is not built yet ([#298](https://github.com/Colonizer-dev/harness/issues/298));
+an unknown host is a **400**.
+
+**Claims are fleet-wide.** The GitHub claim marker is the same on every member, so two members never
+run the same issue: launching an issue another host holds is refused, naming the holder, and a member
+never releases another member's claim. When that holder is a member the fleet currently reads as
+unreachable, the **409** says so — its colony is not re-run elsewhere — and the way past is to
+remove the member or pass `allow_duplicate`.
 
 ## Roles
 
@@ -218,6 +244,8 @@ None of this admits anything today, because pairing does not enroll a member's m
 owner's mesh ([What this is not (yet)](#what-this-is-not-yet)): no member node ever presents itself
 as the `fleet` user. The plumbing takes effect when cross-machine enrollment lands — the follow-up
 tied to the outposts design gate, [#298](https://github.com/Colonizer-dev/harness/issues/298).
+Cross-member launch ([Placement](#placement)) waits on the same gate: a colony may name a peer the
+fleet has room on, but it still runs on the member that launched it.
 
 ## The read-only fallback
 
