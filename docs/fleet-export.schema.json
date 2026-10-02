@@ -147,7 +147,15 @@
           "description": "The boot timings as exported; open."
         },
         "created_at": { "type": ["string", "null"], "format": "date-time" },
-        "updated_at": { "type": ["string", "null"], "format": "date-time" }
+        "updated_at": { "type": ["string", "null"], "format": "date-time" },
+        "repo_identity": {
+          "type": ["object", "null"],
+          "description": "The repository's fleet identity (#763), read from the exporting machine's mirror: its root commit SHA(s), sorted, and its origin URL normalised to host/path (scheme, userinfo, port, trailing / and .git removed; host lowercased; whole URL lowercased on github.com). Absent when there was no mirror, and in bundles from before #763.",
+          "properties": {
+            "roots": { "type": "array", "items": { "type": "string", "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$" } },
+            "url": { "type": ["string", "null"] }
+          }
+        }
       },
       "required": ["id", "origin_host", "original_id"]
     },

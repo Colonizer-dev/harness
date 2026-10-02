@@ -401,6 +401,8 @@ pub async fn run(app: Shared) {
     loop {
         tick.tick().await;
         let report = sweep_once(&app, &ReclaimConfig::load(&app).await).await;
+        // The owner's ingested fleet history (#762) ages out on the same tick, on its own window.
+        crate::fleet_history::prune_tick(&app).await;
         if !report.is_empty() {
             eprintln!(
                 "reclaim: reclaimed {}, failed {}, orphans removed {}, held {}",

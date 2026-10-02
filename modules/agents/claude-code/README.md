@@ -110,10 +110,18 @@ Claude Code sends its full request shape to routed providers, including `thinkin
 
 ## Shared memory
 
-With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an in-process MCP server
-(`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
-emits a `memory_proposal` event for review on the mothership (with review off, a repo note is stored
-straight away; org and global notes always wait for review). Nothing is written inside the colony.
+With `COLONIZER_MEMORY_DIR` set, the agent gets four auto-allowed tools from an in-process MCP server
+(`colonizer_memory`), and the system prompt gets one fixed line saying they exist. No note text is
+ever put into the prompt (issue #766):
+
+- `memory_briefing(topic?)`: a short, sourced summary from each scope's mounted `notes.json`, one entry
+  per line with its scope, kind and source (colony, repository, commit, reviewed or not).
+- `memory_changes(since?)`: entries added, and entries revoked or removed, since the colony last asked.
+- `memory_search(query)`: snippets from `{repo,org,global}/notes/*.md`.
+- `memory_propose(scope, title, content, kind?, confidence?, tags?)`: emits a `memory_proposal` event
+  for review on the mothership (with review off, a repo note is stored straight away; org notes always
+  wait for review, and a global note is a candidate until colonies in two repositories propose it at
+  confidence 0.8 or more). Nothing is written inside the colony.
 
 ## Exec policy
 

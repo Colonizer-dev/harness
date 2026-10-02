@@ -18,8 +18,9 @@ import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import type { CommitLink, FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
 import { bootMedians, bootView } from "./bootTiming";
+import { CommitLinks } from "./CommitLinks";
 import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -353,6 +354,25 @@ export function Inspector({
       active = false;
     };
   }, [api, session?.id]);
+
+  // The colony's commits (issue #765), a separate call like the findings: none recorded, or an
+  // error, reads as an empty list.
+  const [commits, setCommits] = useState<CommitLink[]>([]);
+  useEffect(() => {
+    if (!session) return;
+    let active = true;
+    api.sessionCommits(session.id).then(
+      (body) => {
+        if (active) setCommits(body.commits);
+      },
+      () => {
+        if (active) setCommits([]);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, session?.id, session?.updated_at]);
 
   // Only rows the mothership actually reported: an absent fact is left out rather than guessed at.
   const connections: { label: string; dot: string; section: SectionId }[] = [];
@@ -703,6 +723,10 @@ export function Inspector({
                   </div>
                 </Section>
               )}
+
+              <Section title="COMMITS">
+                <CommitLinks commits={commits} />
+              </Section>
 
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">

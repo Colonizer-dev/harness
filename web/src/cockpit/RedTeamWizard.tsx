@@ -7,8 +7,8 @@ import { useModels } from "../useModels";
 import { ModelPicker } from "../components/ModelPicker";
 import { Button, Spinner, cx } from "../components/ui";
 import { formatCost } from "../spend";
-import type { HunterProbe, RedTeamRun, Repo, Session, StartRedTeamRunRequest } from "../types";
-import { WEEKDAYS, estimateCost, toUtcCadence, type ScheduleChoice } from "./redTeamPlan";
+import type { HunterProbe, RedTeamPreset, RedTeamRun, Repo, Session, StartRedTeamRunRequest } from "../types";
+import { PRESETS, WEEKDAYS, estimateCost, toUtcCadence, type ScheduleChoice } from "./redTeamPlan";
 import { IconAnt } from "../components/icons";
 import { HackerIcon } from "./HackerIcon";
 import strixLogo from "../assets/hunters/strix.png";
@@ -97,6 +97,7 @@ export function WizardBody({
   onOpenHistory,
   onStart,
   initialStep = 0,
+  initialPreset = "general",
 }: {
   org: string;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
@@ -107,6 +108,8 @@ export function WizardBody({
   onOpenHistory: (org: string) => void;
   /** Tests pin a step through it, since static markup cannot click. */
   initialStep?: Step;
+  /** Tests pin the preset the same way. */
+  initialPreset?: RedTeamPreset;
 }) {
   const api = useApi();
   const toast = useToast();
@@ -119,6 +122,7 @@ export function WizardBody({
   const [subagentModel, setSubagentModel] = useState("");
   const [swarm, setSwarm] = useState(3);
   const [autofix, setAutofix] = useState(false);
+  const [preset, setPreset] = useState<RedTeamPreset>(initialPreset);
   const [schedule, setSchedule] = useState<ScheduleChoice>({ every: "once" });
   const [busy, setBusy] = useState(false);
   // Read once when the repositories arrive: a poll's fresh session list must not reset the picks.
@@ -157,7 +161,7 @@ export function WizardBody({
     setBusy(true);
     try {
       const cadence = toUtcCadence(schedule);
-      const shared = { hunter: "swarm", model: model || null, subagent_model: subagentModel || null, swarm_size: swarm, autofix };
+      const shared = { hunter: "swarm", preset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarm, autofix };
       if (cadence) {
         await api.createRedTeamSchedule({ org, repos: picked, cadence, ...shared });
         toast(`Red team scheduled for ${picked.length} ${picked.length === 1 ? "repository" : "repositories"} in ${org}`);
@@ -257,6 +261,26 @@ export function WizardBody({
                 })}
               </div>
             </Field>
+            <Field label="Preset" hint="What the hunters look for. Security adds a pre-scan before launch and an operator checklist to the report.">
+              <div role="radiogroup" aria-label="Preset" className="grid gap-2 sm:grid-cols-2">
+                {PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={preset === p.id}
+                    onClick={() => setPreset(p.id)}
+                    className={cx(
+                      "flex cursor-pointer flex-col gap-1 rounded-xl border p-3 text-left",
+                      preset === p.id ? "border-accent bg-accent-soft" : "border-border bg-panel-2 hover:border-text/30",
+                    )}
+                  >
+                    <span className="text-[13.5px] font-semibold">{p.name}</span>
+                    <span className="text-[12px] leading-snug text-muted">{p.blurb}</span>
+                  </button>
+                ))}
+              </div>
+            </Field>
             <Field label="Repositories" hint="One run per repository. A repository that already has an active run is skipped.">
               {repos === null ? (
                 <p className="flex items-center gap-2 text-[13px] text-muted">
@@ -315,6 +339,12 @@ export function WizardBody({
                   : "No spend history yet to estimate from — watch the first run's cost before scheduling more."}
               </p>
             </div>
+            {preset === "security" && (
+              <p className="text-[12.5px] leading-snug text-muted">
+                Security preset: before the hunters launch, this machine pre-scans the repository&apos;s committed files and history (no model tokens, no repository code run) and
+                hands each lead to the hunter whose focus it matches. The report adds the leads and an operator checklist of what code cannot prove.
+              </p>
+            )}
             <label className="flex cursor-pointer items-start gap-2.5 text-[13px]">
               <input type="checkbox" checked={autofix} onChange={(e) => setAutofix(e.target.checked)} className="mt-0.5" />
               <span>
@@ -375,6 +405,7 @@ export function WizardBody({
       <div className="flex shrink-0 items-center gap-2 border-t border-border px-5 py-3">
         <span className="mr-auto text-[12.5px] text-muted">
           {picked.length} {picked.length === 1 ? "repository" : "repositories"} · {hunters} {hunters === 1 ? "hunter" : "hunters"}
+          {preset === "security" ? " · security" : ""}
         </span>
         {step > 0 && <Button onClick={() => setStep((s) => (s - 1) as Step)}>Back</Button>}
         {step < 2 ? (

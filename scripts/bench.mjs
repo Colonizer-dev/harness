@@ -10,7 +10,16 @@
 //   node scripts/bench.mjs heldout add --heldout ~/bench-heldout --family cart-rounding --check my-check.test.mjs
 //   node scripts/bench.mjs compare bench-before.json bench-after.json
 //   node scripts/bench.mjs jev bench-before.json bench-after.json   # grade Jev compaction across the runs
+//   node scripts/bench.mjs routing [--threshold 0.8] [--json]       # the tier rule against Jev's second opinion
 //   node scripts/bench.mjs clean --repo owner/bench-repo    # close the bench's PRs and delete their branches
+//
+// `routing` reads <data dir>/routing.jsonl and sessions.json (`--data`, else COLONIZER_DATA_DIR, else
+// ~/.local/share/colonizer) and says whether Jev routing `act` mode is justified. It is, only when there
+// are at least 20 confident (confidence >= --threshold, default 0.8) disagreements judged in shadow — the
+// rule's tier ran and the colony has an outcome — and every direction with at least 5 of them says the
+// rule was wrong: where Jev would go lower, the rule's tier merged at least 90% of the time (the task was
+// easy); where Jev would go higher, the rule's tier failed at least 15 points more often than the baseline
+// of all shadow colonies. Otherwise it reads "not yet justified" and points at the bench comparison.
 //
 // `run` needs a mothership on COLONIZER_URL (default http://127.0.0.1:7878) with GitHub and an agent
 // configured, and `gh` logged in to the account that owns the scratch repository. It costs real model tokens
@@ -534,6 +543,236 @@ export function formatJevReport(report) {
   ].join('\n');
 }
 
+// ---------------------------------------------------------------------------------------------- routing
+
+// Is Jev `act` mode justified? (#583) The mothership's routing.jsonl ledger holds one `decision` row per
+// routed boot — the rule's tier, the source that won, and Jev's second opinion when one was asked — and an
+// `actual` row with the dollars the colony really spent once it ends. This joins them to each colony's
+// outcome in sessions.json and asks what `act` would have changed, and whether the colonies it would have
+// changed suggest it should.
+
+const TIERS = ['low', 'medium', 'high'];
+const tierRank = (t) => TIERS.indexOf(t);
+const maxTier = (a, b) => (tierRank(a) >= tierRank(b) ? a : b);
+
+// The verdict's criteria, in one place so the help text and the report cannot drift apart.
+export const ROUTING_VERDICT = {
+  // Confident disagreements, judged in shadow (the rule's tier is the one that ran), with an outcome.
+  minSamples: 20,
+  // A direction (Jev lower / Jev higher) with fewer than this many samples is not judged at all.
+  minPerDirection: 5,
+  // Jev lower: the rule's tier must have merged at least this often — the task was easy, so the cheaper
+  // tier was likely enough.
+  lowerMergedRate: 0.9,
+  // Jev higher: the rule's tier must have failed at least this much more often than the baseline (every
+  // shadow colony with an outcome) — the task was harder than the rule thought.
+  higherFailMargin: 0.15,
+};
+
+/** A colony's end state, from its sessions.json record: merged, pr-open, failed (the run failed, or its
+ *  pull request was closed unmerged), other (no changes, stopped, parked), or pending (still running, or
+ *  sessions.json has lost it). */
+export function routingOutcome(session) {
+  if (!session) return 'pending';
+  if (session.status === 'merged' || session.merged_at) return 'merged';
+  if (session.status === 'pr_opened') return 'pr-open';
+  if (session.status === 'failed' || session.status === 'closed') return 'failed';
+  if (['no_changes', 'stopped', 'parked'].includes(session.status)) return 'other';
+  return 'pending';
+}
+
+const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+const median = (xs) => {
+  if (!xs.length) return null;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+
+/** The tier `act` mode would have run: Jev's, when it was confident enough and disagreed, never under an
+ *  operator override or with routing off, and never below the decision's floor. */
+export function actTier(d, threshold) {
+  const rule = d.rule;
+  const jev = d.jev;
+  if (!jev || !TIERS.includes(jev.tier) || jev.tier === rule) return { tier: rule, blocked: null };
+  if (typeof jev.confidence !== 'number' || jev.confidence < threshold) return { tier: rule, blocked: 'unconfident' };
+  if (d.source === 'override') return { tier: rule, blocked: 'override' };
+  if (d.source === 'off') return { tier: rule, blocked: 'off' };
+  const floored = TIERS.includes(d.floor) ? maxTier(jev.tier, d.floor) : jev.tier;
+  return { tier: floored, blocked: floored === jev.tier ? null : 'floor' };
+}
+
+function directionStats(items) {
+  const n = items.length;
+  const count = (o) => items.filter((i) => i.outcome === o).length;
+  const costs = items.map((i) => i.actual_cost_usd).filter((c) => typeof c === 'number');
+  return {
+    count: n,
+    merged: count('merged'),
+    failed: count('failed'),
+    merged_rate: n ? count('merged') / n : null,
+    failed_rate: n ? count('failed') / n : null,
+    mean_actual_cost_usd: mean(costs),
+  };
+}
+
+/** The verdict on `act`, from the shadow evidence: see ROUTING_VERDICT. */
+export function routingVerdict({ samples, lower, higher, baselineFailedRate }, criteria = ROUTING_VERDICT) {
+  const how = 'run the bench both ways instead: `bench.mjs run --label rule` with jev_routing_act off, `bench.mjs run --label jev` with it on, then `bench.mjs compare bench-rule.json bench-jev.json`';
+  if (samples < criteria.minSamples) {
+    return { justified: false, reason: `only ${samples} confident disagreement${samples === 1 ? '' : 's'} with an outcome in shadow; need ${criteria.minSamples}`, recommend: how };
+  }
+  const judged = [];
+  const failures = [];
+  if (lower.count >= criteria.minPerDirection) {
+    judged.push('lower');
+    if (lower.merged_rate < criteria.lowerMergedRate) failures.push(`where Jev would go lower, the rule's tier merged ${pct(lower.merged_rate)}, under ${pct(criteria.lowerMergedRate)}: the cheaper tier is not shown to be enough`);
+  }
+  if (higher.count >= criteria.minPerDirection) {
+    judged.push('higher');
+    const bar = (baselineFailedRate ?? 0) + criteria.higherFailMargin;
+    if (higher.failed_rate < bar) failures.push(`where Jev would go higher, the rule's tier failed ${pct(higher.failed_rate)}, not ${pct(criteria.higherFailMargin)} over the ${pct(baselineFailedRate ?? 0)} baseline`);
+  }
+  if (judged.length === 0) return { justified: false, reason: `neither direction has ${criteria.minPerDirection} samples to judge`, recommend: how };
+  if (failures.length) return { justified: false, reason: failures.join('; '), recommend: how };
+  return { justified: true, reason: `${samples} confident disagreements, and every direction with ${criteria.minPerDirection}+ samples (${judged.join(', ')}) shows the rule's tier was wrong`, recommend: 'confirm with the bench comparison before turning jev_routing_act on everywhere' };
+}
+
+const pct = (v) => (v == null ? '–' : `${Math.round(v * 100)}%`);
+
+/** The routing ledger joined to outcomes. `rows` are routing.jsonl's lines; `sessions` are sessions.json's
+ *  records (or loadColonies' `{session}` wrappers). A colony booted more than once is judged on its last
+ *  decision; its actual cost is its last `actual` row, else its session's own total. */
+export function routingReport(rows, sessions, threshold = 0.8) {
+  const byId = new Map((sessions ?? []).map((s) => s?.session ?? s).filter((s) => s?.id).map((s) => [s.id, s]));
+  const decisionRows = rows.filter((r) => r?.kind === 'decision' && r.decision && r.session);
+  const last = new Map();
+  for (const r of decisionRows) last.set(r.session, r);
+  const actual = new Map();
+  for (const r of rows) if (r?.kind === 'actual' && r.session && typeof r.actual_cost_usd === 'number') actual.set(r.session, r.actual_cost_usd);
+
+  const colonies = [...last.values()].map((r) => {
+    const d = r.decision;
+    const session = byId.get(r.session);
+    const jev = d.jev && TIERS.includes(d.jev.tier) ? d.jev : null;
+    const agrees = typeof d.jev_agrees === 'boolean' ? d.jev_agrees : jev ? jev.tier === d.rule : null;
+    const act = actTier({ ...d, jev }, threshold);
+    return {
+      session: r.session,
+      repo: r.repo ?? null,
+      issue: r.issue ?? null,
+      rule: d.rule,
+      ran: d.tier,
+      source: d.source,
+      floor: d.floor ?? null,
+      jev_mode: d.jev_mode ?? null,
+      jev_tier: jev?.tier ?? null,
+      confidence: typeof jev?.confidence === 'number' ? jev.confidence : null,
+      agrees,
+      act_tier: act.tier,
+      act_blocked: act.blocked,
+      outcome: routingOutcome(session),
+      actual_cost_usd: actual.get(r.session) ?? (session ? totalCost(session.cost_usd, session.routed_cost_usd) : null),
+    };
+  });
+
+  const withJev = colonies.filter((c) => c.agrees !== null);
+  const agreeRate = (cs) => (cs.length ? cs.filter((c) => c.agrees).length / cs.length : null);
+  const byRule = Object.fromEntries(
+    TIERS.map((t) => {
+      const cs = withJev.filter((c) => c.rule === t);
+      return [t, { with_jev: cs.length, agree: cs.filter((c) => c.agrees).length, rate: agreeRate(cs) }];
+    }),
+  );
+  const conf = (cs) => {
+    const xs = cs.map((c) => c.confidence).filter((x) => x != null);
+    return { count: xs.length, mean: mean(xs), median: median(xs) };
+  };
+
+  const confident = withJev.filter((c) => !c.agrees && c.confidence != null && c.confidence >= threshold);
+  const disagreements = withJev
+    .filter((c) => !c.agrees)
+    .map((c) => ({ ...c, direction: tierRank(c.jev_tier) < tierRank(c.rule) ? 'lower' : 'higher' }));
+  // Shadow evidence: the rule's tier is the one that ran, so its outcome says something about the rule,
+  // and act would have run another tier — a disagreement an override or the floor cancels is not about act.
+  const shadow = (c) => c.ran === c.rule && c.outcome !== 'pending';
+  const evidence = disagreements.filter((c) => shadow(c) && c.act_tier !== c.rule);
+  const baselinePool = colonies.filter(shadow);
+  const baselineFailedRate = baselinePool.length ? baselinePool.filter((c) => c.outcome === 'failed').length / baselinePool.length : null;
+  const lower = directionStats(evidence.filter((c) => c.direction === 'lower'));
+  const higher = directionStats(evidence.filter((c) => c.direction === 'higher'));
+
+  return {
+    threshold,
+    criteria: ROUTING_VERDICT,
+    decision_rows: decisionRows.length,
+    colonies: colonies.length,
+    with_jev: withJev.length,
+    agreement_rate: agreeRate(withJev),
+    agreement_by_rule: byRule,
+    confidence: { agree: conf(withJev.filter((c) => c.agrees)), disagree: conf(withJev.filter((c) => !c.agrees)) },
+    act: {
+      confident_disagreements: confident.length,
+      would_change: colonies.filter((c) => c.act_tier !== c.rule).length,
+      capped_by_floor: confident.filter((c) => c.act_blocked === 'floor').length,
+      floor_cancels: confident.filter((c) => c.act_blocked === 'floor' && c.act_tier === c.rule).length,
+      blocked_by_override: confident.filter((c) => c.act_blocked === 'override').length,
+      blocked_routing_off: confident.filter((c) => c.act_blocked === 'off').length,
+    },
+    disagreements,
+    baseline: { colonies: baselinePool.length, failed_rate: baselineFailedRate },
+    directions: { lower, higher },
+    verdict: routingVerdict({ samples: evidence.length, lower, higher, baselineFailedRate }),
+  };
+}
+
+export function formatRoutingReport(report) {
+  const num = (v, digits = 2) => (v == null ? '–' : v.toFixed(digits));
+  const money = (v) => (v == null ? '–' : `$${v.toFixed(2)}`);
+  const line = (cells) => `| ${cells.join(' | ')} |`;
+  const table = (head, rows) => [line(head), line(head.map(() => '---')), ...rows.map(line)];
+  const a = report.act;
+  const out = [
+    `# Tier routing: the rule against Jev's second opinion (act threshold ${report.threshold})`,
+    '',
+    `${report.colonies} routed colonies (${report.decision_rows} decision rows); ${report.with_jev} with a Jev opinion; agreement ${pct(report.agreement_rate)}.`,
+    `Confidence when Jev agrees: mean ${num(report.confidence.agree.mean)}, median ${num(report.confidence.agree.median)} (n=${report.confidence.agree.count}); when it disagrees: mean ${num(report.confidence.disagree.mean)}, median ${num(report.confidence.disagree.median)} (n=${report.confidence.disagree.count}).`,
+    `Under act at ${report.threshold}: ${a.confident_disagreements} confident disagreements; ${a.would_change} colonies would have run another tier. ${a.blocked_by_override} blocked by an operator override, ${a.blocked_routing_off} with routing off, ${a.capped_by_floor} raised by the floor (${a.floor_cancels} of them back to the rule's tier).`,
+    '',
+    ...table(
+      ['Rule tier', 'With Jev', 'Agree', 'Rate'],
+      TIERS.map((t) => [t, report.agreement_by_rule[t].with_jev, report.agreement_by_rule[t].agree, pct(report.agreement_by_rule[t].rate)]),
+    ),
+  ];
+  if (report.disagreements.length) {
+    out.push(
+      '',
+      '## Disagreements',
+      '',
+      ...table(
+        ['Colony', 'Issue', 'Rule', 'Jev', 'Confidence', 'Ran', 'Act would run', 'Outcome', 'Actual cost'],
+        report.disagreements.map((c) => [c.session, c.repo ? `${c.repo}${c.issue != null ? `#${c.issue}` : ''}` : '–', c.rule, c.jev_tier, num(c.confidence), c.ran ?? '–', c.act_blocked ? `${c.act_tier} (${c.act_blocked})` : c.act_tier, c.outcome, money(c.actual_cost_usd)]),
+      ),
+    );
+  }
+  const d = report.directions;
+  out.push(
+    '',
+    `## Confident disagreements in shadow, by direction (baseline failed rate ${pct(report.baseline.failed_rate)} over ${report.baseline.colonies} colonies)`,
+    '',
+    ...table(
+      ['Jev vs rule', 'Count', 'Merged', 'Failed', 'Mean actual cost'],
+      [
+        ['lower', d.lower.count, pct(d.lower.merged_rate), pct(d.lower.failed_rate), money(d.lower.mean_actual_cost_usd)],
+        ['higher', d.higher.count, pct(d.higher.merged_rate), pct(d.higher.failed_rate), money(d.higher.mean_actual_cost_usd)],
+      ],
+    ),
+    '',
+    report.verdict.justified ? `Verdict: act is justified: ${report.verdict.reason}; ${report.verdict.recommend}.` : `Verdict: act is not yet justified: ${report.verdict.reason}. ${report.verdict.recommend[0].toUpperCase()}${report.verdict.recommend.slice(1)}.`,
+  );
+  return out.join('\n');
+}
+
 // ------------------------------------------------------------------------------------------------ clean
 
 function clean(repo) {
@@ -548,9 +787,8 @@ function clean(repo) {
 // ---------------------------------------------------------------------------------------------- command
 
 export function parseArgs(argv) {
-  // `threshold`'s default mirrors PREDICTED_THRESHOLD in crates/colonizer/src/jev_ladder.rs: the score
-  // the plugin itself kept at, so `jev` grades the decisions compaction actually made.
-  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, threshold: 0.5, json: false, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
+  // `threshold` defaults per command (below).
+  const args = { command: argv[0], repo: null, label: 'run', only: null, timeoutMs: 20 * 60_000, data: null, threshold: null, json: false, heldout: null, maxGap: DEFAULT_MAX_GAP, family: null, check: null, files: [] };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     // Refuse a missing value here: a flag left dangling would otherwise be read as undefined
@@ -579,6 +817,10 @@ export function parseArgs(argv) {
     else if (a.startsWith('--')) throw new Error(`unknown argument ${a}`);
     else args.files.push(a);
   }
+  // `jev`'s default mirrors PREDICTED_THRESHOLD in crates/colonizer/src/jev_ladder.rs: the score the
+  // plugin itself kept at, so `jev` grades the decisions compaction actually made. `routing`'s is the
+  // confidence Jev must reach before `act` mode would let it change a tier.
+  if (args.threshold == null) args.threshold = args.command === 'routing' ? 0.8 : 0.5;
   return args;
 }
 
@@ -610,6 +852,25 @@ async function main() {
     console.log(args.json ? JSON.stringify(report, null, 2) : formatJevReport(report));
     return;
   }
+  if (args.command === 'routing') {
+    // Verdict criteria (ROUTING_VERDICT): act is justified only with ≥20 confident (≥ --threshold)
+    // disagreements judged in shadow — the rule's tier ran and the colony has an outcome — and, for each
+    // direction with ≥5 of them, the evidence says the rule was wrong: where Jev would go lower, the rule's
+    // tier merged ≥90% of the time; where Jev would go higher, the rule's tier failed ≥15 points more
+    // often than every shadow colony's baseline. Anything less reads "not yet justified".
+    const dataDir = dataDirOf(args);
+    const rows = readJsonLines(join(dataDir, 'routing.jsonl'));
+    let sessions = [];
+    try {
+      const parsed = JSON.parse(readFileSync(join(dataDir, 'sessions.json'), 'utf8'));
+      if (Array.isArray(parsed)) sessions = parsed;
+    } catch {
+      // No sessions.json: every outcome reads pending, and the verdict says there is no evidence.
+    }
+    const report = routingReport(rows, sessions, args.threshold);
+    console.log(args.json ? JSON.stringify(report, null, 2) : formatRoutingReport(report));
+    return;
+  }
   if (args.command === 'heldout') {
     if (args.files[0] !== 'add' || !args.heldout || !args.family || !args.check) throw new Error('use heldout add --heldout <dir> --family <family> --check <file>');
     outsideRepo(args.heldout); // before the lock, which would create the directory it guards
@@ -624,7 +885,7 @@ async function main() {
     }
     return;
   }
-  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev or clean');
+  if (args.command !== 'run') throw new Error('use seed, run, heldout add, compare, jev, routing or clean');
   if (!args.repo) throw new Error('run needs --repo owner/name');
 
   const issues = benchIssues(args.repo);

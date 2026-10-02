@@ -111,6 +111,20 @@ or protected one — with the reply untouched. Reporting only; the mount enforce
 `pathpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test, and a masked
 path reached any other way is the exec policy's or the mount's to stop, not this runner's.
 
+## Shared memory
+
+With `COLONIZER_MEMORY_DIR` mounted, `session/new` and `session/load` register one MCP server
+(issue #766), over stdio because every ACP agent must support that transport: `colonizer_memory`,
+which runs `memory-mcp.mjs` with the mounted dir in its env and offers `memory_briefing` (a short,
+sourced summary, optionally on a topic), `memory_changes` (entries added, and entries revoked or
+removed, since the colony last asked) and `memory_search`. They read the mounted `notes.json` and
+note files and frame their answer as data to verify, so a revoked note is gone from the next
+answer. Memory is pulled, never injected: ACP has no system prompt of ours, so a new session's
+first `session/prompt` leads with one fixed text block naming the tools, and no note text; a
+reloaded session does not get it again. Without the mount no server is registered
+(`mcpServers: []`). `memory-mcp.mjs` is the original the OpenCode and Pi modules copy; its logic is
+`memory.mjs`, a byte-for-byte copy of Claude Code's, kept identical by a test.
+
 ## Verified and planned agents
 
 - **Gemini CLI (`gemini --experimental-acp`) — handshake verified.** The real CLI 0.61.0 completed

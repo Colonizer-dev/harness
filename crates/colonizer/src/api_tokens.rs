@@ -213,7 +213,7 @@ pub struct Registry {
 
 /// SHA-256 of a token, hex. Stored rather than the plaintext, so neither the file nor a leak of it
 /// hands over a working credential.
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     crate::util::hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
@@ -343,6 +343,17 @@ impl Registry {
         Ok((plaintext, id))
     }
 
+    /// The stored hash of token `id` — what the fleet keeps of a removed member's token, so the
+    /// revoked credential still reads as "removed" rather than unknown.
+    pub(crate) async fn token_hash(&self, id: &str) -> Option<String> {
+        self.tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.token_hash.clone())
+    }
+
     /// Removes a token; `None` when no token carries the id. Presentations of the revoked token
     /// stop authenticating at once — the next request finds nothing.
     pub async fn revoke(&self, id: &str) -> Option<TokenMeta> {
@@ -350,6 +361,8 @@ impl Registry {
         let at = tokens.iter().position(|t| t.id == id)?;
         let removed = tokens.remove(at);
         self.save(&tokens).await;
+        // Its open sockets and streams end now, not at its next request (issue #746).
+        crate::auth::Revocation::fire(&format!("token:{id}"));
         Some(removed.meta())
     }
 
@@ -466,7 +479,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "question" | "events" | "diff"] if get && !id.is_empty() => Need::Session {
+        ["api", "sessions", id, "question" | "events" | "diff" | "commits"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
         },
@@ -484,15 +497,33 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
+        // colony drive, like answering.
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
+        },
+        // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
+        // unseen-failure flag — so watching it is enough, however it arrives.
+        ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
         },
         // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
         // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
         // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
         // container reads as an unknown colony (404), never as a forbidden one.
         ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        // The read-side core (§7, issue #650): the same need as the `/api` reads over the same
+        // data. Discovery needs no credential at all — `host_guard` admits it before this runs —
+        // but is listed anyway, so a scoped token is not refused on a public route. The single
+        // colony hides behind its org/repo limits like `/api/sessions/{id}`.
+        ["uhp", "v1", "uhp" | "harnesses" | "models"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "harnesses", id] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         ["uhp", "v1", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
@@ -519,6 +550,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
         // The merge train's last tick (issue #671): a watch, like the loops list.
         ["api", "merge-train"] if get => Need::Bare(Scope::Read),
+        ["api", "merge-train", "loop"] if get => Need::Bare(Scope::Read),
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
@@ -526,6 +558,10 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
         ["api", "hosts"] if get => Need::Fleet,
         ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
+        // The history push (issue #762): a member uploads its log payloads, then the colony rows
+        // that reference them, onto its own directory on the owner — nothing else of the owner's.
+        ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
+        ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
@@ -844,6 +880,7 @@ mod tests {
             "/api/sessions/abc/question",
             "/api/sessions/abc/events",
             "/api/sessions/abc/diff",
+            "/api/sessions/abc/commits",
             "/api/maps/acme/web",
             "/api/maps/acme/web/files",
             "/api/tokens/self",
@@ -861,6 +898,11 @@ mod tests {
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
                 "read {path}"
             );
+            assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
+        }
+        // Marking a colony seen (issue #744) is looking at it, not driving it: read may POST it.
+        for path in ["/api/sessions/abc/seen"] {
+            assert!(authorize(&app, &read, &post, path).await.is_ok(), "read {path}");
             assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
         }
         // Launching needs launch.

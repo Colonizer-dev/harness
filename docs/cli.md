@@ -120,6 +120,21 @@ colonizer token revoke tok_x
 `colonizer mcp` starts the MCP server instead of driving one; it is documented in
 [mcp.md](mcp.md).
 
+## Red-team runs
+
+A red-team run sends a swarm of hunter colonies at one repository; what a run does is
+[red-team.md](red-team.md):
+
+```sh
+colonizer redteam start acme/app                                  # armed: starts when no colony is live
+colonizer redteam start acme/app --preset security --hunters 8    # the security preset, a full swarm
+colonizer redteam start acme/app --now                            # start now (exit 5 while colonies are live)
+colonizer redteam list                                            # runs, newest first, with preset and counts
+```
+
+`--preset` is `general` (the default) or `security`; `--hunters N` is the swarm size, 1 to 8.
+`--model`, `--subagent-model` and `--autofix` mirror the cockpit wizard.
+
 ## Loops
 
 Loops are saved prompts that launch a colony on a schedule; what they do is
@@ -133,6 +148,9 @@ colonizer loop run loop_x1                                       # start the nex
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
+colonizer loop merge-train show                                  # the built-in merge-train loop: settings and last report
+colonizer loop merge-train allow acme/app                        # opt a repository in; `on` switches the loop on
+colonizer loop merge-train run --dry-run                         # what it would merge, update, rebase and skip, and why
 ```
 
 `loop create` takes the repository as `owner/repo` (`owner/*` for a map loop: every repository
@@ -180,6 +198,26 @@ and replaces sessions by id instead of duplicating them. With the global `--json
 print as the bundle's manifest. The fleet-join dialog (#686) drives the same format
 over the fleet connection, preview → confirm → transfer, so a machine that joins a fleet is
 backfilled the same way.
+
+### Fleet sync
+
+A machine that has joined a fleet can push its finished colonies' history to the owner
+([fleet.md](fleet.md#history-push)) — once its operator consents; joining alone sends nothing.
+`fleet sync --preview` shows what would be sent, `--enable` prints that preview and consents,
+`--disable` withdraws consent, `fleet sync` asks the running mothership to drain now, and
+`--status` shows where the push stands. None but a plain `fleet sync` or `--enable` sends anything.
+
+```sh
+colonizer fleet sync --preview  # colonies, log files and bytes that would go, and what never does
+colonizer fleet sync --enable   # print the preview, then consent for this membership
+colonizer fleet sync --disable  # stop sending
+colonizer fleet sync            # drain now: rows and payloads sent, pending, retired
+colonizer fleet sync --status   # consent_required, synced, backoff, unauthorized, removed or error
+```
+
+Without consent a plain `fleet sync` fails with the 409 and says how to give it. A manual
+`fleet sync` also retries a push that stopped on a 401 or a 403, or is waiting out a
+`Retry-After`. With the global `--json` both print the mothership's answer.
 
 ## `--json`
 
@@ -251,8 +289,9 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
-for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts` and
-`POST /api/fleet/peer/leave`.
+for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
+`POST /api/fleet/peer/leave`, and the history push's `POST /api/fleet/peer/rows` and
+`PUT /api/fleet/peer/payloads/{sha256}`.
 
 Everything else is the owner's at any scope — token management itself, settings, secrets, and
 publishing. The enforcement is the same for every client of the API, the CLI included.

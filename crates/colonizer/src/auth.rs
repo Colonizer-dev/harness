@@ -35,6 +35,63 @@ pub enum Via {
     Token(String),
 }
 
+/// Revocation of a live credential (issue #746): a paired phone's or a scoped API token's. Every
+/// request such a credential authenticates carries one of these, keyed by the credential's id
+/// (`phone:<id>`, `token:<id>`); revoking fires it, which ends that credential's in-flight requests,
+/// streamed bodies and open sockets at once rather than at their next request. A fired key stays
+/// fired, so a request authenticated a moment before the revoke still sees it. The owner's install
+/// token is not revocable and carries none.
+#[derive(Clone)]
+pub struct Revocation(tokio::sync::watch::Receiver<bool>);
+
+type RevocationMap = std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>;
+static REVOCATIONS: std::sync::LazyLock<std::sync::Mutex<RevocationMap>> = std::sync::LazyLock::new(Default::default);
+
+impl Revocation {
+    /// The revocation for one credential key, already fired if the credential was revoked.
+    pub fn watch(key: &str) -> Revocation {
+        let mut map = REVOCATIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = map
+            .entry(key.to_string())
+            .or_insert_with(|| tokio::sync::watch::channel(false).0);
+        Revocation(sender.subscribe())
+    }
+
+    /// Revokes a credential key: everything it has open ends now.
+    pub fn fire(key: &str) {
+        let mut map = REVOCATIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = map
+            .entry(key.to_string())
+            .or_insert_with(|| tokio::sync::watch::channel(false).0);
+        sender.send_replace(true);
+    }
+
+    pub fn is_fired(&self) -> bool {
+        *self.0.borrow()
+    }
+
+    /// Resolves once the credential is revoked (at once if it already was).
+    pub async fn fired(&self) {
+        let mut rx = self.0.clone();
+        // The sender lives in the map for the process's life; were it ever gone, never fire.
+        if rx.wait_for(|revoked| *revoked).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Runs a socket's serving future until it ends or the credential is revoked. Dropping the
+    /// future drops the socket, which closes the connection.
+    pub async fn until<F: std::future::Future<Output = ()>>(revocation: Option<Revocation>, serve: F) {
+        match revocation {
+            Some(revocation) => tokio::select! {
+                () = serve => {}
+                () = revocation.fired() => {}
+            },
+            None => serve.await,
+        }
+    }
+}
+
 /// The token file: `<config_dir>/api-token`, next to the other saved secrets.
 pub fn token_file(config_dir: &Path) -> PathBuf {
     config_dir.join("api-token")
@@ -93,19 +150,25 @@ pub fn cookie_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// The `token` query parameter of e.g. `/?token=…`, percent-decoded. Only the sign-in link uses
-/// it; API requests use the header or the cookie instead, so tokens stay out of logs.
-pub fn query_token(query: Option<&str>) -> Option<String> {
+/// The named query parameter, percent-decoded. Only the sign-in links carry one (`token`, and
+/// `pair` for a phone's invite, issue #746); API requests use the header or the cookie instead, so
+/// secrets stay out of logs.
+pub fn query_param(query: Option<&str>, name: &str) -> Option<String> {
     for pair in query?.split('&') {
-        let (name, value) = pair.split_once('=')?;
-        if name == "token" {
-            let token = percent_decode(value);
-            if !token.is_empty() {
-                return Some(token);
+        let Some((key, value)) = pair.split_once('=') else { continue };
+        if key == name {
+            let value = percent_decode(value);
+            if !value.is_empty() {
+                return Some(value);
             }
         }
     }
     None
+}
+
+/// The `token` query parameter of e.g. `/?token=…`.
+pub fn query_token(query: Option<&str>) -> Option<String> {
+    query_param(query, "token")
 }
 
 /// Enough percent-decoding for a query value: `%XX` escapes only (the token is hex, so neither

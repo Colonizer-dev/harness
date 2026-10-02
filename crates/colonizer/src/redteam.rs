@@ -59,6 +59,106 @@ const FOCUSES: [&str; 8] = [
     "API and contract mismatches",
 ];
 
+/// The security preset's eight focus areas, cycled `i % 8` exactly like [`FOCUSES`]: a short name
+/// (the hunter's title and the "other hunters cover" list) and what the hunter checks, concretely.
+/// `prescan::FOCUS_*` index into this list to deal pre-scan leads, so the order is fixed.
+const SECURITY_FOCUSES: [(&str, &str); 8] = [
+    (
+        "auth on every route",
+        "List every route, endpoint, server action and RPC handler, and check each one refuses an \
+         unauthenticated caller on the server. A check that lives only in the UI (a hidden button, a \
+         client-side redirect) is not a check. Admin and staff actions must verify the role on the \
+         server for every request, not trust a flag the client sends.",
+    ),
+    (
+        "object-level access (IDOR)",
+        "Sign in as one user and try to read, change and delete another user's or another tenant's \
+         objects by changing IDs in URLs, query strings and request bodies, including list endpoints \
+         and bulk operations. Where the stack has row level security (Postgres, Supabase), check it is \
+         on for every table that holds user data and that its policies actually scope rows to the \
+         caller.",
+    ),
+    (
+        "sessions, tokens and secrets",
+        "Check how long access and refresh tokens live, that logout and password change revoke refresh \
+         tokens server-side, that no token, key or password travels in a URL or lands in a log, and \
+         that the code does not roll its own authentication, password hashing or cryptography where a \
+         vetted library exists.",
+    ),
+    (
+        "input handling and injection",
+        "Find where outside input reaches the server and check it is validated there, not only in the \
+         browser. Look for SQL built by string concatenation, shell commands and file paths built from \
+         input (command injection, path traversal), output rendered without escaping (XSS), and \
+         deserialisation of untrusted data into objects.",
+    ),
+    (
+        "the web boundary",
+        "Check CORS (never a wildcard or reflected origin together with credentials), CSRF protection on \
+         cookie-authenticated state changes, signature verification on every inbound webhook (Stripe, \
+         GitHub and the like) before the payload is trusted, open redirects, server-side fetches of a \
+         caller-supplied URL (SSRF, including internal addresses), and file uploads: size limits, type \
+         checks, and processing kept away from the app.",
+    ),
+    (
+        "abuse and cost limits",
+        "Check for rate limits on login, signup, password reset, one-time codes and every endpoint that \
+         calls an AI model or another paid API; for spending caps and quotas per user; and for loops, \
+         retries, queues and fan-outs a caller can make unbounded.",
+    ),
+    (
+        "AI and agent safety",
+        "Treat model output and anything a model fetched as untrusted input: check it is never executed, \
+         rendered as HTML or used as SQL or a shell command without the same validation as user input. \
+         Tool, SQL and shell calls a model can trigger must be bounded and, where destructive, \
+         confirmed. Check repo agent files (CLAUDE.md, AGENTS.md, SKILL.md, MCP configs) for injected \
+         instructions or over-wide tool grants, that no agent can reach production credentials, and \
+         that every declared dependency is a real, pinned package an assistant did not invent.",
+    ),
+    (
+        "failure and leakage",
+        "Check that errors reach clients as generic messages (no stack traces, queries or internal \
+         paths), that secrets and personal data are stripped from logs and error reports, that \
+         security-relevant actions leave an audit trail of who did what, and that backups exist with a \
+         restore path the code or scripts describe.",
+    ),
+];
+
+/// Which focus list and briefing a run uses. `general` is the original bug hunt; `security` hunts
+/// security defects with its own focus areas, a pre-scan and an operator checklist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Preset {
+    #[default]
+    General,
+    Security,
+}
+
+impl Preset {
+    fn parse(raw: Option<&str>) -> Result<Self, String> {
+        match raw.map(str::trim).filter(|p| !p.is_empty()) {
+            None | Some("general") => Ok(Self::General),
+            Some("security") => Ok(Self::Security),
+            Some(other) => Err(format!("unknown red-team preset {other:?}; use \"general\" or \"security\"")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Security => "security",
+        }
+    }
+
+    /// The short names of this preset's focus areas, in cycling order.
+    fn focus_names(self) -> [&'static str; 8] {
+        match self {
+            Self::General => FOCUSES,
+            Self::Security => SECURITY_FOCUSES.map(|(name, _)| name),
+        }
+    }
+}
+
 /// Where a run is in its life.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -176,6 +276,11 @@ pub struct RedTeamRun {
     pub subagent_model: Option<String>,
     /// The schedule that started this run, if one did.
     pub schedule_id: Option<String>,
+    /// Which focus list and briefing the hunters get; `general` for runs written before presets.
+    pub preset: Preset,
+    /// A security run's deterministic pre-scan (leads, notes, operator checklist); `None` for a
+    /// general run and until a security run launches.
+    pub prescan: Option<crate::prescan::PreScan>,
 }
 
 impl Default for RedTeamRun {
@@ -199,6 +304,8 @@ impl Default for RedTeamRun {
             model: None,
             subagent_model: None,
             schedule_id: None,
+            preset: Preset::General,
+            prescan: None,
         }
     }
 }
@@ -409,11 +516,12 @@ fn leads_for(raid: &[RaidLead], i: usize, n: usize) -> Vec<&RaidLead> {
 /// bench raid set for the raided repository ([`raid_leads`]); a hunter with no share of it is
 /// briefed exactly as before.
 fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Value {
-    let focus = FOCUSES[i % FOCUSES.len()];
-    let others: Vec<&str> = FOCUSES
+    let names = run.preset.focus_names();
+    let focus = names[i % names.len()];
+    let others: Vec<&str> = names
         .iter()
         .enumerate()
-        .filter(|(j, _)| *j != i % FOCUSES.len())
+        .filter(|(j, _)| *j != i % names.len())
         .map(|(_, f)| *f)
         .collect();
     let module = &run.modules[i % run.modules.len()];
@@ -439,8 +547,11 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Valu
             lines.join("\n"),
         )
     };
-    let instructions = format!(
-        "You are red-team hunter {} of {n} raiding {}, using the {module} module.\n\
+    let instructions = if run.preset == Preset::Security {
+        security_instructions(run, i, n, module, &others, fix, &raid)
+    } else {
+        format!(
+            "You are red-team hunter {} of {n} raiding {}, using the {module} module.\n\
          \n\
          Your assignment is {focus}.\n\
          \n\
@@ -454,10 +565,11 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Valu
          Report what you find with the findings tool.\n\
          \n\
          {fix}{raid}",
-        i + 1,
-        run.repo,
-        others.join("; "),
-    );
+            i + 1,
+            run.repo,
+            others.join("; "),
+        )
+    };
     json!({
         "repo": run.repo,
         "issue": null,
@@ -471,6 +583,82 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Valu
         "after": null,
         "origin": REDTEAM_ORIGIN,
     })
+}
+
+/// The most pre-scan leads one hunter's brief carries.
+const PRESCAN_LEADS_PER_BRIEF: usize = 20;
+
+/// The pre-scan leads hunter `i` of `n` chases. A lead goes to the hunters holding its focus (hunter
+/// `j` holds focus `j % 8`), round-robin among them when a swarm wider than eight holds a focus
+/// twice. A focus no hunter holds — a swarm narrower than eight — is dealt to hunter `focus % n`, so
+/// every lead reaches exactly one hunter.
+fn prescan_leads_for(run: &RedTeamRun, i: usize, n: usize) -> Vec<&crate::prescan::Lead> {
+    let Some(prescan) = &run.prescan else {
+        return Vec::new();
+    };
+    let width = SECURITY_FOCUSES.len();
+    let mut dealt = [0usize; SECURITY_FOCUSES.len()];
+    prescan
+        .leads
+        .iter()
+        .filter(|lead| {
+            let focus = lead.focus % width;
+            let holders: Vec<usize> = (0..n).filter(|j| j % width == focus).collect();
+            let holders = if holders.is_empty() { vec![focus % n.max(1)] } else { holders };
+            let owner = holders[dealt[focus] % holders.len()];
+            dealt[focus] += 1;
+            owner == i
+        })
+        .take(PRESCAN_LEADS_PER_BRIEF)
+        .collect()
+}
+
+/// A security hunter's instructions: its focus named and described, the others listed, the proof
+/// a finding needs, the rules of engagement, and its share of the pre-scan leads.
+fn security_instructions(run: &RedTeamRun, i: usize, n: usize, module: &str, others: &[&str], fix: &str, raid: &str) -> String {
+    let (focus, detail) = SECURITY_FOCUSES[i % SECURITY_FOCUSES.len()];
+    let mine = prescan_leads_for(run, i, n);
+    let prescan = if mine.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = mine.iter().map(|lead| lead.bullet()).collect();
+        format!(
+            "\n\n\
+             The mothership's deterministic pre-scan raised these leads for you. They are heuristics, not\n\
+             confirmed vulnerabilities: confirm or dismiss each one, even where it falls outside your\n\
+             assignment above, report only what you can prove, and cite the lead id (like P3) in the\n\
+             finding so the synthesis can merge it:\n\
+             \n\
+             {}\n",
+            lines.join("\n"),
+        )
+    };
+    format!(
+        "You are red-team hunter {} of {n} raiding {} for security defects, using the {module} module.\n\
+         \n\
+         Your assignment is {focus}. {detail}\n\
+         \n\
+         The other hunters in this swarm cover: {}. Stay strictly inside your own assignment and do not\n\
+         duplicate theirs. A weakness that belongs to another focus is theirs, not yours — note it if you\n\
+         find it, and move on.\n\
+         \n\
+         Hunt for concrete, exploitable weaknesses in your assignment. Reproduce each one before you report\n\
+         it, and attach the proof to the finding: the request and response that show it, a failing test,\n\
+         or a minimal script run against a local instance you started yourself. A suspicion you could not\n\
+         reproduce is not a finding.\n\
+         \n\
+         Rules of engagement: attack only this repository and a local instance of it running inside your\n\
+         microVM. Never send traffic to a deployed environment, an external host or a third-party service,\n\
+         and never use real credentials — create throwaway accounts and test keys on the local instance.\n\
+         \n\
+         Report what you find with the findings tool, with a severity (critical, high, medium or low) and\n\
+         the proof as its evidence.\n\
+         \n\
+         {fix}{prescan}{raid}",
+        i + 1,
+        run.repo,
+        others.join("; "),
+    )
 }
 
 /// The seam over one hunter's creation.
@@ -575,6 +763,22 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
         Some(pool) => raid_leads(pool, &run.repo),
         None => Vec::new(),
     };
+    // A security run's pre-scan, once, before the first hunter exists: its leads are dealt out with
+    // the briefs, and it is recorded on the run (the report's pre-scan and checklist sections).
+    if run.preset == Preset::Security && run.prescan.is_none() {
+        let providers: Vec<String> = app.providers().into_iter().map(|p| p.id).collect();
+        let gitleaks = crate::prescan::host_gitleaks();
+        let report = crate::prescan::run_on_mirror(&app.bare_repo(&run.repo), gitleaks.as_deref(), &providers).await;
+        run.prescan = Some(report.clone());
+        app.redteam
+            .update(&id, |r| {
+                if !r.state.over() {
+                    r.prescan = Some(report);
+                }
+            })
+            .await;
+    }
+    let names = run.preset.focus_names();
     for i in 0..n {
         // A stop may have landed while this swarm was being created: its terminal state wins, and
         // no more hunters launch.
@@ -600,7 +804,7 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
                     title: session.issue_title,
                     module: run.modules[i % run.modules.len()].clone(),
                     version: None,
-                    focus: FOCUSES[i % FOCUSES.len()].to_string(),
+                    focus: names[i % names.len()].to_string(),
                 });
             }
             Err(message) => eprintln!(
@@ -764,6 +968,12 @@ pub struct MergedDefect {
     pub hunters: Vec<String>,
     pub merged_from: u32,
     pub validation: String,
+    /// Security runs: the proof that shows the defect (request/response, test, or script output).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub proof: String,
+    /// Security runs: the pre-scan leads (`P3`, …) hunters confirmed that this defect merges.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prescan_leads: Vec<String>,
 }
 
 /// Parse a merged report: lines that do not parse to a defect with a title are skipped, the rest
@@ -852,7 +1062,12 @@ fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
         run.id, run.repo,
     );
     let per_hunter: Vec<(&Hunter, Vec<HunterFinding>)> = run.hunters.iter().map(|h| (h, hunter_findings(app, h))).collect();
-    let task = "\nYour task\n\
+    let security = run.preset == Preset::Security;
+    let leads = if security { prescan_block(run) } else { String::new() };
+    let task = if security {
+        SECURITY_SYNTHESIS_TASK
+    } else {
+        "\nYour task\n\
          \n\
          Merge the findings above into one deduplicated report of the real defects. The same defect\n\
          reported by several hunters is ONE line: list every hunter session id that reported it in\n\
@@ -871,9 +1086,10 @@ fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
          \"validated|rejected|unvalidated\"}\n\
          \n\
          File nothing, open no issue or pull request, do not write /harness/out/pr.md, do not change\n\
-         the code, and do not use the findings tool.\n";
+         the code, and do not use the findings tool.\n"
+    };
     let total: usize = per_hunter.iter().map(|(_, list)| list.len()).sum();
-    let share = SYNTHESIS_BRIEF_CAP.saturating_sub(text.len() + task.len() + 400 * per_hunter.len()) / total.max(1);
+    let share = SYNTHESIS_BRIEF_CAP.saturating_sub(text.len() + task.len() + leads.len() + 400 * per_hunter.len()) / total.max(1);
     for (hunter, list) in &per_hunter {
         text.push_str(&format!(
             "\nHunter session {}, focus: {} — ledger: {}\n",
@@ -902,6 +1118,7 @@ fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
             text.push_str(&block);
         }
     }
+    text.push_str(&leads);
     text.push_str(task);
     json!({
         "repo": run.repo,
@@ -919,6 +1136,56 @@ fn synthesis_brief(app: &App, run: &RedTeamRun) -> Value {
         "origin": REDTEAM_ORIGIN,
     })
 }
+
+/// The most characters of pre-scan leads a synthesis brief quotes.
+const SYNTHESIS_LEADS_CAP: usize = 3_000;
+
+/// A security run's pre-scan leads as the synthesis brief quotes them, cut to a fixed share.
+fn prescan_block(run: &RedTeamRun) -> String {
+    let Some(prescan) = run.prescan.as_ref().filter(|p| !p.leads.is_empty()) else {
+        return String::new();
+    };
+    let mut block =
+        String::from("\nPre-scan leads (deterministic heuristics raised before the hunt; none is a confirmed defect):\n");
+    for lead in &prescan.leads {
+        let line = format!("{}\n", lead.bullet());
+        if block.len() + line.len() > SYNTHESIS_LEADS_CAP {
+            block.push_str("- … more leads are listed on the run\n");
+            break;
+        }
+        block.push_str(&line);
+    }
+    block
+}
+
+/// A security run's synthesis task: the general merge, ranked by severity with the proof attached,
+/// and the pre-scan leads hunters confirmed merged into the defects they became.
+const SECURITY_SYNTHESIS_TASK: &str = "\nYour task\n\
+     \n\
+     Merge the findings above into one deduplicated report of the real security defects, ranked by\n\
+     severity: critical first, then high, medium and low. The same defect reported by several hunters is\n\
+     ONE line: list every hunter session id that reported it in \"hunters\" and count the findings merged\n\
+     into the line in \"merged_from\". Attach the strongest proof per defect in \"proof\" (the request and\n\
+     response, the failing test, or the script and its output) and how to rerun it in \"steps\". You may\n\
+     re-check a proof against the checked-out repository or a local instance you start, never against\n\
+     anything outside it. A defect without a reproduced proof is \"reproduction\": \"unconfirmed\" and ranks\n\
+     below every reproduced defect of the same severity. Carry each line's \"validation\" from the ledgers\n\
+     above: \"validated\" when any finding merged into it was validated, \"rejected\" when all of them\n\
+     were, otherwise \"unvalidated\" — stated explicitly on every line, never implied.\n\
+     \n\
+     When a finding confirms a pre-scan lead (it cites the lead id, or proves the same issue at the same\n\
+     place), merge the lead into that line and list its id in \"prescan_leads\". A lead no hunter\n\
+     confirmed is not a defect: leave it out of the report, where the run already lists it as a lead.\n\
+     \n\
+     Write ONLY /harness/out/redteam-report.jsonl, one JSON object per line, one line per distinct\n\
+     defect, exactly this shape:\n\
+     {\"defect\": \"<one-line title>\", \"severity\": \"critical|high|medium|low\", \"reproduction\":\n\
+     \"reproduced|unconfirmed\", \"steps\": \"<how to rerun the proof>\", \"proof\": \"<request and response,\n\
+     test, or script output>\", \"files\": [\"<path>\"], \"hunters\": [\"<hunter session id>\"],\n\
+     \"merged_from\": 2, \"validation\": \"validated|rejected|unvalidated\", \"prescan_leads\": [\"P3\"]}\n\
+     \n\
+     File nothing, open no issue or pull request, do not write /harness/out/pr.md, do not change\n\
+     the code, and do not use the findings tool.\n";
 
 /// Serializes a synthesis launch from its record to its attach, so a retry or tick racing one queues
 /// here instead of slipping into the record-to-attach gap and launching a second judge.
@@ -1204,6 +1471,9 @@ pub struct NewRedTeamRun {
     /// run `armed`; the tick launches it the next time the nest is empty.
     #[serde(default)]
     arm: Option<bool>,
+    /// `general` (unset) or `security`: which focus list and briefing the hunters get.
+    #[serde(default)]
+    preset: Option<String>,
 }
 
 pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -> ApiResult<RedTeamRun> {
@@ -1230,6 +1500,7 @@ fn check_hunter(raw: Option<&str>) -> Result<String, String> {
 /// run gets exactly the validation and gate a manual one does.
 pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<String>) -> Result<RedTeamRun, crate::AppError> {
     let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
+    let preset = Preset::parse(req.preset.as_deref()).map_err(|e| client_error(StatusCode::BAD_REQUEST, &e))?;
     let model = crate::sessions::launch_model(app, req.model.as_deref(), "model")?;
     let subagent_model = crate::sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     let repo = req.repo.trim().to_string();
@@ -1298,6 +1569,8 @@ pub(crate) async fn start(app: &Shared, req: NewRedTeamRun, schedule_id: Option<
             model,
             subagent_model,
             schedule_id,
+            preset,
+            prescan: None,
         };
         runs.push(run.clone());
         run
@@ -1434,6 +1707,9 @@ pub struct RedTeamSchedule {
     pub subagent_model: Option<String>,
     #[serde(default)]
     pub autofix: bool,
+    /// Which preset each fired run uses; `general` for schedules saved before presets.
+    #[serde(default)]
+    pub preset: Preset,
     pub cadence: Cadence,
     pub enabled: bool,
     pub next_run_at: DateTime<Utc>,
@@ -1488,6 +1764,8 @@ pub struct NewSchedule {
     subagent_model: Option<String>,
     #[serde(default)]
     autofix: Option<bool>,
+    #[serde(default)]
+    preset: Option<String>,
     cadence: Cadence,
     #[serde(default)]
     enabled: Option<bool>,
@@ -1525,6 +1803,7 @@ fn schedule_from(
         }
     }
     let hunter = check_hunter(req.hunter.as_deref()).map_err(|e| bad(&e))?;
+    let preset = Preset::parse(req.preset.as_deref()).map_err(|e| bad(&e))?;
     let swarm_size = req.swarm_size.unwrap_or(DEFAULT_SWARM);
     if !(1..=MAX_SWARM).contains(&swarm_size) {
         return Err(bad(&format!("swarm_size must be 1..={MAX_SWARM}, got {swarm_size}")));
@@ -1544,6 +1823,7 @@ fn schedule_from(
         model,
         subagent_model,
         autofix: req.autofix.unwrap_or(false),
+        preset,
         next_run_at: next_run_after(&req.cadence, now),
         cadence: req.cadence,
         enabled: req.enabled.unwrap_or(true),
@@ -1630,6 +1910,7 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
                 modules: None,
                 autofix: Some(schedule.autofix),
                 arm: Some(true),
+                preset: Some(schedule.preset.as_str().to_string()),
             };
             match start(app, req, Some(schedule.id.clone())).await {
                 Ok(run) => notes.push(format!("{repo}: started {}", run.id)),
@@ -1716,6 +1997,7 @@ mod tests {
             modules: None,
             autofix: None,
             arm: Some(arm),
+            preset: None,
         }
     }
 
@@ -2448,8 +2730,12 @@ mod tests {
             model: None,
             subagent_model: None,
             schedule_id: None,
+            preset: Preset::General,
+            prescan: None,
         };
         let value = serde_json::to_value(&run).unwrap();
+        assert_eq!(value["preset"], "general", "a run names its preset");
+        assert!(value["prescan"].is_null(), "a general run has no pre-scan");
         assert_eq!(value["hunter"], "swarm");
         assert!(value["model"].is_null() && value["subagent_model"].is_null() && value["schedule_id"].is_null());
         assert_eq!(value["state"], "armed");
@@ -2646,6 +2932,7 @@ mod tests {
             model: None,
             subagent_model: None,
             autofix: false,
+            preset: Preset::General,
             cadence: Cadence::Weekly {
                 weekday: 0,
                 hour: 0,
@@ -2974,5 +3261,305 @@ mod tests {
         drop(bare_sessions);
         let _ = std::fs::remove_dir_all(root);
         let _ = std::fs::remove_dir_all(bare_root);
+    }
+    // -- The security preset ----------------------------------------------------
+
+    fn security_run(repo: &str) -> RedTeamRun {
+        RedTeamRun {
+            repo: repo.into(),
+            modules: vec!["general".into()],
+            preset: Preset::Security,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_security_preset_briefs_each_hunter_with_its_focus_and_lists_the_other_seven() {
+        let run = security_run("acme/shop");
+        for n in [1, 3, 8] {
+            for i in 0..n {
+                let brief = hunter_brief(&run, i, n, &[]);
+                let text = brief["instructions"].as_str().unwrap();
+                let (name, detail) = SECURITY_FOCUSES[i % 8];
+                assert!(text.contains(&format!("Your assignment is {name}. {detail}")), "{text}");
+                assert_eq!(brief["title"], format!("Red-team hunter {}/{n}: {name}", i + 1));
+                let others = text.split("The other hunters in this swarm cover: ").nth(1).unwrap();
+                let others = others.split(". Stay strictly").next().unwrap();
+                let listed: Vec<&str> = others.split("; ").collect();
+                assert_eq!(listed.len(), 7, "{others}");
+                assert!(!listed.contains(&name));
+                for (j, (other, _)) in SECURITY_FOCUSES.iter().enumerate() {
+                    if j != i % 8 {
+                        assert!(listed.contains(other), "{other} missing from {others}");
+                    }
+                }
+                assert!(text.contains("Reproduce each one before you report"), "{text}");
+                assert!(text.contains("attach the proof"), "{text}");
+                assert!(text.contains("attack only this repository and a local instance"), "{text}");
+                assert!(text.contains("never use real credentials"), "{text}");
+                assert!(text.contains("findings tool"), "{text}");
+                assert!(text.contains("NEVER open, merge or autofix"), "{text}");
+                assert!(!FOCUSES.iter().any(|g| text.contains(&format!("Your assignment is {g}"))));
+            }
+        }
+        // Cycling wraps exactly like the general preset: hunter 9 of 9 is focus 1 again.
+        let wrapped = hunter_brief(&run, 8, 9, &[]);
+        assert_eq!(wrapped["title"], format!("Red-team hunter 9/9: {}", SECURITY_FOCUSES[0].0));
+        // Autofix on swaps the rule the same way.
+        let mut fixing = security_run("acme/shop");
+        fixing.autofix = true;
+        let text = hunter_brief(&fixing, 0, 3, &[])["instructions"].as_str().unwrap().to_string();
+        assert!(text.contains("autofix is on") && !text.contains("NEVER open"), "{text}");
+    }
+
+    #[test]
+    fn general_runs_are_briefed_exactly_as_before() {
+        let run = raid_run("acme/repo");
+        assert_eq!(run.preset, Preset::General, "general is the default preset");
+        let text = hunter_brief(&run, 0, 3, &[])["instructions"].as_str().unwrap().to_string();
+        let expected = "You are red-team hunter 1 of 3 raiding acme/repo, using the general module.\n\
+             \n\
+             Your assignment is error handling and edge cases.\n\
+             \n\
+             The other hunters in this swarm cover: concurrency and race conditions; input validation and injection; \
+             resource leaks and exhaustion; auth and permission boundaries; core-flow logic errors; silent failures and \
+             swallowed errors; API and contract mismatches. Stay strictly inside your own assignment and do not\n\
+             duplicate theirs. A bug that belongs to another focus is theirs, not yours — note it if you find\n\
+             it, and move on.\n\
+             \n\
+             Hunt aggressively for concrete, demonstrable bugs in your assignment. Reproduce each one before\n\
+             you report it.\n\
+             \n\
+             Report what you find with the findings tool.\n\
+             \n\
+             NEVER open, merge or autofix anything unless explicitly told to. You are here to find and \
+             report bugs, not to change the code.";
+        assert_eq!(text, expected);
+        // A general run never carries pre-scan leads, even if a record somehow has a pre-scan.
+        let mut odd = raid_run("acme/repo");
+        odd.prescan = Some(crate::prescan::PreScan {
+            leads: vec![lead("P1", crate::prescan::FOCUS_SECRETS)],
+            ..Default::default()
+        });
+        assert_eq!(hunter_brief(&odd, 0, 3, &[])["instructions"].as_str().unwrap(), expected);
+        // A run file written before presets reads as general with no pre-scan.
+        let old: RedTeamRun =
+            serde_json::from_value(json!({"id": "rt_old", "repo": "acme/repo", "modules": ["general"]})).unwrap();
+        assert_eq!(old.preset, Preset::General);
+        assert!(old.prescan.is_none());
+    }
+
+    fn lead(id: &str, focus: usize) -> crate::prescan::Lead {
+        crate::prescan::Lead {
+            id: id.into(),
+            focus,
+            path: format!("src/{id}.ts"),
+            message: format!("lead {id}"),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pre_scan_leads_go_to_the_hunter_holding_their_focus() {
+        use crate::prescan::{FOCUS_AI_AGENTS, FOCUS_INPUT, FOCUS_OBJECT_ACCESS, FOCUS_SECRETS, FOCUS_WEB_BOUNDARY};
+        let mut run = security_run("acme/shop");
+        run.prescan = Some(crate::prescan::PreScan {
+            leads: vec![
+                lead("P1", FOCUS_SECRETS),
+                lead("P2", FOCUS_INPUT),
+                lead("P3", FOCUS_WEB_BOUNDARY),
+                lead("P4", FOCUS_OBJECT_ACCESS),
+                lead("P5", FOCUS_AI_AGENTS),
+                lead("P6", FOCUS_SECRETS),
+            ],
+            ..Default::default()
+        });
+        let ids = |i: usize, n: usize| -> Vec<String> { prescan_leads_for(&run, i, n).iter().map(|l| l.id.clone()).collect() };
+        // A full swarm: each lead lands with its own focus's hunter.
+        assert_eq!(ids(FOCUS_SECRETS, 8), ["P1", "P6"]);
+        assert_eq!(ids(FOCUS_INPUT, 8), ["P2"]);
+        assert_eq!(ids(FOCUS_WEB_BOUNDARY, 8), ["P3"]);
+        assert_eq!(ids(FOCUS_OBJECT_ACCESS, 8), ["P4"]);
+        assert_eq!(ids(FOCUS_AI_AGENTS, 8), ["P5"]);
+        assert!(ids(0, 8).is_empty() && ids(5, 8).is_empty() && ids(7, 8).is_empty());
+        // Sixteen hunters hold each focus twice: its leads alternate between the two.
+        assert_eq!(ids(FOCUS_SECRETS, 16), ["P1"]);
+        assert_eq!(ids(FOCUS_SECRETS + 8, 16), ["P6"]);
+        // A swarm of three holds focuses 0-2; leads for the rest go to hunter `focus % 3`, so every lead
+        // reaches exactly one hunter.
+        let mut all: Vec<String> = (0..3).flat_map(|i| ids(i, 3)).collect();
+        all.sort();
+        assert_eq!(all, ["P1", "P2", "P3", "P4", "P5", "P6"]);
+        assert_eq!(ids(2, 3), ["P1", "P6"], "secrets is focus 2, held by hunter 2");
+        assert_eq!(
+            ids(1, 3),
+            ["P3", "P4"],
+            "object access is hunter 1's; the web boundary (4) falls to 4 % 3"
+        );
+        assert_eq!(ids(0, 3), ["P2", "P5"], "input (3) and AI safety (6) fall to hunter 0");
+    }
+
+    #[tokio::test]
+    async fn the_api_takes_a_preset_and_refuses_an_unknown_one() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let mut req = new_run("acme/repo", Some(2), true);
+        req.preset = Some("offensive".into());
+        let err = create(State(app.clone()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("unknown red-team preset"), "{}", err.message());
+        let mut req = new_run("acme/repo", Some(2), true);
+        req.preset = Some("security".into());
+        let run = create(State(app.clone()), Json(req)).await.unwrap().0;
+        assert_eq!(run.preset, Preset::Security);
+        assert!(run.prescan.is_none(), "an armed run has not pre-scanned yet");
+        let value = serde_json::to_value(&run).unwrap();
+        assert_eq!(value["preset"], "security");
+        // The request body is plain JSON: `preset` deserialises from the wire.
+        let wire: NewRedTeamRun = serde_json::from_value(json!({"repo": "acme/other", "preset": "security"})).unwrap();
+        assert_eq!(wire.preset.as_deref(), Some("security"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_security_schedule_fires_security_runs() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let now = Utc::now();
+        let req: NewSchedule = serde_json::from_value(json!({
+            "org": "acme", "repos": ["acme/repo"], "preset": "security",
+            "cadence": {"every": "weekly", "weekday": 0, "hour": 2, "minute": 0},
+        }))
+        .unwrap();
+        let mut schedule = schedule_from(&app, req, "rts_sec".into(), now, now).unwrap();
+        assert_eq!(schedule.preset, Preset::Security);
+        schedule.next_run_at = now - ChronoDuration::minutes(1);
+        app.redteam.schedules.write().await.push(schedule);
+        fire_due(&app, now).await;
+        let runs = app.redteam.runs.read().await.clone();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].preset, Preset::Security);
+        let bad: NewSchedule = serde_json::from_value(json!({
+            "org": "acme", "repos": ["acme/repo"], "preset": "nope",
+            "cadence": {"every": "weekly", "weekday": 0, "hour": 2, "minute": 0},
+        }))
+        .unwrap();
+        assert!(schedule_from(&app, bad, "rts_bad".into(), now, now).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn git_in(dir: &FsPath, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[tokio::test]
+    async fn a_security_run_pre_scans_the_mirror_and_deals_its_leads_to_the_matching_hunters() {
+        let root = temp_root();
+        let app = test_app(&root);
+        // A host mirror for acme/repo, built from a local repository: no network anywhere.
+        let work = root.join("work");
+        std::fs::create_dir_all(work.join("src")).unwrap();
+        std::fs::write(
+            work.join("src/db.js"),
+            "db.query(\"SELECT * FROM users WHERE id = \" + req.params.id);\n",
+        )
+        .unwrap();
+        std::fs::write(
+            work.join("src/app.js"),
+            "app.use(cors({ origin: true, credentials: true }));\n",
+        )
+        .unwrap();
+        std::fs::write(work.join(".env"), "DATABASE_URL=postgres://local\n").unwrap();
+        git_in(&work, &["init", "-q", "-b", "main"]);
+        git_in(&work, &["add", "."]);
+        git_in(&work, &["commit", "-q", "-m", "init"]);
+        let bare = app.bare_repo("acme/repo");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git_in(
+            &root,
+            &["clone", "-q", "--bare", work.to_str().unwrap(), bare.to_str().unwrap()],
+        );
+
+        let mut req = new_run("acme/repo", Some(8), false);
+        req.preset = Some("security".into());
+        let run = create(State(app.clone()), Json(req)).await.unwrap().0;
+        let prescan = run.prescan.as_ref().expect("the pre-scan ran before the hunters launched");
+        assert_eq!(prescan.secret_scanner, "builtin", "tests never pick up a host gitleaks");
+        assert!(prescan.notes.iter().any(|n| n.contains("gitleaks is not installed")));
+        assert_eq!(prescan.checklist.len(), 6);
+        let find = |check| prescan.leads.iter().find(|l| l.check == Some(check)).expect("lead").clone();
+        let sql = find(crate::prescan::Check::StringBuiltSql);
+        let cors = find(crate::prescan::Check::CorsWildcardCredentials);
+        let env = find(crate::prescan::Check::EnvFile);
+        // The stored run carries it too.
+        let stored = get(State(app.clone()), Path(run.id.clone())).await.unwrap().0;
+        assert_eq!(stored.prescan.as_ref().map(|p| p.leads.len()), Some(prescan.leads.len()));
+        let sessions = app.sessions.read().await;
+        let brief_of = |i: usize| {
+            sessions
+                .iter()
+                .find(|s| s.id == run.hunters[i].session_id)
+                .unwrap()
+                .instructions
+                .clone()
+        };
+        for (lead, focus) in [
+            (&sql, crate::prescan::FOCUS_INPUT),
+            (&cors, crate::prescan::FOCUS_WEB_BOUNDARY),
+            (&env, crate::prescan::FOCUS_SECRETS),
+        ] {
+            assert_eq!(run.hunters[focus].focus, SECURITY_FOCUSES[focus].0);
+            for i in 0..8 {
+                let has = brief_of(i).contains(&format!("[{}]", lead.id));
+                assert_eq!(has, i == focus, "lead {} ({}) in hunter {i}'s brief", lead.id, lead.path);
+            }
+        }
+        assert!(brief_of(crate::prescan::FOCUS_INPUT).contains("heuristics, not\nconfirmed vulnerabilities"));
+        drop(sessions);
+
+        // The synthesis brief ranks by severity with proof and merges confirmed leads.
+        let mut done = stored.clone();
+        done.state = RedTeamState::Done;
+        let brief = synthesis_brief(&app, &done);
+        let text = brief["instructions"].as_str().unwrap();
+        assert!(text.contains("ranked by\nseverity"), "{text}");
+        assert!(text.contains("\"proof\""), "{text}");
+        assert!(text.contains("\"prescan_leads\""), "{text}");
+        assert!(text.contains(&format!("[{}]", sql.id)), "{text}");
+        assert!(text.len() < 20_000);
+        // A general run's synthesis brief is untouched by any of that.
+        let mut general = done.clone();
+        general.preset = Preset::General;
+        let text = synthesis_brief(&app, &general)["instructions"].as_str().unwrap().to_string();
+        assert!(!text.contains("prescan_leads") && !text.contains("Pre-scan leads"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_merged_security_line_reads_its_proof_and_leads_and_a_general_line_omits_them() {
+        let lines = parse_report(
+            "{\"defect\":\"IDOR on /orders/:id\",\"severity\":\"high\",\"proof\":\"GET /orders/2 as user 1 -> 200\",\"prescan_leads\":[\"P4\"]}\n\
+             {\"defect\":\"crash\",\"severity\":\"low\"}\n",
+        );
+        assert_eq!(lines[0].proof, "GET /orders/2 as user 1 -> 200");
+        assert_eq!(lines[0].prescan_leads, ["P4"]);
+        let general = serde_json::to_value(&lines[1]).unwrap();
+        assert!(general.get("proof").is_none() && general.get("prescan_leads").is_none());
     }
 }
