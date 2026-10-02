@@ -1022,7 +1022,7 @@ mod tests {
                 "openai_key",
             ),
             ("id AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),
-            ("sts ASIAY34FZKBOKMUTVV7A", "ASIAY34FZKBOKMUTVV7A", "aws_access_key"),
+            (concat!("sts ASIA", "Y34FZKBOKMUTVV7A"), concat!("ASIA", "Y34FZKBOKMUTVV7A"), "aws_access_key"),
             (
                 "AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -1050,8 +1050,8 @@ mod tests {
     fn the_rule_corpus_catches_other_credential_shapes() {
         check(&[
             (
-                "maps AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
-                "AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+                concat!("maps AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"),
+                concat!("AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"),
                 "google_api_key",
             ),
             (concat!("gl glp", "at-xYz123AbC456dEf789gH"), concat!("glp", "at-xYz123AbC456dEf789gH"), "gitlab_token"),
