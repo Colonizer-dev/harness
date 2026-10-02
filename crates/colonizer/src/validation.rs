@@ -79,6 +79,9 @@ pub(crate) fn parse_verdict(text: &str) -> Option<Verdict> {
     if body.is_empty() {
         return None;
     }
+    // #761: the review body is model output that lands in `review.md` and, on a fail, in a public
+    // PR comment, so a credential the reviewer quoted is redacted before either sees it.
+    let body = crate::redact::redact_text(&body).into_owned();
     Some(Verdict { vote, body })
 }
 
@@ -267,6 +270,7 @@ pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value)
         }
         .max(file_cursor + 1);
         event["seq"] = json!(seq);
+        crate::redact::redact_value(&mut event); // #761: nothing secret reaches events.jsonl
         // Reserved even when the append fails, as before: the next line must stamp past a rank a
         // browser may have just seen broadcast, or that broadcast and a later line could share a seq.
         rt.last_seq.store(seq, Ordering::SeqCst);
@@ -296,7 +300,8 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let path = app.session_dir(session_id).join("findings.jsonl");
     let appended = {
         let _guard = rt.findings_lock.lock().await;
-        append_line(&path, &line.to_string()).await
+        // #761: a finding's title or reason can quote what the agent saw, secrets included.
+        append_line(&path, &crate::redact::redact_line(&line.to_string())).await
     };
     if let Err(e) = appended {
         // The outcome is real in memory either way; what failed is the colony's record of it, and
@@ -355,6 +360,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             allow_duplicate: false,
             allow_epic: false,
             queue_behind_holder: false,
+            supply_chain: None,
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -603,6 +609,10 @@ async fn review_fix_pr_inner(app: &Shared, fix_id: &str) -> Result<()> {
         // The review travels to GitHub by file — the body is review-length, not argv-length — and a
         // copy stays in the session directory so the text survives even a posting failure.
         let body_path = app.session_dir(fix_id).join("review.md");
+        // #761: the body was redacted as it was parsed; a review that quoted a secret is said out loud.
+        if let Some(note) = crate::redact::redaction_note("review.md", &verdict.body, "posting") {
+            app.session_log(fix_id, "warn", note).await;
+        }
         std::fs::write(&body_path, &verdict.body)?;
         let mut cmd = app.gh(["pr", "comment", pr_url.as_str(), "--body-file"]);
         cmd.arg(&body_path);
@@ -727,6 +737,20 @@ mod tests {
         assert!(parse_verdict(r#"{"verdict":"maybe","body":"hmm"}"#).is_none());
         assert!(parse_verdict(r#"{"verdict":"pass"}"#).is_none(), "a review says something");
         assert!(parse_verdict("looks good to me").is_none());
+    }
+
+    /// #761: a credential quoted in a review never reaches `review.md` or the PR comment.
+    #[test]
+    fn a_secret_quoted_in_a_review_is_redacted_before_review_md() {
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let reply = json!({"verdict": "fail", "body": format!("the test fixture hard-codes {secret}")}).to_string();
+        let verdict = parse_verdict(&reply).unwrap();
+        assert!(!verdict.body.contains(secret), "{}", verdict.body);
+        assert!(
+            verdict.body.starts_with("the test fixture hard-codes [REDACTED:"),
+            "{}",
+            verdict.body
+        );
     }
 
     /// What GitHub's mergeability licenses: merge now, queue an auto-merge, update from the base
@@ -924,6 +948,28 @@ mod tests {
         let stored = std::fs::read_to_string(&ledger).unwrap();
         assert!(stored.contains("\"state\":\"validated\""), "{stored}");
         assert!(stored.ends_with('\n'), "every line ends the file's append format");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_recorded_outcome_is_redacted_before_it_reaches_the_ledger() {
+        use crate::sessions::SessionStatus;
+        use crate::sessions::tests::app_with_colony;
+        let (app, root) = app_with_colony("abc", SessionStatus::Idle).await;
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        record(
+            &app,
+            "abc",
+            &json!({"title": "leaked token", "state": "rejected", "reason": format!("saw {token}")}),
+        )
+        .await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("findings.jsonl")).unwrap();
+        assert!(!stored.contains(token), "{stored}");
+        assert!(stored.contains("[REDACTED:"), "{stored}");
+        assert!(
+            stored.contains("\"state\":\"rejected\""),
+            "the line stays valid JSON: {stored}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

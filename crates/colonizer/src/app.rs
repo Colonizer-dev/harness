@@ -202,6 +202,9 @@ pub struct App {
     pub stream: crate::stream::Hub,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: crate::telemetry::Telemetry,
+    /// The built-in "TypeScript: remove any" loop (ts_any_loop.rs): its settings, reports, trend
+    /// and batch records, saved to `<config_dir>/ts-any-loop.json`.
+    pub ts_any: crate::ts_any_loop::Store,
     pub updater: crate::update::Updater,
     pub updates: crate::version::Updates,
     /// Anonymous usage reporting: the batch, the switch for it, and the sender that posts the batch
@@ -280,6 +283,7 @@ impl App {
             runtime_cache: Mutex::new(None),
             stream: crate::stream::Hub::new(),
             telemetry: crate::telemetry::Telemetry::new(&cfg.config_dir)?,
+            ts_any: crate::ts_any_loop::Store::new(&cfg.config_dir),
             updater: crate::update::Updater::new(),
             updates: crate::version::Updates::new(&cfg.config_dir)?,
             usage: crate::usage::Usage::new(&cfg.config_dir)?,

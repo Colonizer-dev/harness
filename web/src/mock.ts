@@ -81,6 +81,8 @@ import type {
   SpendTokens,
   StartRedTeamRunRequest,
   TelemetryStatus,
+  TsAnyLoop,
+  TsAnyReport,
   UpdateStatus,
   UsageStatus,
   LoginItemStatus,
@@ -1756,7 +1758,8 @@ export function createMockApi(): Api {
 
   // The rest of the lifecycle: a launch waiting for a slot, and a PR that was merged or closed.
   // The queued one is stacked on the failed colony above it, so the queue reads as waiting for the
-  // parent colony rather than for a parallelism slot.
+  // parent colony rather than for a parallelism slot — and it is superseded (issue #673), so the
+  // hold banner has something to hold.
   const queued = new MockSession({
     ...baseSession("queue1357", "acme/webshop", 51, "Rate-limit the checkout API"),
     status: "queued",
@@ -1764,6 +1767,16 @@ export function createMockApi(): Api {
     parent: "stuck2468",
     queued_behind: "stuck2468",
     base: "colonizer/issue-43-stuck2468",
+    supply_chain: { package: "lodash", advisory: "ghsa-7fm4-wx8h-p9q3" },
+    superseded: {
+      by: "merge_w1",
+      pr_url: "https://github.com/acme/webshop/pull/71",
+      pr: 71,
+      title: "Retry failed webhooks with backoff",
+      reason: "files",
+      at: ago(1500), // shortly after pull/71 merged (a day ago, in the overview seeds below)
+      kept: false,
+    },
     created_at: ago(2),
   });
   queued.session.updated_at = ago(2);
@@ -1965,6 +1978,7 @@ export function createMockApi(): Api {
       agent: { model: "strix/ds4-flash", subagent_model: "deepseek/deepseek-flash", background_model: null },
       max_parallel: 2,
       stack: "rust",
+      close_superseded_prs: ["acme/webshop"],
       memory: { enabled: true, deja: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
     },
@@ -2356,6 +2370,60 @@ export function createMockApi(): Api {
     ended_reason: null,
     created_at: created,
   });
+
+  // The built-in TypeScript any loop: off, with an empty allowlist, and one sample report and a
+  // short history so the demo has a trend to draw.
+  const tsAnySample: TsAnyReport = {
+    id: "tsa_demo01",
+    started_at: ago(60 * 7),
+    finished_at: ago(60 * 7 - 1),
+    dry_run: true,
+    trigger: "manual",
+    blocked: false,
+    repos: [
+      {
+        repo: "acme/webshop",
+        sha: "4f2c9a1",
+        typescript: true,
+        method: "token_scan",
+        method_note: "token scan: node_modules/typescript is absent and offline installs are off",
+        ts_version: null,
+        total: 57,
+        implicit: null,
+        as_casts: 12,
+        suppressions: 3,
+        ts_files: 214,
+        forms: { annotation: 31, as: 12, array: 6, record: 5, type_argument: 3 },
+        modules: [
+          { module: "src/api", explicit: 24, files: 5 },
+          { module: "src/checkout", explicit: 17, files: 4 },
+          { module: "src/lib", explicit: 9, files: 3 },
+        ],
+        files: [{ path: "src/api/client.ts", module: "src/api", explicit: 11, implicit: null, as_casts: 2, suppressions: 0 }],
+        previous: [61, 64],
+        notes: [],
+        error: null,
+      },
+    ],
+    total: 57,
+    dispatched: [{ repo: "acme/webshop", module: "src/api", session: null, title: "TypeScript: remove any in src/api (20 of 24)", occurrences: 20, module_total: 24 }],
+    skipped: [],
+    checks: [],
+    attention: [],
+    note: null,
+  };
+  let tsAnyLoop: TsAnyLoop = {
+    name: "TypeScript: remove any",
+    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 7, minute: 43 }, batch_cap: 20, max_per_run: 3, cooldown_hours: 20, implicit: false, offline_install: true, autopilot: true },
+    next_run_at: null,
+    running: false,
+    node: true,
+    blocked: false,
+    last_report: tsAnySample,
+    history: [64, 61, 57].reverse().map((total, i) => ({ id: `tsa_h${i}`, at: ago(60 * 24 * i + 60 * 7), trigger: "schedule", total, totals: { "acme/webshop": total }, dispatched: 1, skipped: 0, flagged: 0, summary: `1 TypeScript repository: ${total} explicit any` })),
+    attention: [],
+    trend: {},
+  };
   /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
   const nextRun = (cadence: RedTeamCadence, from: Date): string => {
     const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
@@ -3140,6 +3208,7 @@ export function createMockApi(): Api {
       // means the session fell back to the publish module's setting and reports none of its own.
       autofix: body.autofix,
       automerge: body.automerge,
+      supply_chain: body.supply_chain ?? null,
       parent: after?.id ?? null,
       base: after?.branch ?? "main",
     },
@@ -3195,6 +3264,16 @@ export function createMockApi(): Api {
       logActivity({ kind: "outcome.stopped", actor: "you", via: "cockpit", org: s.session.org, repo: s.session.repo, issue: s.session.issue, colony: s.session.id, title: s.session.issue_title });
       s.log("microVM stopped and removed; the worktree was kept");
       return { ...clone(s.session), result: "stopped" };
+    },
+    keepSession: async (id) => {
+      await sleep(200);
+      const s = find(id);
+      const superseded = s.session.superseded;
+      // Like the server: 409 for a colony that is not superseded (or was kept already).
+      if (!superseded || superseded.kept) throw new ApiError("this colony is not superseded; there is nothing to keep", 409);
+      s.patch({ superseded: { ...superseded, kept: true } });
+      s.log("kept: this colony will start even though a merged pull request covered its work");
+      return clone(s.session);
     },
     // The colony was looked at (issue #744): it leaves the badge, like on the server.
     seenSession: async (id) => {
@@ -4144,6 +4223,22 @@ export function createMockApi(): Api {
         l.runs += 1;
         l.disk_cleanup.history.unshift(report);
       }
+      return clone(report);
+    },
+    tsAnyLoop: () => later(() => clone(tsAnyLoop)),
+    saveTsAnyLoop: async (settings) => {
+      await sleep(150);
+      if (settings.cadence.every === "interval" && settings.cadence.minutes < 60) throw new ApiError("the TypeScript any loop runs at most hourly", 400);
+      const active = settings.enabled && settings.allow.length > 0;
+      tsAnyLoop = { ...tsAnyLoop, settings: clone(settings), next_run_at: active ? new Date(Date.now() + 6 * 3_600_000).toISOString() : null };
+      return clone(tsAnyLoop);
+    },
+    runTsAnyLoop: async (body) => {
+      await sleep(400);
+      const report: TsAnyReport = { ...tsAnySample, id: `tsa_${Math.random().toString(16).slice(2, 8)}`, dry_run: body.dry_run, trigger: "manual", started_at: now(), finished_at: now() };
+      // The mock never starts colonies: a real run says what it would have started, like a dry run.
+      report.dispatched = report.dispatched.map((d) => ({ ...d, session: null }));
+      if (!body.dry_run) tsAnyLoop = { ...tsAnyLoop, last_report: report };
       return clone(report);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),

@@ -16,6 +16,7 @@ type FieldKey =
   | "background_model"
   | "max_parallel"
   | "repo_max_parallel"
+  | "close_superseded_prs"
   | "budget_usd"
   | "host_disk"
   | "stack"
@@ -30,7 +31,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean" | "choice";
+  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos";
   min?: number;
   max?: number;
   unit?: string;
@@ -46,6 +47,7 @@ const FIELDS: FieldSpec[] = [
   { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
   { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
+  { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
   { key: "budget_usd", group: "Colonies", label: "Budget per colony", hint: "Dollars one colony may spend on models in total; 0 means unlimited", kind: "number", min: 0, decimal: true, unit: "USD" },
   { key: "host_disk", group: "Colonies", label: "Host disk per colony", hint: "Most disk one colony may leave on the host, like 512M or 16G; 0 means unlimited", kind: "size" },
   { key: "memory_enabled", group: "Memory", label: "Shared memory", hint: "Colonies read global, org and repository notes and propose new ones", kind: "boolean" },
@@ -69,6 +71,9 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
     case "max_parallel":
     case "repo_max_parallel":
       return settings[key];
+    case "close_superseded_prs":
+      // One comma-separated line in the draft; an empty list reads as no override, like inherit.
+      return settings.close_superseded_prs?.join(", ") ?? "";
     case "budget_usd":
       return settings.budget_usd;
     case "host_disk":
@@ -111,6 +116,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
     case "max_parallel":
     case "repo_max_parallel":
       return setting("sandbox", key);
+    case "close_superseded_prs":
+      // Org-only, with no module setting behind it: the default is an empty list, never closing.
+      return "";
     case "budget_usd":
       return setting("sandbox", "budget_usd");
     case "host_disk":
@@ -130,6 +138,10 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
 }
 
 function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = null): string {
+  if (spec.key === "close_superseded_prs") {
+    const list = typeof value === "string" ? parseRepoList(value) : [];
+    return list.length ? list.join(", ") : "never closes";
+  }
   if (value === undefined || value === null) return "global default";
   if (typeof value === "boolean") return value ? "on" : "off";
   // 0 — or nothing set at all, on the server's quota fields — is how unlimited is written.
@@ -145,12 +157,26 @@ function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = 
   return spec.unit ? `${value} ${spec.unit}` : String(value);
 }
 
+/** A repo-list field's text as the array it sends: comma- or newline-separated `owner/name`, trimmed, blanks dropped. */
+function parseRepoList(raw: string): string[] {
+  return raw
+    .split(/[\n,]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/** Whether every entry reads as `owner/name`, the shape the server validates (mirrored for instant feedback). */
+function isRepoList(raw: string): boolean {
+  return parseRepoList(raw).every((repo) => /^[^\s/]+\/[^\s/]+$/.test(repo) && !repo.split("/").includes(".."));
+}
+
 function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
   const draft = {} as Draft;
   for (const spec of FIELDS) {
     const own = readSetting(settings, spec.key);
     const fallback = globalValue(modules, spec.key);
-    const override = own !== undefined && own !== null && !(spec.kind === "model" && own === "");
+    const override =
+      own !== undefined && own !== null && !(spec.kind === "model" && own === "") && !(spec.kind === "repos" && own === "");
     const base = override ? own : fallback;
     draft[spec.key] = {
       override,
@@ -195,7 +221,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     (spec) =>
       draft[spec.key].override &&
       ((spec.kind === "number" && parseNumber(spec, String(draft[spec.key].value)) === null) ||
-        (spec.kind === "size" && parseSize(String(draft[spec.key].value)) === null)),
+        (spec.kind === "size" && parseSize(String(draft[spec.key].value)) === null) ||
+        (spec.kind === "repos" && !isRepoList(String(draft[spec.key].value)))),
   );
   const settings: OrgSettings = {
     agent: {
@@ -206,6 +233,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     },
     max_parallel: pick("max_parallel") as number | null,
     repo_max_parallel: pick("repo_max_parallel") as number | null,
+    // There is nothing to inherit: not overridden is the default empty list, which closes nothing.
+    close_superseded_prs: draft.close_superseded_prs.override ? parseRepoList(String(draft.close_superseded_prs.value)) : [],
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
@@ -221,7 +250,9 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     error: invalid
       ? invalid.kind === "size"
         ? `${invalid.label} must be a size like 512M or 16G, or 0 for unlimited`
-        : numberError(invalid)
+        : invalid.kind === "repos"
+          ? `${invalid.label} entries must be repositories like acme/api`
+          : numberError(invalid)
       : null,
   };
 }
@@ -517,6 +548,20 @@ export function OrgSettingsForm({
                           inputClass,
                           "w-28",
                           parseSize(String(draft[spec.key].value)) === null && "border-err focus:border-err",
+                        )}
+                      />
+                    )}
+                    {spec.kind === "repos" && (
+                      <input
+                        type="text"
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        placeholder="acme/api, acme/web"
+                        aria-label={`${spec.label} for ${org}`}
+                        aria-invalid={!isRepoList(String(draft[spec.key].value))}
+                        className={cx(
+                          inputClass,
+                          !isRepoList(String(draft[spec.key].value)) && "border-err focus:border-err",
                         )}
                       />
                     )}

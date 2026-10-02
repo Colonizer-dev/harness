@@ -36,6 +36,10 @@ pub const EXIT_NOT_FOUND: i32 = 4;
 pub const EXIT_CONFLICT: i32 = 5;
 /// 429: a scoped token's launch cap — its concurrency limit or daily budget — refused the launch.
 pub const EXIT_CAP: i32 = 6;
+/// `pr --wait` followed the pull request's checks and they failed.
+pub const EXIT_CHECKS_FAILED: i32 = 7;
+/// `pr --wait --timeout` ran out of time before the checks settled.
+pub const EXIT_TIMEOUT: i32 = 8;
 
 /// The port a `--host` that names no port of its own gets: the mothership's default bind.
 const DEFAULT_PORT: u16 = 7878;
@@ -79,6 +83,8 @@ Exit codes:
   4  not found: no such colony, loop or token (404)
   5  conflict (409), or `ask`/`answer` on a colony that is not asking anything
   6  a launch cap was refused (429)
+  7  `pr --wait` followed the checks and they failed
+  8  `pr --wait --timeout` ran out of time before the checks settled
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
@@ -177,8 +183,17 @@ enum Command {
     Stop { id: String },
     /// Start a stopped colony again, picking up its worktree where it was left
     Resume { id: String },
-    /// Print a colony's pull request URL and state
-    Pr { id: String },
+    /// Print a colony's pull request URL and state, or --wait for its checks to settle
+    Pr {
+        id: String,
+        /// Follow the pull request's checks until they settle, re-reading the colony, instead of
+        /// printing the state once; exits 7 when they fail, 8 when a --timeout runs out
+        #[arg(long)]
+        wait: bool,
+        /// Give up after this long (`--wait` only): `90`, `90s`, `30m`, `2h`. No timeout by default
+        #[arg(long, requires = "wait", value_name = "DURATION", value_parser = parse_duration)]
+        timeout: Option<Duration>,
+    },
     /// Print a repository's architecture map as a text outline, or search it with --find
     Map {
         /// The repository the map was drawn from, as owner/repo
@@ -853,6 +868,36 @@ fn parse_host(host: &str) -> Result<String, String> {
     }
 }
 
+/// `--timeout` as a duration: a bare number is seconds, `s`/`sec`/`seconds` says so, and the
+/// minutes, hours and days spellings are `loop create`'s ([`split_duration`]: `30m`, `2h`, `1d`,
+/// any case). Zero, a count past `u64`, a time of day (`@`) and any other spelling are refused: a
+/// wait that ends when it starts is a typo, not a plan.
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let refuse = || format!("--timeout takes a number of seconds, or s/m/h/d after it (got \"{text}\")");
+    let text = text.trim();
+    if text.contains('@') {
+        return Err(refuse());
+    }
+    let secs = match split_duration(text) {
+        Some((count, unit)) => {
+            let unit_secs = match unit {
+                'm' => 60,
+                'h' => 3600,
+                _ => 86_400,
+            };
+            count.checked_mul(unit_secs)
+        }
+        None => {
+            let digits = text.chars().take_while(char::is_ascii_digit).count();
+            match text[digits..].trim().to_lowercase().as_str() {
+                "" | "s" | "sec" | "secs" | "second" | "seconds" => text[..digits].parse::<u64>().ok(),
+                _ => None,
+            }
+        }
+    };
+    secs.filter(|secs| *secs > 0).map(Duration::from_secs).ok_or_else(refuse)
+}
+
 /// The token a client command proves itself with: the environment first, so a shell (or a CI job)
 /// can hold it without touching disk; then the file the operator named; then the local install's
 /// own token, read without creating it — the CLI is a client here, not the mint (the mothership
@@ -1373,34 +1418,14 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             })
             .await
         }
-        Command::Pr { id } => {
+        Command::Pr { id, wait, timeout } => {
             let json = cli.json;
             client_command(cli, move |machine| async move {
+                if wait {
+                    return wait_pr(&machine, &id, json, timeout, PR_WAIT_POLL).await;
+                }
                 let detail = machine.get(&format!("/api/sessions/{id}")).await?;
-                if json {
-                    println!(
-                        "{}",
-                        pretty(&json!({
-                            "id": id,
-                            "pr_url": detail["pr_url"],
-                            "status": detail["status"],
-                            "ci_state": detail["ci_state"],
-                            "merged_at": detail["merged_at"],
-                        }))?
-                    );
-                    return Ok(EXIT_OK);
-                }
-                match detail["pr_url"].as_str() {
-                    Some(url) => {
-                        let state = detail["status"].as_str().unwrap_or("unknown");
-                        let ci = detail["ci_state"]
-                            .as_str()
-                            .map(|c| format!(", checks {c}"))
-                            .unwrap_or_default();
-                        println!("{url} ({state}{ci})");
-                    }
-                    None => println!("no pull request yet"),
-                }
+                print_pr(&id, &detail, json)?;
                 Ok(EXIT_OK)
             })
             .await
@@ -1610,6 +1635,102 @@ where
             e.exit_code()
         }
     }
+}
+
+/// How often `pr --wait` re-reads the colony. The mothership re-checks GitHub itself about once a
+/// minute while checks run, so reading it faster buys nothing.
+const PR_WAIT_POLL: Duration = Duration::from_secs(15);
+
+/// The `pr` answer, human or `--json`: the URL with the colony's state and checks, or the words
+/// that there is no pull request yet.
+fn print_pr(id: &str, detail: &Value, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            pretty(&json!({
+                "id": id,
+                "pr_url": detail["pr_url"],
+                "status": detail["status"],
+                "ci_state": detail["ci_state"],
+                "merged_at": detail["merged_at"],
+            }))?
+        );
+        return Ok(());
+    }
+    match detail["pr_url"].as_str() {
+        Some(url) => {
+            let state = detail["status"].as_str().unwrap_or("unknown");
+            let ci = detail["ci_state"]
+                .as_str()
+                .map(|c| format!(", checks {c}"))
+                .unwrap_or_default();
+            println!("{url} ({state}{ci})");
+        }
+        None => println!("no pull request yet"),
+    }
+    Ok(())
+}
+
+/// The body of `pr --wait`: re-read the colony until its checks settle — 0 on success or when
+/// there is nothing to wait for (`no_checks`), 7 when they fail — or until the colony ends without
+/// putting a verdict in front of us (1: no pull request, or one merged or closed untested).
+/// `timeout` ends the wait with 8 instead, and `interval` is a parameter only so the tests can
+/// wait in milliseconds.
+async fn wait_pr(machine: &Machine, id: &str, json: bool, timeout: Option<Duration>, interval: Duration) -> Result<i32, Fail> {
+    // When to stop, and the value to name when saying so.
+    // A timeout too long to land on the clock (`--timeout 5000000000000000h`) is no deadline at all.
+    let give_up = timeout.and_then(|t| tokio::time::Instant::now().checked_add(t).map(|at| (at, t)));
+    loop {
+        let detail = machine.get(&format!("/api/sessions/{id}")).await?;
+        let checks = detail["ci_state"].as_str().unwrap_or("unknown");
+        let status = detail["status"].as_str().unwrap_or("unknown");
+        match detail["pr_url"].as_str() {
+            // A settled verdict — or none to wait for — is the ending the wait was for.
+            Some(_) if matches!(checks, "success" | "failure" | "no_checks") => {
+                print_pr(id, &detail, json)?;
+                return Ok(if checks == "failure" { EXIT_CHECKS_FAILED } else { EXIT_OK });
+            }
+            // The work is out and the verdict never came: the pull request moved on under us.
+            Some(_) if matches!(status, "merged" | "closed") => {
+                eprintln!("the pull request was {status} before its checks settled");
+                return Ok(EXIT_ERROR);
+            }
+            // Still no pull request: a parked colony is paused, not over, but nothing will
+            // publish until someone resumes it, so waiting would hang regardless.
+            None if status == "parked" => {
+                eprintln!("colony {id} is parked; nothing will publish until it is resumed");
+                return Ok(EXIT_ERROR);
+            }
+            None if !pr_still_coming(status) => {
+                eprintln!("colony {id} ended without opening a pull request (status {status})");
+                return Ok(EXIT_ERROR);
+            }
+            _ => {}
+        }
+        let now = tokio::time::Instant::now();
+        if let Some((deadline, after)) = give_up
+            && now >= deadline
+        {
+            eprintln!("colony {id}: checks still {checks} after {after:?}; gave up waiting");
+            return Ok(EXIT_TIMEOUT);
+        }
+        // Sleep to the next poll, but never past the deadline: a short --timeout must not sit out a
+        // whole poll interval just to notice it is over.
+        let wake = match give_up {
+            Some((deadline, _)) => (now + interval).min(deadline),
+            None => now + interval,
+        };
+        tokio::time::sleep(wake - now).await;
+    }
+}
+
+/// Whether a colony with no pull request yet may still open one — the statuses a `--wait` keeps
+/// waiting through. The refused set is `SessionStatus::is_terminal`'s spellings plus `parked`.
+fn pr_still_coming(status: &str) -> bool {
+    !matches!(
+        status,
+        "pr_opened" | "merged" | "closed" | "no_changes" | "stopped" | "failed" | "parked"
+    )
 }
 
 async fn token_command(cli: &Cli, command: TokenCommand) -> i32 {
@@ -2653,6 +2774,8 @@ mod tests {
             &["stop", "abc123"][..],
             &["resume", "abc123"][..],
             &["pr", "abc123"][..],
+            &["pr", "abc123", "--wait"][..],
+            &["pr", "abc123", "--wait", "--timeout", "30m"][..],
             &["map", "acme/app"][..],
             &["map", "acme/app", "--find", "login"][..],
             &["loop", "list"][..],
@@ -2868,6 +2991,51 @@ mod tests {
         }
         // The command structure itself is internally consistent (every subcommand reachable).
         Cli::command().debug_assert();
+    }
+
+    /// `--timeout` belongs to `--wait` (a one-shot `pr` has nothing to time out), takes a duration,
+    /// and refuses a zero or unspellable one: every such argument is a usage error (2).
+    #[test]
+    fn a_pr_timeout_without_a_wait_or_a_bad_duration_is_a_usage_error() {
+        let err = parse(&["pr", "abc123", "--timeout", "30m"]).unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_USAGE, "--timeout needs --wait");
+        for (good, secs) in [
+            ("90", 90),
+            ("90s", 90),
+            ("30m", 1800),
+            ("2h", 7200),
+            // The unit spellings `loop create` reads for a cadence read the same here.
+            ("2H", 7200),
+            ("45min", 2700),
+            ("1d", 86_400),
+            ("10 seconds", 10),
+        ] {
+            let cli = parse(&["pr", "abc123", "--wait", "--timeout", good]).unwrap();
+            let Command::Pr { timeout, .. } = cli.command.unwrap() else {
+                panic!("pr did not parse");
+            };
+            assert_eq!(timeout, Some(Duration::from_secs(secs)), "{good} should parse as a --timeout");
+        }
+        for bad in [
+            "",
+            "0",
+            "0m",
+            "0s",
+            "soon",
+            "m",
+            "1h30m",
+            "99999999999999999999h",
+            "999999999999999999d",
+            "14d@03:00",
+            "daily@09:00",
+            "-5",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad:?} should be refused");
+            assert!(
+                parse(&["pr", "abc123", "--wait", "--timeout", bad]).is_err(),
+                "{bad:?} should not parse"
+            );
+        }
     }
 
     /// The exit codes a script reads are the ones `--help` documents.
@@ -3276,6 +3444,226 @@ mod tests {
 
         let err = set_loop_enabled(&machine, "loop_z", false, false).await.unwrap_err();
         assert_eq!(err.exit_code(), EXIT_NOT_FOUND, "an unknown loop reads as not-found");
+    }
+
+    /// A stub mothership whose one colony reads as `reading(n)` — `n` counts the polls so far — on
+    /// a loopback port. Returns the client and the read counter, so a test can tell looping from a
+    /// single answer.
+    async fn scripted_pr(
+        reading: impl Fn(usize) -> Value + Clone + Send + Sync + 'static,
+    ) -> (Machine, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{Json, Router, routing::get};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let app = Router::new().route(
+            "/api/sessions/abc",
+            get(move || {
+                let reading = reading.clone();
+                let seen = seen.clone();
+                async move {
+                    let n = seen.fetch_add(1, Ordering::SeqCst);
+                    Json(reading(n))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (Machine::for_tests(format!("http://{addr}"), "col".into()), hits)
+    }
+
+    /// `pr --wait` follows a pending first reading to a settled one instead of ending on it:
+    /// success reads as 0 (after really looping), failure as 7.
+    #[tokio::test]
+    async fn pr_wait_follows_pending_checks_until_they_settle() {
+        use std::sync::atomic::Ordering;
+
+        let (machine, hits) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "success" }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_OK);
+        assert!(
+            hits.load(Ordering::SeqCst) >= 2,
+            "a pending reading must loop, not end the wait"
+        );
+
+        let (machine, _) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "failure" }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_CHECKS_FAILED);
+    }
+
+    /// Out of time is its own ending: a colony whose checks stay pending reads as 8, and a short
+    /// timeout cuts the wait short instead of sitting out the whole poll interval.
+    #[tokio::test]
+    async fn pr_wait_times_out_while_checks_stay_pending() {
+        use std::sync::atomic::Ordering;
+
+        let (machine, hits) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "pending",
+            })
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let code = wait_pr(
+            &machine,
+            "abc",
+            false,
+            Some(Duration::from_millis(40)),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, EXIT_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(2), "the deadline cuts the wait short");
+        assert!(hits.load(Ordering::SeqCst) >= 1, "at least one reading before giving up");
+    }
+
+    /// A colony that ends without opening a pull request has nothing to wait for: 1, not 0.
+    #[tokio::test]
+    async fn pr_wait_refuses_a_colony_that_ends_without_a_pull_request() {
+        let (machine, _) = scripted_pr(|_| json!({"id": "abc", "status": "no_changes"})).await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_ERROR);
+    }
+
+    /// A pull request that was merged or closed before its checks settled, and a parked colony
+    /// (paused, but publishing nothing), both mean no verdict is coming: 1.
+    #[tokio::test]
+    async fn pr_wait_refuses_a_pull_request_that_never_got_a_verdict() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new()
+            .route(
+                "/api/sessions/merged",
+                get(|| async {
+                    Json(json!({
+                        "id": "merged",
+                        "status": "merged",
+                        "pr_url": "https://github.com/acme/app/pull/9",
+                        "ci_state": "pending",
+                    }))
+                }),
+            )
+            .route(
+                "/api/sessions/parked",
+                get(|| async { Json(json!({"id": "parked", "status": "parked"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let machine = Machine::for_tests(format!("http://{addr}"), "col".into());
+        let code = wait_pr(&machine, "merged", false, None, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_ERROR);
+        let code = wait_pr(&machine, "parked", false, None, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_ERROR);
+    }
+
+    /// The merge train (#720) merges a pull request as soon as its own reading of the checks is
+    /// green, so a `--wait` can first see the colony already `merged`. A settled verdict still wins
+    /// over the status: merged with checks green is 0, and a pull request closed after its checks
+    /// failed is 7, not the "moved on untested" 1.
+    #[tokio::test]
+    async fn pr_wait_reads_a_verdict_even_after_the_merge_train_moved_the_pull_request() {
+        let (machine, _) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": (if n == 0 { "pr_opened" } else { "merged" }),
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "success" }),
+                "merged_at": (if n == 0 { Value::Null } else { json!("2026-09-29T10:00:00Z") }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_OK, "merged by the train with checks green");
+
+        let (machine, _) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "closed",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "failure",
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_CHECKS_FAILED, "a failed verdict is reported even on a closed PR");
+    }
+
+    /// A colony still on its way to a pull request is waited through; one that has settled
+    /// without one is not. The refused spellings are exactly the terminal statuses plus `parked`,
+    /// checked against the model so a new status cannot slip past either list.
+    #[test]
+    fn pr_still_coming_matches_the_session_model() {
+        use crate::sessions::SessionStatus::*;
+        for status in [
+            Queued,
+            Starting,
+            Running,
+            WaitingForAnswer,
+            Idle,
+            Publishing,
+            PrOpened,
+            Merged,
+            Closed,
+            NoChanges,
+            Parked,
+            Stopped,
+            Failed,
+        ] {
+            assert_eq!(
+                pr_still_coming(status.as_str()),
+                !(status.is_terminal() || status == Parked),
+                "{}",
+                status.as_str()
+            );
+        }
+    }
+
+    /// A `--timeout` too long for the clock waits without a deadline instead of panicking on the
+    /// instant arithmetic; the first settled reading still ends it.
+    #[tokio::test]
+    async fn pr_wait_with_an_overlong_timeout_does_not_panic() {
+        let (machine, _) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "no_checks",
+            })
+        })
+        .await;
+        let huge = parse_duration("5000000000000000h").unwrap();
+        let code = wait_pr(&machine, "abc", false, Some(huge), Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_OK, "no checks is nothing to wait for");
     }
 
     /// `loop merge-train …` edits change one thing in the settings it read back, and `show`
