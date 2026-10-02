@@ -82,3 +82,51 @@ The pull request template asks.
 `scripts/test/gaps.test.mjs` checks that every repository path cited here exists, and that every
 **Not built** row names a tracking issue or says `none filed`. It cannot check the pictures: the
 website lives in another repository, so when an illustration changes there, record it here by hand.
+
+## What this does not do
+
+Stated here rather than buried.
+
+- **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
+  Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
+  publishes no macOS build of it.
+- **Two agents, one forge.** Claude Code and Pi are the agent modules; GitHub the only source and publisher.
+- **The cockpit needs its per-install token.** Startup prints a sign-in link and opens it
+  (`colonizer open` reprints it later; `COLONIZER_NO_BROWSER=1` skips the auto-open). The token is
+  kept in `~/.config/colonizer/api-token`. The server binds to `127.0.0.1`, checks `Host` and
+  `Origin` headers, and should stay there.
+- **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the
+  host's own on Linux, the `linux-arm64` build fetched at install time on a Mac.
+- **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
+  encrypted traffic crosses Tailscale's public DERP servers.
+- **`install.sh --install` is not exercised yet.** It is implemented, but it hasn't been run against the
+  real world. Colonies opening pull requests has been.
+- **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
+  non-Claude models. Routing and the gateway are tested with stub Anthropic-compatible providers inside
+  real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
+  API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
+  wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
+- **ChatGPT subscriptions are not a credential.** OpenAI-compatible providers take an API key: a ChatGPT
+  plan is honoured by the Responses API behind Codex sign-in, which the gateway's `openai` wire does not
+  speak. The [`codex` agent module](../modules/agents/codex) runs on an OpenAI API key instead — a `CODEX_API_KEY`
+  colony secret for `api.openai.com` — but a ChatGPT sign-in is still nothing the harness can spend
+  ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](decisions.md)).
+- **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
+  is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
+  given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
+- **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
+  real credentials included. It found four ways a colony could cross into the host, filed as draft
+  security advisories and not fixed yet ([docs/audit.md](audit.md)).
+- **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
+  crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
+  microsandbox, the in-VM daemon, the agent modules and the web UI beside it — use the installer.
+  Nothing is published to npm.
+- **CI runs every suite, including one that boots a real colony.** The Rust tests and clippy, the
+  runner's, the live map receiver's and the web UI's all run on every pull request; releases are
+  built, smoke-tested and attested with build provenance; dependency audits and SBOMs run with every
+  change and on a weekly schedule; runtime pins move only by reviewed pull request. GitHub-hosted
+  runners do have `/dev/kvm` (the job makes it usable), so the `colony-e2e` job also boots a whole
+  colony end to end — mothership, microVM, agentd and the Claude Code runner against a scratch
+  repository and a stub model server, asserting it reaches `no_changes`. What that still does not
+  cover is a real model or a real GitHub write ([roadmap](vision.md#roadmap-in-public)). The crates are
+  published to crates.io through Trusted Publishing; nothing is published to npm.

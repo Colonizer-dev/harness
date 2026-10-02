@@ -89,6 +89,41 @@ Two settings layers sit next to the modules:
   the first time asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
 
+### Providers today, and what is next
+
+| Kind | Providers today | Next |
+| :--- | :--- | :--- |
+| `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
+| `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
+| `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
+| `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
+| `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
+| `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
+| `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
+| `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
+| `loops` | Besides the loops you write, a built-in "TypeScript: remove any" loop that counts the explicit `any` in the TypeScript repositories you opt in, with their own compiler or a token scan and no model, and hands one small batch per repository to a colony that types them properly, then recounts its pull request. Off, with an empty allowlist, until configured ([docs/loops.md](loops.md#typescript-remove-any)) | — |
+| `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](burn-down.md)) | — |
+
+Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
+parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
+notifications. An org is offered the first time the account shows it — you choose which become workspaces;
+a first install adopts the ones it already had ([#176](https://github.com/Colonizer-dev/harness/issues/176)).
+Model providers (DeepSeek, a server on your LAN or tailnet, any Anthropic-compatible endpoint)
+are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
+keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
+Claude when a provider is down or busy.
+
+One thing worth knowing before you point a provider at a model setting: the orchestrator model does
+nearly all of the work. The subagent setting only carries traffic when a colony delegates to a
+subagent, and colonies rarely do — four recent colonies of 413 to 2 095 events spawned 0, 0, 0 and 1
+between them — and the background setting carries only small auxiliary calls. A provider wired to just
+those two is configured correctly and will still look idle. Pi has no subagents, so its single model
+setting carries all of its traffic. To put real traffic on your own hardware,
+point the orchestrator model at it. The full breakdown is in the
+[Claude Code module](../modules/agents/claude-code/README.md).
+
 ### The gateway's audit log
 
 Every authenticated gateway request appends one line to the colony's `gateway.jsonl`: provider, wire,
@@ -104,6 +139,22 @@ serve), `queue_full`,
 else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
 built from scratch: the colony's own credential headers are dropped at the gateway and only the
 mothership's saved key for the provider is injected.
+
+## What's in the repository
+
+| Path | What it is | Status |
+| :--- | :--- | :--- |
+| [`crates/colonizer`](../crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
+| [`crates/colonizer-agentd`](../crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
+| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
+| [`modules/agents/codex`](../modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
+| [`modules/agents/acp`](../modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
+| [`web`](../web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
+| [`vendor`](../vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and a snapshot of the built-in subagents of the guest Claude Code build (`claude-code-builtins.json`) | `SHIPPING` |
+| [`scripts`](../scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
 
 ## How the mothership's code is put together
 

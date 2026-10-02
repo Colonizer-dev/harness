@@ -88,7 +88,7 @@ provider-key save (`PUT /api/providers/{id}`) answers the refusal with a 503 who
 both variables. The rule covers everything that goes through the secret writer: provider keys, the
 GitHub token, the Claude credential, colony secrets, the notification signing secret, the memory,
 voice and push keys. This is an extra mothership-side layer only; colony-facing mechanics are
-unchanged, and are the ones the [trust model](../README.md#trust-model) names: per-colony gateway
+unchanged, and are the ones the [trust model](trust-model.md) names: per-colony gateway
 tokens, placeholders swapped for the real credential at the TLS edge, agentd's per-session bearer
 token, 0600 files.
 
