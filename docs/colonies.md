@@ -182,13 +182,21 @@ a grace period, the mothership suspends it.
   colonies come back in answer order, ahead of new launches — and the agent continues its own
   session with your answer as the next message. Pressing Resume also delivers a saved answer. If
   the boot fails or the mothership restarts, the answer is not lost.
+- **Warm-up when you open the question:** the cockpit can bring the colony back before you answer.
+  Opening a suspended colony's question asks the mothership to warm it up
+  (`POST /api/sessions/{id}/prewarm`), through the same admission as any boot: never ahead of a
+  colony that already holds an answer, and only after queued launches. Your answer then lands in
+  the running VM without the cold boot; with no answer within `prewarm_timeout_minutes`
+  (default 5) the colony is suspended again and its microVM torn down, freeing the slot, and a
+  failed warm-up or a mothership restart reverts to suspended too.
 
-Two Sandbox settings control this. Both are mothership-wide, with no per-org override:
+Three Sandbox settings control this. All are mothership-wide, with no per-org override:
 
 | Setting | Default | |
 | --- | --- | --- |
 | `suspend_waiting` | on | Suspend colonies that wait for an answer. |
 | `suspend_after_minutes` | 10 | The grace period, from 1 to 1440 minutes. |
+| `prewarm_timeout_minutes` | 5 | How long a warmed colony waits for your answer before it is suspended again. |
 
 **Limits.**
 

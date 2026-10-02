@@ -348,6 +348,8 @@ export interface Api {
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<StopReply>;
+  /** POST /api/sessions/{id}/prewarm (issue #701): boot a suspended colony's question ahead of its answer. Answers 202 when requested, 204 when it is a no-op. */
+  prewarmSession(id: string): Promise<unknown>;
   /** POST /api/sessions/{id}/keep (issue #673): release a superseded colony to start again. 409 when it is not superseded. */
   keepSession(id: string): Promise<Session>;
   cleanupSession(id: string): Promise<Session>;
@@ -754,6 +756,7 @@ export const httpApi: Api = {
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
+  prewarmSession: (id) => post(`/api/sessions/${enc(id)}/prewarm`),
   keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
   seenSession: (id) => post(`/api/sessions/${enc(id)}/seen`),

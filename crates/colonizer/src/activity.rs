@@ -80,6 +80,7 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.cleanup",
     "colony.retain",
     "colony.answer",
+    "colony.prewarm",
     "colony.path_policy",
     "chat.colony",
     "chat.issue",
@@ -926,6 +927,14 @@ pub(crate) async fn record_answer(app: &App, colony: &Session, via: Option<auth:
 /// boot path calls it once the runner is up, which is when the answer counts as delivered.
 pub(crate) async fn record_restored(app: &App, colony: &Session) {
     let entry = Entry::new("outcome.restored", "colony").colony(colony);
+    record(app, entry).await;
+}
+
+/// Records a person opening a suspended colony's question, which asks the queue to pre-warm it
+/// (issue #701) — same shape as [`record_answer`], since the request arrives over the same routes.
+pub(crate) async fn record_prewarm(app: &App, colony: &Session, via: Option<auth::Via>) {
+    let mut entry = Entry::new("colony.prewarm", "you").colony(colony);
+    entry.via = via_name(via);
     record(app, entry).await;
 }
 

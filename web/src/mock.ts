@@ -3176,6 +3176,8 @@ export function createMockApi(): Api {
       colonyActivity("colony.resume", s.session);
       return clone(s.session);
     },
+    // Mock colonies never suspend, so there is nothing to warm (#701).
+    prewarmSession: async () => {},
     publishSession: async (id) => {
       const s = find(id);
       if (!canPublish(s.session)) throw new ApiError("this colony cannot be published", 409);

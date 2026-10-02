@@ -347,6 +347,16 @@ claim take the same open-question lock, so an answer and a claim cannot interlea
 in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
 
+The cockpit can also warm a suspended colony up ahead of the answer (issue #701): opening the question calls
+`POST /api/sessions/{id}/prewarm`, which sets a `prewarm` block on the session — `requested_at`, then
+`started_at` once the boot is admitted, then `ready_at` once the VM and the agent link are up. The queue pass
+claims a slot for a warming colony exactly where it puts answered ones — never ahead of a colony that already
+holds an answer, and only after queued launches — while keeping the suspension record, so the answer path is
+unchanged: an answer still persists to `pending_answer` and is delivered as the first `user_message` over the
+live link. If no answer arrives within the sandbox's `prewarm_timeout_minutes` (default 5), the colony goes
+back to suspended and its VM is torn down; a mothership restart mid-warm-up or a failed boot reverts it to
+suspended too, never to failed.
+
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
 microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
 checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
