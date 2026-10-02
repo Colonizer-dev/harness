@@ -158,11 +158,51 @@ export function nameFromPrompt(prompt: string): string {
   return line.length > 60 ? `${line.slice(0, 57).trimEnd()}…` : line || "Loop";
 }
 
-/** The Loops page's row line: when a colony loop runs, or which maps a map loop refreshes. */
-export function describeLoop(l: Pick<Loop, "kind" | "repo" | "cadence">): string {
-  if ((l.kind ?? "colony") !== "map") return describeLoopCadence(l.cadence);
-  const what = l.repo.endsWith("/*") ? `Refreshes the maps of every repository in ${l.repo.slice(0, -2)}` : `Refreshes the map of ${l.repo}`;
-  return `${what} · ${describeLoopCadence(l.cadence)}`;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/**
+ * The day a loop's `end_at` falls on, in the operator's local time. Spelled out rather than through
+ * `toLocaleDateString`, so the label cannot shift with the locale (as feed.ts's dayLabel does).
+ */
+export function endDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+/** The Loops page's row line: when a colony loop runs, or which maps a map loop refreshes, and — when
+ *  it has one — the day it ends. */
+export function describeLoop(l: Pick<Loop, "kind" | "repo" | "cadence" | "end_at">): string {
+  const what =
+    (l.kind ?? "colony") !== "map"
+      ? describeLoopCadence(l.cadence)
+      : `${l.repo.endsWith("/*") ? `Refreshes the maps of every repository in ${l.repo.slice(0, -2)}` : `Refreshes the map of ${l.repo}`} · ${describeLoopCadence(l.cadence)}`;
+  return l.end_at ? `${what} · ends ${endDate(l.end_at)}` : what;
+}
+
+/** The "Ends" field's local value as the `end_at` the API stores (an RFC3339 instant); null — which
+ *  clears a loop's existing end date — when the field is empty. A `datetime-local` value with no
+ *  zone is read in the operator's local time, like the cadence times above. */
+export function endAtFromInput(value: string): string | null {
+  const ms = Date.parse(value);
+  return value.trim() && Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/** A stored `end_at` back as the "Ends" field's value (`datetime-local`'s local `YYYY-MM-DDTHH:MM`),
+ *  or "" when the loop has no end date. */
+export function endAtInputValue(iso: string | null): string {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Why an "Ends" value is refused, or null when it is fine. A loop starts when it is saved, so its
+ *  end must be after now — the rule the server applies too ("the end date is already past"). */
+export function endAtError(value: string, now = Date.now()): string | null {
+  if (!value.trim()) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return "That is not a valid date.";
+  return ms <= now ? "The end date must be after now." : null;
 }
 
 /** The agent module row one org's colonies launch on: the org's pick, else the mothership's. */
