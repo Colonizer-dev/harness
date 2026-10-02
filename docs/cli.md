@@ -133,6 +133,9 @@ colonizer loop run loop_x1                                       # start the nex
 colonizer loop stop loop_x1                                      # pause: its settings are kept, nothing runs
 colonizer loop start loop_x1                                     # enable a paused or ended loop again
 colonizer loop delete loop_x1                                    # delete it; its past colonies stay
+colonizer loop merge-train show                                  # the built-in merge-train loop: settings and last report
+colonizer loop merge-train allow acme/app                        # opt a repository in; `on` switches the loop on
+colonizer loop merge-train run --dry-run                         # what it would merge, update, rebase and skip, and why
 ```
 
 `loop create` takes the repository as `owner/repo` (`owner/*` for a map loop: every repository

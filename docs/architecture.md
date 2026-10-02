@@ -385,6 +385,14 @@ repository — state, base branch and its CI verdict, the last merge, and each o
 `next`, `waiting_ci`, `needs_rebase`, `waiting`, `skipped` (with the reason) or `merged`. The cockpit shows
 one Merge-train row per repository: next up, waiting on CI, needs rebase, skipped and why.
 
+The **merge-train loop** ([loops.md](loops.md#merge-train), `merge_loop.rs`, issue #754) is the
+careful, scheduled driver for the same train: off by default, hourly, only in opted-in repositories,
+and — unlike the tick — it updates the next candidate after a merge and waits for its fresh CI, caps
+merges per run, spaces them with a cooldown, paces and budgets its GitHub calls and stops on any
+403/429 or secondary rate limit, turns a conflicting mechanical rebase into `needs_redo` (and at
+most one redo colony), and can self-heal a main the train itself turned red. It reuses the train's
+`decide`, guards and merge invocation; a repository it drives is skipped by the tick.
+
 ## Per-colony limits
 
 Five sandbox module settings bound colonies; all but the token budget take a per-org override:

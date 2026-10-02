@@ -379,6 +379,86 @@ enum LoopCommand {
     Start { id: String },
     /// Delete a loop. Its past colonies stay.
     Delete { id: String },
+    /// The built-in merge-train loop (issue #754): off by default, hourly, and only in the
+    /// repositories you opt in. `show` prints its settings and last report
+    #[command(name = "merge-train")]
+    MergeTrain {
+        #[command(subcommand)]
+        command: MergeTrainCommand,
+    },
+}
+
+/// `colonizer loop merge-train …`: each edit reads the settings, changes one thing and saves them
+/// back — the same full replace the cockpit's form sends.
+#[derive(Subcommand, Debug)]
+enum MergeTrainCommand {
+    /// Settings, the next run, paused repositories and the last run's report
+    Show,
+    /// Switch the loop on (it runs at its cadence; nothing merges until a repository is opted in)
+    On,
+    /// Switch the loop off
+    Off,
+    /// Opt a repository (owner/repo) or a whole org (owner) in
+    Allow {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Take a repository or org off the allowlist and the never list
+    Disallow {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Never merge in this repository or org (an upstream-review-only fork, say), whatever the allowlist says
+    Never {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Hold a colony's pull request out of the loop
+    Hold { session: String },
+    /// Release a held colony
+    Unhold { session: String },
+    /// Change the loop's limits and switches; only the flags given change
+    Set {
+        /// Run every N minutes (15 to 10080)
+        #[arg(long, value_name = "MINUTES")]
+        every: Option<u32>,
+        /// Merges per repository per run
+        #[arg(long)]
+        max_merges: Option<u32>,
+        /// A per-repository cap, as owner/repo=N (repeatable)
+        #[arg(long, value_name = "OWNER/REPO=N")]
+        repo_cap: Vec<String>,
+        /// The least seconds between two merges in one repository
+        #[arg(long)]
+        cooldown_secs: Option<u64>,
+        /// Minutes to wait for an updated pull request's CI
+        #[arg(long)]
+        ci_wait_minutes: Option<u64>,
+        /// Known-flaky check names, comma-separated (a trailing * matches a prefix)
+        #[arg(long, value_name = "NAMES")]
+        flaky: Option<String>,
+        /// Re-run main's failed jobs once, then send a fix colony, when main goes red after the train's merge
+        #[arg(long, value_enum)]
+        self_heal: Option<Toggle>,
+        /// With self-heal: revert the train's own last merge instead of sending a fix colony
+        #[arg(long, value_enum)]
+        revert_on_red: Option<Toggle>,
+        /// Dispatch one redo colony for a pull request whose mechanical rebase conflicted
+        #[arg(long, value_enum)]
+        redo: Option<Toggle>,
+    },
+    /// Run it now in the background, or with --dry-run list what it would merge, update, rebase and skip
+    Run {
+        /// Read everything, write nothing, and print the report
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Toggle {
+    On,
+    Off,
 }
 
 /// What a loop's runs do, as `--kind` spells it.
@@ -1474,6 +1554,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 }
                 Ok(EXIT_OK)
             }
+            LoopCommand::MergeTrain { command } => merge_train_command(&machine, command, json).await,
             LoopCommand::Stop { id } => set_loop_enabled(&machine, &id, false, json).await,
             LoopCommand::Start { id } => set_loop_enabled(&machine, &id, true, json).await,
             LoopCommand::Delete { id } => {
@@ -1488,6 +1569,226 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
         }
     })
     .await
+}
+
+const MERGE_LOOP: &str = "/api/merge-train/loop";
+
+/// Applies one `merge-train` edit to the settings the server holds. Pure, for the tests.
+fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<(), String> {
+    let list = |settings: &mut Value, key: &str| -> Vec<String> {
+        settings[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let norm = |t: &str| t.trim().to_ascii_lowercase();
+    match command {
+        MergeTrainCommand::On => settings["enabled"] = json!(true),
+        MergeTrainCommand::Off => settings["enabled"] = json!(false),
+        MergeTrainCommand::Allow { target } => {
+            let mut allow = list(settings, "allow");
+            if !allow.contains(&norm(target)) {
+                allow.push(norm(target));
+            }
+            let never: Vec<String> = list(settings, "never").into_iter().filter(|t| *t != norm(target)).collect();
+            settings["allow"] = json!(allow);
+            settings["never"] = json!(never);
+        }
+        MergeTrainCommand::Disallow { target } => {
+            for key in ["allow", "never"] {
+                let kept: Vec<String> = list(settings, key).into_iter().filter(|t| *t != norm(target)).collect();
+                settings[key] = json!(kept);
+            }
+        }
+        MergeTrainCommand::Never { target } => {
+            let mut never = list(settings, "never");
+            if !never.contains(&norm(target)) {
+                never.push(norm(target));
+            }
+            settings["never"] = json!(never);
+        }
+        MergeTrainCommand::Hold { session } => {
+            let mut held = list(settings, "held");
+            if !held.contains(session) {
+                held.push(session.clone());
+            }
+            settings["held"] = json!(held);
+        }
+        MergeTrainCommand::Unhold { session } => {
+            let held: Vec<String> = list(settings, "held").into_iter().filter(|h| h != session).collect();
+            settings["held"] = json!(held);
+        }
+        MergeTrainCommand::Set {
+            every,
+            max_merges,
+            repo_cap,
+            cooldown_secs,
+            ci_wait_minutes,
+            flaky,
+            self_heal,
+            revert_on_red,
+            redo,
+        } => {
+            if let Some(minutes) = every {
+                settings["cadence"] = json!({"every": "interval", "minutes": minutes});
+            }
+            if let Some(n) = max_merges {
+                settings["max_merges"] = json!(n);
+            }
+            for entry in repo_cap {
+                let (repo, n) = entry
+                    .split_once('=')
+                    .ok_or_else(|| format!("--repo-cap {entry:?} is not owner/repo=N"))?;
+                let n: u32 = n
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("--repo-cap {entry:?}: N is not a number"))?;
+                if !settings["repo_max_merges"].is_object() {
+                    settings["repo_max_merges"] = json!({});
+                }
+                settings["repo_max_merges"][norm(repo)] = json!(n);
+            }
+            if let Some(secs) = cooldown_secs {
+                settings["cooldown_secs"] = json!(secs);
+            }
+            if let Some(minutes) = ci_wait_minutes {
+                settings["ci_wait_minutes"] = json!(minutes);
+            }
+            if let Some(names) = flaky {
+                let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+                settings["flaky_checks"] = json!(names);
+            }
+            for (key, toggle) in [
+                ("self_heal", self_heal),
+                ("revert_on_red", revert_on_red),
+                ("redo_on_conflict", redo),
+            ] {
+                if let Some(t) = toggle {
+                    settings[key] = json!(*t == Toggle::On);
+                }
+            }
+        }
+        MergeTrainCommand::Show | MergeTrainCommand::Run { .. } => {}
+    }
+    Ok(())
+}
+
+/// The loop's state in lines: its switch, where it merges, its limits, and the last report.
+fn describe_merge_loop(view: &Value) -> Vec<String> {
+    let s = &view["settings"];
+    let names = |key: &str| {
+        let list: Vec<&str> = s[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(", ")
+        }
+    };
+    let on = |key: &str| if s[key] == json!(true) { "on" } else { "off" };
+    let mut out = vec![
+        format!(
+            "merge-train loop: {}{}",
+            if s["enabled"] == json!(true) { "on" } else { "off" },
+            view["next_run_at"]
+                .as_str()
+                .map(|at| format!(", next run {}", local_stamp(at, local_offset_minutes())))
+                .unwrap_or_default()
+        ),
+        format!("  cadence: {}", describe_cadence(&s["cadence"], local_offset_minutes())),
+        format!("  opted in: {}", names("allow")),
+        format!("  never: {}", names("never")),
+        format!(
+            "  per run: at most {} merges per repository, {}s between merges, {} min wait for CI",
+            s["max_merges"], s["cooldown_secs"], s["ci_wait_minutes"]
+        ),
+        format!("  known-flaky checks: {}", names("flaky_checks")),
+        format!(
+            "  self-heal: {}, revert on red: {}, redo colonies: {}",
+            on("self_heal"),
+            on("revert_on_red"),
+            on("redo_on_conflict")
+        ),
+    ];
+    if view["writes_blocked"] == json!(true) {
+        out.push("  external writes are blocked: every run is a dry run".to_string());
+    }
+    if let Some(repos) = view["repos"].as_object() {
+        for (repo, mem) in repos {
+            if let Some(why) = mem["paused"].as_str() {
+                out.push(format!("  paused in {repo}: {why}"));
+            }
+        }
+    }
+    if let Some(lines) = view["last_report"]["lines"].as_array() {
+        out.push(format!(
+            "last run{}:",
+            view["last_report"]["finished_at"]
+                .as_str()
+                .map(|at| format!(" ({})", local_stamp(at, local_offset_minutes())))
+                .unwrap_or_default()
+        ));
+        out.extend(lines.iter().filter_map(Value::as_str).map(|l| format!("  {l}")));
+    }
+    out
+}
+
+async fn merge_train_command(machine: &Machine, command: MergeTrainCommand, json: bool) -> Result<i32, Fail> {
+    match &command {
+        MergeTrainCommand::Show => {
+            let view = machine.get(MERGE_LOOP).await?;
+            if json {
+                println!("{}", pretty(&view)?);
+            } else {
+                for line in describe_merge_loop(&view) {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+        MergeTrainCommand::Run { dry_run } => {
+            let path = if *dry_run {
+                format!("{MERGE_LOOP}/run?dry_run=true")
+            } else {
+                format!("{MERGE_LOOP}/run")
+            };
+            let answer = machine
+                .post(&path, None)
+                .await?
+                .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+            if json {
+                println!("{}", pretty(&answer)?);
+            } else if answer["started"] == json!(true) {
+                println!("merge-train loop run started; `colonizer loop merge-train show` prints its report when it is done");
+            } else {
+                for line in answer["report"]["lines"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+        edit => {
+            let view = machine.get(MERGE_LOOP).await?;
+            let mut settings = view["settings"].clone();
+            edit_merge_loop(&mut settings, edit).map_err(|e| Fail::Transport(anyhow::anyhow!(e)))?;
+            let saved = machine.put(MERGE_LOOP, &settings).await?;
+            if json {
+                println!("{}", pretty(&saved)?);
+            } else {
+                for line in describe_merge_loop(&saved).into_iter().take(7) {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+    }
 }
 
 /// `loop stop`/`loop start`: the loop's own fields PUT back with `enabled` flipped — the exact edit
@@ -2063,6 +2364,27 @@ mod tests {
             &["loop", "stop", "loop_x1"][..],
             &["loop", "start", "loop_x1"][..],
             &["loop", "delete", "loop_x1"][..],
+            &["loop", "merge-train", "show"][..],
+            &["loop", "merge-train", "on"][..],
+            &["loop", "merge-train", "allow", "acme/app"][..],
+            &["loop", "merge-train", "never", "acme/upstream-fork"][..],
+            &["loop", "merge-train", "hold", "abc123"][..],
+            &[
+                "loop",
+                "merge-train",
+                "set",
+                "--every",
+                "120",
+                "--max-merges",
+                "2",
+                "--repo-cap",
+                "acme/app=1",
+                "--flaky",
+                "e2e*,lint",
+                "--self-heal",
+                "on",
+            ][..],
+            &["loop", "merge-train", "run", "--dry-run"][..],
             &["mcp"][..],
             &["mcp", "--scope", "launch"][..],
             &["token", "list"][..],
@@ -2574,5 +2896,88 @@ mod tests {
 
         let err = set_loop_enabled(&machine, "loop_z", false, false).await.unwrap_err();
         assert_eq!(err.exit_code(), EXIT_NOT_FOUND, "an unknown loop reads as not-found");
+    }
+
+    /// `loop merge-train …` edits change one thing in the settings it read back, and `show`
+    /// prints the switch, the opted-in repositories and the last report.
+    #[test]
+    fn merge_train_edits_change_only_what_they_name() {
+        let mut s = json!({"enabled": false, "allow": ["acme/web"], "never": [], "held": [], "max_merges": 4});
+        edit_merge_loop(&mut s, &MergeTrainCommand::On).unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Allow {
+                target: "Acme/App".into(),
+            },
+        )
+        .unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Never {
+                target: "acme/fork".into(),
+            },
+        )
+        .unwrap();
+        edit_merge_loop(&mut s, &MergeTrainCommand::Hold { session: "abc".into() }).unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Set {
+                every: Some(120),
+                max_merges: Some(2),
+                repo_cap: vec!["acme/web=1".into()],
+                cooldown_secs: None,
+                ci_wait_minutes: None,
+                flaky: Some("e2e*, lint".into()),
+                self_heal: Some(Toggle::On),
+                revert_on_red: None,
+                redo: Some(Toggle::Off),
+            },
+        )
+        .unwrap();
+        assert_eq!(s["enabled"], json!(true));
+        assert_eq!(s["allow"], json!(["acme/web", "acme/app"]));
+        assert_eq!(s["never"], json!(["acme/fork"]));
+        assert_eq!(s["held"], json!(["abc"]));
+        assert_eq!(s["cadence"], json!({"every": "interval", "minutes": 120}));
+        assert_eq!(s["repo_max_merges"], json!({"acme/web": 1}));
+        assert_eq!(s["flaky_checks"], json!(["e2e*", "lint"]));
+        assert_eq!(
+            (s["self_heal"].clone(), s["redo_on_conflict"].clone()),
+            (json!(true), json!(false))
+        );
+        assert!(s.get("revert_on_red").is_none(), "an untouched flag stays as it was");
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Disallow {
+                target: "acme/app".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(s["allow"], json!(["acme/web"]));
+        let bad = MergeTrainCommand::Set {
+            every: None,
+            max_merges: None,
+            repo_cap: vec!["acme/web".into()],
+            cooldown_secs: None,
+            ci_wait_minutes: None,
+            flaky: None,
+            self_heal: None,
+            revert_on_red: None,
+            redo: None,
+        };
+        assert!(edit_merge_loop(&mut s, &bad).is_err());
+
+        let view = json!({
+            "settings": s, "next_run_at": null, "writes_blocked": true,
+            "repos": {"acme/web": {"paused": "main went red after the train merged #3"}},
+            "last_report": {"lines": ["merged 1 · updated (CI running) 0 · red 0 · redo dispatched 0 · skipped 0"]},
+        });
+        let text = describe_merge_loop(&view).join("\n");
+        assert!(text.contains("merge-train loop: on"), "{text}");
+        assert!(text.contains("opted in: acme/web"), "{text}");
+        assert!(text.contains("never: acme/fork"), "{text}");
+        assert!(text.contains("every run is a dry run"), "{text}");
+        assert!(text.contains("paused in acme/web"), "{text}");
+        assert!(text.contains("merged 1"), "{text}");
     }
 }
