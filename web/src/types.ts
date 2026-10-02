@@ -1692,6 +1692,29 @@ export interface FindingRecord {
   pr?: string;
 }
 
+/** One file a colony changed, from GET /api/sessions/{id}/diff (issue #611): its path and line counts. */
+export interface SessionDiffFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/**
+ * Everything a colony changed against its base branch (GET /api/sessions/{id}/diff, issue #611):
+ * the per-file counts, their totals, and the unified diff text, capped at 200 KiB (`truncated` says
+ * when). The cockpit's pull request card reads only `files`; the CLI and MCP read the text.
+ */
+export interface SessionDiff {
+  id: string;
+  repo: string;
+  base: string | null;
+  files: SessionDiffFile[];
+  added: number;
+  removed: number;
+  diff: string;
+  truncated: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Red-team runs (issue #212): a swarm of hunter colonies raiding one repository
 // ---------------------------------------------------------------------------

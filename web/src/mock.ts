@@ -3219,6 +3219,30 @@ export function createMockApi(): Api {
       ),
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
     sessionCommits: () => later(() => ({ commits: [] })),
+    sessionDiff: (id) =>
+      later(() => {
+        const s = sessions.get(id)?.session;
+        // No pull request, no card to fill: an empty answer, where the real route would 409 with no worktree.
+        if (!s?.pr_url) return { id, repo: s?.repo ?? "", base: s?.base ?? null, files: [], added: 0, removed: 0, diff: "", truncated: false };
+        const files = [
+          { path: "web/src/cockpit/Inspector.tsx", added: 41, removed: 6 },
+          { path: "web/src/api.ts", added: 8, removed: 0 },
+          { path: "web/src/types.ts", added: 12, removed: 1 },
+          { path: "web/src/cockpit/Inspector.test.tsx", added: 55, removed: 2 },
+          { path: "docs/gaps.md", added: 1, removed: 1 },
+          { path: "changelog.d/611.added.md", added: 4, removed: 0 },
+        ];
+        return {
+          id,
+          repo: s.repo,
+          base: s.base,
+          files,
+          added: files.reduce((n, f) => n + f.added, 0),
+          removed: files.reduce((n, f) => n + f.removed, 0),
+          diff: "",
+          truncated: false,
+        };
+      }),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) =>
