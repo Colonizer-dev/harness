@@ -1022,7 +1022,11 @@ mod tests {
                 "openai_key",
             ),
             ("id AKIAIOSFODNN7EXAMPLE here", "AKIAIOSFODNN7EXAMPLE", "aws_access_key"),
-            (concat!("sts ASIA", "Y34FZKBOKMUTVV7A"), concat!("ASIA", "Y34FZKBOKMUTVV7A"), "aws_access_key"),
+            (
+                concat!("sts ASIA", "Y34FZKBOKMUTVV7A"),
+                concat!("ASIA", "Y34FZKBOKMUTVV7A"),
+                "aws_access_key",
+            ),
             (
                 "AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -1054,7 +1058,11 @@ mod tests {
                 concat!("AIza", "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"),
                 "google_api_key",
             ),
-            (concat!("gl glp", "at-xYz123AbC456dEf789gH"), concat!("glp", "at-xYz123AbC456dEf789gH"), "gitlab_token"),
+            (
+                concat!("gl glp", "at-xYz123AbC456dEf789gH"),
+                concat!("glp", "at-xYz123AbC456dEf789gH"),
+                "gitlab_token",
+            ),
             (
                 "npm npm_abcdefghijklmnopqrstuvwxyz0123456789",
                 "npm_abcdefghijklmnopqrstuvwxyz0123456789",
@@ -1086,7 +1094,10 @@ mod tests {
                 "basic_auth",
             ),
             (
-                concat!("post https://hooks.slack", ".com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"),
+                concat!(
+                    "post https://hooks.slack",
+                    ".com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"
+                ),
                 "T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
                 "slack_webhook",
             ),
