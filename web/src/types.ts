@@ -172,6 +172,8 @@ export interface Session {
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */

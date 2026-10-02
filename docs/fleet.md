@@ -75,13 +75,15 @@ vouches for. Either way nothing pairs quietly.
 ## What a member may do: the `fleet` scope
 
 Approving a request mints the member a **fleet-scoped API token** — the new `fleet` scope, the
-lowest there is. It is admitted on exactly four routes:
+lowest there is. It is admitted on exactly these routes:
 
 | Route | Why |
 | :--- | :--- |
 | `GET /api/hosts` | the fleet view, so every member can see every other |
 | `POST /api/fleet/peer/leave` | leaving without holding anything broader |
 | `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | the history push ([below](#history-push)), into the member's own directory on the owner |
+| `GET /api/fleet/policy` | reading the owner's fleet network policy ([below](#network-policy)), to apply its floor |
+| `GET` · `POST` · `PUT` · `PATCH` · `DELETE /api/previews/{id}/…` | the owner's dev-server previews ([below](#dev-server-previews)) of running colonies |
 
 Everything else answers 403, the same as any other scoped token out of scope. The token is handed
 over exactly once at approval, stored hashed on the member, and never shown again on either side —
@@ -203,6 +205,58 @@ runner are doing, so the badge covers them too:
   not a fault. It shows a grey "History sync off" note under the badge instead.
 
 A member running an older colonizer reports neither, and those signals stay unmeasured.
+
+## Network policy
+
+The owner sets one **fleet network policy** — a shared egress floor and who may reach whom — with
+`PUT /api/fleet/policy` (owner-only; a member answers **409**, since the floor is the owner's word),
+and it lives as `<config_dir>/fleet-policy.json`. `GET /api/fleet/policy` reads it back, for the
+owner and for a fleet token. Its shape:
+
+- `egress` — a fleet-wide floor, `{mode, allow, block}`, the same shape an org's egress overrides
+  take ([sandbox-network.md](sandbox-network.md#egress-policy-303)).
+- `orgs` and `repos` — the same overrides per GitHub org and per `owner/name` repository.
+- `reach` — a map from a member id (`mem_…`, as `GET /api/fleet` lists members, or `"owner"`) to the
+  ids it may reach. A key absent from the map may reach every member.
+
+A member fetches the policy with its fleet token on the history-push cadence and caches it; a failed
+fetch keeps the last cache, so staleness can only ever keep a fence up, never take one down, and
+leaving the fleet lifts the cached policy. At boot the floor for the colony's org and repository —
+the fleet, org and repo levels unioned, the mode from the most specific level that names one —
+**clamps** the colony's own resolved egress policy: a member may *tighten* the floor (an allowlist
+under an open floor, extra blocks, a narrower allowlist, an empty allowlist) but never *loosen* it.
+An open local mode under an allowlist floor, allow entries the floor's allowlist does not cover, and
+a local list that drops a floor block are refused; each refusal is logged and listed in the colony's
+egress record (`GET /api/sessions/{id}/egress`, field `fleet_refused`). The owner's own colonies are
+clamped too, and `ALWAYS_BLOCKED` and the harness's infrastructure allows are unchanged. A policy
+naming only `orgs` and `repos` leaves other orgs unfenced; a fleet-wide `egress` covers everything.
+
+## Dev-server previews
+
+The owner points a browser at a port inside a running colony and reaches its dev server through the
+mothership. `POST /api/sessions/{id}/preview` `{"port": 5173}` opens one — owner-only, the colony
+must be running with a microVM, and the port must not be agentd's own `7070` — and
+`DELETE /api/sessions/{id}/preview` closes it. The preview is then served at `/api/previews/{id}/…`,
+on `GET`, `POST`, `PUT`, `PATCH` and `DELETE`: the mothership reverse-proxies plain HTTP to the guest
+port over the mesh. A request needs the owner's credentials or a fleet token — **401** without one —
+and a fleet caller must be allowed to reach `owner` by the policy's `reach` map, else **403**. Every
+credential the caller presented (`Authorization`, `Cookie`, any `x-colonizer-*` header) is stripped
+before the request is forwarded, so the token never reaches the colony. The preview is **404** the
+moment the colony stops or reboots, because the port lives only as long as its microVM, and the
+cockpit's colony row shows a **preview** link while the colony is running.
+
+Previews are **mesh-only**: an install running its colonies with the mesh module off publishes only
+agentd's own port, so the proxy answers **409** rather than pretending. Three limitations:
+
+- **No WebSocket or HMR upgrade.** The proxy carries plain HTTP/1.1 request/response pairs and drops
+  an `Upgrade` header; a response is buffered whole, under a size cap, so a preview is a page, not a
+  download.
+- **Base paths.** A dev server that serves absolute asset paths must be told where it now lives: set
+  its base to `/api/previews/<id>/` (Vite: `--base /api/previews/<id>/`).
+- **Owner-only in practice.** A fleet token authenticates only on the owner, so the previews a member
+  reaches are those of colonies running *on the owner*; member-to-member previews wait for member
+  mesh enrollment ([#298](https://github.com/Colonizer-dev/harness/issues/298)) — see
+  [The mesh ACL](#the-mesh-acl-ready-but-nothing-can-use-it-yet) below.
 
 ## The mesh ACL: ready, but nothing can use it yet
 

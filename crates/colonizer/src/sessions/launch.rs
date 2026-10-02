@@ -611,6 +611,7 @@ pub async fn create(
         sandbox: format!("colonizer-{id}"),
         mesh: None,
         local_port: None,
+        preview_port: None,
         agent: agent.id.clone(),
         autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app.agents, &modules)),
         autofix: req.autofix,
