@@ -195,6 +195,9 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         // onto a worktree that no longer exists, and `can_resume` would never take it back afterwards.
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
+        // Written under the list lock, not through `update_session`, so the unseen mark it would
+        // set at this crossing is set here (issue #744).
+        s.unseen_failure = true;
         let cleared = s.clear_attention();
         s.updated_at = Utc::now();
         let mut message = String::from("was cleaned up while it waited in the queue, so it can never start");
@@ -269,6 +272,7 @@ fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
     }
     s.status = SessionStatus::Failed;
     s.error = Some(reason.to_string());
+    s.unseen_failure = true; // as above: this crossing bypasses `update_session` (issue #744)
     let cleared = s.clear_attention();
     s.updated_at = Utc::now();
     let mut message = format!("can never start: {reason}");
@@ -1276,6 +1280,10 @@ mod tests {
         assert!(matches!(claim, Some(Claim::Retire(..))), "retired, not started");
         assert_eq!(queued.status, SessionStatus::Failed, "out of the queue for good");
         assert_eq!(queued.error.as_deref(), Some(reason.as_str()));
+        assert!(
+            queued.unseen_failure,
+            "the badge counts the retirement until someone looks (#744)"
+        );
         // A colony claimed in the meantime is left alone.
         let mut starting = colony("acme", SessionStatus::Starting);
         assert!(claim_refused(&mut starting, &reason).is_none());

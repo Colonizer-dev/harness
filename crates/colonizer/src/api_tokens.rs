@@ -350,6 +350,8 @@ impl Registry {
         let at = tokens.iter().position(|t| t.id == id)?;
         let removed = tokens.remove(at);
         self.save(&tokens).await;
+        // Its open sockets and streams end now, not at its next request (issue #746).
+        crate::auth::Revocation::fire(&format!("token:{id}"));
         Some(removed.meta())
     }
 
@@ -484,9 +486,17 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
+        // colony drive, like answering.
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
+        },
+        // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
+        // unseen-failure flag — so watching it is enough, however it arrives.
+        ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
         },
         // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
         // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
@@ -861,6 +871,11 @@ mod tests {
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
                 "read {path}"
             );
+            assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
+        }
+        // Marking a colony seen (issue #744) is looking at it, not driving it: read may POST it.
+        for path in ["/api/sessions/abc/seen"] {
+            assert!(authorize(&app, &read, &post, path).await.is_ok(), "read {path}");
             assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
         }
         // Launching needs launch.

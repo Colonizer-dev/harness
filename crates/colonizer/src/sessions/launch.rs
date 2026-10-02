@@ -590,6 +590,8 @@ pub async fn create(
         publishing_holds_slot: false,
         needs_rebase: false,
         rebase_orphaned: false,
+        // A fresh colony has no failure behind it, unseen or otherwise.
+        unseen_failure: false,
         queued_behind,
         // Set by admission when the launch waits for the issue's holder (issue #321).
         claim_wait: false,

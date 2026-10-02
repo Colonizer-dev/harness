@@ -14,7 +14,8 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
-import { deviceLabel, pushSupported, subscribeThisDevice, unsubscribeThisDevice } from "../push";
+import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscriptions, unsubscribeThisDevice } from "../push";
+import { PushDeviceList } from "./PushDevicePrefs";
 import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
@@ -69,6 +70,7 @@ import { SetupSection } from "./SetupSection";
 import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { PhonePane } from "./PhonePane";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -78,7 +80,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -378,6 +380,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "phone",
+          label: "Add your phone",
+          hint: "Pair your phone with a code, and revoke it here",
+        },
+        {
           id: "tokens",
           label: "API tokens",
           hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
@@ -547,11 +554,12 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "phone") pane = <PhonePane back={back} />;
   else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "fleet") pane = <FleetPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
-  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
+  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} orgs={orgs} back={back} />;
   else if (active === "desktop") pane = <DesktopPane back={back} />;
   else if (active === "providers") {
     pane = (
@@ -1629,18 +1637,16 @@ function DesktopPane({ back }: { back?: () => void }) {
 // notifications.ts), not through the Api, so there is nothing here to save.
 // ---------------------------------------------------------------------------
 
-/** An enrolled device's date, as the list shows it: "Sep 23". */
-function pushDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 function NotificationsPane({
   prefs,
   onChanged,
+  orgs,
   back,
 }: {
   prefs: NotificationPrefs;
   onChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  /** The workspaces the cockpit knows, offered as repo-filter suggestions for a device. */
+  orgs?: OrgInfo[];
   back?: () => void;
 }) {
   // The browser's answer as of the pane opening, or as of the last ask from the switch below.
@@ -1655,6 +1661,8 @@ function NotificationsPane({
   const pushable = pushSupported();
   const [subs, setSubs] = useState<PushSubscriptionSummary[] | null>(null);
   const [subscribing, setSubscribing] = useState(false);
+  // Which rows are this browser's own subscription: only their saves claim its timezone (#743).
+  const [ownIds, setOwnIds] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     if (!pushable) return;
@@ -1663,6 +1671,9 @@ function NotificationsPane({
       .pushSubscriptions()
       .then((rows) => !cancelled && setSubs(rows))
       .catch(() => !cancelled && setSubs([]));
+    thisDeviceSubscriptions(api)
+      .then((rows) => !cancelled && setOwnIds(new Set(rows.map((row) => row.id))))
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -1674,6 +1685,7 @@ function NotificationsPane({
     void subscribeThisDevice(api, deviceLabel(navigator.userAgent))
       .then((row) => {
         setSubs((rows) => [...(rows ?? []).filter((other) => other.id !== row.id), row]);
+        setOwnIds((ids) => new Set(ids).add(row.id));
         toast(`Push is on for ${row.label}.`, "success");
       })
       .catch((error) => toast(errorMessage(error), "error"))
@@ -1806,21 +1818,13 @@ function NotificationsPane({
           )}
           {!pushable && showIosInstallHint() && <IosHomeScreenSheet />}
           {subs !== null && subs.length > 0 && (
-            <div className="mt-1 overflow-hidden rounded-xl border border-border">
-              {subs.map((row) => (
-                <div key={row.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] font-medium">{row.label}</div>
-                    <div className="truncate font-mono text-[11px] text-faint">
-                      {row.endpoint_host} · enrolled {pushDate(row.created_at)}
-                    </div>
-                  </div>
-                  <Button variant="danger" size="sm" onClick={() => revokeDevice(row)}>
-                    Revoke
-                  </Button>
-                </div>
-              ))}
-            </div>
+            <PushDeviceList
+              subs={subs}
+              orgs={orgs}
+              ownIds={ownIds}
+              onRevoke={revokeDevice}
+              onChanged={(row) => setSubs((rows) => (rows ?? []).map((other) => (other.id === row.id ? row : other)))}
+            />
           )}
         </div>
 
@@ -3965,7 +3969,7 @@ function PriceField({
   );
 }
 
-function ChipsInput({
+export function ChipsInput({
   id,
   values,
   onChange,

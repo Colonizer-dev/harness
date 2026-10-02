@@ -65,8 +65,24 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     // request passes at all.
     let upgrade = req.headers().contains_key(header::UPGRADE);
     let bearer_ok = auth::bearer_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
-    let cookie_ok = auth::cookie_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
-    if bearer_ok || cookie_ok {
+    let cookie = auth::cookie_token(req.headers());
+    let cookie_ok = cookie
+        .as_deref()
+        .is_some_and(|token| auth::tokens_match(token, &app.api_token));
+    // A paired phone's own cookie (phone.rs, issue #746): the cockpit like the owner's cookie, minus
+    // the routes that mint, approve or revoke access. Revoking the phone ends it on the next request.
+    let phone = match (bearer_ok || cookie_ok, cookie.as_deref()) {
+        (false, Some(token)) => app.phones.authenticate(token),
+        _ => None,
+    };
+    if phone.is_some() && !crate::phone::phone_may(req.method(), req.uri().path()) {
+        return (
+            StatusCode::FORBIDDEN,
+            "a phone cannot change access; use the cockpit on your computer",
+        )
+            .into_response();
+    }
+    if bearer_ok || cookie_ok || phone.is_some() {
         // Cookie-authenticated writes and upgrades keep the same-origin requirement; header
         // authentication already proves a non-browser caller.
         if !bearer_ok && (req.method() != Method::GET || upgrade) {
@@ -87,6 +103,11 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         // Who the activity log says acted: the browser (cookie) or a token holder (the CLI, a script).
         req.extensions_mut()
             .insert(if bearer_ok { auth::Via::Api } else { auth::Via::Cockpit });
+        if let Some(phone) = phone {
+            let key = phone.revocation_key();
+            req.extensions_mut().insert(phone);
+            return run_revocable(&key, req, next).await;
+        }
         return next.run(req).await;
     }
     // A scoped API token (`col_…`, issue #508) authenticates by Bearer header only — a browser
@@ -102,8 +123,9 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         }
         req.extensions_mut().insert(auth::Authenticated(true));
         req.extensions_mut().insert(auth::Via::Token(scoped.name.clone()));
+        let key = format!("token:{}", scoped.id);
         req.extensions_mut().insert(scoped);
-        return next.run(req).await;
+        return run_revocable(&key, req, next).await;
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
@@ -116,6 +138,19 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         // what the body carries — a single-use invite code, a pairing id plus the nonce only its
         // joiner holds — so a request with no token is admitted to exactly those two.
         if req.method() == Method::POST && (path == "/api/fleet/peer/redeem" || path.starts_with("/api/fleet/peer/pairings/")) {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
+        // Answering a question straight from its push (issue #742): the one-shot token in the body
+        // is the whole credential, so this one method+path is admitted with no cookie or bearer —
+        // anything but a live minted token answers 401 in `answer_tokens::answer`.
+        if req.method() == Method::POST && path == "/api/push/answer" {
+            req.extensions_mut().insert(auth::Authenticated(false));
+            return next.run(req).await;
+        }
+        // The phone pairing page's poll (phone.rs): its authentication is the pairing cookie only
+        // the browser that spent the invite holds, checked and rate-limited by the route itself.
+        if req.method() == Method::POST && path == "/api/phone/claim" {
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
@@ -141,17 +176,69 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         return res;
     }
+    // A phone's scanned invite (`/?pair=…`, phone.rs, issue #746). Spent here on its first
+    // presentation, which binds the pairing to this browser and shows the code to confirm in the
+    // local cockpit; no credential is handed over yet. A wrong, spent or expired invite falls
+    // through to the locked page, saying nothing about why, and counts against the rate limit.
+    // Already-authenticated requests never reach this, so they never spend an invite.
+    if req.method() == Method::GET
+        && let Some(code) = auth::query_param(req.uri().query(), "pair")
+    {
+        let user_agent = req
+            .headers()
+            .get(header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        match app.phones.open(&code, user_agent) {
+            Ok(Some(opened)) => return crate::phone::pairing_response(&opened),
+            Ok(None) => {}
+            Err(crate::phone::Limited) => {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "too many failed pairing attempts; wait a minute",
+                )
+                    .into_response();
+            }
+        }
+    }
     let mut res = (StatusCode::UNAUTHORIZED, Html(auth::locked_page())).into_response();
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
 }
 
-/// The PWA files served before sign-in: the manifest, the service worker, its routing script, the
-/// offline page and the icons. Nothing under `/assets` or `/api`.
+/// Runs a request a revocable credential authenticated — a paired phone or a scoped API token —
+/// so that revoking it takes effect at once (issue #746): a request that arrives already revoked,
+/// or is revoked while in flight, is a 401; a streamed response body ends the moment it is revoked;
+/// and the handlers that upgrade to a socket take the [`auth::Revocation`] from the request and
+/// close the socket when it fires.
+async fn run_revocable(key: &str, mut req: Request, next: Next) -> Response {
+    let revoked = || (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+    let revocation = auth::Revocation::watch(key);
+    if revocation.is_fired() {
+        return revoked();
+    }
+    req.extensions_mut().insert(revocation.clone());
+    let res = tokio::select! {
+        res = next.run(req) => res,
+        () = revocation.fired() => return revoked(),
+    };
+    if res.status() == StatusCode::SWITCHING_PROTOCOLS {
+        return res; // the socket's own handler holds the revocation from here
+    }
+    let (parts, body) = res.into_parts();
+    let ended = Box::pin(async move { revocation.fired().await });
+    let body = axum::body::Body::from_stream(futures_util::StreamExt::take_until(body.into_data_stream(), ended));
+    Response::from_parts(parts, body)
+}
+
+/// The PWA files served before sign-in: the manifest, the service worker, its routing script, its
+/// offline outbox, the offline page and the icons. Nothing under `/assets` or `/api`.
 fn is_public_app_file(path: &str) -> bool {
-    matches!(path, "/manifest.webmanifest" | "/sw.js" | "/sw-routes.js" | "/offline.html")
-        || (path.starts_with("/icons/") && !path.contains("..") && path.len() < 64)
+    matches!(
+        path,
+        "/manifest.webmanifest" | "/sw.js" | "/sw-routes.js" | "/sw-outbox.js" | "/offline.html"
+    ) || (path.starts_with("/icons/") && !path.contains("..") && path.len() < 64)
 }
 
 async fn shutdown_signal() {
@@ -204,6 +291,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
     // One line per module that serves API routes, kept in alphabetical order.
     Router::new()
         .merge(crate::activity::routes())
+        .merge(crate::answer_tokens::routes())
         .merge(crate::api_tokens::routes())
         .merge(crate::archive::routes())
         .merge(crate::burn_down::routes())
@@ -236,6 +324,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::notify::routes())
         .merge(crate::orgs::routes())
         .merge(crate::packages::routes())
+        .merge(crate::phone::routes())
         .merge(crate::plugins::routes())
         .merge(crate::providers::routes())
         .merge(crate::publish::routes())
@@ -492,6 +581,7 @@ mod tests {
             "/manifest.webmanifest",
             "/sw.js",
             "/sw-routes.js",
+            "/sw-outbox.js",
             "/offline.html",
             "/icons/icon-192.png",
         ] {
@@ -717,6 +807,291 @@ mod tests {
             assert_eq!(res.headers().get(header::CACHE_CONTROL).unwrap(), "no-store", "GET {uri}");
             assert!(body_text(res).await.contains("colonizer open"), "GET {uri}");
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #746, end to end through the guard: an invite opens one pairing on one browser, hands
+    /// nothing over until the local cockpit confirms the code, then gives that phone a credential of
+    /// its own — never the API token — which cannot manage access and is revoked on its own.
+    #[tokio::test]
+    async fn a_phone_pairs_through_a_confirmed_code_and_is_revocable() {
+        let root = temp_root();
+        let app = test_app(&root);
+        use serde_json::json;
+        let router = || {
+            Router::new()
+                .route("/api/sessions", post(|| async { "created" }))
+                .merge(crate::phone::routes())
+                .fallback(|| async { Html("test page") })
+                .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+                .with_state(app.clone())
+        };
+        let same_origin = || origin("http://127.0.0.1:7878");
+        let json_type = || (header::CONTENT_TYPE, "application/json".to_string());
+        let set_cookie = |res: &Response, name: &str| {
+            res.headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .find(|v| v.starts_with(&format!("{name}=")) && !v.contains("Max-Age=0"))
+                .map(|v| v.split(';').next().unwrap().to_string())
+        };
+
+        // The owner mints an invite; the QR carries it, never the API token.
+        let res = router()
+            .oneshot(guarded(Method::POST, "/api/phone/invites", vec![cookie(&app), same_origin()]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let invite: Value = serde_json::from_str(&body_text(res).await).unwrap();
+        let code = invite["code"].as_str().unwrap().to_string();
+        assert_ne!(code, app.api_token);
+        assert_eq!(invite["ttl_secs"], 300);
+
+        // The phone opens it: a pairing page with the confirm code, a device cookie, no credential.
+        let res = router()
+            .oneshot(guarded(
+                Method::GET,
+                &format!("/?pair={code}"),
+                vec![(header::USER_AGENT, "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)".into())],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
+        let pair = set_cookie(&res, crate::phone::PAIR_COOKIE).expect("the device cookie");
+        assert!(
+            set_cookie(&res, auth::COOKIE_NAME).is_none(),
+            "no credential before the confirm"
+        );
+        let page = body_text(res).await;
+        assert!(!page.contains(&app.api_token));
+        let confirm_code = page
+            .split("aria-label=\"Confirmation code\">")
+            .nth(1)
+            .and_then(|rest| rest.split('<').next())
+            .unwrap()
+            .to_string();
+        assert_eq!(confirm_code.len(), 7, "{confirm_code}");
+
+        // Single use: a second browser presenting the same invite gets the locked page.
+        let res = router()
+            .oneshot(guarded(Method::GET, &format!("/?pair={code}"), vec![]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(set_cookie(&res, crate::phone::PAIR_COOKIE).is_none());
+
+        let claim = |with: Option<&str>| {
+            let headers = with.map(|c| vec![(header::COOKIE, c.to_string())]).unwrap_or_default();
+            router().oneshot(guarded(Method::POST, "/api/phone/claim", headers))
+        };
+        assert_eq!(
+            claim(Some(&pair)).await.unwrap().status(),
+            StatusCode::ACCEPTED,
+            "waiting for the owner"
+        );
+        assert_eq!(
+            claim(None).await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "no device cookie, nothing"
+        );
+
+        // Confirming is the owner's, in the local cockpit — and a wrong code approves nothing.
+        let digits: String = confirm_code.chars().filter(char::is_ascii_digit).collect();
+        let wrong = if digits == "000000" { "111111" } else { "000000" };
+        let confirm = |code: &str| {
+            router().oneshot({
+                let mut req = guarded(
+                    Method::POST,
+                    "/api/phone/pairings/confirm",
+                    vec![cookie(&app), same_origin(), json_type()],
+                );
+                *req.body_mut() = axum::body::Body::from(json!({"code": code}).to_string());
+                req
+            })
+        };
+        assert_eq!(confirm(wrong).await.unwrap().status(), StatusCode::NOT_FOUND);
+        assert_eq!(claim(Some(&pair)).await.unwrap().status(), StatusCode::ACCEPTED);
+        assert_eq!(confirm(&confirm_code).await.unwrap().status(), StatusCode::OK);
+
+        // The claim hands the phone its own credential, once.
+        let res = claim(Some(&pair)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let phone_cookie = set_cookie(&res, auth::COOKIE_NAME).unwrap();
+        assert!(
+            phone_cookie.starts_with(&format!("{}=cph_", auth::COOKIE_NAME)),
+            "{phone_cookie}"
+        );
+        assert!(!phone_cookie.contains(&app.api_token));
+        assert_eq!(
+            claim(Some(&pair)).await.unwrap().status(),
+            StatusCode::NOT_FOUND,
+            "claimed once"
+        );
+
+        // The phone runs the cockpit, but cannot mint or approve access.
+        let as_phone =
+            |method: Method, uri: &str| guarded(method, uri, vec![(header::COOKIE, phone_cookie.clone()), same_origin()]);
+        let res = router().oneshot(as_phone(Method::GET, "/api/phone")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let listed: Value = serde_json::from_str(&body_text(res).await).unwrap();
+        let device = listed["devices"][0]["id"].as_str().unwrap().to_string();
+        assert_eq!(listed["devices"][0]["label"], "iPhone");
+        assert_eq!(
+            router()
+                .oneshot(as_phone(Method::POST, "/api/sessions"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            router()
+                .oneshot(as_phone(Method::POST, "/api/phone/invites"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            router()
+                .oneshot(as_phone(Method::DELETE, &format!("/api/phone/devices/{device}")))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // The owner revokes it, and it is signed out on its next request.
+        let res = router()
+            .oneshot(guarded(
+                Method::DELETE,
+                &format!("/api/phone/devices/{device}"),
+                vec![cookie(&app), same_origin()],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            router().oneshot(as_phone(Method::GET, "/api/phone")).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #746: revoking takes effect at once. A paired phone's open colony events socket, and a
+    /// scoped API token's, close within a second of the revoke, and the same credential cannot
+    /// open another.
+    #[tokio::test]
+    async fn revoking_a_phone_or_a_token_closes_its_open_sockets_at_once() {
+        use futures_util::StreamExt as _;
+        use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue as WsValue};
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", crate::sessions::SessionStatus::Running).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let served = router(&app);
+        let server = tokio::spawn(async move { axum::serve(listener, served).await.unwrap() });
+        let open = |header: (&'static str, String)| async move {
+            let mut req = format!("ws://{addr}/api/sessions/abc/events").into_client_request().unwrap();
+            req.headers_mut().insert(header.0, WsValue::from_str(&header.1).unwrap());
+            req.headers_mut()
+                .insert("origin", WsValue::from_str(&format!("http://{addr}")).unwrap());
+            tokio_tungstenite::connect_async(req).await
+        };
+        // The socket ends — a close frame, an error or the end of the stream — within a second.
+        async fn closes(
+            mut socket: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        ) -> bool {
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    match socket.next().await {
+                        Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | Some(Err(_)) | None => return,
+                        Some(Ok(_)) => continue,
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+
+        // A paired phone.
+        let phone_token = app.phones.add("iPhone").unwrap();
+        let device = app.phones.view()["devices"][0]["id"].as_str().unwrap().to_string();
+        let phone_cookie = ("cookie", format!("{}={phone_token}", auth::COOKIE_NAME));
+        let (socket, _) = open(phone_cookie.clone()).await.expect("the phone opens the events socket");
+        assert!(app.phones.revoke(&device).is_some());
+        assert!(
+            closes(socket).await,
+            "the phone's socket closed within a second of the revoke"
+        );
+        assert!(open(phone_cookie).await.is_err(), "and the phone cannot open another");
+
+        // A scoped API token, the same way.
+        let made = app
+            .api_tokens
+            .create(crate::api_tokens::NewToken {
+                name: "watcher".into(),
+                scope: "read".into(),
+                orgs: Vec::new(),
+                repos: Vec::new(),
+                max_concurrent: None,
+                budget_usd_per_day: None,
+            })
+            .await
+            .unwrap();
+        let bearer = ("authorization", format!("Bearer {}", made.token));
+        let (socket, _) = open(bearer.clone()).await.expect("the token opens the events socket");
+        assert!(app.api_tokens.revoke(&made.meta.id).await.is_some());
+        assert!(
+            closes(socket).await,
+            "the token's socket closed within a second of the revoke"
+        );
+        assert!(open(bearer).await.is_err(), "and the token cannot open another");
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A request still in flight when its credential is revoked fails, and a streamed body stops.
+    #[tokio::test]
+    async fn a_revoked_credentials_in_flight_request_fails() {
+        let root = temp_root();
+        let app = test_app(&root);
+        let token = app.phones.add("iPhone").unwrap();
+        let device = app.phones.view()["devices"][0]["id"].as_str().unwrap().to_string();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let started = std::sync::Arc::new(std::sync::Mutex::new(Some(started_tx)));
+        let slow = Router::new()
+            .route(
+                "/api/slow",
+                get(move || {
+                    let started = started.clone();
+                    async move {
+                        if let Some(tx) = started.lock().unwrap().take() {
+                            let _ = tx.send(());
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        "done"
+                    }
+                }),
+            )
+            .layer(middleware::from_fn_with_state(app.clone(), host_guard))
+            .with_state(app.clone());
+        let request = guarded(
+            Method::GET,
+            "/api/slow",
+            vec![(header::COOKIE, format!("{}={token}", auth::COOKIE_NAME))],
+        );
+        let in_flight = tokio::spawn(slow.oneshot(request));
+        started_rx.await.unwrap();
+        app.phones.revoke(&device).unwrap();
+        let res = tokio::time::timeout(std::time::Duration::from_secs(1), in_flight)
+            .await
+            .expect("answered at once")
+            .unwrap()
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let _ = std::fs::remove_dir_all(root);
     }
 

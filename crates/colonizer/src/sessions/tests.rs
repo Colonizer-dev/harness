@@ -41,6 +41,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         publishing_holds_slot: status == SessionStatus::Publishing,
         needs_rebase: false,
         rebase_orphaned: false,
+        unseen_failure: false,
         queued_behind: None,
         claim_wait: false,
         verify: None,

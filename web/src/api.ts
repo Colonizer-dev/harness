@@ -92,9 +92,13 @@ import type {
   LoginItemStatus,
   PushSubscriptionSummary,
   PushSubscribeBody,
+  PushSubscriptionPatch,
+  PushPresenceBody,
   RemotePairing,
   RemoteStatus,
   MergeTrainStatus,
+  PhoneInvite,
+  Phones,
 } from "./types";
 
 /** The part of the WebSocket interface the UI uses, so the mock can stand in for it. */
@@ -244,6 +248,12 @@ export interface Api {
   subscribePush(body: PushSubscribeBody): Promise<PushSubscriptionSummary>;
   /** DELETE /api/push/subscriptions/{id}: revokes one device. */
   deletePushSubscription(id: string): Promise<void>;
+  /** PATCH /api/push/subscriptions/{id}: renames a device and/or replaces its prefs; 400 on bad prefs, 404 unknown. */
+  updatePushSubscription(id: string, body: PushSubscriptionPatch): Promise<PushSubscriptionSummary>;
+  /** POST /api/push/subscriptions/{id}/test: one push the device should actually show. */
+  testPushSubscription(id: string): Promise<{ sent: boolean }>;
+  /** POST /api/push/presence: the focused-tab report; 404 once the endpoint is no longer subscribed. */
+  pushPresence(body: PushPresenceBody): Promise<void>;
   /** GET /api/remote: the remote-access switch, the tunnel host and the live link (issue #535, docs/protocol.md §6.10). */
   remote(): Promise<RemoteStatus>;
   /** PUT /api/remote: switches the tunnel on or off. 502 when the relay refused the registration — the switch stays off; 500 when the key file is broken and needs a reset. */
@@ -258,6 +268,16 @@ export interface Api {
   rejectRemotePairing(code: string): Promise<{ github_login: string }>;
   /** DELETE /api/remote/owner: unbinds the owner and clears pending codes; the owner's relay sessions stop working. Local-only. */
   unbindRemoteOwner(): Promise<void>;
+  /** GET /api/phone (issue #746): the paired phones and the ones waiting for their code to be confirmed. */
+  phones(): Promise<Phones>;
+  /** POST /api/phone/invites: a single-use, five-minute invite for a phone to scan, and the origins it might open it on. Never a credential. */
+  phoneInvite(): Promise<PhoneInvite>;
+  /** POST /api/phone/pairings/confirm: approve the phone showing this code. Local-only; 404 for a wrong, expired or used code. */
+  confirmPhone(code: string): Promise<{ label: string }>;
+  /** POST /api/phone/pairings/{id}/reject: that phone is never approved. Local-only. */
+  rejectPhone(id: string): Promise<void>;
+  /** DELETE /api/phone/devices/{id}: signs that one phone out. */
+  revokePhone(id: string): Promise<void>;
   /** GET /api/tokens: every scoped API token's metadata, oldest first (docs/cli.md, "Scoped API tokens"). */
   tokens(): Promise<ApiTokenMeta[]>;
   /** POST /api/tokens: mints one. The plaintext in the answer is shown once and never again; 400 with the reason on bad input. */
@@ -301,6 +321,8 @@ export interface Api {
   resumeSession(id: string): Promise<Session>;
   stopSession(id: string): Promise<StopReply>;
   cleanupSession(id: string): Promise<Session>;
+  /** POST /api/sessions/{id}/seen: the colony was looked at — clears `unseen_failure` and has the mothership push "resolved" to every device (issue #744). */
+  seenSession(id: string): Promise<void>;
   /** GET /api/storage: disk usage plus the reclaimable / unpushed / orphan breakdown (issue #223). */
   storageSummary(): Promise<StorageSummary>;
   /** POST /api/sessions/{id}/retain: keep (`{keep: true}`) or release this colony's worktree from automatic reclamation. */
@@ -617,6 +639,9 @@ export const httpApi: Api = {
   pushSubscriptions: () => request("/api/push/subscriptions"),
   subscribePush: (body) => post("/api/push/subscriptions", body),
   deletePushSubscription: (id) => del(`/api/push/subscriptions/${enc(id)}`),
+  updatePushSubscription: (id, body) => request(`/api/push/subscriptions/${enc(id)}`, { method: "PATCH", body: JSON.stringify(body) }),
+  testPushSubscription: (id) => post(`/api/push/subscriptions/${enc(id)}/test`),
+  pushPresence: (body) => post("/api/push/presence", body),
   remote: () => request("/api/remote"),
   setRemote: (enabled) => put("/api/remote", { enabled }),
   resetRemote: () => post("/api/remote/reset"),
@@ -624,6 +649,11 @@ export const httpApi: Api = {
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
   rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),
   unbindRemoteOwner: () => del("/api/remote/owner"),
+  phones: () => request("/api/phone"),
+  phoneInvite: () => post("/api/phone/invites"),
+  confirmPhone: (code) => post("/api/phone/pairings/confirm", { code }),
+  rejectPhone: (id) => post(`/api/phone/pairings/${enc(id)}/reject`),
+  revokePhone: (id) => del(`/api/phone/devices/${enc(id)}`),
   tokens: () => request("/api/tokens"),
   createToken: (body) => post("/api/tokens", body),
   revokeToken: (id) => del(`/api/tokens/${enc(id)}`),
@@ -659,6 +689,7 @@ export const httpApi: Api = {
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   cleanupSession: (id) => post(`/api/sessions/${enc(id)}/cleanup`),
+  seenSession: (id) => post(`/api/sessions/${enc(id)}/seen`),
   storageSummary: () => request("/api/storage"),
   setKeep: (id, keep) => post(`/api/sessions/${enc(id)}/retain`, { keep }),
   deleteSession: (id, opts) => del(`/api/sessions/${enc(id)}${query({ purge_logs: opts?.purgeLogs ? "true" : undefined })}`),

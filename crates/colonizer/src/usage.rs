@@ -908,6 +908,7 @@ mod tests {
             publishing_holds_slot: false,
             needs_rebase: false,
             rebase_orphaned: false,
+            unseen_failure: false,
             queued_behind: None,
             claim_wait: false,
             verify: None,
