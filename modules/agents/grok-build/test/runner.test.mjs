@@ -5,7 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -124,7 +124,7 @@ test('resolveModel accepts xai-grok and bare ids, and refuses other providers by
 });
 
 test('untrustableWorkspace refuses only a workspace that is the home directory or the filesystem root', () => {
-  const home = mkdtempSync(join(tmpdir(), 'grok-test-untrust-'));
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'grok-test-untrust-')));
   assert.equal(untrustableWorkspace(home, home), home, 'a workspace that is $HOME is auto-trusted upstream');
   assert.equal(untrustableWorkspace('/', home), '/', 'the filesystem root can never be gated');
   assert.equal(untrustableWorkspace(home, mkdtempSync(join(tmpdir(), 'grok-test-other-'))), null, 'an ordinary workspace gates fine');

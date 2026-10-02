@@ -145,6 +145,10 @@ watcher can still see a just-created masked file — publish still applies. And
 a bound path cannot be deleted or renamed inside the guest (the bind holds the
 inode), so the agent cannot `rm -rf` a nested checkout that contains a masked
 or protected path; each bind that was applied is on the colony log.
+Off Linux (a macOS dev build of agentd) there are no bind mounts, so nothing
+is enforced: agentd instead polls the workspace about once a second (bounded
+in depth and entries) for nested checkouts and writes one warn line per policy
+path it finds in one and cannot bind, naming the path.
 
 **`.git` is not a bind.** The git admin dir is mounted read-only at its own
 host path at boot already, so `.git/config` and `.git/hooks/` are beyond the
