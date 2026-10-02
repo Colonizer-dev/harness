@@ -12,6 +12,7 @@ import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } f
 import { useModels } from "../useModels";
 import { TsAnyLoopCard } from "./TsAnyLoop";
 import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DocsLoopCard } from "./DocsLoopCard";
 import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
 import { SupplyChainLoopCard } from "./SupplyChainLoop";
@@ -187,6 +188,7 @@ export function LoopsView({
         </div>
 
         <TsAnyLoopCard onOpenColony={onOpenColony} />
+      <DocsLoopCard onOpenColony={onOpenColony} />
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
     </Page>

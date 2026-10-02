@@ -212,6 +212,12 @@ Rules:
   runner assigns the class; the Mothership's autonomy judge enforces it against its ceiling
   (§6.2b). A question with no `risk` — an older runner's — counts as `workspace_write`; a value
   outside the vocabulary counts as above every ceiling and is never answered automatically.
+- A question whose answer a tool call is blocked on, in flight inside a live agent, carries
+  `blocking: true`: a subagent's `AskUserQuestion`, an ACP permission request, an exec-policy ask
+  (which also carries `kind: "exec_policy"`). A resumed transcript cannot finish that call, so the
+  Mothership does not suspend such a colony while it waits, up to a two-hour cap
+  ([#759](https://github.com/Colonizer-dev/harness/issues/759); docs/colonies.md). The lead agent's
+  own question omits the field: its turn resumes with the answer as the next message.
 - `status` must be emitted on every state change. `waiting_for_answer` while a question is open.
 - `agent_session` names the runner's own conversation id, so the harness can have it continued later
   (§1's `COLONIZER_RESUME_SESSION`). Emit it as soon as the runner knows its conversation id, the
@@ -362,6 +368,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
 | `POST /api/sessions/{id}/answer` | `{question_id, answers, response?, questions?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads; `questions`, when given, is the question content the answerer saw, and must equal the open question's or the answer is the stale **409** (runners number questions afresh after a reboot, so an id alone can name a different question). A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore, or one whose send into a colony that stopped between the checks and the send fails, is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
+| `POST /api/sessions/{id}/prewarm` | Warms a suspended colony up ahead of its answer ([#701]): asks the queue to boot it through the same admission as any restore — behind colonies that already hold an answer, after queued launches — so the answer lands in an already running VM instead of a cold boot. Sets `prewarm` on the session (below). Answers **202** when a warm-up was requested and **204** when it is a no-op (already warming or ready, nothing to warm). **404** for an unknown colony |
 | `POST /api/sessions/{id}/seen` | Someone is looking at the colony: clears `unseen_failure` (below), and when it actually cleared something — the cockpit only calls this for a `failed` colony nobody has opened yet, with the page in front — pushes the silent `{"type":"resolved","colony","badge"}` to every push subscription, so each device closes that colony's notification and lowers its badge ([cockpit.md](cockpit.md#notifications-and-web-push)). Answered **204** either way; **404** for an unknown colony. Read scope for API tokens — looking is not driving |
 | `POST /api/sessions/{id}/messages` | `{id, text}` — the events socket's `user_message` command over HTTP, the offline outbox's route (§5). It shares the socket's one user-message path, so the same colony-state check, the same trim and 100,000-byte cap, and a scoped token's text marked external input — but it answers instead of dropping: `200 {"id": "u-<id>", "duplicate": false}`, `duplicate: true` when that client `id` was already delivered to this colony, so a repeat sent after a lost answer is answered, not delivered twice (`id` is 1–64 of `A–Z a–z 0–9 _ -`, **400** otherwise). **400** also for an empty or over-cap `text`, which the socket drops silently; **404** for an unknown colony; **409** when the colony is not live and cannot take a message, or when the send into a colony that stopped between that check and the send fails — nothing was delivered and the `id` stays free, so the retry is not absorbed as a duplicate |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|automerge\|blocked\|merged\|error` (§6.6). **404** for an unknown colony |
@@ -450,7 +457,7 @@ routed together).
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
   `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|prewarm`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -680,7 +687,7 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 
 The example shows the common fields; the record carries more, and most optional ones are left out
 of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`, `parked`,
-`agent_session`, `pending_answer`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
+`agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
@@ -714,6 +721,16 @@ suspension's own time. A colony with `suspended` and `pending_answer` both set, 
 it, restores take such colonies in answer order ahead of fresh launches, and the cockpit shows
 "Answered · resumes when a slot frees" with the colony's place in line (its rank among the
 answered ones by that same order). All three are absent on a colony that has never been suspended.
+
+`prewarm` is set while a warm-up of such a colony is under way ([#701]) — someone opened the
+question, so the mothership is booting it ahead of the answer: `{requested_at, started_at?,
+ready_at?}`, the request's arrival, the boot's admission and the VM and agent link coming up, each
+RFC 3339 and absent until it happens. `suspended` stays set while warming and the status moves on
+to `starting` and then `running` — the colony holds its slot again — but an answer still lands in
+`pending_answer` exactly as for any suspended colony, and is delivered as the first message once
+the runner is up. `prewarm_timeout_minutes` (default 5) with no answer, a mothership restart or a
+failed boot clears `prewarm` and leaves the colony suspended again, never failed; answering
+clears `prewarm`, `suspended` and `pending_answer` together once the answer is delivered.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never
@@ -3831,3 +3848,23 @@ mothership sets `COLONIZER_LOOP=true`, and `mcp__colonizer_loop__loop_next` only
 `COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build and OpenCode runners
 gate the same two tools on the same env under their own names. A self-paced loop whose colony never
 calls `loop_next` runs again a day later.
+
+### Docs & README loop
+
+The built-in docs loop ([loops.md](loops.md#docs--readme)), saved in `<config_dir>/docs-loop.json`.
+Owner only: a scoped API token reaches none of these routes.
+
+| Route | What it does |
+|---|---|
+| `GET /api/docs-loop` | `{name, settings: {allow, interval_hours, cooldown_hours}, enabled, next_run_at, last_report, history: [{id, at, trigger, summary}], limits}`. `enabled` is `allow` being non-empty; `last_report` is the newest run's full report, or null. |
+| `PUT /api/docs-loop` | Replaces the settings: `allow` (repositories `owner/name` and orgs `owner`, at most 100), `interval_hours` (1–168, default 24), `cooldown_hours` (1–720, default 24). **400** for anything else. |
+| `POST /api/docs-loop/enable` · `POST /api/docs-loop/disable` | `{target}`: adds a repository or org to the allowlist, or removes one (**404** when it is not there). A loop that becomes enabled runs 10 minutes later; removing the last entry switches it off. |
+| `POST /api/docs-loop/run` | `{dry_run?}` (default false): runs over the allowlist now and answers the report. A dry run launches nothing and records nothing. **409** while the loop is off or a run is in progress. |
+
+A report is `{id, at, trigger: "schedule"|"run_now"|"dry_run", dry_run, external_writes_blocked,
+repos: [{repo, head, since, findings: [{kind, file?, line?, change?, message, advisory?}], more, action,
+reason, colony}]}`. An `advisory` finding (a missing changelog fragment) is reported but never
+dispatches a colony on its own. `kind` is `undocumented_change`, `broken_link`, `broken_anchor`, `missing_command`,
+`routes_drift`, `changelog` or `docs_map`; `action` is `clean`, `dispatched`, `skipped`,
+`report_only` or `error`; `more` counts the findings past the 40 a report keeps. The colony a run
+dispatches carries the origin `docs-loop`.

@@ -326,6 +326,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::colony_secrets::routes())
         .merge(crate::deja::routes())
         .merge(crate::deps::routes())
+        .merge(crate::docs_loop::routes())
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
@@ -398,6 +399,7 @@ pub(crate) fn router(app: &Shared) -> Router {
 async fn start_tasks(app: &Shared, router: &Router) {
     crate::autonomy::start_tasks(app);
     crate::burn_down::start_tasks(app);
+    crate::docs_loop::start_tasks(app);
     crate::fleet_sync::start_tasks(app);
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);

@@ -468,6 +468,13 @@ pub fn suspend_after(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "suspend_after_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long a pre-warmed colony (issue #701) waits for the answer after its boot before the queue
+/// suspends it again. Same clamp-as-read reasoning as [`suspend_after`].
+pub fn prewarm_timeout(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "prewarm_timeout_minutes").clamp(1, 1440) as i64)
+}
+
 /// Whether parking a colony (quota exhaustion, an expired hold — issue #213) tears its microVM
 /// down, from the resume module. On by default: the cold resume it buys is the only resume that
 /// works after a restart, and an idle microVM holds real memory. Off, the microVM stays running

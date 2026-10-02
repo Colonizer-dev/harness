@@ -4,6 +4,7 @@ import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
 import { defaultPushPrefs, mergePushPrefs } from "./push";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
+import { mockDocsLoop } from "./cockpit/docsLoopMock";
 import { defaultMergeLoopSettings } from "./cockpit/mergeLoop";
 import type {
   SupplyChainLoop,
@@ -3218,6 +3219,8 @@ export function createMockApi(): Api {
       colonyActivity("colony.resume", s.session);
       return clone(s.session);
     },
+    // Mock colonies never suspend, so there is nothing to warm (#701).
+    prewarmSession: async () => {},
     publishSession: async (id) => {
       const s = find(id);
       if (!canPublish(s.session)) throw new ApiError("this colony cannot be published", 409);
@@ -4223,6 +4226,7 @@ export function createMockApi(): Api {
       return clone(report);
     },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
+    ...mockDocsLoop(now),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);

@@ -88,11 +88,14 @@ export function ChatPanel({
   state,
   live,
   onOpenMemory,
+  onAnswerFocus,
 }: {
   stream: SessionStream | null;
   state: StreamState;
   live: boolean;
   onOpenMemory?: () => void;
+  /** The answer box got focus; a suspended colony's open question may want warming (issue #701). */
+  onAnswerFocus?: () => void;
 }) {
   const toast = useToast();
   const thread = useMemo(() => buildThread(state), [state]);
@@ -264,6 +267,7 @@ export function ChatPanel({
             live={live}
             waiting={thread.hasOpenQuestion}
             picker={<ModelPicker stream={stream} state={state} enabled={connected && live} />}
+            onFocusAnswer={onAnswerFocus}
           />
         </ThreadPrimitive.Root>
       </AssistantRuntimeProvider>
@@ -843,12 +847,25 @@ function ModelPicker({ stream, state, enabled }: { stream: SessionStream | null;
   );
 }
 
-function Composer({ isRunning, live, waiting, picker }: { isRunning: boolean; live: boolean; waiting: boolean; picker: ReactNode }) {
+function Composer({
+  isRunning,
+  live,
+  waiting,
+  picker,
+  onFocusAnswer,
+}: {
+  isRunning: boolean;
+  live: boolean;
+  waiting: boolean;
+  picker: ReactNode;
+  onFocusAnswer?: () => void;
+}) {
   return (
     <div className="border-t border-border bg-panel/60 p-3">
       <ComposerPrimitive.Root className="flex items-end gap-2 rounded-2xl border border-border bg-panel p-1.5 pl-3 shadow-[var(--shadow)] focus-within:border-accent">
         <ComposerPrimitive.Input
           rows={1}
+          onFocus={onFocusAnswer}
           placeholder={
             !live
               ? "This colony's microVM is not running"

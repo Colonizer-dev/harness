@@ -192,6 +192,13 @@ export function execPolicyLogLine(hit, command) {
   return `exec policy: ${hit.decision} rule=${hit.rule} layer=${hit.layer} command=${oneLine(command, LOG_COMMAND_CHARS)}`;
 }
 
+/**
+ * The `kind` a question event carries when an exec-policy `ask` raised it (issue #759): the Bash
+ * call that asked is still in flight inside a live agent, so the mothership must not suspend the
+ * colony while it waits — the call would die with the microVM and the agent that made it.
+ */
+export const EXEC_POLICY_QUESTION_KIND = 'exec_policy';
+
 /** The colony question an `ask` decision becomes: the rule in the text, Allow and Deny options. */
 export function execPolicyQuestion(hit, command) {
   const truncated = oneLine(command, 400);
@@ -202,11 +209,36 @@ export function execPolicyQuestion(hit, command) {
         header: 'Exec policy',
         multiSelect: false,
         options: [
-          { label: 'Allow', description: 'Run this command once' },
+          { label: 'Allow', description: 'Run this command; the colony will not ask again for the same command' },
           { label: 'Deny', description: 'Refuse the command; the agent sees the policy reason' },
         ],
       },
     ],
+  };
+}
+
+/**
+ * The colony's memory of the commands its operator allowed (issue #759). An Allow is kept per
+ * (rule, layer, command with its whitespace collapsed), so the agent that retries the command —
+ * or a subagent the lead spawns in place of one that died — is not asked again for it, while a
+ * different command, or the same one under a different rule, still asks. Only an `ask` is ever
+ * looked up here: a deny is refused before the cache is consulted, so nothing in it can soften a
+ * deny. It lives in the runner process — one per colony run — and never on disk, where the agent
+ * could write itself an approval; a colony restored in a fresh microVM therefore asks afresh.
+ */
+export function createExecAllowCache() {
+  const allowed = new Set();
+  const key = (hit, command) => `${hit.rule}\u0000${hit.layer}\u0000${String(command).replace(/\s+/g, ' ').trim()}`;
+  return {
+    /** True when this `ask` was already allowed for this command. */
+    has: (hit, command) => hit?.decision === 'ask' && allowed.has(key(hit, command)),
+    /** Records an operator's Allow of this `ask`; anything but an `ask` is ignored. */
+    remember: (hit, command) => {
+      if (hit?.decision === 'ask') allowed.add(key(hit, command));
+    },
+    get size() {
+      return allowed.size;
+    },
   };
 }
 

@@ -330,10 +330,32 @@ Two sandbox module settings drive this, global with no per-org override: `suspen
 reported its session id is suspended; anything else keeps its microVM, said once in the colony log. A suspension
 lasts until answered, stopped or deleted — stopping clears the suspension and any held answer — and the sandbox
 watchdog and restart recovery both leave a suspended colony alone: its microVM is gone by design, not by crash.
+A colony whose open question is an exec-policy `ask` (the question event's `kind` is `exec_policy`, issue #759)
+is never suspended: the tool call that asked is blocked in flight inside a live agent — often a subagent — and a
+resumed transcript cannot pick that call back up, so suspending it killed the agent and the lead only spawned
+another that asked again. The same holds for any question the runner marks `blocking: true` — a subagent's
+`AskUserQuestion` (Claude Code reports the subagent in canUseTool's `agentID`, and the runner also recognises the
+tool_use arriving in a subagent's message), and every ACP `session/request_permission` — since a resumed session
+has no pending call to hand the answer to. The runtime keeps the flag beside the open question and restores it
+from the saved events the same way. The exemption is capped: a blocking question unanswered for
+`BLOCKING_QUESTION_CAP` (two hours, never shorter than the grace) is suspended anyway, with a `warn` log line
+saying the agent that asked is lost and the answer will reach the lead on resume. Nothing else bounds that
+wait — budgets count spend, and a colony blocked on its user spends nothing — so without the cap an unanswered
+question would hold a microVM and a slot indefinitely.
 Suspension also requires the question to still be open in the runtime: the live answer path and the suspension
 claim take the same open-question lock, so an answer and a claim cannot interleave and an answer is never lost
 in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
+
+The cockpit can also warm a suspended colony up ahead of the answer (issue #701): opening the question calls
+`POST /api/sessions/{id}/prewarm`, which sets a `prewarm` block on the session — `requested_at`, then
+`started_at` once the boot is admitted, then `ready_at` once the VM and the agent link are up. The queue pass
+claims a slot for a warming colony exactly where it puts answered ones — never ahead of a colony that already
+holds an answer, and only after queued launches — while keeping the suspension record, so the answer path is
+unchanged: an answer still persists to `pending_answer` and is delivered as the first `user_message` over the
+live link. If no answer arrives within the sandbox's `prewarm_timeout_minutes` (default 5), the colony goes
+back to suspended and its VM is torn down; a mothership restart mid-warm-up or a failed boot reverts it to
+suspended too, never to failed.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
 microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`

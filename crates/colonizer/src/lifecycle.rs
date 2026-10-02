@@ -258,6 +258,27 @@ pub async fn recover(app: &Shared) {
         // microVM is gone by design, so the orphan branch below would read the suspension as a
         // crash and stop a colony whose answer is still pending.
         if fresh.suspended.is_some() {
+            // A colony that was warming (issue #701) when the harness died has a microVM whose
+            // boot task died with it: give the warm-up up and put the colony back the way the
+            // suspension left it, question open and answerable for the restore pass.
+            if fresh.prewarming() {
+                app.session_log(
+                    &fresh.id,
+                    "info",
+                    "startup: the colony was warming for its answer; giving the warm-up up".into(),
+                )
+                .await;
+                teardown_vm(app, &fresh).await;
+                app.update_session(&fresh.id, |x| {
+                    if !x.prewarming() {
+                        return false;
+                    }
+                    x.status = SessionStatus::WaitingForAnswer;
+                    x.prewarm = None;
+                    true
+                })
+                .await;
+            }
             continue;
         }
         if claimed_boot_after_snapshot(&s, &fresh) {
@@ -1008,9 +1029,11 @@ pub async fn resume(
             x.local_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
             // the boot; any held answer stays on the record, and the boot delivers it. The boot is
-            // told whether it is restoring a suspension (issue #700) before the flag goes.
+            // told whether it is restoring a suspension (issue #700) before the flag goes. A pending
+            // pre-warm request is subsumed: this resume is the boot it was asking for.
             x.was_suspended = x.suspended.is_some();
             x.suspended = None;
+            x.prewarm = None;
             // A parked colony stops being parked here (issue #213): the record had its say — the
             // cold path below tears down a microVM the park kept — and the resumed colony is not
             // parked any more.
@@ -1267,9 +1290,10 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
                 attention = x.clear_attention();
                 // A suspended colony stopped by hand is just stopped (issue #562): its held answer
                 // would be delivered by a resume that is never coming, and the question it was
-                // waiting on is closed for good.
+                // waiting on is closed for good. A pending pre-warm request dies with it too.
                 x.suspended = None;
                 x.pending_answer = None;
+                x.prewarm = None;
                 // A parked colony stopped by hand is just stopped too (issue #213): the park record
                 // describes a state this stop replaces, and keeping it would promise a reset or a
                 // warm resume that is no longer pending.

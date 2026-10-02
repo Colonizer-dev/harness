@@ -34,7 +34,7 @@ use std::path::PathBuf;
 /// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
 /// trust scope one machine in a fleet holds (issue #686): it reaches only the fleet's own routes,
 /// and nothing below `read` passes any other need. `read` watches, `operate` drives colonies that
-/// exist (answer, stop, resume), `launch` starts colonies.
+/// exist (answer, stop, resume, prewarm), `launch` starts colonies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
@@ -474,7 +474,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             Need::Map { owner, name }
         }
         ["api", "tokens", "self"] if get => Need::Bare(Scope::Read),
-        // Colony-scoped: watch at read, drive (answer, stop, resume) at operate.
+        // Colony-scoped: watch at read, drive (answer, stop, resume, prewarm) at operate.
         ["api", "sessions", id] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
@@ -499,7 +499,12 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
         // colony drive, like answering.
-        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "keep"] if post && !id.is_empty() => Need::Session {
+        [
+            "api",
+            "sessions",
+            id,
+            "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm",
+        ] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,
         },
