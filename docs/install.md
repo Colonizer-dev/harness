@@ -301,6 +301,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_CLAUDE_BIN` | `claude` on `PATH`, then `~/.local/share/mise/installs/claude/latest/claude`, `~/.local/bin/claude`, `~/.claude/local/claude` | The native Claude Code binary to mount into colonies |
 | `COLONIZER_GATEWAY_BIND` | `127.0.0.1:41750` | The provider gateway; colonies reach it through `host.microsandbox.internal`. Must be an IP and port: a hostname such as `localhost:41750` refuses startup |
 | `COLONIZER_FLEET_PEERS` | – | Base URLs of other motherships, comma separated, polled for the fleet view (`GET /api/hosts`). Nothing is exposed by setting it |
+| `COLONIZER_FLEET_SYNC` | on | Set to `off` (or `0`, `false`, `no`) to stop a fleet member's background history push ([fleet.md](fleet.md#history-push)); `colonizer fleet sync` still drains on demand. Has no effect on a machine that has not joined a fleet |
 | `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
@@ -310,6 +311,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_QUOTA_FALLBACK` | on | `0` or `false` stops every provider from failing over to its `fallback_model` when its plan runs out ([docs/providers.md](providers.md#plans-quotas-and-trust)) |
 | `COLONIZER_RECLAIM` | on | `0`, `false`, `off` or `no` switches off the 5-minute sweep that reclaims finished colonies' worktrees once their work is pushed. Manual cleanup still works |
 | `COLONIZER_RECLAIM_RETENTION_HOURS` | `12` | How long a finished colony's worktree is kept before the sweep may reclaim it |
+| `COLONIZER_FLEET_INGEST_RETENTION_DAYS` | `90` | On a fleet owner, days a member's synced colony and its logs are kept after they arrive; `0` keeps them ([fleet.md](fleet.md#reading-it-on-the-owner)) |
 | `COLONIZER_RECLAIM_MIN_FREE` | `5G` | The free-disk floor, used only when the sandbox module's `min_free_disk` setting has not been saved. Below it the queue pauses and the sweep reclaims pushed work without waiting |
 | `MSB_HOME` | `~/.microsandbox` | Where microsandbox keeps its state and image cache, for the disk figures |
 | `COLONIZER_HUNTER_INSTALL` | off | `1`, `true`, `on` or `yes` allows installing security hunters ([docs/security-hunters.md](security-hunters.md)) |

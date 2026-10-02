@@ -34,7 +34,7 @@ const MAX_CHUNK_RAW: u64 = 16 * 1024 * 1024;
 const MANIFEST_NAME: &str = "manifest.json";
 const HISTORY_FILE: &str = "history/sessions.jsonl";
 /// The log ledgers a session directory may contribute, by exact name (`sessions/runtime.rs`).
-const LOG_BASENAMES: [&str; 3] = ["events.jsonl", "harness.jsonl", "gateway.jsonl"];
+pub(crate) const LOG_BASENAMES: [&str; 3] = ["events.jsonl", "harness.jsonl", "gateway.jsonl"];
 /// The data-dir files the stats category carries. Nothing else under the data dir is ever read.
 const STAT_FILES: [&str; 5] = [
     "routing.jsonl",
@@ -124,7 +124,7 @@ fn host_name() -> String {
 /// One path segment safe to join under a directory we own: non-empty ASCII letters, digits,
 /// `-`, `_` and `.`, never a leading dot (no `..`, nothing hidden). Host ids, session ids and
 /// every tar entry segment are checked with this before anything is opened.
-fn is_safe_segment(name: &str) -> bool {
+pub(crate) fn is_safe_segment(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('.')
         && name
@@ -249,7 +249,7 @@ pub struct ImportedSession {
 }
 
 impl ImportedSession {
-    fn of(origin: &Origin, s: &Session, repo_identity: Option<RepoIdentity>) -> ImportedSession {
+    pub(crate) fn of(origin: &Origin, s: &Session, repo_identity: Option<RepoIdentity>) -> ImportedSession {
         ImportedSession {
             id: format!("{}:{}", origin.host, s.id),
             origin_host: origin.host.clone(),
@@ -447,7 +447,7 @@ fn collect(data_dir: &Path, origin: &Origin, cats: &Categories) -> anyhow::Resul
 /// (`<data_dir>/repos/<owner>/<repo>.git`, as `App::bare_repo` lays it out). `None` when the
 /// mirror is gone or tells nothing, or when `repo` is not a plain `owner/name` — a record's repo
 /// field never steers a read outside `repos/`.
-fn mirror_identity(data_dir: &Path, repo: &str) -> Option<RepoIdentity> {
+pub(crate) fn mirror_identity(data_dir: &Path, repo: &str) -> Option<RepoIdentity> {
     if repo.is_empty() || !repo.split('/').all(is_safe_segment) {
         return None;
     }
@@ -466,7 +466,7 @@ fn range_of(sessions: &[Session]) -> (Option<DateTime<Utc>>, Option<DateTime<Utc
 }
 
 /// The colony records from the data dir's `sessions.json`; missing on a fresh install means none.
-fn read_sessions(data_dir: &Path) -> anyhow::Result<Vec<Session>> {
+pub(crate) fn read_sessions(data_dir: &Path) -> anyhow::Result<Vec<Session>> {
     match std::fs::read(data_dir.join("sessions.json")) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),

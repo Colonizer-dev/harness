@@ -124,7 +124,7 @@ async fn reduced_status(app: &Shared) -> Value {
         .get("ok")
         .cloned()
         .unwrap_or(json!(true));
-    json!({
+    let mut body = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
         "host": host_value,
@@ -137,7 +137,14 @@ async fn reduced_status(app: &Shared) -> Value {
             },
         },
         "storage": {"ok": storage_ok},
-    })
+    });
+    // Member health on the owner (issue #764): whether the colony runner is ticking, and — on a
+    // fleet member — where its history push stands. Ages, counts and classes only.
+    body["runner"] = json!({"last_tick_age_s": crate::queue::last_tick_age_s()});
+    if let Some(sync) = crate::fleet_sync::health_summary(app).await {
+        body["fleet_sync"] = sync;
+    }
+    body
 }
 
 pub(crate) async fn status(

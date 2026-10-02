@@ -305,14 +305,18 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
-| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` — everything the Settings → Fleet pane renders |
+| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
 | `POST /api/fleet/pending/{id}/approve` · `…/reject` | The owner's decision on a redeemed invite. Approve answers `{member}` and mints the member's `fleet`-scoped token, handed over exactly once; reject leaves the joiner's next confirm reading `rejected` |
 | `DELETE /api/fleet/members/{id}` | End one membership from the owner's side: the member's fleet token is revoked, its local data stays |
 | `POST /api/fleet/join` · `POST /api/fleet/join/confirm` · `DELETE /api/fleet/join` | Redeem an owner's invite (`{owner_url, code, name?, url?}` → `{confirm_code, status: "pending"}`; **409** while already in a fleet, or an owner with members), poll for the owner's decision (`{status: "joined"\|"pending"\|"rejected"\|"expired"}`), cancel |
 | `POST /api/fleet/leave` | A member ends its own membership; the token is revoked and every local colony and setting stays |
+| `GET /api/fleet/sync` · `POST /api/fleet/sync` | A member's history push (Fleet history push, below): where it stands — `{member, consent, enabled, status, detail, acknowledged, retired, last_drain_at, last_synced_at, next_attempt_at}` — and drain now, answering the drain report; **409** when this mothership has not joined a fleet, or its operator has not consented |
+| `GET /api/fleet/sync/preview` · `POST /api/fleet/sync/consent` | What the history push would send — `{owner_url, colonies, payloads, payload_bytes, omitted_payloads, row_bytes, total_bytes, pending_colonies, pending_bytes, includes, excludes}`, sending nothing — and the operator's consent for this membership (`{enabled}` → the status); both **409** when not a member |
+| `GET /api/fleet/history` · `GET /api/fleet/history/{member}/{row_id}` · `…/logs/{name}` | The owner's view of what members synced (Fleet history on the owner, below): the filtered, paged list with totals per member and repository, one colony's record and its logs, and one log streamed; owner-only |
+| `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | The owner's ingest for a member's history push, on the member's `fleet` token: one log payload stored by its hash (**204**), then a batch of colony rows upserted by id (`{rows}` → `{accepted, rejected}`); **403** for a token that belongs to no member |
 | `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
 | `PUT /api/modules/{kind}` | `{provider, enabled (default true), settings}` → saves config and answers the module as `GET` lists it. **400** for an unknown provider or setting, a value of the wrong type or out of range, or switching off a kind that must stay on (`source`, `sandbox`, `agent`, `publish`) |
@@ -1164,8 +1168,10 @@ every poll and stays cheap without a cache.
 
 Without the API token this endpoint answers a reduced body, and only that: `version`, `queue_depth`,
 `host` with `microvms_live`, `microvms_ceiling` and the numeric capacity figures (no `id`, `hostname`,
-`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, and `storage` with only `ok`.
-It always uses the cached probes and ignores `?fresh`. This is what fleet peers read.
+`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, `storage` with only `ok`,
+`runner` with `last_tick_age_s`, and — on a fleet member only — `fleet_sync` (both described under
+[Member health](#member-health-issue-764)). It always uses the cached probes and ignores `?fresh`.
+This is what fleet peers read.
 
 ### `GET /api/hosts`
 
@@ -1255,8 +1261,8 @@ The table above names each one; the shapes:
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
   `{status: "approved", token, member_id}` exactly once (a second poll reads **404**), or the
   rejection. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
-  `GET /api/hosts` and `POST /api/fleet/peer/leave`, never minted by `POST /api/tokens`, and never
-  the member's local cockpit token.
+  `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
+  never minted by `POST /api/tokens`, and never the member's local cockpit token.
 - `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
   revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
   enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](fleet.md).
@@ -1267,6 +1273,134 @@ as u32, mod 1,000,000. The owner knows the invite code and learns the nonce at t
 joiner generated both. The digits are a compare for two people looking at two screens, not an
 authentication — a stolen invite redeemed by someone else is consumed, so the real joiner sees an
 error and the owner sees a request nobody vouches for.
+
+### Fleet history push (issue #762)
+
+A member drains its finished colonies' history to its fleet's owner on the `fleet` token its
+pairing minted; the design is in [fleet.md](fleet.md#history-push). Two owner routes take it, both
+`fleet`-scoped and both answering **403** to a token that names no current member (the owner's own
+cockpit token included). What arrives lands under `<data_dir>/fleet-ingest/<member_id>/` on the
+owner.
+
+- `PUT /api/fleet/peer/payloads/{sha256}` — the body is one log ledger's raw bytes (at most 32 MiB),
+  keyed by the lowercase hex SHA-256 of those bytes. **204** once stored (or already held); **400**
+  when the key is malformed or the body does not hash to it; **413** past the size limit. Stored
+  as `payloads/<sha256>`, so a re-upload is a no-op.
+- `POST /api/fleet/peer/rows` — `{"rows": [{id, record, payloads}]}`, at most 500 rows and 4 MiB.
+  `record` is the same allowlist projection of a colony the export bundle's history carries
+  ([§6.11](#611-fleet-export-bundle-687)), and `id` is its `<origin_host>:<original_id>`.
+  `payloads` lists the colony's logs — `{name, sha256, bytes}` with `name` one of `events.jsonl`,
+  `harness.jsonl`, `gateway.jsonl`, or `{name, bytes, omitted: true}` for a log too large to send.
+  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}]}`: accepted rows
+  are upserted by id into `sessions.json` (a re-sent row replaces itself, never duplicates), and a
+  row whose payloads are not all held is refused by name with the hashes it lacks. A body that
+  cannot be read as rows is refused whole (**400**/**422**, or **413** past the limits) — the
+  member splits such a batch to find the row that caused it. A refusal may name the row itself
+  with a top-level `"row": id`.
+
+The member reads the other answers as states: **401** stops the drain and asks for attention,
+**403** stops syncing (removed from the fleet), and **429**/**503** wait out `Retry-After`
+(seconds or an HTTP date).
+
+A removed member's token keeps a tombstone on the owner (its SHA-256, kept in
+`<config_dir>/fleet.json` after the token itself is revoked), so every API request presenting it
+answers **403** `{"error": "removed from the fleet"}`; a token the owner never knew, or one that
+left by itself, answers the usual **401**.
+
+Nothing is pushed until the member's operator consents, per membership:
+`GET /api/fleet/sync/preview` counts what would be sent (finished colonies, their logs, bytes in
+all and not yet acknowledged) from the same collection the drain sends, and
+`POST /api/fleet/sync/consent` `{"enabled": true|false}` records the answer on the membership in
+`<config_dir>/fleet.json`. A new join starts with it off; until it is on, `GET /api/fleet/sync`
+reads `status: "consent_required"` and `POST /api/fleet/sync` answers **409**.
+
+### Fleet history on the owner (issue #762)
+
+What members pushed, read back on the owner ([fleet.md](fleet.md#reading-it-on-the-owner)). All
+three routes are owner-only: a scoped token — a member's `fleet` token included — answers **403**.
+
+- `GET /api/fleet/history?member=&repo=&status=&since=&until=&limit=&cursor=` — every member's
+  synced colonies, newest `record.updated_at` first. `member` is a member id, `repo` the record's
+  `owner/name`, `status` its status (`merged`, `pr_opened`, …); `since`/`until` bound the finish
+  time, each RFC 3339 or `YYYY-MM-DD` (`until`'s day is inclusive). Pagination follows
+  `GET /api/sessions`: `limit` 1–100 (default 20), `cursor` the last entry's `key`, `next_cursor`
+  null at the end; a malformed filter or a cursor naming no entry is **400**. The answer:
+  `{colonies: [{key, member_id, member_name, member_removed, id, received_at, record, payloads}],
+  next_cursor, stats: {total, members: [{member_id, name, removed, …}], repos: [{repo, …}]},
+  members: [{id, name, removed}], repos: [..], retention_days}`, where each total is
+  `{colonies, merged, cost_usd}` over every filtered row (`cost_usd` null when no row carries a
+  cost), and `key` is `<member_id>/<row id>`. `member_removed` marks a member the owner removed.
+- `GET /api/fleet/history/{member}/{row_id}` — one entry as above plus
+  `logs: [{name, sha256, bytes, omitted, stored}]`; **404** for an unknown member or row.
+- `GET /api/fleet/history/{member}/{row_id}/logs/{name}` — one stored log, streamed as
+  `text/plain` exactly as the member sent it (no owner-side redaction); **404** when the row names
+  no such log, it was omitted, or the owner does not hold it.
+
+Rows are pruned `COLONIZER_FLEET_INGEST_RETENTION_DAYS` (default 90, `0` = never) after
+`received_at` by the reclaim tick, together with the payloads only they referenced.
+
+### Member health (issue #764)
+
+Each entry of `GET /api/fleet`'s `members` carries one verdict:
+
+```json
+{"id": "mem_…", "name": "worker", "url": "http://10.0.0.2:7878", "joined_at": "…",
+ "health": {"state": "degraded", "code": "no_heartbeat", "reason": "No heartbeat for 12 min", "hint": "the machine may be asleep"}}
+```
+
+`state` is `ok`, `unknown`, `degraded` or `stopped`; `code`, `reason` and `hint` are `null`
+exactly when it is `ok`. `note` is independent of the state: something worth knowing that is not a
+fault — today only `"History sync off"`, when the member's operator has not consented to the
+history push — else `null`. `unknown` means no poll has checked the member yet: it is never reported
+as `ok` on no evidence. `code` is stable; `reason` and `hint` are for showing verbatim. Reading the view never dials a
+member: it evaluates what the owner already holds (`crates/colonizer/src/fleet_health.rs`), and
+every signal that fires is a finding. The worst state wins (`stopped` over `degraded` over `unknown` over `ok`); findings of the same state break ties in
+the order below.
+
+| Order | `code` | Fires when | State | Hint | Wired |
+|---|---|---|---|---|---|
+| 1 | `token_revoked` | the member's fleet token is gone from the registry | stopped | re-pair this machine | yes |
+| 2 | `sync_rejected` | the member's last sync drew a 401 (`unauthorized`) or a 403 (`removed`); reason "Token revoked" | stopped | re-pair this machine | yes |
+| 3 | `runner_down` | the member's queue loop last ticked ≥ 5 min ago; reason "Colony runner not ticking" | degraded | restart colonizer on this machine | yes |
+| 4 | `disk_full` | disk ≥ 90% used (≥ 95% stopped); without a total, < 5 GB free (< 1 GB stopped) | degraded / stopped | clean target/ dirs | yes |
+| 5 | `no_heartbeat` | the member last answered ≥ 5 min before the owner's latest poll (≥ 30 min stopped) | degraded / stopped | the machine may be asleep | yes |
+| 6 | `unreachable` | the owner's latest poll went unanswered | degraded | check that it is awake and on the network | yes |
+| 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
+| 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
+| 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
+| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+
+The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
+A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
+because nobody looked; before the first poll those signals are unmeasured, so the member reads `unknown` (any other
+finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. `GET /api/hosts` rows gained
+`disk_total_bytes` (omitted when unknown) for the disk percentage.
+
+The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
+caller without the API token gets) carries two more keys, both ages, counts and classes only:
+
+```json
+{"runner": {"last_tick_age_s": 3},
+ "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
+                "last_error_class": "error", "consent": true}}
+```
+
+- `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
+  tick). The loop ticks every 5 s and stamps the time before it starts queued colonies, so a tick
+  that wedges leaves the stamp to age.
+- `fleet_sync` — present only on a fleet member, read from its drain state
+  (`<data_dir>/fleet-sync.json`) without collecting or hashing anything. `state` is the drain
+  status of [the history push](#fleet-history-push-issue-762) (`consent_required` while the
+  operator has not said yes). `backlog_rows` is how many rows the last drain left unsent, and
+  `oldest_unsent_age_s` how long every drain since has ended with a backlog — a lower bound on the
+  oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
+  `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
+  `consent` is the operator's answer; with it off, no backlog is claimed.
+
+`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
+peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
+signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
+grows from it does.
 
 ### `GET /api/version`
 
