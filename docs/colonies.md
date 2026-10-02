@@ -563,7 +563,8 @@ the tool and its input are exactly the same. The bench-wide report that grades c
 each other is `bench.mjs jev`
 ([bench.md, Grading Jev compaction](bench.md#grading-jev-compaction)). This is separate from the
 Jev routing second opinion (`jev_shadow_mode`,
-[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is also shadow-only.
+[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is shadow-only unless
+`jev_routing_act` lets it pick the tier.
 
 ## Rate limits on notifications and the judge
 

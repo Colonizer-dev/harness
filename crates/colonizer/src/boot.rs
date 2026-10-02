@@ -718,12 +718,6 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.
-    let route_settings = crate::routing::RoutingSettings {
-        enabled: setting(&agent_choice, &agent.schema, "route_per_task")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
-    };
     let task_labels: Vec<String> = issue
         .as_ref()
         .and_then(|i| i["labels"].as_array())
@@ -753,14 +747,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let sensitivity_config = crate::sensitivity::SensitivityConfig::load(&wt);
     let named_paths = crate::routing::paths_in(&s.issue_title, body_text);
     let sensitivity = crate::sensitivity::classify_paths(named_paths, &sensitivity_config);
-    // Jev shadow mode (jev.rs): an optional external classifier's second opinion, fetched here in
-    // the async boot path — never inside `routing::decide`, which stays synchronous and pure. Off by
-    // default, and a silent no-op without both the setting and a `JEV_API_KEY` secret: it is recorded
-    // for later comparison and never changes the tier a colony runs on.
-    let jev_enabled = setting(&agent_choice, &agent.schema, "jev_shadow_mode")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    task_signals.jev = crate::jev::shadow_opinion(jev_enabled, &s.issue_title, &task_labels, &task_signals).await;
+    // Jev (jev.rs): an optional external classifier's second opinion, fetched here in the async boot
+    // path — never inside `routing::decide`, which stays synchronous and pure. Off by default, and a
+    // silent no-op without both a setting and a `JEV_API_KEY` secret. Shadow mode records it for
+    // comparison; act mode (issue #583) lets a confident opinion pick the tier, never below the
+    // floor `decide` derives from `sensitive` — whether this org's gateway demands more than any
+    // provider for the task's class (sensitivity.rs `required_mark`).
+    let flag = |key: &str| setting(&agent_choice, &agent.schema, key).and_then(Value::as_bool);
+    let jev_mode = crate::routing::JevMode::from_settings(
+        flag("jev_routing_act").unwrap_or(false),
+        flag("jev_shadow_mode").unwrap_or(false),
+    );
+    let route_settings = crate::routing::RoutingSettings {
+        enabled: flag("route_per_task").unwrap_or(true),
+        chosen: s.model_tier.as_deref().and_then(crate::routing::Tier::parse),
+        jev_mode,
+        jev_act_confidence: setting(&agent_choice, &agent.schema, "jev_routing_act_confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.8),
+        sensitive: crate::sensitivity::required_mark(sensitivity, org_settings.sensitivity.as_ref())
+            > crate::sensitivity::ProviderMark::Any,
+    };
+    task_signals.jev = crate::jev::shadow_opinion(jev_mode.asks(), &s.issue_title, &task_labels, &task_signals).await;
     let tier_decision = crate::routing::decide(&route_settings, &task_signals);
     let model_low = setting_str(&agent_choice, &agent.schema, "model_low");
     let model = setting_str(&agent_choice, &agent.schema, "model");
@@ -775,9 +783,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // input price, which sometimes costs more than running the task directly would have. Opt-in —
     // until real per-colony token volumes are measured (#469) the operator supplies the estimate,
     // and an all-zero one skips the gate entirely, so every colony that has not opted in boots
-    // exactly as before. Only the rule's own low pick is gated: medium is the module's model and
-    // high an escalation, neither with a context-reload tradeoff, and an operator's explicit tier
-    // is an instruction a cost estimate must never second-guess.
+    // exactly as before. Only a low pick by the rule or by Jev in act mode is gated: medium is the
+    // module's model and high an escalation, neither with a context-reload tradeoff, and an
+    // operator's explicit tier is an instruction a cost estimate must never second-guess. The gate
+    // only ever keeps the colony on the module's model, so it can never undercut the floor.
     let mut cost_record = Value::Null;
     let mut gated = false;
     let mut effective_model = routed_model.to_string();
@@ -797,7 +806,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
                     .and_then(Value::as_bool)
                     .unwrap_or(true)
                     && !estimate.worth_routing()
-                    && tier_decision.source == crate::routing::Source::Rule;
+                    && matches!(
+                        tier_decision.source,
+                        crate::routing::Source::Rule | crate::routing::Source::Jev
+                    );
                 if gated {
                     effective_model = module_model.clone();
                 }
@@ -850,17 +862,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         )
         .await;
     }
-    // A shadow opinion that disagrees with the rule is worth a low-key note for later promotion
-    // analysis; it never blocks boot or looks like an error.
-    if tier_decision.jev_agrees() == Some(false) {
+    // An opinion that disagrees with the rule is worth a low-key note for later promotion analysis;
+    // it never blocks boot or looks like an error. In act mode the reason above already says so
+    // when Jev picked the tier.
+    if tier_decision.jev_agrees() == Some(false) && tier_decision.source != crate::routing::Source::Jev {
         log.info(format!(
-            "jev shadow mode: the second opinion says {} where the rule says {}",
+            "jev {} mode: the second opinion says {} where the rule says {}",
+            jev_mode.as_str(),
             tier_decision.jev.as_ref().map(|jev| jev.tier.as_str()).unwrap_or("?"),
             tier_decision.rule.as_str()
         ))
         .await;
     }
     let record = json!({
+        // Which decision this is and how Jev took part (issue #583), so a report can compare
+        // Jev-acted decisions against rule ones by outcome without re-deriving either.
+        "point": crate::routing::DECISION_POINT,
+        "jev_mode": jev_mode,
+        "jev_agrees": tier_decision.jev_agrees(),
+        "floor": tier_decision.floor,
         "tier": tier_decision.tier,
         "rule": tier_decision.rule,
         "source": tier_decision.source,
