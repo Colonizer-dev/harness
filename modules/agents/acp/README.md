@@ -69,9 +69,11 @@ two-hour cap.
 
 ## Workspace confinement
 
-`fs/*` requests resolve every path against the runner's working directory (the workspace): the
-longest existing ancestor is resolved through `realpath`, so `../`, an absolute path outside, and a
-symlink pointing out of the tree are all refused with JSON-RPC error `-32602` before the filesystem
+`fs/*` requests resolve every path against the runner's working directory (the workspace): each
+symlink on the way is resolved component by component — a dangling one too, against its own
+directory, to where a write through it would land — and the result must stay under the workspace's
+real path, so `../`, an absolute path outside, a symlink pointing out of the tree (whether or not its
+target exists yet) and a symlink loop are all refused with JSON-RPC error `-32602` before the filesystem
 is touched — and a file over 16 MiB is refused rather than buffered whole. Terminal commands are a
 weaker fence: they are only *started* with a `cwd` inside the workspace (default: the workspace
 root) — what a command then does with its arguments, env and paths is the agent's business, and the
@@ -114,6 +116,20 @@ mounted bind list (docs/path-policy.md, issue #647) once `confine` has resolved 
 or protected one — with the reply untouched. Reporting only; the mount enforces.
 `pathpolicy.mjs` is a byte-for-byte copy of Claude Code's, kept identical by a test, and a masked
 path reached any other way is the exec policy's or the mount's to stop, not this runner's.
+
+## Shared memory
+
+With `COLONIZER_MEMORY_DIR` mounted, `session/new` and `session/load` register one MCP server
+(issue #766), over stdio because every ACP agent must support that transport: `colonizer_memory`,
+which runs `memory-mcp.mjs` with the mounted dir in its env and offers `memory_briefing` (a short,
+sourced summary, optionally on a topic), `memory_changes` (entries added, and entries revoked or
+removed, since the colony last asked) and `memory_search`. They read the mounted `notes.json` and
+note files and frame their answer as data to verify, so a revoked note is gone from the next
+answer. Memory is pulled, never injected: ACP has no system prompt of ours, so a new session's
+first `session/prompt` leads with one fixed text block naming the tools, and no note text; a
+reloaded session does not get it again. Without the mount no server is registered
+(`mcpServers: []`). `memory-mcp.mjs` is the original the OpenCode and Pi modules copy; its logic is
+`memory.mjs`, a byte-for-byte copy of Claude Code's, kept identical by a test.
 
 ## Verified and planned agents
 

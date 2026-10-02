@@ -17,6 +17,16 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 - Loops: in a loop colony (docs/protocol.md, Loops) the MCP server also offers `colonizer_loop_stop`,
   and on a self-paced loop `colonizer_loop_next` too; both leave the colony as `loop_stop`/`loop_next`
   events (`delay_minutes` clamped to 15–1440), and the mothership owns the schedule.
+- Shared memory (issue #766): with `COLONIZER_MEMORY_DIR` mounted, the same MCP server serves
+  `colonizer_memory_briefing` (a short, sourced summary, optionally on a topic),
+  `colonizer_memory_changes` (entries added, and entries revoked or removed, since the colony last
+  asked) and `colonizer_memory_search`, read from the mounted `notes.json` and note files and framed
+  as data to verify. They run inside `mcp.mjs` and never cross the bridge, and they show in the
+  transcript as tool calls. Memory is pulled, never injected: the instructions file carries one
+  fixed line naming these tools, and no note text. The logic is `memory.mjs` (a copy of the
+  claude-code module's) and `memory-mcp.mjs` (a copy of the ACP module's), both kept byte-identical
+  by `test/memory.test.mjs`. `colonizer_memory_propose` still crosses the bridge as a
+  `memory_proposal` event, now with `kind` and `confidence`.
 - Text arrives per part as `assistant_text` (`reasoning` as `thinking`); tool completions become
   `tool_call`/`tool_result` (capped at 20 000 characters); `turn_end` carries cumulative
   `model_usage` per `<provider>/<model>`.
@@ -31,7 +41,7 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.5) |
 | `COLONIZER_FINDINGS` | off | `true` emits `finding` events for `colonizer_finding_file` calls |
 | `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED` | set by the mothership | A loop colony's tools: `colonizer_loop_stop`, plus `colonizer_loop_next` when the loop is self-paced |
-| `COLONIZER_MEMORY_DIR` | unset | Shared memory the model may read (`{repo,org,global}/notes/*.md`) |
+| `COLONIZER_MEMORY_DIR` | unset | The mounted shared-memory store; turns on the `colonizer_memory_briefing`, `colonizer_memory_changes` and `colonizer_memory_search` tools |
 | `COLONIZER_OPENCODE_BIN` | none | Use this binary instead of downloading the pinned one |
 
 Models are reached through the mothership's provider gateway, which holds the keys (§6.5): for a

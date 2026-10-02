@@ -4,7 +4,7 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -399,6 +399,18 @@ export function childEnv(env) {
 }
 
 /**
+ * The record name for a background command: a short hash of the text, so rerunning the same job
+ * overwrites its record instead of accumulating them (issue #700).
+ */
+export function backgroundRecordName(command) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < command.length; i++) {
+    hash = Math.imul(hash ^ command.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return `bg-${hash.toString(16).padStart(8, '0')}`;
+}
+
+/**
  * SDK options from the environment. Returns warnings instead of logging so stdout stays protocol-only.
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
@@ -632,6 +644,30 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       },
     ],
   };
+  if (env.COLONIZER_SERVICES_DIR) {
+    // Background Bash calls get a restart:false service record (issue #700), so a resumed boot's
+    // relaunch report can name what the suspension killed. The record carries the command text,
+    // never an env value, and a failed write is one log line — never a blocked tool call.
+    options.hooks = {
+      ...options.hooks,
+      PostToolUse: [{
+        matcher: 'Bash',
+        hooks: [async ({ tool_input }) => {
+          try {
+            const command = tool_input?.command;
+            if (tool_input?.run_in_background && typeof command === 'string' && command.trim()) {
+              const name = backgroundRecordName(command);
+              writeFileSync(join(env.COLONIZER_SERVICES_DIR, `${name}.json`),
+                JSON.stringify({ name, cmd: command, restart: false, source: 'background' }));
+            }
+          } catch (err) {
+            process.stderr.write(`colonizer: recording a background command failed: ${err?.message ?? err}\n`);
+          }
+          return { continue: true };
+        }],
+      }],
+    };
+  }
   if (instructions) {
     // Conditional instructions (issue #473): appended after the gates above — they arrive first at
     // index 0 — and never carrying a permission decision, so they cannot allow or deny anything.

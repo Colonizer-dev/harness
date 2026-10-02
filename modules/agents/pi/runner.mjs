@@ -11,6 +11,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
+
 export const MAX_TOOL_OUTPUT = 20_000;
 // Pi's --thinking values; '' (no flag) is no thinking for gateway models.
 export const EFFORT_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -19,7 +21,7 @@ export const SYSTEM_PROMPT_APPEND = [
   'You are running inside a Colonizer colony: a disposable microVM whose work is published as a pull request. The user follows along in a web UI.',
   '- You are running unattended: nobody can answer a question mid-turn, so when a decision is yours to make, choose the reasonable option and say in your reply that you chose it.',
   '- Follow the brief you were given, including writing the pull request description to /harness/out/pr.md.',
-  '- You have only your built-in tools (read, bash, edit, write) — no subagents and no Colonizer tools. Where the brief names a tool you do not have, such as filing a finding, do the work yourself (run the command, note it in your reply) instead of trying to call it.',
+  '- You have your built-in tools (read, bash, edit, write) and, when the next line names them, shared memory\'s read tools — no subagents and no other Colonizer tools. Where the brief names a tool you do not have, such as filing a finding, do the work yourself (run the command, note it in your reply) instead of trying to call it.',
 ].join('\n');
 
 const AUTH_MODES = new Set(['x-api-key', 'bearer', 'none']);
@@ -114,11 +116,15 @@ export function buildModelsConfig(routes, model, effort = '') {
   };
 }
 
+/** The shared-memory extension (issue #766), loaded by explicit path: --no-extensions stops only discovery. */
+export const MEMORY_EXTENSION = fileURLToPath(new URL('./memory-extension.mjs', import.meta.url));
+
 /** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note
  * and, when the harness switched tools off, an --exclude-tools denylist on top of Pi's default
- * read, bash, edit, write set. */
-export function piArgs({ provider, modelId, effort = '', disabledTools = [] }) {
-  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
+ * read, bash, edit, write set. With shared memory mounted (`memory`), the memory extension is
+ * loaded and the prompt gains one fixed line naming its tools — never any note text. */
+export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false }) {
+  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory ? ['--extension', MEMORY_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
 }
 
 /**
@@ -218,7 +224,7 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
   const modelUsage = new Map(); // "provider/model" -> cumulative tokens
   const pendingResponses = new Map(); // request id → response handler
 
-  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools }), env, cwd });
+  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR) }), env, cwd });
   child.stdin.on('error', () => {}); // Pi gone: the exit path reports it, not a broken pipe
 
   /**

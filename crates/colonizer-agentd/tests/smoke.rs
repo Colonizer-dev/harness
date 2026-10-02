@@ -88,7 +88,8 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// Spawns the real binary from a session.json, the way a colony boots it, and waits for /v1/health.
-async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
+/// `restore` is the resume block (issue #700), present only on a resumed boot.
+async fn start(dir: &Path, initial_prompt: &str, restore: Option<Value>) -> Daemon {
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -96,13 +97,16 @@ async fn start(dir: &Path, initial_prompt: &str) -> Daemon {
         .port();
     std::fs::write(dir.join("runner.py"), STUB_RUNNER).unwrap();
     std::fs::write(dir.join("token"), format!("{TOKEN}\n")).unwrap();
-    let config = json!({
+    let mut config = json!({
         "session_id": "smoke",
         "workspace": dir.join("workspace"),
         "listen": format!("127.0.0.1:{port}"),
         "agent": {"module": "smoke", "command": ["python3", dir.join("runner.py")], "env": {}},
         "initial_prompt": initial_prompt,
     });
+    if let Some(restore) = restore {
+        config["restore"] = restore;
+    }
     std::fs::write(dir.join("session.json"), config.to_string()).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_colonizer-agentd"))
         .arg("--config")
@@ -194,7 +198,7 @@ fn assert_stamped(events: &[Value]) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn boot_to_health_events_message_replay_and_clean_shutdown() {
     let dir = scratch("smoke");
-    let mut daemon = start(&dir, "boot check").await;
+    let mut daemon = start(&dir, "boot check", None).await;
     let port = daemon.port;
 
     // The token wall comes first: nothing is answerable without it, including the shutdown POST.
@@ -326,6 +330,50 @@ async fn boot_to_health_events_message_replay_and_clean_shutdown() {
     unsafe { libc::kill(daemon.child.id() as libc::pid_t, libc::SIGTERM) };
     assert_eq!(daemon.child.wait().unwrap().code(), Some(0), "agentd exits 0 on SIGTERM");
 
+    drop(daemon);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The resumed boot (issue #700): agentd relaunches the declared services before the brief, and the
+/// first user message opens with what came back — against the real binary and a real listener.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resume_relaunches_services_and_prefixes_the_first_message() {
+    let dir = scratch("restore");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let restore = json!({
+        "suspended": true,
+        "services": [
+            {"name": "web", "cmd": format!("exec python3 -m http.server {port} --bind 127.0.0.1"),
+             "ready": port.to_string(), "timeout_secs": 15, "source": "manifest"},
+            {"name": "bg-test", "cmd": "cargo test --workspace", "restart": false, "source": "background"},
+        ],
+    });
+    let daemon = start(&dir, "resume brief", Some(restore)).await;
+    let mut events = ws(daemon.port, "/v1/events?since=0", Some(TOKEN)).await.unwrap();
+    let opening = collect_until(&mut events, |e| e["type"] == "status" && e["state"] == "waiting_for_answer").await;
+    let text = opening
+        .iter()
+        .find(|e| e["type"] == "user_message" && e["id"] == "initial")
+        .and_then(|e| e["text"].as_str())
+        .unwrap_or_else(|| panic!("the first user message is missing: {opening:#?}"));
+    assert!(
+        text.starts_with(&format!("Restored from suspension. Restarted: `web` on :{port} (ready in"))
+            && text.contains("Lost: background `cargo test --workspace`, rerun if needed.\n\nresume brief"),
+        "the report must open the message and the brief follow after a blank line: {text}"
+    );
+
+    // The relaunch outlives the readiness wait, so the service is still up afterwards. It is
+    // detached on purpose, so kill it before the daemon goes away.
+    let (status, _) = http(port, "GET", "/", None).await.unwrap();
+    assert_eq!(status, 200, "the relaunched service answers");
+    let _ = std::process::Command::new("pkill")
+        .arg("-f")
+        .arg(format!("http.server {port}"))
+        .status();
     drop(daemon);
     let _ = std::fs::remove_dir_all(&dir);
 }

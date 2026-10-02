@@ -11,13 +11,14 @@
 import { spawn } from 'node:child_process';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { mkdtempSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
-import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
+import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
+import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
@@ -49,6 +50,18 @@ const PRESETS = {
     }),
   },
 };
+
+// Shared memory's read tools (issue #766) as a stdio MCP server, the transport every ACP agent
+// must support: memory_briefing, memory_changes and memory_search over COLONIZER_MEMORY_DIR.
+export const MEMORY_MCP = fileURLToPath(new URL('./memory-mcp.mjs', import.meta.url));
+
+/** The MCP servers session/new and session/load register: the memory server when memory is
+ * mounted, none otherwise. Memory is pulled through it, never put into a prompt. */
+export function mcpServers(env = process.env) {
+  const dir = String(env.COLONIZER_MEMORY_DIR ?? '').trim();
+  if (!dir) return [];
+  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] }];
+}
 
 /** The preset's spec, or null for `custom` and unknown names. */
 function presetSpec(preset) {
@@ -156,22 +169,15 @@ function optionByKind(options, prefix) {
   return real.find((option) => option.kind === `${prefix}_once`) ?? real.find((option) => option.kind.startsWith(prefix));
 }
 
-/** The workspace-confined absolute path for `target`, or null when it escapes: symlinks resolve
- * through the longest existing ancestor, so a link out of the tree cannot hide an escape. */
+/** The workspace-confined absolute path for `target`, or null when it escapes. Every symlink on
+ * the way resolves, component by component — a dangling one too, to where a write through it
+ * would land — so a link out of the tree cannot hide an escape (pathpolicy.mjs `resolveInWorkspace`).
+ * The result keeps the caller's spelling of the workspace root. */
 export function confine(workspace, target) {
-  let abs = resolve(workspace, String(target ?? ''));
-  const tail = [];
-  for (;;) {
-    try {
-      const resolved = join(realpathSync(abs), ...tail);
-      return resolved === workspace || resolved.startsWith(workspace + sep) ? resolved : null;
-    } catch {
-      tail.unshift(basename(abs));
-      const parent = dirname(abs);
-      if (parent === abs) return null;
-      abs = parent;
-    }
-  }
+  const inside = resolveInWorkspace(workspace, target);
+  if (!inside) return null;
+  const rel = relative(inside.root, inside.full);
+  return rel === '' ? workspace : join(workspace, rel);
 }
 
 // §2 caps tool_result output; file reads refuse anything over READ_CAP instead of buffering it.
@@ -548,6 +554,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   };
 
   let acp = null;
+  let servers = [];
+  let memoryLine = false; // the next prompt leads with MEMORY_PROMPT_APPEND
   if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
   // The handshake: negotiate ACP, then the session — `session/load` for §1's COLONIZER_RESUME_SESSION
@@ -565,12 +573,13 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         emit({ type: 'log', level: 'warn', message: `cannot resume session ${resumeId}: the agent does not advertise loadSession; a fresh session starts instead` });
       }
       let session = {};
+      servers = mcpServers(env);
       if (loadable && resumeId) {
         replaying = true; // the agent replays the old conversation; the harness logged it once already
         try {
           // The load result carries what session/new would (models included), so a resumed colony
           // keeps its model surface.
-          session = plainObject(await acp.request('session/load', { sessionId: resumeId, cwd: workspace, mcpServers: [] }));
+          session = plainObject(await acp.request('session/load', { sessionId: resumeId, cwd: workspace, mcpServers: servers }));
           // The agent may rename the session as it loads it; talk to the id it answered with.
           sessionId = typeof session.sessionId === 'string' && session.sessionId ? session.sessionId : resumeId;
         } catch (err) {
@@ -579,8 +588,11 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         replaying = false;
       }
       if (!sessionId) {
-        session = await acp.request('session/new', { cwd: workspace, mcpServers: [] });
+        session = await acp.request('session/new', { cwd: workspace, mcpServers: servers });
         sessionId = String(session.sessionId ?? '');
+        // A fresh session has no system prompt of ours, so its first prompt carries the one fixed
+        // line naming the memory tools; a reloaded session already had it.
+        memoryLine = servers.length > 0;
       }
       if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
@@ -621,7 +633,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
           let failureText = null;
           let stopped = null;
           try {
-            const result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: message.text }] });
+            const prompt = [{ type: 'text', text: message.text }];
+            if (memoryLine) {
+              prompt.unshift({ type: 'text', text: MEMORY_PROMPT_APPEND });
+              memoryLine = false;
+            }
+            const result = await acp.request('session/prompt', { sessionId, prompt });
             const reason = String(result.stopReason ?? '');
             stopped = reason === 'cancelled' ? 'interrupted by the user' : reason === 'refusal' ? 'the agent refused to continue' : null;
             if (!stopped && reason !== 'end_turn') emit({ type: 'log', level: 'warn', message: `the turn stopped on ${JSON.stringify(result.stopReason)}` });

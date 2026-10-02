@@ -3,6 +3,7 @@
 
 use super::*;
 use axum::http::HeaderMap;
+use std::{collections::VecDeque, sync::LazyLock};
 
 /// The query `GET /api/sessions` takes (issue #651): with neither field the route answers the
 /// cockpit's bare array as it always has; with `limit` or `cursor` it answers a page. Both stay
@@ -217,6 +218,36 @@ pub async fn answer(
     }
 }
 
+/// `POST /api/sessions/{id}/seen` (issue #744): someone is looking at this colony now, so a
+/// failure it moved into is no longer unseen — the flag the app badge counts is cleared here, and
+/// the silent `resolved` push lets every other device close its notification and lower the badge.
+/// The push only fires when something was actually unseen: a look at a colony whose question is
+/// still open must not close that question's notification elsewhere. Never awaits the push.
+pub async fn seen(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode, crate::AppError> {
+    app.session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    let mut cleared = false;
+    let _ = app
+        .update_session(&id, |s| {
+            cleared = s.unseen_failure;
+            s.unseen_failure = false;
+        })
+        .await;
+    if cleared {
+        spawn_resolved(&app, &id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Fires [`crate::push::resolved`] for one colony, spawned: an answer or a look must never wait
+/// on the push services, and a failed push costs nothing but a log line on the device's side.
+fn spawn_resolved(app: &Shared, id: &str) {
+    let app = app.clone();
+    let id = id.to_string();
+    tokio::spawn(async move { crate::push::resolved(&app, &id).await });
+}
+
 /// A scoped API token's free text, prefixed with the external-input marker (issue #508): the agent
 /// reads it as a description of the task from outside, never as the operator's voice. Shared by
 /// the answer paths' `response` note and the socket's `user_message`. An empty note leaves the
@@ -229,13 +260,157 @@ fn external_text(name: &str, text: &str) -> String {
     }
 }
 
+/// `POST /api/sessions/{id}/messages` (issue #746): the HTTP twin of the events socket's
+/// `user_message` command, for the phone's offline queue — a POST whose response was lost is
+/// repeated with the same client `id`, and the repeat is answered, not delivered twice. Same
+/// shared path as the socket ([`submit_message`]), the answer twin's error shapes.
+pub async fn message(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, crate::AppError> {
+    let client = body["id"].as_str().unwrap_or_default();
+    if !valid_client_id(client) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "expected {\"id\": str of 1-64 of A-Z a-z 0-9 _ -, \"text\": str}",
+        ));
+    }
+    let rt = app.runtime(&id).await;
+    let scoped = scoped.map(|axum::Extension(scoped)| scoped);
+    match submit_message(
+        &app,
+        &id,
+        &rt,
+        body["text"].as_str().unwrap_or_default(),
+        Some(client),
+        scoped.as_ref(),
+    )
+    .await
+    {
+        Ok(sent) => Ok(Json(json!({"id": sent.id, "duplicate": !sent.delivered}))),
+        Err(MessageError::NoSession) => Err(client_error(StatusCode::NOT_FOUND, "no such session")),
+        Err(MessageError::NotAccepting(status)) => Err(client_error(
+            StatusCode::CONFLICT,
+            &format!("the colony is {} and cannot take a message; resume it first", status.as_str()),
+        )),
+        Err(MessageError::Undelivered) => Err(client_error(
+            StatusCode::CONFLICT,
+            "the colony is stopping and cannot take a message; retry once it has resumed",
+        )),
+        Err(MessageError::Invalid) => Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "expected a non-empty \"text\" of at most 100,000 characters",
+        )),
+    }
+}
+
+/// The client id the messages twin dedupes on: 1-64 of ASCII letters, digits, `_` and `-`, so it
+/// is safe to embed in the wire id (`u-<client>`) and never reads as anything but an id.
+fn valid_client_id(client: &str) -> bool {
+    (1..=64).contains(&client.len()) && client.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Client ids already delivered, `(colony, client id)` oldest first. Bounded at
+/// [`SEEN_CLIENTS_MAX`] pairs: a repeat inside the window is answered, not delivered twice; past
+/// the window it delivers again, which a queue's retry (seconds, not days) never reaches.
+static SEEN_CLIENTS: LazyLock<std::sync::Mutex<VecDeque<(String, String)>>> =
+    LazyLock::new(|| std::sync::Mutex::new(VecDeque::new()));
+const SEEN_CLIENTS_MAX: usize = 512;
+
+/// Why a user message was not delivered. The socket path drops each of these silently, as it
+/// always has; the HTTP twin answers each with its own status.
+#[derive(Debug)]
+enum MessageError {
+    NoSession,
+    NotAccepting(SessionStatus),
+    /// Empty or oversized text — the socket drops it, HTTP answers 400.
+    Invalid,
+    /// The send into the runner's channel failed (its receiver is gone — the colony is stopping):
+    /// nothing was delivered, and nothing was remembered. The socket drops it as ever; HTTP
+    /// answers a 409 so the queue's retry is not absorbed as a duplicate.
+    Undelivered,
+}
+
+/// What one user message turned into, for the HTTP twin's reply.
+struct Sent {
+    id: String,
+    delivered: bool,
+}
+
+/// The one user-message path (issue #746): the events socket's `user_message` command and
+/// `POST /api/sessions/{id}/messages` both forward through here, so both check the colony, trim
+/// and size-check the text, and mark a scoped token's message the same way. `client_id` is the
+/// HTTP twin's dedupe key; the socket passes `None` and mints its own `u-<short_id>`.
+async fn submit_message(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    raw_text: &str,
+    client_id: Option<&str>,
+    scoped: Option<&crate::api_tokens::ScopedToken>,
+) -> Result<Sent, MessageError> {
+    let s = app.session(id).await.ok_or(MessageError::NoSession)?;
+    if !accepts_commands(s.status) {
+        return Err(MessageError::NotAccepting(s.status));
+    }
+    let text = raw_text.trim();
+    if text.is_empty() || text.len() > 100_000 {
+        return Err(MessageError::Invalid);
+    }
+    // A scoped token's message is external input like its answers (issue #508): the marker tells
+    // the agent who is talking, in the operator's voice or not.
+    let text = match scoped {
+        Some(token) => external_text(&token.name, text),
+        None => text.to_string(),
+    };
+    let mid = match client_id {
+        Some(client) => format!("u-{client}"),
+        None => format!("u-{}", short_id()),
+    };
+    let forward = json!({"type": "user_message", "id": mid, "text": text});
+    let Some(client) = client_id else {
+        rt.commands.send(forward).map_err(|_| MessageError::Undelivered)?;
+        return Ok(Sent {
+            id: mid,
+            delivered: true,
+        });
+    };
+    // A repeat client id is answered, not delivered twice. The check, the send and the record are
+    // one step under the lock (the send is a synchronous channel push), so two retries racing each
+    // other cannot both deliver. A fresh id is recorded only once its send has gone through: the
+    // channel dies with the runner (a stopping colony), and an id remembered ahead of a failed
+    // send would read every retry as a duplicate — the message lost without a trace.
+    let mut seen = SEEN_CLIENTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if seen.iter().any(|(s, c)| s == id && c == client) {
+        return Ok(Sent {
+            id: mid,
+            delivered: false,
+        });
+    }
+    rt.commands.send(forward).map_err(|_| MessageError::Undelivered)?;
+    seen.push_back((id.to_string(), client.to_string()));
+    while seen.len() > SEEN_CLIENTS_MAX {
+        seen.pop_front();
+    }
+    Ok(Sent {
+        id: mid,
+        delivered: true,
+    })
+}
+
 /// An answer as the API takes it: the question it answers, one choice per question label, and the
 /// free-text note the agent reads alongside. Exactly the socket command's fields (`client_command`),
-/// parsed once so both paths validate identically.
-struct AnswerCommand {
-    question_id: String,
-    answers: Value,
-    response: Value,
+/// parsed once so both paths validate identically. The push-answer route (issue #742) builds one
+/// directly, so the shape is crate-visible. `questions`, optional, is the question content the
+/// answerer saw (issue #746): a queued answer replayed after a reconnect carries it, so an answer
+/// to a question that has since changed under the same id is refused, never delivered.
+pub(crate) struct AnswerCommand {
+    pub(crate) question_id: String,
+    pub(crate) answers: Value,
+    pub(crate) response: Value,
+    pub(crate) questions: Option<Vec<Value>>,
 }
 
 impl AnswerCommand {
@@ -247,6 +422,7 @@ impl AnswerCommand {
             question_id: command["question_id"].as_str()?.to_string(),
             answers: command["answers"].as_object()?.clone().into(),
             response: command.get("response").cloned().unwrap_or(Value::Null),
+            questions: command.get("questions").and_then(Value::as_array).cloned(),
         })
     }
 
@@ -272,7 +448,7 @@ impl AnswerCommand {
 /// Why an HTTP answer was refused. Each refusal names itself in the handler above: a colony that
 /// is not there is a 404; one that cannot take an answer, is not asking, or is asking something
 /// else is a 409 — a conflict with the colony's state that re-reading the question resolves.
-enum AnswerError {
+pub(crate) enum AnswerError {
     NoSession,
     NotAccepting(SessionStatus),
     NoQuestion,
@@ -292,7 +468,7 @@ enum AnswerError {
 /// runner under the open question's lock — the same lock the suspension tick claims under — so an
 /// answer and a suspension cannot interleave: either the answer goes first and the tick leaves the
 /// colony alone, or the claim goes first and the answer is held.
-async fn submit_answer(
+pub(crate) async fn submit_answer(
     app: &Shared,
     id: &str,
     rt: &Arc<Runtime>,
@@ -311,7 +487,11 @@ async fn submit_answer(
     // a suspended colony has no runner to do that, so the host checks here whatever path brought
     // the answer in.
     if require_pending || suspended {
-        let open_matches = open.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id);
+        // Ids alone do not name one question for life — runners count `q-1`, `q-2`… afresh when a
+        // suspended colony boots again — so an answer that says what it saw must match that too.
+        let open_matches = open.as_ref().is_some_and(|(open_id, questions, _)| {
+            open_id == &answer.question_id && answer.questions.as_ref().is_none_or(|saw| saw == questions)
+        });
         if !open_matches {
             return Err(if open.is_some() {
                 AnswerError::Stale
@@ -337,16 +517,38 @@ async fn submit_answer(
         drop(gate);
         return hold_answer(app, id, rt, open, answer, external, via).await;
     }
+    // An HTTP answer (require_pending) that lost the race for the question — a push or cockpit tap
+    // that took it down between the open read above and this lock — stops here: forwarding it too
+    // would hand the runner a second answer to a question the host no longer counts as open
+    // (issue #742's promise: a notification tap and the cockpit's button answer a colony once).
+    // The socket path keeps forwarding whatever it is given: the host may not know the question it
+    // answers yet, and the runner refuses what is stale.
+    let gate_matches = gate.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id);
+    if require_pending && !gate_matches {
+        return Err(if open.is_some() {
+            AnswerError::Stale
+        } else {
+            AnswerError::NoQuestion
+        });
+    }
     // The answer is on its way to the runner, whose own `question_answered` echo closes the
     // question: close it here first, so the tick — which claims only under an open question, and
     // matching the one the answer is for — reads none. A stale answer (socket path) matches
     // nothing and leaves the live question standing for the runner to refuse it.
-    if gate.as_ref().is_some_and(|(open_id, ..)| open_id == &answer.question_id) {
+    if gate_matches {
         *gate = None;
     }
     drop(gate);
-    let _ = rt.commands.send(answer.forward(external));
+    // A send into a dead runner (the colony stopping between the checks above and here) delivers
+    // nothing: the HTTP twin answers the not-accepting 409 instead of a 204 for a lost answer,
+    // while the socket path drops the error as it always has.
+    if rt.commands.send(answer.forward(external)).is_err() {
+        return Err(AnswerError::NotAccepting(s.status));
+    }
     crate::activity::record_answer(app, &s, via).await;
+    // The question is answered as far as the person is concerned (issue #744): every other
+    // device closes its notification and drops the colony from its badge.
+    spawn_resolved(app, id);
     Ok(())
 }
 
@@ -444,6 +646,8 @@ async fn hold_answer(
             if let Some(s) = app.session(id).await {
                 crate::activity::record_answer(app, &s, via).await;
             }
+            // The held answer settles the question the same way a live one does (issue #744).
+            spawn_resolved(app, id);
             // Where the colony stands in the restore line (issue #667), read off the same admission
             // the restore pass answers to, so the log says what the next ticks will do with it.
             // The pause is the tick's own hold on the restore pass (`start_queued` skips it while
@@ -503,8 +707,10 @@ pub async fn events_ws(
     Query(query): Query<SinceQuery>,
     via: Option<axum::Extension<crate::auth::Via>>,
     scoped: Option<axum::Extension<crate::api_tokens::ScopedToken>>,
+    revocation: Option<axum::Extension<crate::auth::Revocation>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
+    let revocation = revocation.map(|axum::Extension(r)| r);
     app.session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
@@ -512,7 +718,13 @@ pub async fn events_ws(
     let via = via.map(|axum::Extension(via)| via);
     let scoped = scoped.map(|axum::Extension(scoped)| scoped);
     let actor = SocketActor { via, scoped };
-    Ok(ws.on_upgrade(move |socket| events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, actor, socket)))
+    // A revoked credential's socket closes at once (issue #746), not at its next request.
+    Ok(ws.on_upgrade(move |socket| {
+        crate::auth::Revocation::until(
+            revocation,
+            events_socket(app, id, rt, query.since.unwrap_or(0), query.epoch, actor, socket),
+        )
+    }))
 }
 
 /// One replayable line of events.jsonl: the decoded line and its seq, or `None` to skip it.
@@ -703,17 +915,18 @@ async fn client_command(
     }
     let forward = match command["type"].as_str() {
         Some("user_message") => {
-            let text = command["text"].as_str().unwrap_or_default().trim();
-            if text.is_empty() || text.len() > 100_000 {
-                return;
-            }
-            // A scoped token's message is external input like its answers (issue #508): the
-            // marker tells the agent who is talking, in the operator's voice or not.
-            let text = match &scoped {
-                Some(token) => external_text(&token.name, text),
-                None => text.to_string(),
-            };
-            json!({"type": "user_message", "id": format!("u-{}", short_id()), "text": text})
+            // The shared user-message path (issue #746): no client id over the socket, so every
+            // message delivers. A refusal here is the stale-session broadcast above, as before.
+            let _ = submit_message(
+                app,
+                id,
+                rt,
+                command["text"].as_str().unwrap_or_default(),
+                None,
+                scoped.as_ref(),
+            )
+            .await;
+            return;
         }
         Some("answer") => {
             // The socket path pre-checks nothing about the question: the runner owns the
@@ -784,15 +997,17 @@ pub async fn terminal_ws(
     State(app): State<Shared>,
     Path(id): Path<String>,
     Query(query): Query<TerminalQuery>,
+    revocation: Option<axum::Extension<crate::auth::Revocation>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, crate::AppError> {
+    let revocation = revocation.map(|axum::Extension(r)| r);
     let s = app
         .session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     let cols = query.cols.unwrap_or(80).clamp(10, 500);
     let rows = query.rows.unwrap_or(24).clamp(5, 300);
-    Ok(ws.on_upgrade(move |socket| terminal_socket(app, s, cols, rows, socket)))
+    Ok(ws.on_upgrade(move |socket| crate::auth::Revocation::until(revocation, terminal_socket(app, s, cols, rows, socket))))
 }
 
 async fn terminal_socket(app: Shared, s: Session, cols: u16, rows: u16, mut socket: WebSocket) {
@@ -854,8 +1069,11 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     super::files::routes()
         .route("/api/sessions", routing::get(list).post(create))
         .route("/api/sessions/{id}", routing::get(get))
+        .route("/api/sessions/{id}/commits", routing::get(crate::commit_links::api_commits))
         .route("/api/sessions/{id}/question", routing::get(question))
         .route("/api/sessions/{id}/answer", routing::post(answer))
+        .route("/api/sessions/{id}/seen", routing::post(seen))
+        .route("/api/sessions/{id}/messages", routing::post(message))
         .route("/api/sessions/{id}/events", routing::get(events_ws))
         .route("/api/sessions/{id}/terminal", routing::get(terminal_ws))
 }
@@ -1147,6 +1365,218 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #746: the messages twin shares the socket's path — the client id becomes the wire id
+    /// (`u-<client>`), a repeat of the same id is answered without a second delivery, and the
+    /// socket path (no client id) delivers every time.
+    #[tokio::test]
+    async fn the_message_twin_delivers_once_per_client_id() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let mut rx = rt.commands_rx.lock().await.take().unwrap();
+
+        let first = submit_message(&app, "abc", &rt, "  carry on  ", Some("deliv-1"), None)
+            .await
+            .unwrap();
+        assert!(first.delivered);
+        assert_eq!(first.id, "u-deliv-1", "the client id becomes the wire id");
+        let forwarded = rx.try_recv().unwrap();
+        assert_eq!(forwarded["type"], "user_message");
+        assert_eq!(forwarded["id"], "u-deliv-1");
+        assert_eq!(forwarded["text"], "carry on", "trimmed, like the socket path always trimmed");
+
+        let again = submit_message(&app, "abc", &rt, "carry on", Some("deliv-1"), None)
+            .await
+            .unwrap();
+        assert!(!again.delivered, "a repeated client id is a duplicate");
+        assert_eq!(again.id, "u-deliv-1", "the reply still names the id");
+        assert!(rx.try_recv().is_err(), "nothing was delivered twice");
+
+        // A different client id delivers; so does a socket message with no client id at all.
+        assert!(
+            submit_message(&app, "abc", &rt, "go", Some("deliv-2"), None)
+                .await
+                .unwrap()
+                .delivered
+        );
+        rx.try_recv().unwrap();
+        let socket = submit_message(&app, "abc", &rt, "go", None, None).await.unwrap();
+        assert!(socket.delivered);
+        assert!(socket.id.starts_with("u-"), "the socket's id is minted: {}", socket.id);
+        rx.try_recv().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A send into a dead runner channel (the receiver dropped while the colony stops) delivers
+    /// nothing, so it must not be remembered: the twin answers the 409-shaped `Undelivered` and a
+    /// retry of the same client id is not absorbed as a duplicate — the message is not silently
+    /// lost.
+    #[tokio::test]
+    async fn a_failed_send_is_undelivered_and_leaves_the_client_id_free() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        drop(rt.commands_rx.lock().await.take().unwrap());
+
+        assert!(
+            matches!(
+                submit_message(&app, "abc", &rt, "carry on", Some("retry-1"), None).await,
+                Err(MessageError::Undelivered)
+            ),
+            "a send into a dead runner is an error, not a fake success"
+        );
+        // Not remembered: the same client id goes down the send path again (and fails again)
+        // instead of being answered as a duplicate.
+        assert!(matches!(
+            submit_message(&app, "abc", &rt, "carry on", Some("retry-1"), None).await,
+            Err(MessageError::Undelivered)
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The answer twin's send into a dead runner answers the not-accepting 409 too, instead of a
+    /// 204 for an answer that never reached the agent; the socket path discards the same error
+    /// silently, as it always has.
+    #[tokio::test]
+    async fn a_failed_answer_send_is_not_a_204() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        *rt.open_question.lock().await = Some(("q1".into(), Vec::new(), QuestionRisk::ReadOnly));
+        drop(rt.commands_rx.lock().await.take().unwrap());
+        let parsed = AnswerCommand::parse(&json!({
+            "type": "answer",
+            "question_id": "q1",
+            "answers": {"a": "b"},
+            "response": "go",
+        }))
+        .unwrap();
+        assert!(matches!(
+            submit_answer(&app, "abc", &rt, parsed, None, None, true).await,
+            Err(AnswerError::NotAccepting(_))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The twin marks a scoped token's text as external input like the socket does, and refuses
+    /// with a named error what the socket drops silently — without burning the refused message's
+    /// client id, so a corrected retry still delivers.
+    #[tokio::test]
+    async fn the_message_twin_marks_a_scoped_tokens_text_and_refuses_the_rest() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let mut rx = rt.commands_rx.lock().await.take().unwrap();
+        let scoped = crate::api_tokens::ScopedToken {
+            id: "tok_test".into(),
+            name: "watcher".into(),
+            scope: crate::api_tokens::Scope::Operate,
+            orgs: Vec::new(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        };
+        let sent = submit_message(&app, "abc", &rt, "rerun the suite", Some("watch-1"), Some(&scoped))
+            .await
+            .unwrap();
+        assert_eq!(sent.id, "u-watch-1");
+        assert_eq!(
+            rx.try_recv().unwrap()["text"].as_str().unwrap(),
+            "[external input from API token \"watcher\"] rerun the suite",
+            "the message is marked as external input"
+        );
+
+        assert!(matches!(
+            submit_message(&app, "abc", &rt, "   ", Some("watch-2"), None).await,
+            Err(MessageError::Invalid)
+        ));
+        assert!(matches!(
+            submit_message(&app, "abc", &rt, &"x".repeat(100_001), Some("watch-3"), None).await,
+            Err(MessageError::Invalid)
+        ));
+        assert!(matches!(
+            submit_message(&app, "zzz", &rt, "hello", Some("watch-4"), None).await,
+            Err(MessageError::NoSession)
+        ));
+        assert!(
+            submit_message(&app, "abc", &rt, "now really", Some("watch-2"), None)
+                .await
+                .unwrap()
+                .delivered,
+            "an invalid text did not burn its client id"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose microVM is down refuses a message naming its state — the twin's 409, where
+    /// the socket answers a stale client with a fresh session frame instead.
+    #[tokio::test]
+    async fn the_message_twin_refuses_a_colony_that_cannot_take_one() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Merged).await;
+        let rt = app.runtime("abc").await;
+        assert!(matches!(
+            submit_message(&app, "abc", &rt, "hello", Some("late-1"), None).await,
+            Err(MessageError::NotAccepting(SessionStatus::Merged))
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #746: the offline outbox replays a queued answer with the question content it saw.
+    /// The replay delivers once — a second replay finds the question closed — and an answer to a
+    /// question that changed under the same id (a rebooted runner counts `q-1` afresh) is refused
+    /// as stale instead of answering something the operator never read.
+    #[tokio::test]
+    async fn a_replayed_answer_delivers_once_and_never_to_a_changed_question() {
+        let (app, root) = app_with_colony("abc", SessionStatus::WaitingForAnswer).await;
+        let rt = app.runtime("abc").await;
+        let mut rx = rt.commands_rx.lock().await.take().unwrap();
+        let asked = vec![json!({"question": "Push now?", "options": [{"label": "yes"}, {"label": "no"}]})];
+        let replay = |saw: &Vec<Value>| {
+            AnswerCommand::parse(&json!({
+                "question_id": "q-1",
+                "answers": {"Push now?": "yes"},
+                "questions": saw,
+            }))
+            .unwrap()
+        };
+
+        // The question changed under the same id while the answer sat in the queue: refused.
+        let changed = vec![json!({"question": "Delete the branch?", "options": [{"label": "yes"}]})];
+        *rt.open_question.lock().await = Some(("q-1".into(), changed, QuestionRisk::WorkspaceWrite));
+        assert!(matches!(
+            submit_answer(&app, "abc", &rt, replay(&asked), None, None, true).await,
+            Err(AnswerError::Stale)
+        ));
+        assert!(rx.try_recv().is_err(), "nothing reached the agent");
+
+        // The question it saw: delivered, once.
+        *rt.open_question.lock().await = Some(("q-1".into(), asked.clone(), QuestionRisk::WorkspaceWrite));
+        assert!(
+            submit_answer(&app, "abc", &rt, replay(&asked), None, None, true)
+                .await
+                .is_ok()
+        );
+        let forwarded = rx.try_recv().unwrap();
+        assert_eq!(forwarded["question_id"], "q-1");
+        assert!(
+            forwarded.get("questions").is_none(),
+            "the runner gets the answer, not the check"
+        );
+        assert!(matches!(
+            submit_answer(&app, "abc", &rt, replay(&asked), None, None, true).await,
+            Err(AnswerError::NoQuestion)
+        ));
+        assert!(rx.try_recv().is_err(), "a second replay delivers nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn client_ids_are_bounded_and_shaped() {
+        assert!(valid_client_id("m-1_2"));
+        assert!(valid_client_id(&"a".repeat(64)));
+        assert!(!valid_client_id(&"a".repeat(65)), "64 is the cap");
+        assert!(!valid_client_id(""));
+        assert!(!valid_client_id("has space"));
+        assert!(!valid_client_id("unicode-é"));
+        assert!(!valid_client_id("../escape"));
+    }
+
     /// Issue #508: the question route separates an empty inbox from an unknown colony — a colony
     /// that is not asking reads 204 with no body (nothing to answer, not an error), an unknown id
     /// stays a 404, and an open question reads as the body `colonizer ask` and the cockpit parse.
@@ -1174,6 +1604,40 @@ mod tests {
 
         // An unknown colony stays a 404.
         let error = question(State(app), Path("zzz".into())).await.unwrap_err();
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `POST /api/sessions/{id}/seen` (issue #744): a look at a colony with nothing unseen answers
+    /// 204 and stays silent — its question, if any, is still open, and no other device may close a
+    /// notification for it — while a look at an unseen failure clears the flag and resolves it on
+    /// the one subscribed device. An unknown colony is a 404 either way.
+    #[tokio::test]
+    async fn seen_clears_the_unseen_failure_and_404s_an_unknown_id() {
+        let captures: crate::push::tests::Captures = std::sync::Arc::default();
+        let addr = crate::push::tests::capture_server(captures.clone()).await;
+        let (app, root) = app_with_colony("abc", SessionStatus::Failed).await;
+        let phone = crate::push::tests::device(&format!("http://{addr}/phone"), [7u8; 16]);
+        crate::push::tests::notify_on(&app).await;
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        crate::push::save(&app.cfg.config_dir, &[phone.subscription]).unwrap();
+
+        let response = seen(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(captures.lock().unwrap().is_empty(), "a look with nothing unseen stays silent");
+
+        app.update_session("abc", |s| s.unseen_failure = true).await.unwrap();
+        assert!(
+            crate::push::needs_you(&app.session("abc").await.unwrap()),
+            "the failure is unseen"
+        );
+        let response = seen(State(app.clone()), Path("abc".into())).await.unwrap();
+        assert_eq!(response, StatusCode::NO_CONTENT);
+        crate::push::tests::await_captures(&captures, 1).await;
+        assert!(!app.session("abc").await.unwrap().unseen_failure, "the failure has been seen");
+
+        let error = seen(State(app), Path("zzz".into())).await.unwrap_err();
         assert_eq!(error.status(), StatusCode::NOT_FOUND);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1254,6 +1718,7 @@ mod tests {
             question_id: "q1".into(),
             answers: json!({"Which file name?": "hello.txt"}),
             response: Value::String("go ahead".into()),
+            questions: None,
         };
         assert!(
             submit_answer(&app, "abc", &rt, answer, None, None, true).await.is_ok(),
@@ -1301,6 +1766,7 @@ mod tests {
             question_id: "q1".into(),
             answers: json!({}),
             response: Value::Null,
+            questions: None,
         };
         assert!(
             matches!(
@@ -1341,6 +1807,7 @@ mod tests {
             question_id: "q1".into(),
             answers: json!({"Push now?": "yes"}),
             response: Value::Null,
+            questions: None,
         };
 
         let root = std::env::temp_dir().join(format!("colonizer-answer-race-{}", crate::util::short_id()));

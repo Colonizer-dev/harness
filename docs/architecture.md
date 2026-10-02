@@ -207,6 +207,18 @@ explicit orchestrator proposals, and a proposal is persisted the moment its even
 colony that ends or dies loses no proposal already made. `MEMORY.md` is written at boot from landed
 notes only.
 
+Memory is pulled, never injected (issue #766). No note text is put into a colony's system prompt or
+first message: one fixed prompt line names the tools, and the agent calls `memory_briefing` (a short,
+sourced summary, optionally on a topic) and `memory_changes` (what was added or revoked since it last
+asked) when it wants memory. A note that reached the store through a mistaken or manipulated review
+therefore reaches an agent only as a tool answer framed as data, with its source beside it, and a
+revoked note is gone from the next answer. Fleet-wide (global) memory is not proposed directly: a
+colony's global proposal is a sighting of a candidate, promoted into the review queue only when
+colonies in two distinct repositories propose it with confidence of at least 0.8. Every note keeps
+the colony, repository and commit it came from (`source.session_id`, `source.repo`, `source.commit`,
+or `source.promoted_from` for a promoted note), so it can be traced and revoked; see
+[protocol §6.2](protocol.md#62-shared-memory-runner--mothership).
+
 ## Session lifecycle
 
 This is the mechanism. What a colony looks like from the operator's side (launching, claims,
@@ -261,20 +273,29 @@ stateDiagram-v2
    Before a completion claim is published, the host verifies it independently: it snapshots
    the colony's work (commits and uncommitted files) without touching the worktree, reads the git state
    itself — commits ahead of base, changed files, whether the paths the PR description names are on the
-   branch — and re-runs the repository's test command in a fresh one-shot microVM over a git archive of
-   the snapshot, never on the host and never from the agent's own logs. The verdict, recorded as a
+   branch — and re-runs the repository's checks in fresh one-shot microVMs over a git archive of the
+   snapshot, never on the host and never from the agent's own logs. With `verify: auto` the checks come
+   from the diff rather than one root declaration: a diff touching Rust files or `Cargo.toml`/`Cargo.lock`
+   runs `cargo test`; every other changed file runs the test script of the nearest ancestor directory
+   with a `package.json`, by that package's own package manager (so `web/**` runs web's own vitest, not
+   the root's); files neither covers fall back to the root Makefile's `test:` target when declared, and
+   are not checked when it is not — a diff with no Rust in it never runs `cargo test`. The checks run
+   sequentially, one microVM each, from the subdirectory they belong to. The verdict, recorded as a
    `verification` host event in the colony's log, is `confirmed`, `contradicted` (the contradictions
-   stated plainly) or `unverifiable`, which is never treated as confirmed. Only a description whose
+   stated plainly), `inconclusive` or `unverifiable`, which is never treated as confirmed. A check that
+   fails is re-run once on the merge-base, in a fresh checkout of the same kind: failing there too is
+   `inconclusive` — not this colony's doing — and autopilot still publishes, with a note in the pull
+   request; only a failure new against the base contradicts the claim, and a base that cannot be run
+   leaves the head failure a contradiction. The last 200 lines of a failing check's output are kept in
+   the colony's `out/verify-<check>.log`, and the failing test names ride the contradiction — and the
+   held colony's attention detail. Only a description whose
    in-repo paths are *all* missing from the branch and the diff contradicts the claim; a missing path
    beside ones that are there — a file deliberately not created, or one for other work — is an
-   advisory, shown with the verdict and in the pull request, and never changes it. The command comes from the
-   `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
-   the base branch (package.json `scripts.test`, run by the repository's own package manager —
-   the `packageManager` field, else the root lockfile: bun, pnpm, yarn or npm, and `npm install &&
-   npm test` without one — else Cargo.toml → `cargo test`; else a Makefile `test:` target →
-   `make test`; a tool the colony image lacks leaves the claim unverifiable), `none` means unverifiable by declaration, and a colony's own `verify`
-   overrides it. Autopilot publishes on `confirmed` and `unverifiable` exactly as before; on
-   `contradicted` it holds the colony the same way an errored turn does. The mesh node is deleted.
+   advisory, shown with the verdict and in the pull request, and never changes it. An explicit `verify`
+   — the `publish` module's setting or the colony's own — still replaces the whole selection, and
+   `none` means unverifiable by declaration. Autopilot publishes on `confirmed`, `inconclusive` and
+   `unverifiable` exactly as before; on `contradicted` it holds the colony the same way an errored
+   turn does. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM
@@ -396,6 +417,14 @@ external-writes kill switch.
 repository — state, base branch and its CI verdict, the last merge, and each open pull request as
 `next`, `waiting_ci`, `needs_rebase`, `waiting`, `skipped` (with the reason) or `merged`. The cockpit shows
 one Merge-train row per repository: next up, waiting on CI, needs rebase, skipped and why.
+
+The **merge-train loop** ([loops.md](loops.md#merge-train), `merge_loop.rs`, issue #754) is the
+careful, scheduled driver for the same train: off by default, hourly, only in opted-in repositories,
+and — unlike the tick — it updates the next candidate after a merge and waits for its fresh CI, caps
+merges per run, spaces them with a cooldown, paces and budgets its GitHub calls and stops on any
+403/429 or secondary rate limit, turns a conflicting mechanical rebase into `needs_redo` (and at
+most one redo colony), and can self-heal a main the train itself turned red. It reuses the train's
+`decide`, guards and merge invocation; a repository it drives is skipped by the tick.
 
 ## Per-colony limits
 

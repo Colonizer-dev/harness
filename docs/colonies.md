@@ -180,7 +180,8 @@ Two Sandbox settings control this. Both are mothership-wide, with no per-org ove
   it costs: the agent that asked is lost with the microVM, and your answer, when it comes, reaches
   the lead agent when the colony resumes. The cap is never shorter than `suspend_after_minutes`.
 - This is transcript resume, not a memory snapshot. Processes that were running inside the VM,
-  such as a dev server, are gone after the resume.
+  such as a dev server, are gone after the resume. Services the colony declares or registers come
+  back — see [Services that come back after a resume](#services-that-come-back-after-a-resume).
 - Stopping a suspended colony clears the suspension and any saved answer.
 
 A separate Sandbox setting, `hold_timeout_minutes` (default 30), parks a colony that autopilot
@@ -196,12 +197,71 @@ a VM snapshot, is in
   the same worktree and branch. The agent is told to continue from what is already there. You can
   resume a colony that is `stopped` or `failed`, as long as its worktree still exists. If the
   parallel limit is full, the resume queues.
+- **Resume does not need GitHub.** The first boot stores the colony's issue in its session
+  directory (`issue.json`), and a resume boots on that copy rather than asking GitHub again, so a
+  suspended account, a rate limit or a network outage cannot fail it. A colony started before
+  issues were stored recovers its issue from its first brief (`vm/session.json`, then its event
+  logs). The resume then tries to refresh the base branch in the local mirror; if the remote is
+  unreachable or refuses, the colony log says `resumed offline: base not refreshed` and the colony
+  carries on with the mirror as it is. With `COLONIZER_NO_EXTERNAL_EFFECTS` set, the refresh is
+  not tried at all. Launching a new colony still needs GitHub, and a suspended account is reported
+  as suspended.
 - **Delete** (the cockpit, or `DELETE /api/sessions/{id}`) removes the colony, its chat and its
   worktree. You can only delete a colony that is not live and not publishing. Its logs go to the
   [log archive](#the-log-archive) first.
 
 The mothership also stops colonies itself: when a budget or the host-disk quota is passed, and
 when a microVM dies on its own. In every case the worktree is kept, so Resume continues.
+
+## Services that come back after a resume
+
+A resume boots a fresh microVM: every process inside the old one is gone. A colony declares the
+long-lived processes it wants back in `.colonizer/services.toml` at the worktree root, and anything
+the agent starts during the run through `colonizer-svc` is recorded too; on a resume the mothership
+hands both to the guest, which relaunches them before the agent sees your answer or brief, waits on
+each one's readiness, and opens the resumed turn saying what came back. A fresh boot starts
+nothing; services come back on a resume only.
+
+> Restored from suspension. Restarted: `web` on :5173 (ready in 3.2 s). Lost: background
+> `cargo test`, rerun if needed.
+
+The manifest lists services, one `[[service]]` table each:
+
+```toml
+[[service]]
+name = "web"
+cmd = "npm run dev -- --port 5173"
+cwd = "web"             # optional
+ready = 5173            # optional: integer port or "http://localhost:5173/" URL string
+env = ["VITE_API_URL"]  # optional: names only
+timeout_secs = 30       # optional
+```
+
+| Field | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | yes | 1-64 characters of letters, digits, dots, underscores or dashes. Also the record's file name. |
+| `cmd` | string | yes | Shell command, run with `sh -c` from the worktree root (or `cwd`). |
+| `cwd` | string | no | Directory to run in, relative to the worktree root. Absolute paths and `..` are refused. |
+| `ready` | integer or string | no | TCP port or http(s) URL the resume waits on for readiness. |
+| `env` | array of strings | no | Environment variable **names** passed through from the colony env. A table like `env = { TOKEN = "abc" }` is refused — values are never stored on this road; pass them through the colony env. |
+| `timeout_secs` | integer | no | How long to wait for `ready` before the service counts as failed. Default 60. |
+
+Services started during the run are recorded with `colonizer-svc` — the agentd binary under another
+name, linked onto the guest's PATH at boot:
+
+```sh
+colonizer-svc start web --ready 5173 --cwd web --env VITE_API_URL -- npm run dev -- --port 5173
+colonizer-svc stop web
+```
+
+Claude Code background Bash tasks are recorded the same way, as background tasks. They are never
+relaunched — the mothership cannot judge whether a finished test run should run again — so a resume
+reports them lost, exactly once, and leaves rerunning them to the agent.
+
+The records live in the colony's session directory on the host, mounted into the VM at
+`/colonizer/services`, so they survive the suspension like the worktree and transcript do. A resume
+waits each service out to readiness or its `timeout_secs`, and reports one that never answers as
+not ready, naming the log it wrote to.
 
 ## Budgets and plan balance
 
@@ -265,30 +325,52 @@ done. The mothership checks that claim before autopilot publishes:
 1. It snapshots the colony's work without touching the worktree.
 2. It reads the git state itself: commits ahead of the base branch, changed files, and whether the
    files the PR description names are on the branch.
-3. It runs the repository's test command in a fresh, one-shot microVM, on a `git archive` export
-   of the snapshot. The command never runs on the host, and the result never comes from the
-   agent's own logs. The test run has a 20-minute limit.
+3. It runs the checks the diff calls for in fresh, one-shot microVMs, on a `git archive` export
+   of the snapshot. Nothing runs on the host, and no result comes from the agent's own logs.
+   Each check has a 20-minute limit.
 
-The verdict is `confirmed`, `contradicted` or `unverifiable`. Autopilot publishes on `confirmed`
-and `unverifiable`, and holds the colony on `contradicted`. A claim is contradicted only if the
-tests fail, or if *none* of the files the description names are on the branch. If some named
-files are missing but others are there, that is only an **advisory**. Advisories are shown with
-the verdict and added to the pull request as "Verification notes". They never change the verdict.
+The verdict is `confirmed`, `contradicted`, `inconclusive` or `unverifiable`. Autopilot publishes
+on `confirmed`, `inconclusive` and `unverifiable`, and holds the colony on `contradicted`. A claim
+is contradicted only if a check fails in a way the base branch does not, or if *none* of the files
+the description names are on the branch: when a check fails, the mothership runs the same check
+once more on the merge-base, in a fresh checkout of its own. A check that fails there too is
+**inconclusive** — the colony did not break it — and autopilot publishes anyway, with a note in
+the pull request; only a failure new against the base holds the colony. If some named files are
+missing but others are there, that is only an **advisory**. Advisories are shown with the verdict
+and added to the pull request as "Verification notes". They never change the verdict.
 
-**Which test command.** The **Publish** module's `verify` setting decides. You can override it for
+A failing check leaves its last 200 lines of output in the colony's `out/` directory —
+`out/verify-cargo-test.log`, `out/verify-web-npm-test.log`, one log per check — and the failing
+test names (up to five, parsed from cargo, vitest or jest output) are quoted in the hold message
+and the colony's attention detail.
+
+**Which checks.** The **Publish** module's `verify` setting decides. You can override it for
 one colony at launch.
 
-- `auto` (the default) reads the base branch. For a `package.json` with a `test` script, it uses
-  the repository's own package manager: the `packageManager` field first, then the lockfile
-  (bun, pnpm, yarn or npm), else npm. Otherwise `cargo test` for a `Cargo.toml`, or `make test` for
-  a Makefile with a `test:` target.
+- `auto` (the default) picks the checks from what the diff touches, so a colony is never held for
+  code it did not go near. Rust files, `Cargo.toml` or `Cargo.lock` run `cargo test` — a diff with
+  no Rust in it skips it. Every other changed file runs the test script of the nearest ancestor
+  directory with a `package.json`, by that package's own package manager: the `packageManager`
+  field first, then the lockfile (bun, pnpm, yarn or npm), else npm — so `web/**` runs web's own
+  vitest, not the root's. Files neither covers run the root Makefile's `test:` target when the
+  repository declares one, and nothing when it does not. The checks run one after another, each in
+  its own microVM, from the subdirectory they belong to.
 - `none` records every claim as unverifiable without checking.
-- Any other text is the test command itself.
+- Any other text is the test command itself, replacing the diff-scoped checks.
 
-**Limits.** If the colony image lacks the tool the command needs, the claim is unverifiable. The
-command comes from the base branch, so a branch that changes it cannot change what is run. The
-full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle),
-step 5.
+**Which check first.** When the diff owes more than one check, the **Publish** module's
+`verify_focus` setting decides the order. `shadow` (the default) runs them as above and records, in
+the data dir's `jev_focus.jsonl` and the colony's log, which check would have gone first — the one
+owning most of the changed files — and whether it would have caught the failure sooner. `act` runs
+that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
+every check to pass.
+
+**Limits.** If the colony image lacks the tool a check needs, that check is unverifiable. A branch
+that rewrites the file a check's command is read from (`scripts.test`, the Makefile) cannot grade
+its own homework: that check comes back unverifiable and nothing runs. A check whose directory the
+branch deleted is skipped rather than run to a meaningless exit 1. A base result is remembered
+per repository, image, base commit and check, so a re-verification does not pay for it twice. The
+full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle), step 5.
 
 ## Conditional instructions
 
@@ -330,6 +412,17 @@ colony, memory is read-only.
 Nothing becomes memory until it is approved. The **Memory** module's `require_review` setting is on
 by default. Turning it off only lets repository notes through. Org and global notes are always
 reviewed.
+
+- Memory is never put into a colony's prompt. The agent asks for it with `memory_briefing` (a short
+  summary, each entry with its kind and its source: colony, repository, commit) and
+  `memory_changes` (what was added or revoked since it last asked).
+- Every entry has a kind: plan, decision, file-change note, failure, architecture note or convention.
+- A repository note stays with its repository. A note becomes global (fleet-wide) only when colonies
+  in two different repositories propose it with confidence of at least 0.8, and you approve it.
+  `GET /api/memory/candidates` lists what is waiting on a second repository.
+- To take a note back, revoke it: `POST /api/memory/notes/{id}/revoke?scope=&key=`. Colonies stop
+  seeing it at their next briefing, and the mothership keeps a record of what it was and where it
+  came from.
 
 **Limits.** Nothing extracts memories from a conversation automatically. With the `mem0` provider,
 the mem0 key never enters a colony. The access table is in
@@ -383,6 +476,36 @@ node scripts/colony-report.mjs --transcript <id> --origin autonomy,watchdog
 
 **Limits.** Lines written before this field existed have no `origin`. The vocabulary is in
 [protocol.md, Origins](protocol.md#origins).
+
+## Which commits a colony wrote
+
+When a publish pushes, the mothership records each commit the branch carries past its base in
+`<data>/sessions/<id>/commits.json`: the full sha, its `git patch-id --stable`, the colony and the
+agent session that wrote it. The patch-id names the change rather than the commit, so the link
+survives a rebase, a cherry-pick or a message-only amend.
+
+After the branch is rewritten, a reconcile re-points each link whose commit is no longer on the
+branch to the one commit there with the same patch-id, keeping the old shas in `previous`. It runs:
+
+- after the watcher's own auto-rebase pushes, and again at every publish;
+- when the PR watcher or the merge train reads a head (`headRefOid`) different from the last one
+  seen: a live colony's own force-push, GitHub's update-branch, a rewrite from elsewhere. The
+  mothership fetches the colony branch into its mirror (the hardened host git) and reconciles
+  against it, off the watcher's tick;
+- after `sync_repo` fetches a repository, for each colony there with links whose branch tip moved.
+
+Each stamps the tip it reconciled against (`tip` in `commits.json`), so a head seen again, or a
+branch that did not move, costs one comparison and no fetch.
+
+The links show in the cockpit's colony pane under **Commits**, and in
+`GET /api/sessions/{id}/commits` ([protocol.md](protocol.md)). An orphaned link carries an
+**orphaned** badge whose tooltip says why: a squash or rewrite made the match ambiguous, so the link
+was kept rather than guessed.
+
+**Limits.** The reconcile never guesses. A squash, an amend that changed the content, or more than
+one matching commit leaves the link in place, flagged `orphaned`. A failing git call or fetch
+changes nothing, and while a rebase is in progress the reconcile does not run. Merged and closed
+colonies are not reconciled after a sync. A redo colony taking over a branch is not a trigger yet.
 
 ## The log archive
 
@@ -459,7 +582,8 @@ the tool and its input are exactly the same. The bench-wide report that grades c
 each other is `bench.mjs jev`
 ([bench.md, Grading Jev compaction](bench.md#grading-jev-compaction)). This is separate from the
 Jev routing second opinion (`jev_shadow_mode`,
-[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is also shadow-only.
+[protocol.md §6.1c](protocol.md#61c-jev-second-opinion-shadow-mode)), which is shadow-only unless
+`jev_routing_act` lets it pick the tier.
 
 ## Rate limits on notifications and the judge
 

@@ -71,6 +71,8 @@ pub(crate) use agentd::*;
 // By name: the glob imports of `lifecycle` and `publish` above bring a `routes` of their own.
 pub(crate) use api::routes;
 pub use api::*;
+// The shared answer path, callable in-process by the push-answer route (issue #742).
+pub(crate) use api::{AnswerCommand, AnswerError, submit_answer};
 pub(crate) use attention::*;
 pub use launch::*;
 pub use model::*;

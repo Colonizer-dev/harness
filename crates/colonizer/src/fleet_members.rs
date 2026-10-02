@@ -7,7 +7,8 @@
 //! joiner-made nonce. A person compares the two confirm codes — equal only if both hold the same
 //! code and nonce — and approves; approval mints a fleet-scoped API token, handed over exactly
 //! once at the joiner's next poll. The token reaches `GET /api/hosts` and
-//! `POST /api/fleet/peer/leave` (watching the fleet, leaving it) and nothing else
+//! `POST /api/fleet/peer/leave` (watching the fleet, leaving it), plus the history push's two ingest
+//! routes (`fleet_sync.rs`, #762), and nothing else
 //! ([`crate::api_tokens::Scope::Fleet`]). Leaving, from either side, revokes it.
 //!
 //! State lives in `<config_dir>/fleet.json` (0600), loaded never-fail and written through on
@@ -106,7 +107,24 @@ struct Membership {
     member_id: String,
     token: String,
     joined_at: DateTime<Utc>,
+    /// Consent to push this machine's history to the owner (`fleet_sync.rs`, #762): off at every
+    /// join, turned on by the member's operator after seeing the preview. A new membership — a
+    /// leave and a re-join — starts it off again.
+    #[serde(default)]
+    history_sync: bool,
 }
+
+/// A member the owner removed: its token's hash, kept after the token itself is revoked, so the
+/// removed machine's next call reads 403 "removed from the fleet" rather than an anonymous 401.
+#[derive(Clone, Serialize, Deserialize)]
+struct Tombstone {
+    member_id: String,
+    token_hash: String,
+    removed_at: DateTime<Utc>,
+}
+
+/// How many removals are remembered; the oldest go first.
+const MAX_TOMBSTONES: usize = 256;
 
 /// Everything the fleet knows, as persisted. Both roles live here: a mothership is a member, an
 /// owner, or alone — never two of those at once.
@@ -122,6 +140,8 @@ struct FleetState {
     joining: Option<Joining>,
     #[serde(default)]
     membership: Option<Membership>,
+    #[serde(default)]
+    removed: Vec<Tombstone>,
 }
 
 impl FleetState {
@@ -161,6 +181,7 @@ impl FleetState {
             })).collect::<Vec<_>>(),
             "membership": self.membership.as_ref().map(|m| json!({
                 "owner_url": m.owner_url, "member_id": m.member_id, "joined_at": m.joined_at,
+                "history_sync": m.history_sync,
             })),
             "joining": self.joining.as_ref().map(|j| json!({
                 "owner_url": j.owner_url, "confirm_code": j.confirm_code, "started_at": j.started_at,
@@ -230,6 +251,103 @@ impl FleetStore {
     /// Whether any machine belongs to this fleet — the mesh ACL's trigger.
     pub async fn has_members(&self) -> bool {
         !self.state.read().await.members.is_empty()
+    }
+
+    /// This mothership's own membership, when it has joined a fleet: where the owner answers,
+    /// the member id the owner knows us by, and the fleet token that proves it. What the history
+    /// drain (`fleet_sync.rs`, issue #762) pushes with.
+    pub async fn membership(&self) -> Option<crate::fleet_sync::Target> {
+        self.state
+            .read()
+            .await
+            .membership
+            .as_ref()
+            .map(|m| crate::fleet_sync::Target {
+                owner_url: m.owner_url.clone(),
+                member_id: m.member_id.clone(),
+                token: m.token.clone(),
+            })
+    }
+
+    /// On an owner, the member a fleet token belongs to — `None` when the token names no current
+    /// member (it left, or was removed while its token still authenticated).
+    pub async fn member_for_token(&self, token_id: &str) -> Option<String> {
+        let state = self.state.read().await;
+        state.members.iter().find(|m| m.token_id == token_id).map(|m| m.id.clone())
+    }
+
+    /// On an owner, every current member as `(id, name)`: the history view's names and its
+    /// "removed" test (`fleet_history.rs`) — a member directory with no current member was removed.
+    pub async fn member_names(&self) -> Vec<(String, String)> {
+        let state = self.state.read().await;
+        state.members.iter().map(|m| (m.id.clone(), m.name.clone())).collect()
+    }
+
+    /// Whether this member's operator has consented to the history push; `None` when this
+    /// mothership belongs to no fleet.
+    pub async fn history_sync(&self) -> Option<bool> {
+        self.state.read().await.membership.as_ref().map(|m| m.history_sync)
+    }
+
+    /// Records the operator's consent (or its withdrawal) for the current membership. `false`
+    /// when there is no membership to record it on.
+    pub async fn set_history_sync(&self, enabled: bool) -> bool {
+        let mut state = self.state.write().await;
+        let Some(m) = state.membership.as_mut() else {
+            return false;
+        };
+        m.history_sync = enabled;
+        self.save(&state).await;
+        true
+    }
+
+    /// Whether a presented Bearer token belongs to a member this owner removed.
+    pub async fn is_removed_token(&self, presented: &str) -> bool {
+        let hash = crate::api_tokens::hash_token(presented);
+        self.state
+            .read()
+            .await
+            .removed
+            .iter()
+            .any(|t| constant_time_eq(t.token_hash.as_bytes(), hash.as_bytes()))
+    }
+
+    /// Stands a membership up directly, as a completed join would: the history-drain tests.
+    #[cfg(test)]
+    pub(crate) async fn set_membership_for_tests(&self, target: Option<crate::fleet_sync::Target>) {
+        let mut state = self.state.write().await;
+        state.membership = target.map(|t| Membership {
+            owner_url: t.owner_url,
+            member_id: t.member_id,
+            token: t.token,
+            joined_at: Utc::now(),
+            history_sync: false,
+        });
+        self.save(&state).await;
+    }
+
+    /// Adds a member directly, the token minted as approval would: the history-drain tests stand
+    /// an owner up without walking the pairing each time. Answers `(member_id, token)`.
+    #[cfg(test)]
+    pub(crate) async fn add_member_for_tests(app: &Shared, name: &str) -> (String, String) {
+        let (token, token_id) = app.api_tokens.create_fleet_token(name).await.unwrap();
+        let id = format!("mem_{}", util::short_id());
+        let mut state = app.fleet_members.state.write().await;
+        state.members.push(Member {
+            id: id.clone(),
+            name: name.to_string(),
+            url: None,
+            token_id,
+            joined_at: Utc::now(),
+        });
+        app.fleet_members.save(&state).await;
+        (id, token)
+    }
+
+    /// Removes a member the way the owner's Remove does, for the history-drain tests.
+    #[cfg(test)]
+    pub(crate) async fn remove_member_for_tests(app: &Shared, id: &str) {
+        remove_member_where(app, true, |m| m.id == id).await;
     }
 }
 
@@ -327,13 +445,24 @@ async fn update_mesh_acl(app: &Shared) {
     }
 }
 
-/// Removes the member `matches` names: token revoked, row dropped, mesh node (`fleet-<id>`)
+/// Removes the member `matches` names — remembering its token as removed when `tombstone` (the
+/// owner's Remove, not the member's own leave): token revoked, row dropped, mesh node (`fleet-<id>`)
 /// deleted and the rule closed if this was the last — both mesh steps best effort. `None` when
 /// nothing matches.
-async fn remove_member_where(app: &Shared, matches: impl Fn(&Member) -> bool) -> Option<Member> {
+async fn remove_member_where(app: &Shared, tombstone: bool, matches: impl Fn(&Member) -> bool) -> Option<Member> {
     let mut state = app.fleet_members.state.write().await;
     let at = state.members.iter().position(matches)?;
     let member = state.members.remove(at);
+    if tombstone && let Some(token_hash) = app.api_tokens.token_hash(&member.token_id).await {
+        // The owner's Remove: the revoked token keeps answering "removed from the fleet".
+        state.removed.push(Tombstone {
+            member_id: member.id.clone(),
+            token_hash,
+            removed_at: Utc::now(),
+        });
+        let excess = state.removed.len().saturating_sub(MAX_TOMBSTONES);
+        state.removed.drain(..excess);
+    }
     app.fleet_members.save(&state).await;
     drop(state);
     app.api_tokens.revoke(&member.token_id).await;
@@ -416,11 +545,56 @@ async fn read_bounded(mut res: reqwest::Response) -> std::result::Result<Vec<u8>
 // The cockpit's routes. Owner-only: `api_tokens::classify` leaves them there.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/fleet`: the state both pages need, minus every secret.
+/// `GET /api/fleet`: the state both pages need, minus every secret — and on each member, its
+/// `health` (issue #764): `{state, code, reason, hint}`, from signals this owner already holds.
+/// Reading it never dials a member; the numbers are those of the last `GET /api/hosts` poll.
 pub async fn view(State(app): State<Shared>) -> Json<Value> {
     let mut state = app.fleet_members.state.write().await;
     state.prune();
-    Json(state.view())
+    let mut view = state.view();
+    let members = state.members.clone();
+    drop(state);
+    if let Some(rows) = view["members"].as_array_mut() {
+        for (row, member) in rows.iter_mut().zip(&members) {
+            let signals = member_signals(&app, member).await;
+            row["health"] = crate::fleet_health::evaluate(&signals).to_json();
+        }
+    }
+    Json(view)
+}
+
+/// What this owner knows about one member, as health signals (fleet_health.rs names which are
+/// wired). The heartbeat's age is measured at the latest poll, not now: a member does not go
+/// stale because the cockpit was closed; a member never answered counts from when it joined.
+async fn member_signals(app: &Shared, member: &Member) -> crate::fleet_health::Signals {
+    let token_valid = Some(app.api_tokens.scoped(&member.token_id).await.is_some());
+    let observation = match &member.url {
+        Some(url) => app.fleet_cache.observation(url).await,
+        None => None,
+    };
+    let mut signals = crate::fleet_health::Signals {
+        token_valid,
+        has_url: member.url.is_some(),
+        ..Default::default()
+    };
+    if let Some(seen) = observation {
+        let since = seen.last_answer.unwrap_or(member.joined_at).max(member.joined_at);
+        signals.heartbeat_age = Some((seen.polled_at - since).max(Duration::zero()));
+        signals.reachable = Some(seen.reachable);
+        signals.disk_free_bytes = seen.disk_free_bytes;
+        signals.disk_total_bytes = seen.disk_total_bytes;
+        signals.runner_tick_age = seen.runner_tick_age_s.map(Duration::seconds);
+        if let Some(sync) = seen.fleet_sync {
+            signals.sync_consent = Some(sync.consent);
+            signals.last_sync_error = sync
+                .last_error_class
+                .as_deref()
+                .and_then(crate::fleet_health::SyncError::from_class);
+            signals.sync_backlog_rows = Some(sync.backlog_rows);
+            signals.sync_backlog_age = sync.oldest_unsent_age_s.map(Duration::seconds);
+        }
+    }
+    signals
 }
 
 /// `POST /api/fleet/invites`: a fresh single-use code, shown here and never again.
@@ -524,7 +698,7 @@ pub async fn reject(State(app): State<Shared>, Path(id): Path<String>) -> Result
 
 /// `DELETE /api/fleet/members/{id}`: remove a machine — token revoked, mesh rule closed.
 pub async fn remove(State(app): State<Shared>, Path(id): Path<String>) -> Result<StatusCode, crate::AppError> {
-    if remove_member_where(&app, |m| m.id == id).await.is_none() {
+    if remove_member_where(&app, true, |m| m.id == id).await.is_none() {
         return Err(client_error(StatusCode::NOT_FOUND, "no such member"));
     }
     Ok(StatusCode::NO_CONTENT)
@@ -687,6 +861,9 @@ pub async fn join_confirm(State(app): State<Shared>) -> ApiResult<Value> {
                 member_id,
                 token,
                 joined_at: Utc::now(),
+                // Joining is not consent to push history: the operator turns it on after the
+                // preview (`POST /api/fleet/sync/consent`).
+                history_sync: false,
             });
             app.fleet_members.save(&state).await;
             Ok(Json(json!({"status": "joined"})))
@@ -858,7 +1035,7 @@ pub async fn peer_leave(
     if token.scope != crate::api_tokens::Scope::Fleet {
         return Err(client_error(StatusCode::FORBIDDEN, "this route takes a fleet token"));
     }
-    if remove_member_where(&app, |m| m.token_id == token.id).await.is_none() {
+    if remove_member_where(&app, false, |m| m.token_id == token.id).await.is_none() {
         // No matching member is already-left, not an error; the token still goes.
         app.api_tokens.revoke(&token.id).await;
     }
@@ -1135,6 +1312,7 @@ mod tests {
             member_id: "mem_us".into(),
             token: "col_ours".into(),
             joined_at: Utc::now(),
+            history_sync: false,
         });
         let body = json!({"code": "AAAA-AAAA-AAAA-AAAA", "nonce": new_nonce().unwrap(), "name": "worker"}).to_string();
         let (status, _) = ask(&router, Method::POST, "/api/fleet/peer/redeem", None, Some(body)).await;
@@ -1225,6 +1403,154 @@ mod tests {
 
     /// Removing a member from the cockpit and a member's own leave both revoke the token and drop
     /// the row; the leave of an already-removed machine still ends cleanly.
+    /// Issue #764: each member in `GET /api/fleet` carries a `health` verdict. A member whose last
+    /// answer is 12 minutes older than the owner's latest poll reads degraded, with its hint; a
+    /// revoked token reads stopped.
+    #[tokio::test]
+    async fn a_member_with_a_stale_heartbeat_reads_degraded_with_a_hint() {
+        let (_root, app, router, owner) = rig();
+        let owner = owner.as_deref();
+        let (member_id, _token) = join_member(&router, owner, &an_invite(&router, &app.api_token).await).await;
+
+        // Never polled yet: nobody checked it, so unknown — never ok.
+        let view = fleet_view(&router, owner).await;
+        let health = &view["members"][0]["health"];
+        assert_eq!(health["state"], "unknown", "{view}");
+        assert_eq!(health["reason"], "Not checked yet");
+        assert_eq!(health["hint"], "open the cockpit or wait for the next poll");
+
+        // It joined an hour ago; it last answered 12 minutes before the latest poll, which failed.
+        let now = Utc::now();
+        let (url, token_id) = {
+            let mut state = app.fleet_members.state.write().await;
+            let member = state.members.iter_mut().find(|m| m.id == member_id).unwrap();
+            member.joined_at = now - Duration::hours(1);
+            (member.url.clone().unwrap(), member.token_id.clone())
+        };
+        let row = crate::fleet::HostSummary {
+            id: "worker-host".into(),
+            name: "worker".into(),
+            platform: "linux-x86_64".into(),
+            os: "Debian".into(),
+            version: Some("0.1.10".into()),
+            slots_in_use: 0,
+            slots_ceiling: 4,
+            queue_depth: 0,
+            disk_free_bytes: Some(400 << 30),
+            disk_total_bytes: Some(500 << 30),
+            last_heartbeat: Some((now - Duration::minutes(12)).to_rfc3339()),
+            health: crate::fleet::HostHealth::Unreachable,
+            runner_tick_age_s: None,
+            fleet_sync: None,
+        };
+        app.fleet_cache.record_poll(&url, now, row).await;
+
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "no_heartbeat", "the heartbeat outranks plain unreachability");
+        assert_eq!(health["reason"], "No heartbeat for 12 min");
+        assert_eq!(health["hint"], "the machine may be asleep");
+
+        // Revoke its token behind the fleet's back: stopped, and the hint says re-pair.
+        app.api_tokens.revoke(&token_id).await.unwrap();
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "stopped", "{health}");
+        assert_eq!(health["reason"], "Token revoked");
+        assert_eq!(health["hint"], "re-pair this machine");
+    }
+
+    /// Issue #764: the sync and runner signals a member reports in its status reach its health —
+    /// a 401 or 403 sync stops it, an hour-old backlog or a stalled queue loop degrades it, and
+    /// consent off is only a note.
+    #[tokio::test]
+    async fn a_members_sync_and_runner_reports_map_to_its_health() {
+        let (_root, app, router, owner) = rig();
+        let owner = owner.as_deref();
+        let (member_id, _token) = join_member(&router, owner, &an_invite(&router, &app.api_token).await).await;
+        let url = {
+            let state = app.fleet_members.state.read().await;
+            state.members.iter().find(|m| m.id == member_id).unwrap().url.clone().unwrap()
+        };
+        let poll = |runner: Option<i64>, sync: Option<crate::fleet::PeerSync>| {
+            let app = app.clone();
+            let url = url.clone();
+            async move {
+                let now = Utc::now();
+                let row = crate::fleet::HostSummary {
+                    id: "worker-host".into(),
+                    name: "worker".into(),
+                    platform: "linux-x86_64".into(),
+                    os: "Debian".into(),
+                    version: Some("0.1.10".into()),
+                    slots_in_use: 0,
+                    slots_ceiling: 4,
+                    queue_depth: 0,
+                    disk_free_bytes: Some(400 << 30),
+                    disk_total_bytes: Some(500 << 30),
+                    last_heartbeat: Some(now.to_rfc3339()),
+                    health: crate::fleet::HostHealth::Online,
+                    runner_tick_age_s: runner,
+                    fleet_sync: sync,
+                };
+                app.fleet_cache.record_poll(&url, now, row).await;
+            }
+        };
+        let synced = crate::fleet::PeerSync {
+            state: "synced".into(),
+            consent: true,
+            ..Default::default()
+        };
+
+        poll(Some(3), Some(synced.clone())).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "{health}");
+        assert_eq!(health["note"], Value::Null);
+
+        let behind = crate::fleet::PeerSync {
+            state: "error".into(),
+            backlog_rows: 5,
+            oldest_unsent_age_s: Some(2 * 3600),
+            last_error_class: Some("error".into()),
+            consent: true,
+        };
+        poll(Some(3), Some(behind)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "sync_backlog");
+        assert_eq!(health["reason"], "Sync behind by 5 rows");
+
+        for (state, class) in [("unauthorized", "unauthorized"), ("removed", "forbidden")] {
+            let rejected = crate::fleet::PeerSync {
+                state: state.into(),
+                last_error_class: Some(class.into()),
+                consent: true,
+                ..Default::default()
+            };
+            poll(Some(3), Some(rejected)).await;
+            let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+            assert_eq!(health["state"], "stopped", "{state}: {health}");
+            assert_eq!(health["code"], "sync_rejected");
+            assert_eq!(health["reason"], "Token revoked");
+            assert_eq!(health["hint"], "re-pair this machine");
+        }
+
+        poll(Some(600), Some(synced)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "degraded", "{health}");
+        assert_eq!(health["code"], "runner_down");
+        assert_eq!(health["reason"], "Colony runner not ticking");
+
+        let off = crate::fleet::PeerSync {
+            state: "consent_required".into(),
+            consent: false,
+            ..Default::default()
+        };
+        poll(Some(3), Some(off)).await;
+        let health = fleet_view(&router, owner).await["members"][0]["health"].clone();
+        assert_eq!(health["state"], "ok", "consent off is not a fault: {health}");
+        assert_eq!(health["note"], "History sync off");
+    }
+
     #[tokio::test]
     async fn removal_and_leaving_both_revoke_the_token_and_drop_the_member() {
         let (_root, app, router, owner) = rig();
@@ -1243,6 +1569,12 @@ mod tests {
         let gone = app.api_tokens.authenticate(&member_token).await.is_none();
         assert!(gone, "the token is revoked");
         assert_eq!(fleet_view(&router, owner).await["role"], "none");
+        // The removed member's token is remembered: 403 "removed", where an unknown one is 401.
+        let (status, answer) = ask(&router, Method::GET, "/api/hosts", Some(&member_token), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(answer["error"], "removed from the fleet");
+        let (status, _) = ask(&router, Method::GET, "/api/hosts", Some("col_never_minted"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
 
         // A second member leaves by itself, with its own token.
         let (_second, second_token) = join_member(&router, owner, &an_invite(&router, &app.api_token).await).await;
@@ -1257,6 +1589,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "the member drops itself with its fleet token");
         assert!(app.api_tokens.authenticate(&second_token).await.is_none());
+        let (status, _) = ask(&router, Method::GET, "/api/hosts", Some(&second_token), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "a member that left is not a removed one");
         let view = fleet_view(&router, owner).await;
         assert_eq!(view["role"], "none");
         assert_eq!(view["members"].as_array().unwrap().len(), 0);

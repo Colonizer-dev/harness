@@ -29,6 +29,7 @@ must be ignored (forward compatibility).
 | `/opt/colonizer/{caveman,headroom,jev-compaction}/`, `/opt/colonizer/bin/rtk` | ro | The token-saving payloads (Token savings, §4), each mounted only when its switch is on and the payload is installed |
 | `/opt/claude/bin/claude` | ro | Claude Code binary (claude-code module only) |
 | `/root/.claude/projects` | rw | The agent's session transcripts, a host directory (`<session dir>/transcripts`) mounted writable so they outlive the microVM. Path from the module's `session_resume.dir` (claude-code: `/root/.claude/projects`, codex: `/root/.codex`, acp: `/root/.gemini`) |
+| `/colonizer/services` | rw | Service records the guest's writers keep ([colonies.md](colonies.md#services-that-come-back-after-a-resume)), one JSON file per service (`<name>.json`). A host directory (`<session dir>/services`) mounted writable, so they outlive the microVM like the transcripts above |
 | `/opt/node/bin/node` | ro | Vendored Node runtime for the agent runner, pinned in `vendor/node.lock` and fetched at install by `scripts/fetch-node-binary.sh`, mounted read-only beside agentd |
 | `/workspace` | rw | Git worktree |
 | `/harness/out` | rw | Files the agent hands to the host (e.g. `pr.md`) |
@@ -55,6 +56,30 @@ suspended ([#562]): `COLONIZER_RESUME_SESSION` carries the `agent_session` id th
 last run, for it to continue that conversation (the Claude Code runner passes it to the SDK's
 `resume` option, codex to `codex exec … resume`, ACP to `session/load`); the held answer is the
 `initial_prompt`. Absent means a fresh conversation.
+
+`COLONIZER_SERVICES_DIR=/colonizer/services` reaches `agent.env` on every boot (#700): the
+directory the guest's service writers (`colonizer-svc`, a Claude Code background-Bash hook) record
+started services in, one JSON file per service. On a resume boot, `session.json` also gains a
+top-level `restore` key — absent on other boots, which is how the guest tells a restore from a
+fresh start:
+
+```json
+"restore": {
+  "suspended": true,
+  "services": [
+    { "name": "web", "cmd": "npm run dev -- --port 5173", "cwd": "web", "ready": "5173",
+      "env": ["VITE_API_URL"], "timeout_secs": 30, "restart": true, "source": "manifest" }
+  ]
+}
+```
+
+`suspended` says the colony was suspended when the resume claimed it. `services` lists the
+repository's `.colonizer/services.toml` declarations first, then the records the previous run left
+in `COLONIZER_SERVICES_DIR`; background records (`restart: false`) are listed once and deleted, so
+they are reported lost exactly once. `env` holds names only and every `cmd` is scrubbed of the
+colony's secret values before any of this is written. The guest relaunches each restartable
+service, waits it out to `ready` or `timeout_secs` (default 60), and opens the resumed turn saying
+what came back and what was lost.
 
 ### Where the agent runtime comes from
 
@@ -273,9 +298,12 @@ Sends `shutdown` to the runner, waits up to 10 s, then kills it. Response `{"ok"
 
 Every `/api/` route needs the install's API token (`Authorization: Bearer`) or the cockpit's
 sign-in cookie; a cookie write also needs a same-origin `Origin`. Without either the answer is
-**401**, except `GET /api/status`, which answers a reduced body (below). A request naming a Host
-that is not allowed is **403** whatever it carries. `crates/colonizer/routes.snap` is the complete
-route table: each method and path with what an unauthenticated request gets, which scoped-token
+**401**, except `GET /api/status`, which answers a reduced body (below), and `POST /api/push/answer`,
+which authenticates by the one-time token in its body (below). A request naming a Host
+that is not allowed is **403** whatever it carries. A paired phone's cookie (Add your phone, below)
+authenticates like the owner's, except that its writes to `/api/phone`, `/api/tokens`,
+`/api/remote` and `/api/fleet` are **403**. `crates/colonizer/routes.snap` is the complete route
+table: each method and path with what an unauthenticated request gets, which scoped-token
 class reaches it (Scoped API tokens, below) and the activity-log kind it records (§6.9). Routes
 not named in a scoped-token class are owner only.
 
@@ -283,14 +311,18 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, and `storage.ok` — never repositories, orgs, hostnames, host ids or accounts |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`. `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures and microVM counts, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
-| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` — everything the Settings → Fleet pane renders |
+| `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
 | `POST /api/fleet/pending/{id}/approve` · `…/reject` | The owner's decision on a redeemed invite. Approve answers `{member}` and mints the member's `fleet`-scoped token, handed over exactly once; reject leaves the joiner's next confirm reading `rejected` |
 | `DELETE /api/fleet/members/{id}` | End one membership from the owner's side: the member's fleet token is revoked, its local data stays |
 | `POST /api/fleet/join` · `POST /api/fleet/join/confirm` · `DELETE /api/fleet/join` | Redeem an owner's invite (`{owner_url, code, name?, url?}` → `{confirm_code, status: "pending"}`; **409** while already in a fleet, or an owner with members), poll for the owner's decision (`{status: "joined"\|"pending"\|"rejected"\|"expired"}`), cancel |
 | `POST /api/fleet/leave` | A member ends its own membership; the token is revoked and every local colony and setting stays |
+| `GET /api/fleet/sync` · `POST /api/fleet/sync` | A member's history push (Fleet history push, below): where it stands — `{member, consent, enabled, status, detail, acknowledged, retired, last_drain_at, last_synced_at, next_attempt_at}` — and drain now, answering the drain report; **409** when this mothership has not joined a fleet, or its operator has not consented |
+| `GET /api/fleet/sync/preview` · `POST /api/fleet/sync/consent` | What the history push would send — `{owner_url, colonies, payloads, payload_bytes, omitted_payloads, row_bytes, total_bytes, pending_colonies, pending_bytes, includes, excludes}`, sending nothing — and the operator's consent for this membership (`{enabled}` → the status); both **409** when not a member |
+| `GET /api/fleet/history` · `GET /api/fleet/history/{member}/{row_id}` · `…/logs/{name}` | The owner's view of what members synced (Fleet history on the owner, below): the filtered, paged list with totals per member and repository, one colony's record and its logs, and one log streamed; owner-only |
+| `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | The owner's ingest for a member's history push, on the member's `fleet` token: one log payload stored by its hash (**204**), then a batch of colony rows upserted by id (`{rows}` → `{accepted, rejected}`); **403** for a token that belongs to no member |
 | `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
 | `PUT /api/modules/{kind}` | `{provider, enabled (default true), settings}` → saves config and answers the module as `GET` lists it. **400** for an unknown provider or setting, a value of the wrong type or out of range, or switching off a kind that must stay on (`source`, `sandbox`, `agent`, `publish`) |
@@ -335,7 +367,9 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions` | `{repo, issue?, title?, instructions?, autopilot?, verify?, allow_duplicate?, allow_epic?, queue_behind_holder?, model_tier?, model_override?, subagent_model_override?, claude_account?, after?, stack?, serialize?, origin?, autofix?, automerge?}` → `Session` (`model_override` / `subagent_model_override` run this colony's orchestrator / subagents on a named model — a Claude alias or ID, or `<provider>/<model>` naming a configured provider (**400** otherwise) — over whatever routing and the agent module would pick; both are recorded on the `Session`; omit `issue` for an open session: the agent asks what to work on; omit `autopilot` to use the `publish` module's `autopilot` setting, on by default; `model_tier` — `low`, `medium` or `high` — runs this colony on that tier instead of the one per-task routing picks, whether or not routing is on (§6.1b), and a value that is not one of the three is a **400**; `autofix` and `automerge`, each default false, override the `publish` module's settings of the same names for this colony (§6.6); `verify` overrides its `verify` setting (§6.3, Done-verification); `claude_account` runs the colony on that Claude account (Connections, below; **400** for a malformed id); `after` names a parent colony: the new one queues until the parent's pull request merges, or with `stack: true` branches from the parent's branch once it is pushed and targets its pull request at it (**404** for an unknown parent, **409** for one in another repository); `serialize: true` queues behind a live colony in the same repository whose changed files overlap instead of starting beside it; `origin` labels who launched it (below)). **400** also when the org's workspace is switched off, the repository name is invalid, or the agent module or Claude login is missing. Past the parallel limit the colony comes back `queued` rather than being refused, and starts when a slot frees. **409** when another colony already holds that issue — one queued, live, publishing, or with its pull request still open — naming it; `allow_duplicate: true` starts a second one anyway, and `queue_behind_holder: true` instead joins the issue's successor queue: the colony comes back `queued` with `claim_wait: true` and `queued_behind` naming the holder, and starts when the holder releases the issue (below). `allow_duplicate` wins when both are set and skips the GitHub check too; without it a remote conflict (below) is a **409**. **409** when the issue is an epic (sub-issues, an `epic` label, or a title marking one), listing its open sub-issues; `allow_epic: true` starts one anyway (*Epics*, below) |
 | `GET /api/sessions` · `GET /api/sessions/{id}` | `Session` list / one (the single route also carries `recent_events` + `diagnosis`, below) |
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
-| `POST /api/sessions/{id}/answer` | `{question_id, answers, response?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads. A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
+| `POST /api/sessions/{id}/answer` | `{question_id, answers, response?, questions?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads; `questions`, when given, is the question content the answerer saw, and must equal the open question's or the answer is the stale **409** (runners number questions afresh after a reboot, so an id alone can name a different question). A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore, or one whose send into a colony that stopped between the checks and the send fails, is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
+| `POST /api/sessions/{id}/seen` | Someone is looking at the colony: clears `unseen_failure` (below), and when it actually cleared something — the cockpit only calls this for a `failed` colony nobody has opened yet, with the page in front — pushes the silent `{"type":"resolved","colony","badge"}` to every push subscription, so each device closes that colony's notification and lowers its badge ([cockpit.md](cockpit.md#notifications-and-web-push)). Answered **204** either way; **404** for an unknown colony. Read scope for API tokens — looking is not driving |
+| `POST /api/sessions/{id}/messages` | `{id, text}` — the events socket's `user_message` command over HTTP, the offline outbox's route (§5). It shares the socket's one user-message path, so the same colony-state check, the same trim and 100,000-byte cap, and a scoped token's text marked external input — but it answers instead of dropping: `200 {"id": "u-<id>", "duplicate": false}`, `duplicate: true` when that client `id` was already delivered to this colony, so a repeat sent after a lost answer is answered, not delivered twice (`id` is 1–64 of `A–Z a–z 0–9 _ -`, **400** otherwise). **400** also for an empty or over-cap `text`, which the socket drops silently; **404** for an unknown colony; **409** when the colony is not live and cannot take a message, or when the send into a colony that stopped between that check and the send fails — nothing was delivered and the `id` stays free, so the retry is not absorbed as a duplicate |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|automerge\|blocked\|merged\|error` (§6.6). **404** for an unknown colony |
 | `GET /api/findings` | The same records aggregated across all colonies; each one already carries `session` and gains `repo` |
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
@@ -345,16 +379,20 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `DELETE /api/sessions/{id}` | Forgets a colony that is not live and not publishing. Its logs are archived first (`<data>/archive/`, see [colonies.md](colonies.md#the-log-archive)); if archiving fails, nothing is deleted. Then the worktree, local branch and record go. `?purge_logs=true` also removes the colony's archive bundles. Answers `{deleted, leftover, archived, purged_bundles, purge_error}`. **404** for an unknown id; **409** `stop the colony first` while it is live or publishing |
 | `GET /api/sessions/{id}/diff` | Everything the colony changed since it branched from `origin/<base>`: committed and uncommitted edits, plus untracked files as new-file diffs (at most 200 of them; binaries and symlinks skipped). `{id, repo, base, files: [{path, added, removed}], added, removed, diff, truncated}`, `diff` capped at 200 KB. Needs the worktree, not a live colony; `colonizer diff` and the MCP server read it. **409** when there is no worktree or no merge base, or git fails |
+| `GET /api/sessions/{id}/commits` | The commits the colony wrote, oldest first, as the mothership keeps them through rebase, amend and force-push (issue #765, [colonies.md](colonies.md#which-commits-a-colony-wrote)): `{commits: [{sha, previous, orphaned, agent_session?, recorded_at}]}`. `sha` is where the link points now, `previous` the shas it pointed at before (oldest first), and `orphaned` is `true` when a squash or rewrite left no single commit with the same patch-id, so the link was kept rather than guessed. Empty for a colony that never published. **404** for an unknown colony |
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
 | `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution. Read scope for API tokens |
+| `GET /api/merge-train/loop` | The merge-train loop (issue #754, [loops.md](loops.md#merge-train)): `{settings, next_run_at, running, writes_blocked, repos: {"owner/repo": {paused, last_merge_at, last_train_merge, needs_redo, redo_dispatched, …}}, last_report, history}`. `settings` is `{enabled, cadence, allow, never, max_merges, repo_max_merges, cooldown_secs, ci_wait_minutes, ci_poll_secs, flaky_checks, self_heal, revert_on_red, redo_on_conflict, max_api_calls, min_call_gap_ms, held}`; a report is `{started_at, finished_at, dry_run, forced_dry_run, stopped, api_calls, summary, lines, repos: [{repo, main, paused, heal, items: [{session, pr_url, title, action: "merged"\|"updated"\|"rebased"\|"red"\|"rerun"\|"needs_redo"\|"redo_dispatched"\|"waiting"\|"skipped", reason}]}]}`; `history` is newest first. Read scope for API tokens |
+| `PUT /api/merge-train/loop` | Replaces the loop's settings (the same shape); out-of-range limits, a malformed `allow`/`never` entry or `revert_on_red` without `self_heal` are a `400`. Switching it on books the next run one cadence away. Owner only |
+| `POST /api/merge-train/loop/run[?dry_run=true]` | A dry run (or any run while external writes are blocked) answers `{started: false, report}`; a real run starts in the background and answers `{started: true}`, `409` while one is going. Owner only |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow, block}, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md)). **404** for a colony booted before the record existed |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
-| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?}` → `RedTeamRun`. `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
-| `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
-| `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
+| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
+| `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, preset, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
+| `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, preset?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
 | `PUT /api/redteam/schedules/{id}` | Same body; replaces the settings, keeps `id`, `created_at` and the last firing, and recomputes `next_run_at`. **404** for an unknown schedule |
 | `DELETE /api/redteam/schedules/{id}` | Removes it. **404** for an unknown schedule |
 | `POST /api/redteam/runs/{id}/stop` | Stop the run and every hunter it started: live hunters stop like `/api/sessions/{id}/stop`, queued ones leave the queue. Idempotent once the run is `done` or `stopped`; **404** for an unknown run |
@@ -364,6 +402,42 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/activity` | The activity log (§6.9): colony outcomes recorded at the transition and what a person changed through the API, newest first, paged with `before`/`limit` and filtered by `kind`, `actor`, `org`, `repo` and `q`. **400** naming an unknown kind or actor, or a `limit` outside 1–500 |
 | `GET /api/tokens` · `POST /api/tokens` · `DELETE /api/tokens/{id}` | Scoped API tokens (below), owner only: the metadata list, a mint, and a revoke. `POST` takes `{name, scope, orgs?, repos?, max_concurrent?, budget_usd_per_day?}` (**400** naming what is wrong) and answers `{token, …meta}` — the `col_…` plaintext comes back exactly once; the registry (`<config_dir>/api-tokens.json`) keeps only its SHA-256 |
 | `GET /api/tokens/self` | Who is asking: `{owner: false, name, scope, orgs, repos}` for a scoped token, `{owner: true, scope: "owner", orgs: [], repos: []}` for the install token or the browser cookie |
+| `GET /api/phone` · `POST /api/phone/invites` · `POST /api/phone/pairings/confirm` · `POST /api/phone/pairings/{id}/reject` · `DELETE /api/phone/devices/{id}` · `POST /api/phone/claim` | Add your phone ([cockpit.md](cockpit.md#add-your-phone)), below |
+
+### Add your phone
+
+A phone pairs in four steps and ends up with a credential of its own (`crates/colonizer/src/phone.rs`):
+
+1. `POST /api/phone/invites` (owner, not a phone) answers `{code, expires_at, ttl_secs, origins}`:
+   an invite of 256 random bits, single use, live 300 s, kept as a SHA-256 in memory (**429** with
+   four open). `origins` is where a phone could reach this mothership, best first, each
+   `{kind: relay|tailnet|lan, url, reachable, secure, note}`: `https://<install>.my.colonizer.dev`
+   while remote access is on (reachable while connected), the tailnet address, the LAN address. A
+   plain-HTTP origin is reachable only when the listener answers on it **and** the Host allowlist
+   accepts it; `note` names the fix or the no-HTTPS caveat.
+2. An unauthenticated `GET /?pair=<invite>` spends the invite and opens a pairing bound to that
+   browser: the answer is a page showing a six-digit confirm code, with a `colonizer_pair` cookie
+   (`HttpOnly`, `SameSite=Strict`, `Path=/api/phone/claim`) holding the pairing's id and secret. An
+   unknown, spent or expired invite gets the locked page. No credential is set.
+3. `POST /api/phone/pairings/confirm {"code"}` approves the pairing showing that code: local only
+   (**403** through the remote tunnel) and never from a phone. **404** for a code no pairing shows.
+   `POST /api/phone/pairings/{id}/reject` turns one down.
+4. `POST /api/phone/claim`, admitted without a token, is the pairing page's poll: **202** while
+   unconfirmed, **404** once expired, rejected or unknown, and **200** once confirmed, setting the
+   phone's own `colonizer_token` cookie (`cph_…`, stored as a SHA-256 in `<config_dir>/phones.json`)
+   and consuming the pairing.
+
+Failed steps (an invite that opens nothing, a claim that finds nothing, a wrong confirm code)
+share one limit: after 10 in 60 s every step answers **429** until the window slides.
+`GET /api/phone` lists `{devices: [{id, label, paired_at}], pending: [{id, label, expires_at}]}`,
+never a code or a hash. `DELETE /api/phone/devices/{id}` revokes one phone (owner, not a phone),
+and with it the push subscriptions that phone made and every notification answer token sent to it
+(`POST /api/push/answer` then answers **401**). A push subscription made with a phone's cookie
+records that phone (`phone` in its summary) and, without a label, takes the phone's; the phone may
+`PATCH`, `DELETE` or test only its own subscriptions (**403** otherwise).
+Revoking a phone, or a scoped API token (`DELETE /api/tokens/{id}`), takes effect at once: every
+request that credential has in flight answers **401**, a streamed body it is reading ends, and its
+open WebSockets (events, terminal, `/api/stream`) close.
 
 ### Scoped API tokens
 
@@ -377,11 +451,11 @@ routed together).
 
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
-  `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
+  `/api/sessions/{id}/commits`, `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
-  `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
+  `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|stop|resume`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -429,9 +503,13 @@ All owner only. Tokens are never sent back to the browser.
 | `GET /api/login-item` | Whether the mothership starts when you log in: a LaunchAgent `dev.colonizer.mothership` on macOS, the systemd user unit `colonizer.service` on Linux. `{platform: "macos"\|"linux"\|"unsupported", installed, enabled, pid, definition, binary, log, note}`; on Linux `note` suggests `loginctl enable-linger` when lingering is off. **500** on an unsupported platform |
 | `POST /api/login-item` | `{enabled}`, the same as `colonizer login-item enable\|disable`. Enabling writes and loads the definition (restart on crash only, output to `<data>/mothership.out`), copying only `PATH` and non-secret `COLONIZER_*` variables into it. Disabling unloads it for future logins and never stops the running mothership. Answers the status |
 | `GET /api/push/key` | `{public_key}`: the Web Push (VAPID) public key, base64url. The key pair is made on first use and kept at `<config>/push-vapid-key`; `COLONIZER_VAPID_SUBJECT` sets the JWT subject |
-| `GET /api/push/subscriptions` | `[{id, label, created_at, endpoint_host}]` (`created_at` in unix seconds). Endpoints and keys are never returned; the records are kept 0600 in `<config>/push-subscriptions.json` |
-| `POST /api/push/subscriptions` | A browser's `PushSubscription.toJSON()` plus an optional `label`: `{endpoint (https, ≤ 2048), keys: {p256dh, auth}, label? (default "This device", ≤ 60)}`. The same endpoint again refreshes its keys and label. Subscribing is the whole opt-in for this device: it then receives the notify module's announcements (§6.3, Notify) as one short line and a link, while that module is on. Answers the summary; **400** on a bad body. A push service answering 404 or 410 removes the subscription |
+| `GET /api/push/subscriptions` | `[{id, label, created_at, endpoint_host, last_seen, prefs, phone}]` (`phone` the paired phone's id that subscribed it, else `null`; `created_at` and `last_seen` in unix seconds, `last_seen` `null` until the device's first presence ping). Endpoints and keys are never returned; the records are kept 0600 in `<config>/push-subscriptions.json` |
+| `POST /api/push/subscriptions` | A browser's `PushSubscription.toJSON()` plus an optional `label`: `{endpoint (https, ≤ 2048), keys: {p256dh, auth}, label? (default "This device", ≤ 60)}`. The same endpoint again refreshes its keys and label. Subscribing enrolls the device: it then receives the notify module's announcements (§6.3, Notify) as one short line and a link, while that module is on, subject to the device's own preferences (below); a subscription from before preferences existed behaves on the defaults. Answers the summary; **400** on a bad body. A push service answering 404 or 410 removes the subscription. Every announcement carries `{title, body, url, tag, badge}`, plus `colony` when there is one — `tag` is `colony-<id>`, so a colony's next notification replaces its last; `badge` is the needs-you count at send time, left out for a device whose `badge` preference is off. A colony that has just been handled (`/seen` above, or its question answered) instead sends the silent `{"type":"resolved","colony","badge"}` (only while the notify module is on, and only to devices whose preferences could have announced that colony — in scope, with at least one colony event on; quiet hours and presence do not apply; `badge` again follows the device's preference), `Urgency: normal`, never to Apple endpoints (`*.push.apple.com`), which revoke a subscription that receives an invisible push |
+| `PATCH /api/push/subscriptions/{id}` | `{label?, prefs?}`, either optional and `None` leaving it as it is. The label follows the create rules; `prefs` is `{events: {question\|pull_request\|needs_rebase\|failed\|attention\|provider_degraded\|digest: bool}, question_sound: bool, answer_actions: bool, badge: bool, scope: ["org"\|"org/repo", ≤ 50 entries], quiet: {start, end} \| null, questions_break_quiet: bool, tz?, utc_offset}` — a missing event key means that event's default (the act-now events on, `provider_degraded` and `digest` off), scope entries ≤ 200 characters with no whitespace and at most one `/`, quiet hours in minutes since midnight with `start ≠ end` wrapping midnight, and the offset within ±14 hours. Quiet hours follow `tz` when it names an IANA zone (daylight saving included) and `utc_offset` otherwise. `answer_actions` (answer buttons on a question) and `badge` (the app-icon count) default on. The mothership checks these before every send (`push_prefs.rs`). Answers the updated summary; **400** for bad prefs; **404** for an unknown id |
 | `DELETE /api/push/subscriptions/{id}` | **204**; **404** for an unknown id |
+| `POST /api/push/subscriptions/{id}/test` | One test push to that device alone, through the same encryption and prune-on-Gone as a real event but past every preference — the point is to prove the pipe works whatever the device's settings say. `{sent: bool}`; **404** for an unknown id |
+| `POST /api/push/presence` | The cockpit's heartbeat: `{endpoint, colony?, focused, tz?, utc_offset?}`. Records what the tab is showing and whether it could show a notification itself, so a send to a device already looking at that colony is held back while the report is fresh (the cockpit pings every 30 s; one older than 75 s is ignored — in-memory only, so a restart errs toward buzzing). Also refreshes the device's `last_seen` and time zone (tz name and offset, for quiet hours). **204**; **404** for an unknown endpoint; **400** for an offset beyond ±14 hours |
+| `POST /api/push/answer` | A question notification's button tap as an answer: `{"token", "choice": <label>}` or `{"token", "other": <text>}` → `{answered}`. The token is minted as the question push is built — a question is notification-answerable only when it is the colony's exactly-one open question, single-select, with one to three options; any other question, and every device whose `answer_actions` preference is off, gets an empty `answer` and the notification only opens the cockpit (no token is minted when no receiving device shows buttons). The token is random and single-use (first tap wins — one token per push, so a second subscribed device's tap answers **401**), the mothership keeps only its SHA-256, in memory: it works for that colony and question only, expires after 24 hours or when the question closes or is replaced, and is gone on a restart. It is never an API token, and it is this route's only credential — no cookie or bearer is read (the Host allowlist above still applies). The answer rides the same path as `POST /api/sessions/{id}/answer`, so a suspended colony holds it until restore. **401** for an unknown, spent or expired token; **409** when the colony is no longer asking that question — answered in the cockpit first (exactly one answer lands), or a new question under the same id, since the token also pins the question's content — which burns the token or cannot take an answer; **400** for a bad body or a choice the push never offered; **404** for a colony that no longer exists |
 | `GET /api/archive` | The local log archive: when a colony ends, its session directory is packed to `<data>/archive/<org>/<repo>/<yyyy>/<mm>/<id>.tar.zst` (a later change adds `<id>.r2.tar.zst`, and so on), with a `.json` sidecar. `{root, count, bytes, entries: [{session, repo, org, issue, title, status, pr_url, cost_usd, model_usage, model_tier, agent, created_at, updated_at, archived_at, mothership, revision, bundle, bytes, fingerprint}]}`, newest first |
 | `POST /api/archive/retention` | The only thing that deletes from the archive. `{keep_days?, max_gb?, allow_single_copy? = false, dry_run? = true, expect?}`: plans the bundles older than `keep_days`, then the oldest until the archive fits `max_gb` (1 GB = 10⁹ bytes); neither limit, nothing planned. `{dry_run, remove: [{bundle, session, bytes, archived_at}], count, bytes, kept_single_copy}`. Without `allow_single_copy: true` nothing is removed, only counted in `kept_single_copy`. Applying (`dry_run: false`) needs `expect` set to the preview's `bundle` list: **409** when the plan changed since, **400** without it or for a negative limit |
 | `GET /api/hunters/{id}/probe` | A security hunter (`strix` or `shannon`): `{manifest, installed, probe: {runtime_ok, docker_ok, ready, detail}}`. Both hunters need Docker, which colonies do not have, so `ready` is always `false` today; red-team runs use colony hunters (§6.7). **404** for an unknown id |
@@ -567,7 +645,10 @@ of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspe
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
-(§6.1b), `verification` (§6.3) and `attention` (§6.3, Watchdog).
+(§6.1b), `verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
+colony moves into `failed` and cleared by the `seen` route above, so a failure stays in the
+needs-you count (the app badge's) until a person has opened the colony; colonies from before the
+field existed load as seen.
 
 `origin` names what launched the colony: `burn_down` (§6.2c), `redteam` (§6.7), `map` or
 `map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), or `chat` / `colonize` for a
@@ -1093,8 +1174,10 @@ every poll and stays cheap without a cache.
 
 Without the API token this endpoint answers a reduced body, and only that: `version`, `queue_depth`,
 `host` with `microvms_live`, `microvms_ceiling` and the numeric capacity figures (no `id`, `hostname`,
-`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, and `storage` with only `ok`.
-It always uses the cached probes and ignores `?fresh`. This is what fleet peers read.
+`uptime_secs` or `checked_at`), `runtime` with only `platform` and `os`, `storage` with only `ok`,
+`runner` with `last_tick_age_s`, and — on a fleet member only — `fleet_sync` (both described under
+[Member health](#member-health-issue-764)). It always uses the cached probes and ignores `?fresh`.
+This is what fleet peers read.
 
 ### `GET /api/hosts`
 
@@ -1184,8 +1267,8 @@ The table above names each one; the shapes:
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
   `{status: "approved", token, member_id}` exactly once (a second poll reads **404**), or the
   rejection. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
-  `GET /api/hosts` and `POST /api/fleet/peer/leave`, never minted by `POST /api/tokens`, and never
-  the member's local cockpit token.
+  `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
+  never minted by `POST /api/tokens`, and never the member's local cockpit token.
 - `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
   revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
   enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](fleet.md).
@@ -1196,6 +1279,134 @@ as u32, mod 1,000,000. The owner knows the invite code and learns the nonce at t
 joiner generated both. The digits are a compare for two people looking at two screens, not an
 authentication — a stolen invite redeemed by someone else is consumed, so the real joiner sees an
 error and the owner sees a request nobody vouches for.
+
+### Fleet history push (issue #762)
+
+A member drains its finished colonies' history to its fleet's owner on the `fleet` token its
+pairing minted; the design is in [fleet.md](fleet.md#history-push). Two owner routes take it, both
+`fleet`-scoped and both answering **403** to a token that names no current member (the owner's own
+cockpit token included). What arrives lands under `<data_dir>/fleet-ingest/<member_id>/` on the
+owner.
+
+- `PUT /api/fleet/peer/payloads/{sha256}` — the body is one log ledger's raw bytes (at most 32 MiB),
+  keyed by the lowercase hex SHA-256 of those bytes. **204** once stored (or already held); **400**
+  when the key is malformed or the body does not hash to it; **413** past the size limit. Stored
+  as `payloads/<sha256>`, so a re-upload is a no-op.
+- `POST /api/fleet/peer/rows` — `{"rows": [{id, record, payloads}]}`, at most 500 rows and 4 MiB.
+  `record` is the same allowlist projection of a colony the export bundle's history carries
+  ([§6.11](#611-fleet-export-bundle-687)), and `id` is its `<origin_host>:<original_id>`.
+  `payloads` lists the colony's logs — `{name, sha256, bytes}` with `name` one of `events.jsonl`,
+  `harness.jsonl`, `gateway.jsonl`, or `{name, bytes, omitted: true}` for a log too large to send.
+  The answer is `{"accepted": [id…], "rejected": [{id, error, missing_payloads?}]}`: accepted rows
+  are upserted by id into `sessions.json` (a re-sent row replaces itself, never duplicates), and a
+  row whose payloads are not all held is refused by name with the hashes it lacks. A body that
+  cannot be read as rows is refused whole (**400**/**422**, or **413** past the limits) — the
+  member splits such a batch to find the row that caused it. A refusal may name the row itself
+  with a top-level `"row": id`.
+
+The member reads the other answers as states: **401** stops the drain and asks for attention,
+**403** stops syncing (removed from the fleet), and **429**/**503** wait out `Retry-After`
+(seconds or an HTTP date).
+
+A removed member's token keeps a tombstone on the owner (its SHA-256, kept in
+`<config_dir>/fleet.json` after the token itself is revoked), so every API request presenting it
+answers **403** `{"error": "removed from the fleet"}`; a token the owner never knew, or one that
+left by itself, answers the usual **401**.
+
+Nothing is pushed until the member's operator consents, per membership:
+`GET /api/fleet/sync/preview` counts what would be sent (finished colonies, their logs, bytes in
+all and not yet acknowledged) from the same collection the drain sends, and
+`POST /api/fleet/sync/consent` `{"enabled": true|false}` records the answer on the membership in
+`<config_dir>/fleet.json`. A new join starts with it off; until it is on, `GET /api/fleet/sync`
+reads `status: "consent_required"` and `POST /api/fleet/sync` answers **409**.
+
+### Fleet history on the owner (issue #762)
+
+What members pushed, read back on the owner ([fleet.md](fleet.md#reading-it-on-the-owner)). All
+three routes are owner-only: a scoped token — a member's `fleet` token included — answers **403**.
+
+- `GET /api/fleet/history?member=&repo=&status=&since=&until=&limit=&cursor=` — every member's
+  synced colonies, newest `record.updated_at` first. `member` is a member id, `repo` the record's
+  `owner/name`, `status` its status (`merged`, `pr_opened`, …); `since`/`until` bound the finish
+  time, each RFC 3339 or `YYYY-MM-DD` (`until`'s day is inclusive). Pagination follows
+  `GET /api/sessions`: `limit` 1–100 (default 20), `cursor` the last entry's `key`, `next_cursor`
+  null at the end; a malformed filter or a cursor naming no entry is **400**. The answer:
+  `{colonies: [{key, member_id, member_name, member_removed, id, received_at, record, payloads}],
+  next_cursor, stats: {total, members: [{member_id, name, removed, …}], repos: [{repo, …}]},
+  members: [{id, name, removed}], repos: [..], retention_days}`, where each total is
+  `{colonies, merged, cost_usd}` over every filtered row (`cost_usd` null when no row carries a
+  cost), and `key` is `<member_id>/<row id>`. `member_removed` marks a member the owner removed.
+- `GET /api/fleet/history/{member}/{row_id}` — one entry as above plus
+  `logs: [{name, sha256, bytes, omitted, stored}]`; **404** for an unknown member or row.
+- `GET /api/fleet/history/{member}/{row_id}/logs/{name}` — one stored log, streamed as
+  `text/plain` exactly as the member sent it (no owner-side redaction); **404** when the row names
+  no such log, it was omitted, or the owner does not hold it.
+
+Rows are pruned `COLONIZER_FLEET_INGEST_RETENTION_DAYS` (default 90, `0` = never) after
+`received_at` by the reclaim tick, together with the payloads only they referenced.
+
+### Member health (issue #764)
+
+Each entry of `GET /api/fleet`'s `members` carries one verdict:
+
+```json
+{"id": "mem_…", "name": "worker", "url": "http://10.0.0.2:7878", "joined_at": "…",
+ "health": {"state": "degraded", "code": "no_heartbeat", "reason": "No heartbeat for 12 min", "hint": "the machine may be asleep"}}
+```
+
+`state` is `ok`, `unknown`, `degraded` or `stopped`; `code`, `reason` and `hint` are `null`
+exactly when it is `ok`. `note` is independent of the state: something worth knowing that is not a
+fault — today only `"History sync off"`, when the member's operator has not consented to the
+history push — else `null`. `unknown` means no poll has checked the member yet: it is never reported
+as `ok` on no evidence. `code` is stable; `reason` and `hint` are for showing verbatim. Reading the view never dials a
+member: it evaluates what the owner already holds (`crates/colonizer/src/fleet_health.rs`), and
+every signal that fires is a finding. The worst state wins (`stopped` over `degraded` over `unknown` over `ok`); findings of the same state break ties in
+the order below.
+
+| Order | `code` | Fires when | State | Hint | Wired |
+|---|---|---|---|---|---|
+| 1 | `token_revoked` | the member's fleet token is gone from the registry | stopped | re-pair this machine | yes |
+| 2 | `sync_rejected` | the member's last sync drew a 401 (`unauthorized`) or a 403 (`removed`); reason "Token revoked" | stopped | re-pair this machine | yes |
+| 3 | `runner_down` | the member's queue loop last ticked ≥ 5 min ago; reason "Colony runner not ticking" | degraded | restart colonizer on this machine | yes |
+| 4 | `disk_full` | disk ≥ 90% used (≥ 95% stopped); without a total, < 5 GB free (< 1 GB stopped) | degraded / stopped | clean target/ dirs | yes |
+| 5 | `no_heartbeat` | the member last answered ≥ 5 min before the owner's latest poll (≥ 30 min stopped) | degraded / stopped | the machine may be asleep | yes |
+| 6 | `unreachable` | the owner's latest poll went unanswered | degraded | check that it is awake and on the network | yes |
+| 7 | `sync_backlog` | the member's drains have ended with rows unsent for ≥ 60 min; reason "Sync behind by N rows" | degraded | check its network, then restart colonizer there | yes |
+| 8 | `sync_rate_limited` | the member's drain is backing off after a 429 or 503 | degraded | it backs off by itself; wait a few minutes | yes |
+| 9 | `unwatched` | the member published no URL, so the owner cannot poll it | degraded | re-join with this machine's URL so the owner can poll it | yes |
+| 10 | `not_checked` | the member has a URL but no poll has reached a verdict yet | unknown | open the cockpit or wait for the next poll | yes |
+
+The poll signals come from the owner's `GET /api/hosts` fan-out (the cockpit polls it while open).
+A heartbeat's age is measured at the latest poll, not at the read, so a member does not go stale
+because nobody looked; before the first poll those signals are unmeasured, so the member reads `unknown` (any other
+finding, such as a revoked token, still wins), and a member that never answered counts its age from when it joined. `GET /api/hosts` rows gained
+`disk_total_bytes` (omitted when unknown) for the disk percentage.
+
+The sync and runner signals ride the same poll. A member's reduced `GET /api/status` (the body a
+caller without the API token gets) carries two more keys, both ages, counts and classes only:
+
+```json
+{"runner": {"last_tick_age_s": 3},
+ "fleet_sync": {"state": "error", "backlog_rows": 5, "oldest_unsent_age_s": 5400,
+                "last_error_class": "error", "consent": true}}
+```
+
+- `runner.last_tick_age_s` — seconds since the queue loop last came round (`null` before its first
+  tick). The loop ticks every 5 s and stamps the time before it starts queued colonies, so a tick
+  that wedges leaves the stamp to age.
+- `fleet_sync` — present only on a fleet member, read from its drain state
+  (`<data_dir>/fleet-sync.json`) without collecting or hashing anything. `state` is the drain
+  status of [the history push](#fleet-history-push-issue-762) (`consent_required` while the
+  operator has not said yes). `backlog_rows` is how many rows the last drain left unsent, and
+  `oldest_unsent_age_s` how long every drain since has ended with a backlog — a lower bound on the
+  oldest row's wait, `null` with no backlog. `last_error_class` is `unauthorized` (401),
+  `forbidden` (403), `rate_limited` (429/503, backing off), `error` (anything else) or `null`.
+  `consent` is the operator's answer; with it off, no backlog is claimed.
+
+`GET /api/hosts` rows carry them on as `runner_tick_age_s` and `fleet_sync`, each omitted when the
+peer did not report it. A peer on an older colonizer reports neither, so its sync and runner
+signals stay unmeasured and never fire. An `error` class does not fire on its own; a backlog that
+grows from it does.
 
 ### `GET /api/version`
 
@@ -1483,8 +1694,8 @@ not to print, log, commit or persist them. The harness log records which names a
   on a phone) and these views: overview (the nest), launch, a colony view (status, branch, cost, host
   disk, the actions Create PR, Stop, Resume, Clean up; chat beside a terminal), Code, Chat, Loops,
   Secrets, Host, Inbox and History, plus memory and settings. The Settings dialog has Setup,
-  Connections, Model providers, Runtime, Live map, Remote access, Updates, Usage data, Notifications
-  and Desktop, and the module settings.
+  Connections, Model providers, Runtime, Live map, Remote access, Add your phone, Updates, Usage
+  data, Notifications and Desktop, and the module settings.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.
@@ -1497,6 +1708,16 @@ not to print, log, commit or persist them. The harness log records which names a
   with a text field; a single Submit button that sends `answer`. Once `question_answered` arrives the
   card collapses to a summary of the chosen answers.
 - The composer sends `user_message`; a Stop button sends `interrupt` while the agent is working.
+- Offline: with a colony's events socket down, an answer or a `user_message` the composer cannot
+  send is queued in the service worker (`web/public/sw-outbox.js`, IndexedDB) and sent one at a
+  time, in order, through the two HTTP twins above — Background Sync (tag `colonizer-outbox`) where
+  the browser offers it, otherwise on the next open, `online` or return to the tab. A queued answer
+  carries `questions`, the question content the operator read: the answer route refuses it (**409**)
+  unless the open question still has that id and that content, and the first delivery closes the
+  question, so a replay is delivered at most once and never to a changed question. A queued message
+  carries its item id as the dedupe `id`. A final refusal — a 4xx other than an auth 401/403 — drops
+  the item with a note; a network error, a 5xx or an auth 401/403 keeps it; an item queued over a day
+  ago is dropped unsent.
 - Light and dark themes via `prefers-color-scheme`; usable at 400 px width.
 
 ---
@@ -1588,8 +1809,10 @@ The decision is recorded three ways:
 - an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
   body, no checklist items, 1 path named`), naming the model when it differs from `model`, the
   cost gate when it kept the colony on `model`, and the rule's tier when an override disagrees;
-- a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
-  agent, misroute, signals, jev, cost, sensitivity}`, where `source` is `off`/`rule`/`override`,
+- a `model_routing` object on the session record — `{point, jev_mode, jev_agrees, floor, tier,
+  rule, source, score, reason, model, agent, misroute, signals, jev, cost, sensitivity}`, where
+  `point` is always `"routing.tier"`, the first four are §6.1c's, `source` is
+  `off`/`rule`/`override`/`jev`,
   `model` is set only when the tier changed it, `agent` names the agent module — the harness — the
   decision was made for, the same name the spend journal's colony rows carry (§6.8), so a routing
   decision can be joined with what the colony went on to spend, `misroute` is true when an operator
@@ -1620,14 +1843,15 @@ added after boot has none, and its requests go to Anthropic like any unrouted mo
 ### 6.1c Jev second opinion (shadow mode)
 
 An optional, default-off external classifier ("Jev", `crates/colonizer/src/jev.rs`) can be consulted
-for a second opinion on the tier §6.1b's rule already picked, in shadow mode only: the opinion is
+for a second opinion on the tier §6.1b's rule already picked. In shadow mode the opinion is
 attached to `Signals`/`Decision` as `jev: Option<JevOpinion>` (tier, model, confidence, an estimated
-cost) and recorded alongside the rule's own decision, but `decide` never reads it — it stays exactly
-the synchronous, pure function §6.1b describes, with no model and no network call inside it. The
+cost) and recorded alongside the rule's own decision without changing the tier; act mode (below)
+lets it pick the tier. Either way `decide` stays the synchronous, pure function §6.1b describes,
+with no model and no network call inside it. The
 network call happens once, in the async boot path in `boot.rs`, before `decide` runs.
 
-Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` (a `claude-code`
-module setting, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
+Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` or
+`jev_routing_act` (`claude-code` module settings, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
 itself, so the key never enters a colony. A missing key, the setting left off, or any
 failure of the call all resolve to `jev: None`; none of them is an error, and none of them blocks or
 meaningfully slows boot. The whole exchange is bounded by a roughly 1.8-second hard timeout, with a
@@ -1642,13 +1866,30 @@ credentials: the issue title with credential-looking tokens redacted, its labels
 "latest" alias, since a second opinion's calibration is specific to one model version and is not
 assumed to carry over to the next. Each call's `estimated_cost_usd` is a rough token estimate against
 an unverified per-token price, logged so the cost of asking stays visible — it is not metered billing,
-and it is not folded into a colony's own routed cost, since this opinion never chooses a model.
+and it is not folded into a colony's own routed cost, since the opinion is a classifier call, not
+the model the colony runs on.
 
-This ships shadow mode only: zero applied decisions. Promoting Jev's tier to an actual input to
-`decide` is a separate, later change, and needs measured evidence first — comparing `routing.jsonl`
-records where `jev.tier` disagreed with `rule` against those sessions' eventual `actual_cost_usd` and
-misroute outcomes over a meaningful sample, to show the second opinion would have beaten the heuristic
-before anything is asked to act on it.
+**Act mode** (issue #583, experimental, default off). `jev_routing_act` (a `claude-code` boolean,
+default `false`) lets the opinion pick the tier: it asks Jev exactly as shadow mode does, with or
+without `jev_shadow_mode`, and when the opinion's `confidence` is at least
+`jev_routing_act_confidence` (a number in 0–1, default `0.8`) `decide` uses Jev's tier instead of
+the rule's, with `source: "jev"`. An opinion that lands on the rule's own tier leaves `source:
+"rule"`. Below the threshold, with no opinion, or in shadow mode, the rule's tier stands. An
+operator's `model_tier` still wins, and routing off still runs on `model`. The #470 cost gate
+applies to a low tier Jev picked just as it does to the rule's. Jev's tier is never below the
+task's **floor**:
+
+- a task is sensitive when the minimum provider mark its class demands of this org's gateway is
+  above `any` (`sensitivity::required_mark` — `vetted` and `restricted` by default, or any class an
+  org's overrides raise). A sensitive task's floor is the rule's own tier: Jev may raise it, never
+  lower it, since the tier picks the model and so the provider the colony starts on;
+- an unknown sandbox preset floors at `medium`, the same clamp the rule applies to itself;
+- both: the higher of the two. Neither: no floor.
+
+Every `routing.jsonl` decision row and `model_routing` record carries `point: "routing.tier"`,
+`jev_mode` (`off`/`shadow`/`act`), `jev_agrees` (whether Jev's tier equals the rule's, `null` with
+no opinion) and `floor` (a tier, or `null`), so Jev-acted decisions can be compared with rule ones
+against each session's `actual_cost_usd` and misroute outcomes.
 
 This second opinion and Jev compaction (Token savings) are separate features sharing only the
 `JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
@@ -1664,22 +1905,40 @@ real deployment. It only ever degrades to "no shadow opinion," every time.
 Approved notes are mounted read-only in every colony:
 
 ```
-/colonizer/memory/global/  MEMORY.md  notes/<id>.md
-/colonizer/memory/org/     MEMORY.md  notes/<id>.md     (the colony's GitHub org)
-/colonizer/memory/repo/    MEMORY.md  notes/<id>.md     (the colony's repository)
+/colonizer/memory/global/  MEMORY.md  notes.json  notes/<id>.md
+/colonizer/memory/org/     MEMORY.md  notes.json  notes/<id>.md     (the colony's GitHub org)
+/colonizer/memory/repo/    MEMORY.md  notes.json  notes/<id>.md     (the colony's repository)
 ```
 
-`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`). Every note a colony wrote is labelled
-before its title: `(from a colony, reviewed)` once a person approved it, `(from a colony, not reviewed)`
-when stored with review off, and `(from a colony)` for notes from before that was recorded. Note files
-written from then on carry the matching `> Written by a colony…` line under the heading. The index header
-says notes are background to verify, not instructions. `COLONIZER_MEMORY_DIR=/colonizer/memory`
-tells the runner memory is enabled. The runner exposes two tools to the agent: `memory_search`
-(search the mounted notes) and `memory_propose` (scope `repo` | `org` | `global`, `title`, `content`).
-Proposing emits a runner event; nothing is written inside the colony:
+**Memory is pulled, never injected (issue #766).** No note text goes into a colony's system prompt or
+its first message. The prompt carries one fixed line saying the memory tools exist, and the agent pulls
+what it needs through MCP. `COLONIZER_MEMORY_DIR=/colonizer/memory` tells the runner memory is enabled,
+and the runner serves four tools:
+
+| Tool | Input | Answer |
+|---|---|---|
+| `memory_briefing` | `topic?` (words that must all appear) | A short, sourced summary: one entry per line as `[scope/kind] Title: summary`, then `source:` (colony, repo, commit, and whether a person reviewed it; `the maintainer` for your own notes; `promoted from …` for fleet-wide notes) and the entry's id. Repo entries first, newest first. At most 12 entries |
+| `memory_changes` | `since?` (ISO 8601) | What was added, and what was revoked or removed, since the colony last called either tool (or since `since`). A revoked entry is named so the agent stops relying on it |
+| `memory_search` | `query` | Snippets from the note files, every term matching |
+| `memory_propose` | `scope`, `title`, `content`, `kind?`, `confidence?`, `tags?` | Emits a `memory_proposal` event; nothing is written inside the colony |
+
+Both new tools read `notes.json`, the structured store the mothership rewrites the moment a note is
+approved or revoked, and wrap their answer in a `<shared-memory>` frame that names the content data to
+verify, not instructions. A note's title and summary are flattened to one line, so a note cannot start
+a line of the answer of its own.
+
+**Kinds.** Every entry is one of `plan`, `decision`, `file_change` (a note about a change to specific
+files), `failure`, `architecture` (an architecture note) or `convention`. Notes stored before kinds
+existed, and proposals that name none, are `convention`; an unknown kind is refused.
+
+`MEMORY.md` is an index (`- [Title](notes/<id>.md) — first line`) kept for people and older runners. Every
+note a colony wrote is labelled before its title: `(from a colony, reviewed)` once a person approved it,
+`(from a colony, not reviewed)` when stored with review off, and `(from a colony)` for notes from before
+that was recorded. Note files written from then on carry the matching `> Written by a colony…` line under
+the heading. Proposing emits a runner event:
 
 ```jsonc
-{"type":"memory_proposal","origin":"orchestrator","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"]}
+{"type":"memory_proposal","origin":"orchestrator","scope":"repo","title":"Run tests with --locked","content":"markdown…","tags":["tests"],"kind":"convention","confidence":0.9}
 ```
 
 `origin` names who asked: `orchestrator`, a `subagent:<name>` or a `background:<name>`. Only the
@@ -1693,7 +1952,24 @@ the field existed — is read as the orchestrator. The matrix and where it is en
 The mothership records it as a pending proposal and broadcasts `{"type":"memory_proposed","proposal":{…}}`
 (no `seq`) on the colony's event stream. Approved proposals become notes and appear in every colony's
 mount immediately. With `require_review` off, a `repo` note is stored at once with `source.reviewed: false`
-(`status: "approved"` in the broadcast); `org` and `global` notes are always queued.
+(`status: "approved"` in the broadcast); `org` notes are always queued. A repo note stays in its own
+repository's scope: no other repository's colony mounts it.
+
+**Promotion to fleet-wide memory.** A colony cannot put a note straight into `global` memory. A `global`
+proposal is recorded as a sighting of a fleet-wide *candidate* (same kind, same title words), one per
+repository, in `candidates.json` on the mothership. A candidate is queued for review as a global note only
+once colonies in **at least two distinct repositories** proposed it with **`confidence` of at least 0.8**
+(absent counts as 0), and only once. It is always reviewed, whatever `require_review` says, because it
+reaches every colony (issue #376). The queued note's `source.promoted_from` lists every qualifying
+sighting's colony, repository and commit.
+
+**Provenance and revocation.** Every note a colony proposed keeps `source.session_id` (the colony),
+`source.repo` and `source.commit`, the commit its worktree was at, read on the mothership rather than
+taken from the agent. `POST /api/memory/notes/{id}/revoke?scope=&key=` with an optional `{reason}`
+removes a note from `notes.json`, the index and its note file, so every later `memory_briefing` goes
+without it and `memory_changes` reports it revoked. What it was and where it came from are kept in
+`revoked.json` beside the store, outside every colony's mount. With mem0 the note is deleted upstream and
+the next boot goes without it.
 
 **Where approved notes live** is the memory module's provider. `files` keeps them on the mothership and
 mounts each scope directory. `mem0` keeps them in a [mem0](https://mem0.ai) project through its Platform
@@ -1823,6 +2099,8 @@ pull requests small; they will adopt the red-team runs of
 | `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
+| `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
+| `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
@@ -1951,6 +2229,8 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `POST /api/memory/proposals/{id}/reject` | Discard |
 | `POST /api/memory/notes` | `{scope, key, title, content}`: a note written by you |
 | `DELETE /api/memory/notes/{id}?scope=&key=` | Remove a note. With mem0, only one Colonizer wrote into that scope |
+| `POST /api/memory/notes/{id}/revoke?scope=&key=` | Optional `{reason}`. Revoke a note: later briefings go without it, and `revoked.json` keeps its provenance (issue #766) |
+| `GET /api/memory/candidates` | Fleet-wide candidates and their sightings (colony, repo, commit, confidence), including those not yet promoted |
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `GET /api/deja` · `GET /api/deja/search?org=&q=` | Transcript recall (deja, off by default, [colonies.md](colonies.md#recall-from-earlier-colonies-deja)): whether the deja binary is installed and, per org, whether recall is on, the index size and the last index time; the search runs the recall a colony of that org would get. Owner only. A colony reaches its own org's index through `POST /recall` on the colony gateway, with its colony token |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
@@ -1974,16 +2254,21 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2, "detail": "…"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
 `stall_minutes` is nudged with a `user_message` whose id starts with `watchdog-` (UIs render it as a
 notice, not a user bubble), at most `max_nudges` times per stall; then `attention.reason` becomes
-`nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
+`nudges_exhausted` — the flag is written with the log line that says the colony needs you, and
+gateway traffic alone (a request in flight) does not clear it again; only agent progress does. A
+colony blocked on an exhausted provider is flagged `provider_quota_exhausted` instead of being nudged
+(§6.5, Provider out of quota cards). A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
-`autopilot_held`. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
+`autopilot_held`. A flag carries a `detail` when the mothership can say why in one line: a claim
+held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
+(Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
 provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
 watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
@@ -2072,16 +2357,25 @@ change this: a draft PR is still an external write, refused the same way as a re
 **Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
 on its own. It snapshots the colony's work — commits and uncommitted files — without touching the
 worktree, reads the git state directly (commits ahead of base, changed files, whether the paths the PR
-description names are on the branch), and re-runs the repository's test command in a fresh one-shot
-microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
-codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
-`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — an empty
-branch, no test command known, the runner unavailable — which is never treated as confirmed.
-The fresh run's exit number is the one the guest itself writes to a report file mounted for exactly that
-(`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
-reported has not verified anything. Autopilot publishes on
-`confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
-`attention.reason` `autopilot_held` and the contradictions in the event below.
+description names are on the branch), and re-runs the checks the diff calls for in fresh one-shot
+microVMs over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
+codes. The verdict is `confirmed` (every fresh run is green and the git state matches the description),
+`contradicted` (a check or the git state disagrees, the contradictions stated plainly), `inconclusive`
+([#672]: a check fails on the colony's work but fails on the merge-base too, so it is not this
+colony's doing) or `unverifiable` — an empty branch, no check known, the runner unavailable — which is
+never treated as confirmed. Each run's exit number is the one the guest itself writes to a report file
+mounted for exactly that (`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it,
+so a runner that never reported has not verified anything. A check that fails is re-run once on the
+merge-base commit, in a fresh checkout of the same kind: failing there too makes the verdict
+`inconclusive` — autopilot still publishes, and the pull request body notes it — while only a failure
+new against the base is `contradicted`; a base that cannot be run for infra reasons leaves the head
+failure a contradiction. Base results are cached in memory per repository, image, base commit,
+directory and command. The last ~200 lines of a failing check's output are written to the session's
+`out/verify-<check>.log` (`out/verify-cargo-test.log`, `out/verify-web-npm-test.log`), and failing
+test names parsed from cargo, vitest or jest output — up to five — are quoted in the contradiction,
+which is the held colony's `attention.detail`. Autopilot publishes on `confirmed`, `inconclusive` and
+on `unverifiable` exactly as before; on `contradicted` the colony is held with `attention.reason`
+`autopilot_held` and the contradictions in the event below.
 
 The description's paths are the backticked path-like tokens in `pr.md`; a path counts as in the
 repository when the branch or the diff carries it or its directory is on the branch (an example URL
@@ -2094,23 +2388,41 @@ or future work, or were renamed on the way. Advisories are listed once each in `
 and added to the published pull request as a "Verification notes" block; they never change the
 verdict or hold autopilot.
 
-The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
-colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
-a command), then — for `auto` — the repository's own declaration read from the **base** branch:
-package.json `scripts.test`, run by the repository's own package manager — the `packageManager`
-field through corepack (`corepack pnpm …`, `corepack yarn …`; `bun` and `npm` directly), else the
-root lockfile: `bun.lock`/`bun.lockb` → `bun install --frozen-lockfile && bun run test`,
-`pnpm-lock.yaml` → `pnpm install --frozen-lockfile && pnpm test`, `yarn.lock` → `yarn install
---immutable && yarn test` (Yarn 2+'s lockfile) or `--frozen-lockfile` (Yarn 1's),
-`package-lock.json`/`npm-shrinkwrap.json` → `npm ci && npm test`, and no lockfile →
-`npm install && npm test`; a bun repository without the script runs `bun test` when the base branch
-has test files for it — then Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`.
-The fresh-checkout VM checks for the tool the command needs before running it: a tool the colony
-image does not carry (the default node image has no bun or pnpm) makes the claim `unverifiable`,
-named in the summary, never `contradicted`. A branch that rewrote
-the entry its resolved command comes from (`scripts.test`, the Makefile) would be grading its own
-homework: the claim comes back `unverifiable` with that said plainly, and nothing runs. `verify:
-none` means
+The checks are never guessed from chat text. An explicit `verify` on the colony (`NewSession.verify`)
+or the `publish` module's `verify` setting — `auto` by default, `none`, or a command — replaces the
+whole selection with that one command. For `auto` ([#672]) the checks are chosen from what the diff
+touches, so a colony is never held for code it did not go near, and each check runs from the checkout
+root or, when it belongs to a subdirectory's own package, from that subdirectory:
+
+- **Rust:** any `*.rs` file, `Cargo.toml` or `Cargo.lock` in the diff → `cargo test`. A diff with no
+  Rust in it skips `cargo test` entirely.
+- **Every other changed file:** the test script of the nearest ancestor directory with a
+  `package.json`, read from the **base** branch and run by that package's own package manager — the
+  `packageManager` field through corepack (`corepack pnpm …`, `corepack yarn …`; `bun` and `npm`
+  directly), else the package's lockfile: `bun.lock`/`bun.lockb` → `bun install --frozen-lockfile &&
+  bun run test`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile && pnpm test`, `yarn.lock` →
+  `yarn install --immutable && yarn test` (Yarn 2+'s lockfile) or `--frozen-lockfile` (Yarn 1's),
+  `package-lock.json`/`npm-shrinkwrap.json` → `npm ci && npm test`, and no lockfile →
+  `npm install && npm test`; a bun package without the script runs `bun test` when there are test
+  files for it. So `web/**` runs web's own test script (vitest), not the root's, and a module's
+  lockfile runs that module's tests when it declares a script.
+- **Covered by neither:** the root Makefile's `test:` target → `make test`, and nothing at all when
+  the repository declares none.
+
+The checks run sequentially, one microVM each, in the diff's order unless the `publish` module's
+`verify_focus` setting says otherwise ([#584](https://github.com/Colonizer-dev/harness/issues/584)): `act` runs first the check owning the most changed
+files and, when it contradicts the claim, skips the rest; `shadow` (the default) keeps the order and
+only measures; `off` does neither. Shadow and act append one row per verification that ran a check
+to the data dir's `jev_focus.jsonl` — `{kind: "focus", ts, session, mode, candidates: [{label,
+owned}], chosen, would_catch, verdict, actual_first_failure_ms, focused_first_failure_ms, total_ms,
+checks_run}`, `chosen` being `full` when there is nothing to focus on (fewer than two checks) —
+and `confirmed` still needs every check run green. Each fresh-checkout VM checks for the tool the command
+needs before running it: a tool the colony image does not carry (the default node image has no bun or
+pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
+rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own
+homework: that check comes back `unverifiable` with that said plainly, and nothing runs. A check
+whose directory the branch deleted is skipped rather than run to a meaningless exit 1 — if no check
+is left, the claim is `unverifiable` for want of one. `verify: none` means
 unverifiable by declaration. Verification also runs with autopilot off and while external writes are
 blocked; it then records the verdict without publishing. The verdict is appended to the colony's
 `events.jsonl` as a host event
@@ -2120,7 +2432,7 @@ same object minus `type`/`seq`/`ts`):
 
 ```jsonc
 {"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
- "contradictions":[],"advisories":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "contradictions":[],"advisories":[],"inconclusive":[],"command":"npm test","command_source":"package.json","exit_code":0,
  "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
 ```
 
@@ -2129,8 +2441,10 @@ same object minus `type`/`seq`/`ts`):
 `packageManager` (the package.json field), the lockfile that picked the package manager
 (`bun.lock`, `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`,
 `npm-shrinkwrap.json`), `package.json` (no lockfile, so npm), `Cargo.toml`, `Makefile`; null when no
-command ran), `exit_code`/`tests_ms` are the
-fresh run's, `files_changed` lists at most 50, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
+command ran; with several checks, `command` and `command_source` are the first check's),
+`inconclusive` lists the checks that failed on the merge-base as well, one reviewer-ready clause each
+([#672]; absent on events recorded before it existed), `exit_code` is the first failing check's (0 when
+every check reported green) and `tests_ms` the checks' summed run time, `files_changed` lists at most 50, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
 
 **No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
 in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
@@ -2180,9 +2494,13 @@ route gets one extra allow rule for that port on top of its egress policy
 ```json
 [{"provider": "strix", "prefix": "strix/",
   "base_url": "http://host.microsandbox.internal:41750/providers/strix", "auth": "none",
+  "wire": "openai",
   "headers": {"x-colonizer-colony": "<per-colony token>"},
   "timeout_secs": 900, "context_tokens": 131072, "fallback_model": "claude-sonnet-5"}]
 ```
+
+`wire` is the provider's wire (`anthropic`, the default, or `openai`): a runner that speaks the OpenAI
+wire itself reads it to know which routes serve its own paths untranslated (issue #629).
 
 **Runner.**
 
@@ -2201,12 +2519,16 @@ route gets one extra allow rule for that port on top of its egress policy
   Without `fallback_model`, return the gateway's response unchanged.
 
 **Gateway endpoint** `POST /providers/{id}/v1/messages`, plus `POST
-/providers/{id}/v1/messages/count_tokens` on the `wire: anthropic` (the route is registered for any
+/providers/{id}/v1/messages/count_tokens` on the `wire: anthropic`, and `POST /providers/{id}/v1/responses`
+and `POST /providers/{id}/v1/chat/completions` on the `wire: openai` (below; the route is registered for any
 method and path so that a refusal is audited like real traffic; the handler answers `405` to a wrong
 method and `404` to any other path, and forwards a query string only if it stays within the path's
 character set plus `=` and `&`):
 
-- Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`.
+- Requires `x-colonizer-colony` to match a live colony's token; otherwise `401`. The same token is also
+  accepted as `Authorization: Bearer <token>` — what a runner speaking the OpenAI wire sends — and the
+  gateway's own header keeps precedence when a request carries both. Neither credential is ever forwarded
+  to a provider.
 - What a token admits is recorded at boot, before the token is written: the providers and the
   `<provider>/<model>` pairs the colony's model settings name. A colony with no recorded set reaches
   nothing, and `403` `permission_error` is answered, before anything is sent upstream, when the
@@ -2246,13 +2568,23 @@ character set plus `=` and `&`):
 - Every request that passes colony auth is one JSON line in the colony's `<session dir>/gateway.jsonl`,
   with its outcome and, on failure, the failure code `health.last_failure` reports.
 
-**`openai` wire.** A provider with `wire: "openai"` speaks OpenAI's Chat Completions API, and the gateway
-translates in both directions (`crates/colonizer/src/openai.rs`). The runner's fallback resends its own,
-untranslated request, so it is unaffected.
+**`openai` wire.** A provider with `wire: "openai"` speaks OpenAI's Chat Completions API. `POST /v1/messages`
+is translated in both directions (`crates/colonizer/src/openai.rs`), and two of OpenAI's own routes pass
+through untranslated (issue #629). The runner's fallback resends its own, untranslated request, so it is
+unaffected.
 
-- Only `POST /v1/messages` is translated, to `{base_url}/v1/chat/completions`, sent with `content-type` and
-  the provider credential only. Any other path, including `/v1/messages/count_tokens`, answers `404`, and
-  the runner estimates the token count itself.
+- `POST /v1/responses` and `POST /v1/chat/completions` are forwarded to `{base_url}` + the same path (query
+  kept; a `base_url` that already ends in `/v1` does not grow a second one, so the presets that store it
+  that way — xai-grok's `https://api.x.ai/v1` — join normally), sent with `content-type` and the provider
+  credential only. The connection policy's `model_map`
+  renames the model exactly as on `/v1/messages`, and a streaming chat completion gains
+  `stream_options.include_usage` unless the colony asked for usage itself — accounting needs the final
+  chunk. Everything else forwards as sent; a body neither rewrite touches goes out byte-for-byte. Any
+  other path on this wire — including `/v1/messages/count_tokens`, which has no OpenAI equivalent — answers
+  `404` (the runner then estimates the token count itself), and a non-POST to a served path `405`, as on
+  every wire. The passthrough is held to the same token, provider, model, budget and queue checks as
+  `/v1/messages`: the body's top-level `model` is what the colony's recorded `<provider>/<model>` pairs
+  are matched against, and an `anthropic`-wire provider does not serve these two paths at all.
 - The request is rebuilt from an allowlist. `system`, and system messages inside `messages`, become
   `system` messages; text, images (base64 or URL) and PDF documents become content parts; `tool_use` becomes
   `tool_calls`, and `tool_result` becomes `tool` messages directly after them (images in a tool result move
@@ -2289,7 +2621,11 @@ counted differently but on one scale, Anthropic's token names:
   carries the running output total); a non-streaming JSON body is buffered only to count, up to 4 MiB,
   past which the response forwards unpriced. Anything the tap cannot parse counts as zero, so an
   estimate can only undercount.
-- `wire: openai`: the usage the translation already extracted is reused; the body is never read twice.
+- `wire: openai`: the usage the translation already extracted is reused; the body is never read twice. A
+  passthrough response is tapped like the anthropic wire instead, in the route's own spelling: Responses'
+  `response.completed` event — or the `usage` of a finished non-streaming body — and a chat completion's
+  final chunk (or non-streaming `usage`), with cached input coming back out of the input total either way,
+  so both wires account on Anthropic's scale.
 
 `pricing` is five rates in dollars per million tokens: `input_per_mtok`, `output_per_mtok`,
 `cache_read_per_mtok`, `cache_write_per_mtok` and `thinking_per_mtok`. A save checks that the first
@@ -2304,7 +2640,10 @@ are estimates.
 **Provider fields** (all optional): `timeout_secs` (30-3600, default 600), `max_concurrent` (1-64, absent =
 unlimited), `queue_timeout_secs` (1-3600, default `timeout_secs`), `context_tokens` (1024-2000000),
 `fallback_model` (a Claude model; the aliases `opus`, `sonnet`, `haiku` and `fable` are resolved to model IDs in routes,
-because a fallback request goes to the API as is). `quota` is where to read what is left in a prepaid token
+because a fallback request goes to the API as is — or, for quota exhaustion only, `<provider>/<model>` on another
+configured provider that lists the model and speaks the same wire, which the gateway retries itself; see Quota
+exhaustion below. A cross-wire, unknown-provider, own-provider or unlisted fallback is a `400` on save, and only a
+Claude fallback reaches the colony's route, so only it covers an unreachable, timed-out or full connection). `quota` is where to read what is left in a prepaid token
 plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
 RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
@@ -2323,7 +2662,7 @@ anthropic-wire provider must be scheme and host only, with no `/v1` suffix: the 
 request's own path itself (`/v1/messages`, and `/v1/models` for the health probe), so a base already
 ending in `/v1` doubles it and 404s silently until the first live call. `PUT /api/providers/{id}` now
 rejects that shape at save time for `wire: anthropic` (an `openai`-wire base_url ending in `/v1`, like
-`xai-grok`'s, is unaffected — the translator appends `/chat/completions` itself). Meta enforces
+`xai-grok`'s, is legitimate — the gateway's join there skips the guest path's repeated `/v1`). Meta enforces
 `max_tokens >= 16`, answering `400` `invalid_request_error` below it, so a colony or provider default for
 this preset must respect that floor. Meta is also a heavy reasoner: thinking tokens are spent from the
 output budget before any text, so `max_tokens` should be set generously here, and its
@@ -2410,9 +2749,16 @@ restart keeps it; a record whose reset has passed or whose TTL has run out is dr
 the reset the message named — or, when the message names none, a 15-minute TTL after which the record
 lapses and the queue re-probes — and the answer carries `x-colonizer-quota-exhausted` (the reset
 words, or `exhausted`). An upstream 2xx clears the record at once. When the
-provider has a `fallback_model` the answer also carries `x-colonizer-fallback:
-provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504 —
-failover happens at request level, so an operator opts a role out by unsetting that role's
+provider has a Claude `fallback_model` the answer also carries `x-colonizer-fallback:
+provider_quota_exhausted`, and the colony router retries on Claude exactly as for 502/503/504. When
+its `fallback_model` is `<provider>/<model>` ([#767]) the gateway retries the request itself, once:
+the same body with `model` set to the fallback's model, to that provider, which must speak the same
+wire (anthropic to anthropic, openai to openai — the gateway has no path that re-shapes a response for
+the other wire mid-request). The retry is the operator's hop, so the colony's recorded
+`allowed_providers`/`allowed_models` do not refuse it; sensitivity, key and budget checks apply as
+to any request, and it is audited as its own request to the fallback provider. The colony gets the
+fallback's answer; a fallback provider that is itself exhausted, missing or on another wire is not
+tried, and the original answer (without `x-colonizer-fallback`) stands. Failover happens at request level, so an operator opts a role out by unsetting that role's
 provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
 `GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
 provider, and there a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
@@ -2427,6 +2773,78 @@ resumes parked colonies whose provider recovered — reset passed, or the provid
 ones whose park discarded the microVM and routing a kept-VM park through the resume endpoint, which
 resumes it warm when it can and falls back to cold otherwise. Colonies whose provider is still
 exhausted stay parked.
+
+**Provider out of quota cards** ([#767]). The maintainer answers an exhausted provider on one
+dedicated card per provider, not on a free-form question from an agent. The gateway ties colonies to
+the exhaustion: a colony whose request came back quota-exhausted with no `fallback_model` retry on
+offer is *blocked* on that provider until one of its own requests succeeds (in memory; the provider's
+record above is what survives a restart). A card lists every colony in play (live, queued or parked,
+not cleaned up) that is blocked on the provider, or parked with `attention.reason`
+`provider_quota_exhausted` naming it (in `attention.provider`, or in the park's `error`). Only a
+provider with an active record and at least one such colony gets a card; the Claude account's own cap
+keeps its banner (`quota.kind: "account"`).
+
+`GET /api/attention` answers `{"quota_cards": [card]}`, and `GET /api/status` carries the same list as
+`quota_cards`, so the cockpit needs no second poll:
+
+```json
+{"provider": "bailian", "provider_name": "Bailian", "models": ["qwen3.8-max"],
+ "title": "bailian · qwen3.8-max is out of quota", "reset_at": "Oct 1, 16:00 UTC", "reset_unix": 1790870400,
+ "colonies": [{"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "issue_title": "…",
+               "status": "running", "hits": 3, "waiting": false, "resume_unix": null}],
+ "orgs": ["acme"], "waiting": 0, "resume_unix": null, "fallback_model": null, "wire": "anthropic",
+ "alternatives": [{"id": "sonnet", "label": "Claude Sonnet (latest)", "provider": "anthropic", "wire": null,
+                   "failure_pct": 0.0, "rated": false, "degraded": false, "healthy": true}]}
+```
+
+`models` are the provider's models the colonies run, most used first; `hits` is a colony's quota
+answers in a row; `waiting`/`resume_unix` count the colonies parked for the reset and the earliest
+scheduled resume. `alternatives` is every model `/api/models` offers that is not on an exhausted
+provider, with its provider's usage health (Claude's models read degraded only while the account's
+own cap holds), healthy ones first.
+
+`POST /api/providers/{id}/quota-action` answers the card with
+`{action: "switch"|"wait"|"stop", model?, scope?: "colonies"|"org"|"all", colonies?: [id], org?, remember?}`
+and replies `{action, provider, colonies: [id], failed: [{id, ok: false, error}], changes: [change]}`. `colonies` limits
+the action to some of the card's colonies (an id not on the card is a `400`); `org` limits it to one
+org.
+
+- `switch` needs `model`, one of the card's `alternatives` (a model on the exhausted provider, or one
+  not on offer, is a `400`). Each colony's role on the provider moves: `model_override` when its
+  orchestrator model is there (or no role visibly is — a tier or background model), and
+  `subagent_model_override` when its subagent model is. The colony is then restarted — a live or
+  parked one stopped and resumed cold, a stopped one resumed, a queued one simply boots with it — so
+  boot re-derives `allowed_providers`/`allowed_models` from the new settings. `scope: "org"` also
+  moves the colonies' orgs' `model`, `subagent_model` and `background_model` overrides that route to
+  the provider, so the orgs' next colonies start on the new model. `remember: true` saves `model` as
+  the provider's `fallback_model`: a Claude model, or a model on another provider of the same wire
+  (the rules of Provider fields above; `400` otherwise, before anything changes). `scope: "all"`
+  ([#767]) moves every model role on the provider install-wide: each of the agent module's
+  `model`, `subagent_model`, `background_model`, `summary_model`, `model_low` and `model_high`
+  settings that routes to the provider (saved through `PUT /api/modules/agent`'s own handler and
+  validation), every org's `model`, `subagent_model` and `background_model` override that does (every
+  org, not only the card's), and the card's colonies as above. Every role is checked before anything
+  changes — the module's schema, a `model_map` that must list the model, and `summary_model` on a
+  Claude model needing an Anthropic provider or API key (summaries never use the login) — so a model
+  one role cannot take is a `400` with nothing moved. Any other `scope` is a `400`.
+
+  A switch's reply also carries `changes: [{scope, target, key, was, now}]`, one per setting it
+  moved, with the value it replaced (`was`, null when unset): `scope` is `install` (target: the agent
+  module), `org` (target: the org), `colony` (target: the colony id; `was` is the model the role
+  resolved to) or `provider` (target: the provider; key `fallback_model`, from `remember`). The
+  mothership logs the same list. There is no undo; the cockpit shows each as "was X → now Y".
+- `wait` parks every live colony (`status` `parked`, the worktree kept — suspended, not failed) and
+  re-stamps an already-parked one: `attention` gains `provider`, `action: "wait"`, `reset_at` and
+  `resume_unix` (the provider's `reset_unix`). The queue's 5 s resume pass requeues it once
+  `resume_unix` has passed or the provider recovered, whichever is first; a reset-less record resumes
+  it when the record's TTL lapses. A queued colony is reported under `failed`: the queue already holds it.
+- `stop` stops every colony as `POST /api/sessions/{id}/stop` does; a pre-#213 `stopped` park loses its
+  quota flag, so it is not resumed later.
+
+A blocked colony that is live — `starting` included, when its agent never got a turn out — is
+flagged by the watchdog's minute tick with `attention.reason` `provider_quota_exhausted`,
+`attention.provider` and the reset, and a log line saying it needs the maintainer; the watchdog does
+not nudge it, since another request cannot be answered until the plan resets ([#760]).
 
 **Health.** `GET /api/providers/{id}/health` probes `GET {base_url}/v1/models` with a 5 s timeout:
 
@@ -2536,9 +2954,15 @@ path, so the parallel limit applies: a hunter may sit `queued` until a slot free
  "hunters": [{"session_id": "ab12cd34", "title": "Red-team hunter 1/3: …", "module": "general",
               "version": null, "focus": "error handling and edge cases"}],
  "counts": {"found": 0, "validated": 0, "rejected": 0, "filed": 0, "merged": null},
- "synthesis": null,
+ "synthesis": null, "preset": "general", "prescan": null,
  "created_at": "…", "started_at": null, "ended_at": null, "gate_reason": null}
 ```
+
+`preset` is `general` or `security`. A security run records its pre-scan in `prescan` before the
+first hunter launches: `{"ran_at", "commit", "secret_scanner": "gitleaks|builtin|", "notes": [..],
+"leads": [{"id": "P1", "check", "focus": 0-7, "path", "line", "commit", "message"}], "checklist":
+[{"id", "title", "status": "needs_review|not_verifiable", "evidence"}]}` — a checklist item is never
+passed ([red-team.md](red-team.md#the-pre-scan)).
 
 The gate. A run may only *launch* while no colony is live (a ``SessionStatus::is_live()`` state
 anywhere, whatever the org). `POST` with `arm` unset/`false` ("start now") launches its hunters
@@ -2574,7 +2998,8 @@ share of the brief) and cites the host paths. The report is
 `sessions/<synthesis id>/out/redteam-report.jsonl`, JSON lines, one object per distinct defect,
 most severe first: `{"defect", "severity": "critical|high|medium|low", "reproduction":
 "reproduced|unconfirmed", "steps", "files": [..], "hunters": [<hunter session ids>], "merged_from":
-n, "validation": "validated|rejected|unvalidated"}` — a defect several hunters reported is one
+n, "validation": "validated|rejected|unvalidated"}`, and on a security run also `"proof"` and
+`"prescan_leads": ["P3"]` (the pre-scan leads the defect confirmed) — a defect several hunters reported is one
 line naming all of them, and `validation` carries the ledger verdicts (§6.6): `validated` when any
 merged finding was validated, `rejected` when all were, else `unvalidated`. `synthesis` tracks the
 judge independently of the run's own state, which stays `done`: `null` | `{"state":
@@ -3016,8 +3441,14 @@ session record itself is exported as an allowlist projection, not whole (below).
   one fleet's import; `origin_host` and `original_id` match `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`.
 - Only those three are required. Everything else — repo, org, issue, issue_title, status, branch,
   base, pr_url, pr_opened_at, merged_at, summary, error, cost_usd, routed_cost_usd, model_tier,
-  model_usage, model_routing, agent, boot_timing, created_at, updated_at — is optional and
-  nullable; an exporter may leave out what its records never held.
+  model_usage, model_routing, agent, boot_timing, created_at, updated_at, repo_identity — is
+  optional and nullable; an exporter may leave out what its records never held.
+- `repo_identity` (#763) is `{"roots": ["<sha>", …], "url": "<host/path>|null"}`, read from the
+  exporting machine's mirror of `repo`: the root commit SHA(s), sorted, and the origin URL
+  normalised (scheme, `user@`/token, port, trailing `/` and `.git` removed; host lowercased;
+  github.com paths lowercased too, since GitHub treats them case-insensitively). The raw remote
+  never travels. Fleet members match repositories by root first, then URL, and treat more than
+  one candidate as no match.
 - The machine-readable shapes — the manifest at the top level, `imported_session`, `chunk` and
   `import_cursor` under `$defs` — are in
   [fleet-export.schema.json](fleet-export.schema.json) (draft 2020-12).
@@ -3095,9 +3526,18 @@ Responses SDKs, SSE parsers and UI components can drive a colony unchanged.
 **Status: partly implemented.** These tables are the contract to review before
 any code; each one is implemented in its own change afterwards. #651 landed the
 first pieces — the §7.1 surface rules (`/uhp` routes with `UHP-Version` and the
-§7.7 error envelope) and §7.5's artifact reads — and the rest is still proposed:
-until a table lands, nothing on the wire changes for it. The *Colonizer today*
-column is what works; how that as-is
+§7.7 error envelope), the session page and §7.5's artifact reads — and #650 the
+read-side core (`crates/colonizer/src/uhp.rs`): `GET /uhp/v1/uhp` (discovery,
+served without a credential), `GET /uhp/v1/harnesses` and
+`/uhp/v1/harnesses/{id}`, `GET /uhp/v1/models` and `GET /uhp/v1/sessions/{id}`,
+with version negotiation on every served `/uhp` route (any `UHP-Version` other
+than `2026-09-12` is **400** `unsupported_protocol_version`) and the envelope on
+every `/uhp` refusal, the credential ones included (**401**
+`authentication_error`, **403** `permission_error`). Scoped API tokens are held
+to the same scope and org/repo limits there as on `/api`. The rest is still
+proposed — creating and continuing responses (§7.3), SSE streaming (§7.4), input
+files (§7.5) and cancellation (§7.6): until a table lands, nothing on the wire
+changes for it. The *Colonizer today* column is what works; how the served
 surface measures against the UHP conformance suite is in
 [docs/conformance.md](conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the
