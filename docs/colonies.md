@@ -304,30 +304,45 @@ done. The mothership checks that claim before autopilot publishes:
 1. It snapshots the colony's work without touching the worktree.
 2. It reads the git state itself: commits ahead of the base branch, changed files, and whether the
    files the PR description names are on the branch.
-3. It runs the repository's test command in a fresh, one-shot microVM, on a `git archive` export
-   of the snapshot. The command never runs on the host, and the result never comes from the
-   agent's own logs. The test run has a 20-minute limit.
+3. It runs the checks the diff calls for in fresh, one-shot microVMs, on a `git archive` export
+   of the snapshot. Nothing runs on the host, and no result comes from the agent's own logs.
+   Each check has a 20-minute limit.
 
-The verdict is `confirmed`, `contradicted` or `unverifiable`. Autopilot publishes on `confirmed`
-and `unverifiable`, and holds the colony on `contradicted`. A claim is contradicted only if the
-tests fail, or if *none* of the files the description names are on the branch. If some named
-files are missing but others are there, that is only an **advisory**. Advisories are shown with
-the verdict and added to the pull request as "Verification notes". They never change the verdict.
+The verdict is `confirmed`, `contradicted`, `inconclusive` or `unverifiable`. Autopilot publishes
+on `confirmed`, `inconclusive` and `unverifiable`, and holds the colony on `contradicted`. A claim
+is contradicted only if a check fails in a way the base branch does not, or if *none* of the files
+the description names are on the branch: when a check fails, the mothership runs the same check
+once more on the merge-base, in a fresh checkout of its own. A check that fails there too is
+**inconclusive** — the colony did not break it — and autopilot publishes anyway, with a note in
+the pull request; only a failure new against the base holds the colony. If some named files are
+missing but others are there, that is only an **advisory**. Advisories are shown with the verdict
+and added to the pull request as "Verification notes". They never change the verdict.
 
-**Which test command.** The **Publish** module's `verify` setting decides. You can override it for
+A failing check leaves its last 200 lines of output in the colony's `out/` directory —
+`out/verify-cargo-test.log`, `out/verify-web-npm-test.log`, one log per check — and the failing
+test names (up to five, parsed from cargo, vitest or jest output) are quoted in the hold message
+and the colony's attention detail.
+
+**Which checks.** The **Publish** module's `verify` setting decides. You can override it for
 one colony at launch.
 
-- `auto` (the default) reads the base branch. For a `package.json` with a `test` script, it uses
-  the repository's own package manager: the `packageManager` field first, then the lockfile
-  (bun, pnpm, yarn or npm), else npm. Otherwise `cargo test` for a `Cargo.toml`, or `make test` for
-  a Makefile with a `test:` target.
+- `auto` (the default) picks the checks from what the diff touches, so a colony is never held for
+  code it did not go near. Rust files, `Cargo.toml` or `Cargo.lock` run `cargo test` — a diff with
+  no Rust in it skips it. Every other changed file runs the test script of the nearest ancestor
+  directory with a `package.json`, by that package's own package manager: the `packageManager`
+  field first, then the lockfile (bun, pnpm, yarn or npm), else npm — so `web/**` runs web's own
+  vitest, not the root's. Files neither covers run the root Makefile's `test:` target when the
+  repository declares one, and nothing when it does not. The checks run one after another, each in
+  its own microVM, from the subdirectory they belong to.
 - `none` records every claim as unverifiable without checking.
-- Any other text is the test command itself.
+- Any other text is the test command itself, replacing the diff-scoped checks.
 
-**Limits.** If the colony image lacks the tool the command needs, the claim is unverifiable. The
-command comes from the base branch, so a branch that changes it cannot change what is run. The
-full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle),
-step 5.
+**Limits.** If the colony image lacks the tool a check needs, that check is unverifiable. A branch
+that rewrites the file a check's command is read from (`scripts.test`, the Makefile) cannot grade
+its own homework: that check comes back unverifiable and nothing runs. A check whose directory the
+branch deleted is skipped rather than run to a meaningless exit 1. A base result is remembered
+per repository, image, base commit and check, so a re-verification does not pay for it twice. The
+full description is in [architecture.md, Session lifecycle](architecture.md#session-lifecycle), step 5.
 
 ## Conditional instructions
 

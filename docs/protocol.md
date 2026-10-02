@@ -2092,7 +2092,7 @@ on by default; setting `require_review` = true; off lets only `repo` notes skip 
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2, "detail": "…"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -2101,7 +2101,9 @@ notice, not a user bubble), at most `max_nudges` times per stall; then `attentio
 `nudges_exhausted`. A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
-`autopilot_held`. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
+`autopilot_held`. A flag carries a `detail` when the mothership can say why in one line: a claim
+held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
+(Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
 provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
 watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
@@ -2190,16 +2192,25 @@ change this: a draft PR is still an external write, refused the same way as a re
 **Done-verification (issue #328).** Before a completion claim is published, the mothership verifies it
 on its own. It snapshots the colony's work — commits and uncommitted files — without touching the
 worktree, reads the git state directly (commits ahead of base, changed files, whether the paths the PR
-description names are on the branch), and re-runs the repository's test command in a fresh one-shot
-microVM over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
-codes. The verdict is `confirmed` (the fresh run is green and the git state matches the description),
-`contradicted` (either disagrees, the contradictions stated plainly) or `unverifiable` — an empty
-branch, no test command known, the runner unavailable — which is never treated as confirmed.
-The fresh run's exit number is the one the guest itself writes to a report file mounted for exactly that
-(`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it, so a runner that never
-reported has not verified anything. Autopilot publishes on
-`confirmed` and on `unverifiable` exactly as before; on `contradicted` the colony is held with
-`attention.reason` `autopilot_held` and the contradictions in the event below.
+description names are on the branch), and re-runs the checks the diff calls for in fresh one-shot
+microVMs over a `git archive` of the snapshot: never on the host, never from the agent's logs or exit
+codes. The verdict is `confirmed` (every fresh run is green and the git state matches the description),
+`contradicted` (a check or the git state disagrees, the contradictions stated plainly), `inconclusive`
+([#672]: a check fails on the colony's work but fails on the merge-base too, so it is not this
+colony's doing) or `unverifiable` — an empty branch, no check known, the runner unavailable — which is
+never treated as confirmed. Each run's exit number is the one the guest itself writes to a report file
+mounted for exactly that (`/colonizer-verify/exit`); the sandbox's own exit code only corroborates it,
+so a runner that never reported has not verified anything. A check that fails is re-run once on the
+merge-base commit, in a fresh checkout of the same kind: failing there too makes the verdict
+`inconclusive` — autopilot still publishes, and the pull request body notes it — while only a failure
+new against the base is `contradicted`; a base that cannot be run for infra reasons leaves the head
+failure a contradiction. Base results are cached in memory per repository, image, base commit,
+directory and command. The last ~200 lines of a failing check's output are written to the session's
+`out/verify-<check>.log` (`out/verify-cargo-test.log`, `out/verify-web-npm-test.log`), and failing
+test names parsed from cargo, vitest or jest output — up to five — are quoted in the contradiction,
+which is the held colony's `attention.detail`. Autopilot publishes on `confirmed`, `inconclusive` and
+on `unverifiable` exactly as before; on `contradicted` the colony is held with `attention.reason`
+`autopilot_held` and the contradictions in the event below.
 
 The description's paths are the backticked path-like tokens in `pr.md`; a path counts as in the
 repository when the branch or the diff carries it or its directory is on the branch (an example URL
@@ -2212,23 +2223,34 @@ or future work, or were renamed on the way. Advisories are listed once each in `
 and added to the published pull request as a "Verification notes" block; they never change the
 verdict or hold autopilot.
 
-The test command is never guessed from chat text. It is resolved in order: an explicit `verify` on the
-colony (`NewSession.verify`) or the `publish` module's `verify` setting (`auto` by default, `none`, or
-a command), then — for `auto` — the repository's own declaration read from the **base** branch:
-package.json `scripts.test`, run by the repository's own package manager — the `packageManager`
-field through corepack (`corepack pnpm …`, `corepack yarn …`; `bun` and `npm` directly), else the
-root lockfile: `bun.lock`/`bun.lockb` → `bun install --frozen-lockfile && bun run test`,
-`pnpm-lock.yaml` → `pnpm install --frozen-lockfile && pnpm test`, `yarn.lock` → `yarn install
---immutable && yarn test` (Yarn 2+'s lockfile) or `--frozen-lockfile` (Yarn 1's),
-`package-lock.json`/`npm-shrinkwrap.json` → `npm ci && npm test`, and no lockfile →
-`npm install && npm test`; a bun repository without the script runs `bun test` when the base branch
-has test files for it — then Cargo.toml → `cargo test`, a Makefile `test:` target → `make test`.
-The fresh-checkout VM checks for the tool the command needs before running it: a tool the colony
-image does not carry (the default node image has no bun or pnpm) makes the claim `unverifiable`,
-named in the summary, never `contradicted`. A branch that rewrote
-the entry its resolved command comes from (`scripts.test`, the Makefile) would be grading its own
-homework: the claim comes back `unverifiable` with that said plainly, and nothing runs. `verify:
-none` means
+The checks are never guessed from chat text. An explicit `verify` on the colony (`NewSession.verify`)
+or the `publish` module's `verify` setting — `auto` by default, `none`, or a command — replaces the
+whole selection with that one command. For `auto` ([#672]) the checks are chosen from what the diff
+touches, so a colony is never held for code it did not go near, and each check runs from the checkout
+root or, when it belongs to a subdirectory's own package, from that subdirectory:
+
+- **Rust:** any `*.rs` file, `Cargo.toml` or `Cargo.lock` in the diff → `cargo test`. A diff with no
+  Rust in it skips `cargo test` entirely.
+- **Every other changed file:** the test script of the nearest ancestor directory with a
+  `package.json`, read from the **base** branch and run by that package's own package manager — the
+  `packageManager` field through corepack (`corepack pnpm …`, `corepack yarn …`; `bun` and `npm`
+  directly), else the package's lockfile: `bun.lock`/`bun.lockb` → `bun install --frozen-lockfile &&
+  bun run test`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile && pnpm test`, `yarn.lock` →
+  `yarn install --immutable && yarn test` (Yarn 2+'s lockfile) or `--frozen-lockfile` (Yarn 1's),
+  `package-lock.json`/`npm-shrinkwrap.json` → `npm ci && npm test`, and no lockfile →
+  `npm install && npm test`; a bun package without the script runs `bun test` when there are test
+  files for it. So `web/**` runs web's own test script (vitest), not the root's, and a module's
+  lockfile runs that module's tests when it declares a script.
+- **Covered by neither:** the root Makefile's `test:` target → `make test`, and nothing at all when
+  the repository declares none.
+
+The checks run sequentially, one microVM each. Each fresh-checkout VM checks for the tool the command
+needs before running it: a tool the colony image does not carry (the default node image has no bun or
+pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
+rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own
+homework: that check comes back `unverifiable` with that said plainly, and nothing runs. A check
+whose directory the branch deleted is skipped rather than run to a meaningless exit 1 — if no check
+is left, the claim is `unverifiable` for want of one. `verify: none` means
 unverifiable by declaration. Verification also runs with autopilot off and while external writes are
 blocked; it then records the verdict without publishing. The verdict is appended to the colony's
 `events.jsonl` as a host event
@@ -2238,7 +2260,7 @@ same object minus `type`/`seq`/`ts`):
 
 ```jsonc
 {"type":"verification","verdict":"confirmed","by_declaration":false,"summary":"one plain line",
- "contradictions":[],"advisories":[],"command":"npm test","command_source":"package.json","exit_code":0,
+ "contradictions":[],"advisories":[],"inconclusive":[],"command":"npm test","command_source":"package.json","exit_code":0,
  "tests_ms":8100,"commits":2,"files_changed":["src/scan.rs"],"snapshot":"<sha>|null","ms":12345}
 ```
 
@@ -2247,8 +2269,10 @@ same object minus `type`/`seq`/`ts`):
 `packageManager` (the package.json field), the lockfile that picked the package manager
 (`bun.lock`, `bun.lockb`, `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json`,
 `npm-shrinkwrap.json`), `package.json` (no lockfile, so npm), `Cargo.toml`, `Makefile`; null when no
-command ran), `exit_code`/`tests_ms` are the
-fresh run's, `files_changed` lists at most 50, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
+command ran; with several checks, `command` and `command_source` are the first check's),
+`inconclusive` lists the checks that failed on the merge-base as well, one reviewer-ready clause each
+([#672]; absent on events recorded before it existed), `exit_code` is the first failing check's (0 when
+every check reported green) and `tests_ms` the checks' summed run time, `files_changed` lists at most 50, and `ms` is the verification's whole wall time — purely mechanical, no model calls.
 
 **No-write kill-switch (issue #84).** Setting `COLONIZER_NO_EXTERNAL_EFFECTS` or `COLONIZER_NO_WRITE`
 in the mothership's environment to any non-empty value other than `0`, `false`, `off` or `no`
