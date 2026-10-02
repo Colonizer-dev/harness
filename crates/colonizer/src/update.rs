@@ -523,7 +523,7 @@ pub async fn command(force: bool) -> Result<()> {
         Preflight::Proceed { installed, latest } => (installed, latest),
     };
     if force {
-        println!("{}", force_warning(&client, &base, &installed, &latest).await);
+        println!("{}", force_warning(&client, &base, &token, &installed, &latest).await);
     }
     println!("updating from {installed} to {latest}");
 
@@ -576,8 +576,8 @@ pub async fn command(force: bool) -> Result<()> {
 /// Queued colonies hold nothing yet, so an update does not interrupt them — but
 /// `--force` is the explicit acknowledgement of the queue, and the count
 /// belongs in the warning next to the total.
-async fn force_warning(client: &reqwest::Client, base: &str, installed: &str, latest: &str) -> String {
-    let sessions = session_counts(client, base).await;
+async fn force_warning(client: &reqwest::Client, base: &str, token: &str, installed: &str, latest: &str) -> String {
+    let sessions = session_counts(client, base, token).await;
     let at_risk = match sessions {
         Ok((total, queued)) => {
             let noun = if total == 1 {
@@ -594,8 +594,17 @@ async fn force_warning(client: &reqwest::Client, base: &str, installed: &str, la
     )
 }
 
-async fn session_counts(client: &reqwest::Client, base: &str) -> Result<(usize, usize)> {
-    let sessions: Vec<Value> = client.get(format!("{base}/api/sessions")).send().await?.json().await?;
+async fn session_counts(client: &reqwest::Client, base: &str, token: &str) -> Result<(usize, usize)> {
+    let sessions: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        // The route needs the per-install token; a 401 (or any other refusal) must read as an
+        // unknown count, not as a count parsed out of a plain-text error body.
+        .error_for_status()?
+        .json()
+        .await?;
     let queued = sessions.iter().filter(|s| s["status"].as_str() == Some("queued")).count();
     Ok((sessions.len(), queued))
 }
@@ -923,6 +932,58 @@ mod tests {
             "a colony is publishing: o/r (abc)"
         );
         assert_eq!(server_error("  Bad Gateway  "), "Bad Gateway");
+    }
+
+    /// `--force`'s session count reads the token-protected `/api/sessions` with the install's
+    /// bearer token: the right token counts the sessions and the queues, a missing or wrong one
+    /// reads as unknown rather than as a count parsed out of a refusal.
+    #[tokio::test]
+    async fn the_force_warning_counts_sessions_through_the_api_token() {
+        use axum::{
+            Json, Router,
+            http::{HeaderMap, StatusCode, header},
+            routing::get,
+        };
+
+        let app = Router::new().route(
+            "/api/sessions",
+            get(|headers: HeaderMap| async move {
+                let authorized =
+                    headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()) == Some("Bearer s3cret");
+                if authorized {
+                    (
+                        StatusCode::OK,
+                        Json(json!([
+                            {"id": "a", "status": "running"},
+                            {"id": "b", "status": "queued"},
+                            {"id": "c", "status": "queued"},
+                        ])),
+                    )
+                } else {
+                    // What the route answers without the token: a 401 the count must not read as data.
+                    (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+        assert_eq!(
+            session_counts(&client, &base, "s3cret").await.unwrap(),
+            (3, 2),
+            "three sessions, two of them queued"
+        );
+        assert!(
+            session_counts(&client, &base, "wrong").await.is_err(),
+            "a wrong token is an unknown count, not a parsed one"
+        );
+        assert!(
+            session_counts(&client, &base, "").await.is_err(),
+            "a missing token is an unknown count too"
+        );
     }
 
     #[test]
