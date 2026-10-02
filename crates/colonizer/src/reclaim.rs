@@ -498,23 +498,25 @@ async fn storage_now(app: &Shared) -> Json<Value> {
     let now = Utc::now();
     let sessions = app.sessions.read().await.clone();
     let data_dir = app.cfg.data_dir.clone();
+    let archive_dir = crate::archive::archive_root(&app);
     let msb_home = microsandbox_home();
     let paths: Vec<(PathBuf, PathBuf)> = sessions
         .iter()
         .map(|s| (PathBuf::from(&s.worktree), app.session_dir(&s.id)))
         .collect();
-    let (wt_total, repos_total, sess_total, sizes, msb_bytes) = tokio::task::spawn_blocking(move || {
+    let (wt_total, repos_total, sess_total, archive_total, sizes, msb_bytes) = tokio::task::spawn_blocking(move || {
         let sizes: Vec<u64> = paths.iter().map(|(wt, dir)| dir_size(wt) + dir_size(dir)).collect();
         (
             dir_size(&data_dir.join("worktrees")),
             dir_size(&data_dir.join("repos")),
             dir_size(&data_dir.join("sessions")),
+            dir_size(&archive_dir),
             sizes,
             msb_home.filter(|p| p.is_dir()).map(|p| dir_size(&p)),
         )
     })
     .await
-    .unwrap_or((0, 0, 0, Vec::new(), None));
+    .unwrap_or((0, 0, 0, 0, Vec::new(), None));
     let mut reclaimable = Vec::new();
     let mut unpushed = Vec::new();
     for (s, bytes) in sessions.iter().zip(sizes.into_iter().chain(std::iter::repeat(0))) {
@@ -551,7 +553,7 @@ async fn storage_now(app: &Shared) -> Json<Value> {
         "free_bytes": free,
         "admission_paused": verdict.admission_paused,
         "totals": {"worktrees_bytes": wt_total, "repos_bytes": repos_total, "sessions_bytes": sess_total,
-            "microsandbox_bytes": msb_bytes},
+            "archive_bytes": archive_total, "microsandbox_bytes": msb_bytes},
         "reclaimable": reclaimable, "unpushed": unpushed, "orphans": orphans,
     }))
 }
@@ -788,6 +790,18 @@ mod tests {
             warn_free_bytes: 0,
         };
         assert!(sweep_once(&app, &off).await.is_empty(), "disabled means nothing happens");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_storage_totals_count_the_log_archive() {
+        let (app, root) = app_with_colony("arch1", SessionStatus::Stopped).await;
+        // Bundles live under the canonical archive root, `<data_dir>/archive`.
+        let dir = crate::archive::archive_root(&app).join("acme/webshop/2026/10");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("arch1.tar.zst"), vec![0u8; 4096]).unwrap();
+        let Json(value) = storage_now(&app).await;
+        assert_eq!(value["totals"]["archive_bytes"], 4096, "{value}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

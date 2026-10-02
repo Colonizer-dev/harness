@@ -170,6 +170,7 @@ export function HostView({
         { label: "Worktrees", bytes: storage.totals.worktrees_bytes, color: "var(--chart-1)" },
         { label: "Repositories", bytes: storage.totals.repos_bytes, color: "var(--chart-2)" },
         { label: "Colony sessions", bytes: storage.totals.sessions_bytes, color: "var(--chart-4)" },
+        { label: "Session archives", bytes: storage.totals.archive_bytes, color: "var(--chart-5)" },
         ...(storage.totals.microsandbox_bytes != null ? [{ label: "microsandbox (images)", bytes: storage.totals.microsandbox_bytes, color: "var(--chart-3)" }] : []),
       ]
     : [];
