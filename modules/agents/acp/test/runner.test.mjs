@@ -5,14 +5,14 @@
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { clampOptions, commandText, confine, contentText, riskForKind, splitCommand, toolOutput } from '../runner.mjs';
+import { clampOptions, commandText, confine, contentText, defaultCacheDir, resolveGemini, riskForKind, splitCommand, toolOutput } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const moduleDir = join(here, '..');
@@ -165,6 +165,65 @@ test('confine refuses a dangling symlink out of the tree, which a write would fo
   // spelling of the link lands the bytes outside.
   writeFileSync(join(root, 'link'), 'escaped');
   assert.ok(existsSync(target), 'writing through the in-tree spelling creates the file outside the workspace');
+});
+
+test('resolveGemini prefers env and PATH, caches the fetched bundle, refuses a bad sha256', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'colonizer-gem-test-'));
+  const fakeBytes = Buffer.from('fake-gemini-tgz');
+  const { createHash } = await import('node:crypto');
+  const good = createHash('sha256').update(fakeBytes).digest('hex');
+  const lock = (sha) => `gemini-cli  0.61.0  any  agent  ${sha}  https://example.invalid/t.tgz`;
+  const fetchImpl = async () => ({ ok: true, arrayBuffer: async () => fakeBytes });
+  let tarCalled = 0;
+  const runTar = async (args) => {
+    tarCalled++;
+    const dest = args[args.indexOf('-C') + 1];
+    mkdirSync(join(dest, 'package', 'bundle'), { recursive: true });
+    writeFileSync(join(dest, 'package', 'bundle', 'gemini.js'), '//gemini');
+  };
+  const pathDir = join(dir, 'pathdir');
+  mkdirSync(pathDir, { recursive: true });
+  writeFileSync(join(pathDir, 'gemini'), 'x');
+  // COLONIZER_GEMINI_BIN wins, then PATH; neither one fetches.
+  assert.deepEqual(await resolveGemini({ env: { COLONIZER_GEMINI_BIN: '/custom/gemini' }, lockText: '' }), ['/custom/gemini', '--experimental-acp']);
+  assert.deepEqual(await resolveGemini({ env: { PATH: pathDir }, lockText: '' }), [join(pathDir, 'gemini'), '--experimental-acp']);
+  assert.equal(tarCalled, 0);
+  // A sha256 the bytes do not match is refused before anything is extracted.
+  await assert.rejects(resolveGemini({ env: {}, lockText: lock('0'.repeat(64)), fetchImpl, runTar, cacheDir: join(dir, 'bad') }), /sha256 mismatch/);
+  assert.equal(tarCalled, 0);
+  // A good pin downloads, extracts package/bundle and runs the bundle with the colony's own node.
+  const argv = await resolveGemini({ env: {}, lockText: lock(good), fetchImpl, runTar, cacheDir: join(dir, 'good'), log: () => {} });
+  assert.equal(argv[0], process.execPath);
+  assert.equal(argv[1], join(dir, 'good', '0.61.0', 'package', 'bundle', 'gemini.js'));
+  assert.equal(argv[2], '--experimental-acp');
+  assert.equal(tarCalled, 1);
+  assert.equal(defaultCacheDir({ XDG_CACHE_HOME: '/x' }), '/x/colonizer/gemini');
+  assert.equal(defaultCacheDir({ HOME: '/h' }), '/h/.cache/colonizer/gemini');
+  assert.ok(defaultCacheDir({ PATH: '/bin' }).endsWith('colonizer-gemini'));
+  // A second boot reuses the cache: no fetch, no tar.
+  const again = await resolveGemini({ env: {}, lockText: lock(good), fetchImpl: async () => { throw new Error('must not fetch'); }, runTar, cacheDir: join(dir, 'good') });
+  assert.deepEqual(again, argv);
+  assert.equal(tarCalled, 1);
+  // A failed extraction leaves no final version dir and no scratch dir: the cache keeps nothing.
+  await assert.rejects(resolveGemini({ env: {}, lockText: lock(good), fetchImpl, runTar: async () => { throw new Error('tar blew up'); }, cacheDir: join(dir, 'fail') }), /tar blew up/);
+  assert.ok(!existsSync(join(dir, 'fail', '0.61.0')), 'a failed extraction leaves no final dir to reuse');
+  assert.deepEqual(readdirSync(join(dir, 'fail')), [], 'the scratch dir is cleaned up on failure');
+  // A stale scratch dir from a runner killed mid-extraction is not a cache hit: the bundle is
+  // fetched and extracted into place afresh, and the half dir is left alone, never adopted.
+  const stale = join(dir, 'stale');
+  mkdirSync(join(stale, '.0.61.0.tmp-dead', 'package', 'bundle'), { recursive: true });
+  writeFileSync(join(stale, '.0.61.0.tmp-dead', 'package', 'bundle', 'gemini.js'), '//half');
+  let refetched = 0;
+  const argv2 = await resolveGemini({ env: {}, lockText: lock(good), fetchImpl: async () => { refetched++; return { ok: true, arrayBuffer: async () => fakeBytes }; }, runTar, cacheDir: stale });
+  assert.equal(refetched, 1, 'a stale half-extracted scratch dir does not count as a cache hit');
+  assert.equal(argv2[1], join(stale, '0.61.0', 'package', 'bundle', 'gemini.js'));
+});
+
+test('the gemini.lock row carries the module.json pin', () => {
+  const manifest = JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8'));
+  const lock = readFileSync(join(moduleDir, 'gemini.lock'), 'utf8');
+  const version = manifest.requires.pins['@google/gemini-cli'].version.replace(/\./g, '\\.');
+  assert.match(lock, new RegExp(`^gemini-cli\\s+${version}\\s+any\\s+agent\\s+[0-9a-f]{64}\\s+https://registry\\.npmjs\\.org/`, 'm'));
 });
 
 test('acp/execpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {
