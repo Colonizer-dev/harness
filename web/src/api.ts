@@ -46,6 +46,11 @@ import type {
   FleetJoinStatus,
   FleetMember,
   FleetState,
+  FleetSyncPreview,
+  FleetHistoryDetail,
+  FleetHistoryPage,
+  FleetHistoryQuery,
+  FleetSyncStatus,
   FindingRecord,
   HarnessStatus,
   HeadroomStatus,
@@ -308,6 +313,16 @@ export interface Api {
   cancelFleetJoin(): Promise<void>;
   /** POST /api/fleet/leave: ends this mothership's own membership; every local colony and setting stays. */
   leaveFleet(): Promise<void>;
+  /** GET /api/fleet/sync/preview (issue #762): what the history push would send; sends nothing. 409 when not a member. */
+  fleetSyncPreview(): Promise<FleetSyncPreview>;
+  /** POST /api/fleet/sync/consent: turns the history push on or off for this membership. 409 when not a member. */
+  setFleetHistorySync(enabled: boolean): Promise<FleetSyncStatus>;
+  /** GET /api/fleet/history (issue #762, owner-only): the members' synced colonies, filtered and paged, with totals. */
+  fleetHistory(q?: FleetHistoryQuery): Promise<FleetHistoryPage>;
+  /** GET /api/fleet/history/{member}/{row_id}: one synced colony's record and its logs. */
+  fleetHistoryEntry(member: string, rowId: string): Promise<FleetHistoryDetail>;
+  /** GET /api/fleet/history/{member}/{row_id}/logs/{name}: one stored log, as text. */
+  fleetHistoryLog(member: string, rowId: string, name: string): Promise<string>;
   repos(): Promise<Repo[]>;
   issues(repo: string): Promise<Issue[]>;
   /** POST /api/colonize/draft: free text as one or a few issue drafts, from the cheap summary model (the text itself when there is none). Files nothing. */
@@ -679,6 +694,18 @@ export const httpApi: Api = {
   confirmFleetJoin: () => post("/api/fleet/join/confirm"),
   cancelFleetJoin: () => del("/api/fleet/join"),
   leaveFleet: () => post("/api/fleet/leave"),
+  fleetSyncPreview: () => request("/api/fleet/sync/preview"),
+  setFleetHistorySync: (enabled) => post("/api/fleet/sync/consent", { enabled }),
+  fleetHistory: (q = {}) =>
+    request(`/api/fleet/history${query({ member: q.member, repo: q.repo, status: q.status, since: q.since, until: q.until, limit: q.limit?.toString(), cursor: q.cursor })}`),
+  fleetHistoryEntry: (member, rowId) => request(`/api/fleet/history/${enc(member)}/${enc(rowId)}`),
+  fleetHistoryLog: async (member, rowId, name) => {
+    // A log is text: never JSON-parsed, even when it is a single JSON line.
+    const res = await fetch(`/api/fleet/history/${enc(member)}/${enc(rowId)}/logs/${enc(name)}`);
+    const text = await res.text();
+    if (!res.ok) throw new ApiError(text || res.statusText, res.status);
+    return text;
+  },
   repos: () => request("/api/repos"),
   issues: (repo) => {
     const [owner, name] = repo.split("/");

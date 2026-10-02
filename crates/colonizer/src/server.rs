@@ -169,6 +169,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
+        // A fleet member the owner removed presents a token revoked on purpose: it reads 403
+        // "removed from the fleet", so the member can tell removal from a bad credential.
+        if let Some(token) = auth::bearer_token(req.headers())
+            && app.fleet_members.is_removed_token(&token).await
+        {
+            return crate::client_error(StatusCode::FORBIDDEN, "removed from the fleet").into_response();
+        }
         return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
     }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
@@ -322,7 +329,9 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
+        .merge(crate::fleet_history::routes())
         .merge(crate::fleet_members::routes())
+        .merge(crate::fleet_sync::routes())
         .merge(crate::gateway::routes())
         .merge(crate::github::routes())
         .merge(crate::graft::routes())
@@ -386,6 +395,7 @@ pub(crate) fn router(app: &Shared) -> Router {
 async fn start_tasks(app: &Shared, router: &Router) {
     crate::autonomy::start_tasks(app);
     crate::burn_down::start_tasks(app);
+    crate::fleet_sync::start_tasks(app);
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);
     crate::loops::start_tasks(app);
@@ -1126,7 +1136,29 @@ mod tests {
         let public_body: Value = serde_json::from_str(&public_text).unwrap();
         let mut keys: Vec<&str> = public_body.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["host", "queue_depth", "runtime", "storage", "version"]);
+        assert_eq!(keys, ["host", "queue_depth", "runner", "runtime", "storage", "version"]);
+        // Issue #764: the queue loop's age crosses over; `fleet_sync` only on a fleet member.
+        assert!(public_body["runner"].get("last_tick_age_s").is_some());
+        app.fleet_members
+            .set_membership_for_tests(Some(crate::fleet_sync::Target {
+                owner_url: "http://owner.example:7878".into(),
+                member_id: "mem_1".into(),
+                token: "col_secret_member_token".into(),
+            }))
+            .await;
+        let member = auth_router(&app)
+            .oneshot(guarded(Method::GET, "/api/status", vec![]))
+            .await
+            .unwrap();
+        let member_text = body_text(member).await;
+        let member_body: Value = serde_json::from_str(&member_text).unwrap();
+        assert_eq!(member_body["fleet_sync"]["state"], "consent_required", "{member_body}");
+        assert_eq!(member_body["fleet_sync"]["consent"], false);
+        assert!(
+            !member_text.contains("owner.example") && !member_text.contains("col_secret"),
+            "no URL or token crosses over"
+        );
+        app.fleet_members.set_membership_for_tests(None).await;
 
         let signed_in = auth_router(&app)
             .oneshot(guarded(Method::GET, "/api/status", vec![bearer(&app)]))

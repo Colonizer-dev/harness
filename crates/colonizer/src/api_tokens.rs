@@ -213,7 +213,7 @@ pub struct Registry {
 
 /// SHA-256 of a token, hex. Stored rather than the plaintext, so neither the file nor a leak of it
 /// hands over a working credential.
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     crate::util::hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
@@ -341,6 +341,17 @@ impl Registry {
         tokens.push(stored);
         self.save(&tokens).await;
         Ok((plaintext, id))
+    }
+
+    /// The stored hash of token `id` — what the fleet keeps of a removed member's token, so the
+    /// revoked credential still reads as "removed" rather than unknown.
+    pub(crate) async fn token_hash(&self, id: &str) -> Option<String> {
+        self.tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.token_hash.clone())
     }
 
     /// Removes a token; `None` when no token carries the id. Presentations of the revoked token
@@ -547,6 +558,10 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
         ["api", "hosts"] if get => Need::Fleet,
         ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
+        // The history push (issue #762): a member uploads its log payloads, then the colony rows
+        // that reference them, onto its own directory on the owner — nothing else of the owner's.
+        ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
+        ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
