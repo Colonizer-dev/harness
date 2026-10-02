@@ -10,8 +10,7 @@ here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `an
 
 ## Which mothership, which token
 
-Every client command takes the same two global flags, before or after the subcommand. The local
-commands accept them too, and ignore them:
+Every client command takes the same two global flags, before or after the subcommand:
 
 - **`--host HOST[:PORT]`** — the mothership to talk to. The default is the local one
   (`COLONIZER_BIND`, else `127.0.0.1:7878`). A bare host name gets the default port 7878; a host
@@ -20,13 +19,19 @@ commands accept them too, and ignore them:
 - **`--token-file PATH`** — a file holding the API token (the value itself, one line). The token
   resolution order is `COLONIZER_TOKEN`, then this file, then the local install's own token at
   `<config_dir>/api-token` — written by the mothership's first start; the client commands only
-  read it, never mint one (the local `open` does create it on a first run). With none of the
-  three there is nothing to prove yourself with and the command says so.
+  read it, never mint one (the local `open`, and `update` with no token given, do create it on a
+  first run). With none of the three there is nothing to prove yourself with and the command says
+  so.
+
+The local commands run against this machine and take none of the client flags. `update` is the
+exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
+like any client command — but it has no `--json`. The rest (`open`, `login-item`, `telemetry`,
+`version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
+(exit 2), and their `--help` does not list them.
 
 `colonizer open` is local on purpose: it reprints the sign-in link and opens a browser on this
-machine, always with the local token and `COLONIZER_BIND`, whatever `--host` or `--token-file`
-say. The mothership on another machine cannot be opened from here. The cockpit itself is described
-in [cockpit.md](cockpit.md).
+machine, always with the local token and `COLONIZER_BIND`. The mothership on another machine cannot
+be opened from here. The cockpit itself is described in [cockpit.md](cockpit.md).
 
 **Over a tailnet.** The client half needs nothing from the mothership but reachability. The
 mothership side needs three things, or it refuses remote callers:
@@ -250,7 +255,9 @@ the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_a
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
 stored map document — or, with `--find`, the search result — `fleet export --preview` and
 `fleet import <file> --preview` the bundle's manifest, and `answer` echoes the answer body
-it sent. Scripts should prefer it to parsing the human columns.
+it sent. Scripts should prefer it to parsing the human columns. The local commands with no JSON
+rendering refuse it, like the two host flags above; `fleet export` and `fleet import` are local
+but do have one.
 
 ## Exit codes
 

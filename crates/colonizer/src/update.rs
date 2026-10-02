@@ -36,8 +36,7 @@ use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex};
 
 use crate::{
-    Shared, auth,
-    config::Settings,
+    Shared,
     sessions::{Session, SessionStatus},
     util, version,
 };
@@ -491,24 +490,26 @@ fn preflight(status: &Value, force: bool) -> Result<Preflight> {
 /// then follows the progress it already reports, so the command and the button
 /// in Settings cannot drift apart.
 ///
+/// `host` (from `--host`, else `COLONIZER_BIND`) is the mothership to ask, and
+/// `token` (from `COLONIZER_TOKEN`, `--token-file`, or the local install's own
+/// token file) proves the request — resolved in `cli` so this command and the
+/// client commands agree on both.
+///
 /// `force` installs the latest release over a development build, or over a
 /// release newer than it, after saying what is at risk. It never skips the
 /// wait for a publishing colony: that refusal comes from the mothership.
-pub async fn command(force: bool) -> Result<()> {
-    let cfg = Settings::from_env()?;
-    let base = format!("http://{}", cfg.bind);
-    // The mothership's API needs the per-install token; this CLI reads the file the server minted.
-    let token = auth::load_or_create(&cfg.config_dir)?;
+pub async fn command(force: bool, host: &str, token: &str) -> Result<()> {
+    let base = format!("http://{host}");
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()?;
 
     let status: Value = client
         .get(format!("{base}/api/update"))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .send()
         .await
-        .with_context(|| format!("no mothership answering on {}; start `colonizer` first", cfg.bind))?
+        .with_context(|| format!("no mothership answering on {host}; start `colonizer` first"))?
         // A wrong token answers 401, which must surface as refused, not as unparsable JSON.
         .error_for_status()?
         .json()
@@ -529,7 +530,7 @@ pub async fn command(force: bool) -> Result<()> {
 
     // No body, like the Settings button, unless forcing: the route reads a
     // missing body as "just install the newer release".
-    let request = client.post(format!("{base}/api/update/apply")).bearer_auth(&token);
+    let request = client.post(format!("{base}/api/update/apply")).bearer_auth(token);
     let started = if force {
         request.json(&json!({ "force": true })).send().await?
     } else {
@@ -546,7 +547,7 @@ pub async fn command(force: bool) -> Result<()> {
     let mut backup_announced = false;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let Ok(response) = client.get(format!("{base}/api/update")).bearer_auth(&token).send().await else {
+        let Ok(response) = client.get(format!("{base}/api/update")).bearer_auth(token).send().await else {
             println!("the mothership is restarting into {latest}");
             return Ok(());
         };

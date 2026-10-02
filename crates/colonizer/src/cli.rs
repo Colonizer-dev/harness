@@ -11,7 +11,7 @@
 use crate::{Settings, auth, util};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, FixedOffset};
-use clap::{ArgAction, CommandFactory as _, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{Read as _, Write as _};
@@ -88,7 +88,9 @@ Exit codes:
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`update`, `open`, `login-item`, `telemetry`) read them; the client commands take --host and --token-file.";
+(`open`, `login-item`, `telemetry`) read them. The client commands take --host and --token-file,
+and so does `update` — a thin client of a running mothership; the other local commands refuse
+them (and --json), which only the client commands use.";
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -760,11 +762,7 @@ impl Machine {
     /// Builds the client from the global flags, resolving the host and the token the way every
     /// client command does.
     pub(crate) fn from_cli(cli: &Cli) -> Result<Self> {
-        let host = match &cli.host {
-            // The flag's parser already normalized it to `host:port`.
-            Some(host) => host.clone(),
-            None => Settings::from_env()?.bind,
-        };
+        let host = resolve_host(cli)?;
         Ok(Self {
             base: format!("http://{host}"),
             token: resolve_token(cli)?,
@@ -935,14 +933,29 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     secs.filter(|secs| *secs > 0).map(Duration::from_secs).ok_or_else(refuse)
 }
 
-/// The token a client command proves itself with: the environment first, so a shell (or a CI job)
-/// can hold it without touching disk; then the file the operator named; then the local install's
-/// own token, read without creating it — the CLI is a client here, not the mint (the mothership
-/// writes that file on its first start).
+/// The mothership the client half dials: `--host` when given (its parser already normalized it to
+/// `host:port`), else the local mothership's bind from the environment.
+fn resolve_host(cli: &Cli) -> Result<String> {
+    match &cli.host {
+        Some(host) => Ok(host.clone()),
+        None => Ok(Settings::from_env()?.bind),
+    }
+}
+
+/// `COLONIZER_TOKEN`, trimmed and non-empty, when it is set: the one token source that outranks any
+/// file, because a shell (or a CI job) can hold it without touching disk.
+fn env_token() -> Option<String> {
+    std::env::var("COLONIZER_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// The token a client command proves itself with: the environment first; then the file the operator
+/// named; then the local install's own token, read without creating it — the CLI is a client here,
+/// not the mint (the mothership writes that file on its first start).
 fn resolve_token(cli: &Cli) -> Result<String> {
-    if let Some(token) = std::env::var("COLONIZER_TOKEN").ok().map(|t| t.trim().to_string())
-        && !token.is_empty()
-    {
+    if let Some(token) = env_token() {
         return Ok(token);
     }
     if let Some(path) = &cli.token_file {
@@ -961,6 +974,19 @@ fn resolve_token(cli: &Cli) -> Result<String> {
             path.display()
         )
     })
+}
+
+/// The token `update` proves itself with. An explicit source — `COLONIZER_TOKEN` or `--token-file`
+/// — wins, read exactly as a client command reads it; with neither, it is the local install's own
+/// token, *created* on a first run. `update` asks the mothership to replace itself, so unlike the
+/// strictly-read client commands it may mint the token a fresh install has not written yet, and
+/// plain `colonizer update` keeps reading the same file it always did.
+fn update_token(cli: &Cli) -> Result<String> {
+    if env_token().is_some() || cli.token_file.is_some() {
+        return resolve_token(cli);
+    }
+    let cfg = Settings::from_env()?;
+    auth::load_or_create(&cfg.config_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,10 +1151,97 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 // Running the commands.
 // ---------------------------------------------------------------------------
 
+/// The local commands and the client global flags each refuses. They run against this machine, so
+/// a flag that names a mothership (`--host`, `--token-file`) or asks for JSON means nothing to
+/// them. `update` is the one exception: it is a thin client of a running mothership, so it keeps
+/// `--host` and `--token-file` and refuses only `--json`, which it has no rendering for.
+const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
+    ("update", &["json"]),
+    ("open", &["host", "token_file", "json"]),
+    ("login-item", &["host", "token_file", "json"]),
+    ("telemetry", &["host", "token_file", "json"]),
+    ("version", &["host", "token_file", "json"]),
+    ("completions", &["host", "token_file", "json"]),
+    ("man", &["host", "token_file", "json"]),
+];
+
+/// [`Cli::command`], plus a hidden arg for each client global flag a local command refuses.
+///
+/// clap does not propagate a global argument to a subcommand that already declares the same id
+/// (`Command::_propagate_global_args`), so the hidden arg keeps `--host`, `--token-file` and
+/// `--json` out of that command's `--help` — while clap still parses them, which is what
+/// [`refuse_local_global_flags`] then turns into a usage error.
+fn cli_command() -> clap::Command {
+    let mut command = Cli::command();
+    for (name, refused) in LOCAL_COMMANDS {
+        command = command.mut_subcommand(*name, |sub| sub.args(refused.iter().map(|flag| refused_flag(flag))));
+    }
+    command
+}
+
+/// The hidden stand-in for one client global flag on a local command: the same id, so clap's global
+/// propagation skips it, and the same spelling, so the operator's flag still parses — and is
+/// refused.
+fn refused_flag(id: &str) -> clap::Arg {
+    let arg = clap::Arg::new(id.to_string()).long(id.replace('_', "-")).hide(true);
+    if id == "json" {
+        arg.action(ArgAction::SetTrue)
+    } else {
+        arg.value_name("VALUE")
+    }
+}
+
+/// Refuses a client global flag on a local command, exit 2, saying the flag is not for it. Reads
+/// the flag from whichever side of the subcommand it was given: clap keeps a pre-subcommand flag in
+/// the top-level matches and a post-subcommand one in the subcommand's.
+fn refuse_local_global_flags(command: &mut clap::Command, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+    let Some((name, sub)) = matches.subcommand() else {
+        return Ok(());
+    };
+    let Some((_, refused)) = LOCAL_COMMANDS.iter().find(|(local, _)| *local == name) else {
+        return Ok(());
+    };
+    let given = |flag: &str| {
+        matches.value_source(flag) == Some(clap::parser::ValueSource::CommandLine)
+            || sub.value_source(flag) == Some(clap::parser::ValueSource::CommandLine)
+    };
+    match refused.iter().copied().find(|flag| given(flag)) {
+        Some(flag) => Err(command.error(clap::error::ErrorKind::UnknownArgument, local_flag_refusal(name, flag))),
+        None => Ok(()),
+    }
+}
+
+/// Why a local command refuses a client global flag, in one line. `open` gets the extra note that
+/// it is local on purpose — it always prints and opens this machine's own link.
+fn local_flag_refusal(name: &str, flag: &str) -> String {
+    let flag = format!("--{}", flag.replace('_', "-"));
+    if name == "open" && flag != "--json" {
+        return format!(
+            "{flag} only applies to the client commands, not `colonizer open`: open is local on \
+             purpose and always uses this machine's link"
+        );
+    }
+    format!("{flag} only applies to the client commands, not `colonizer {name}`")
+}
+
+/// Parses the command line the way clap does, then refuses a client global flag on a local command
+/// that cannot use it ([`refuse_local_global_flags`]). [`parse`] and the tests both go through
+/// here, so what the binary does and what the tests check cannot drift apart.
+fn try_parse_from<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut command = cli_command();
+    let mut matches = command.try_get_matches_from_mut(args)?;
+    refuse_local_global_flags(&mut command, &matches)?;
+    Cli::from_arg_matches_mut(&mut matches)
+}
+
 /// Parses the command line the way clap does: usage errors exit [`EXIT_USAGE`], `--help` and
 /// `--version` print and exit [`EXIT_OK`] — neither ever starts a mothership.
 pub fn parse() -> Cli {
-    Cli::try_parse().unwrap_or_else(|e| {
+    try_parse_from(std::env::args_os()).unwrap_or_else(|e| {
         debug_assert_eq!(e.exit_code(), if e.use_stderr() { EXIT_USAGE } else { EXIT_OK });
         let _ = e.print();
         std::process::exit(e.exit_code());
@@ -1155,6 +1268,14 @@ fn await_local(result: Result<()>) -> i32 {
     }
 }
 
+/// `update`: resolve the mothership it should ask (this one unless `--host` names another) and the
+/// token to ask with, then hand the work over.
+async fn update_command(cli: &Cli, force: bool) -> Result<()> {
+    let host = resolve_host(cli)?;
+    let token = update_token(cli)?;
+    crate::update::command(force, &host, &token).await
+}
+
 async fn dispatch(cli: &Cli, command: Command) -> i32 {
     match command {
         Command::Version => {
@@ -1163,7 +1284,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             println!("{}", crate::version::build().line());
             EXIT_OK
         }
-        Command::Update { force } => await_local(crate::update::command(force).await),
+        Command::Update { force } => await_local(update_command(cli, force).await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
             let cfg = match Settings::from_env() {
@@ -1192,13 +1313,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             // The generator writes straight through and panics on a failed write of its own, so
             // the script is buffered: a closed pipe (a `| head`) ends the copy, not the process.
             let mut script = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "colonizer", &mut script);
+            clap_complete::generate(shell, &mut cli_command(), "colonizer", &mut script);
             let _ = std::io::stdout().write_all(&script);
             EXIT_OK
         }
         Command::Man => {
             // EPIPE (a `| head`) is not an error here; the page was read as far as it was read.
-            let _ = clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout().lock());
+            let _ = clap_mangen::Man::new(cli_command()).render(&mut std::io::stdout().lock());
             EXIT_OK
         }
         Command::Mcp { scope } => match Machine::from_cli(cli) {
@@ -2793,7 +2914,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("colonizer").chain(args.iter().copied()))
+        try_parse_from(std::iter::once("colonizer").chain(args.iter().copied()))
     }
 
     /// The documented commands all still parse, and the global flags reach them from either side.
@@ -2913,6 +3034,92 @@ mod tests {
         // The global flags work on both sides of the subcommand.
         for args in [&["--json", "list"][..], &["list", "--json"][..]] {
             assert!(parse(args).unwrap().json, "{args:?} should carry --json");
+        }
+    }
+
+    /// The rendered `--help` of a subcommand, through the same parse the binary uses.
+    fn help_for(command: &str) -> String {
+        let err = parse(&[command, "--help"]).unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::DisplayHelp),
+            "{command} --help should display"
+        );
+        err.to_string()
+    }
+
+    /// The client-only global flags are refused on the local commands that cannot use them, with
+    /// exit 2, whether the flag came before or after the subcommand.
+    #[test]
+    fn the_client_flags_are_refused_on_local_commands() {
+        for args in [
+            &["--host", "other-box", "open"][..],
+            &["open", "--host", "other-box"][..],
+            &["open", "--token-file", "/tmp/token"][..],
+            &["version", "--json"][..],
+            &["--json", "telemetry", "show"][..],
+            &["login-item", "enable", "--host", "h:1"][..],
+            &["completions", "bash", "--token-file", "/tmp/token"][..],
+            &["man", "--host", "h:1"][..],
+            &["update", "--json"][..],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.exit_code(), EXIT_USAGE, "{args:?} should be a usage error");
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{args:?}");
+            assert!(
+                err.to_string().contains("only applies to the client commands"),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    /// The `open` refusal says why it ignores the flag: it is local on purpose.
+    #[test]
+    fn open_says_it_is_local_on_purpose() {
+        let err = parse(&["--host", "other-box", "open"]).unwrap_err();
+        assert!(err.to_string().contains("local on purpose"), "{err}");
+    }
+
+    /// The flags still reach the commands that can use them, from either side — and `update --host`
+    /// carries the address it will dial.
+    #[test]
+    fn the_client_flags_still_work_where_they_apply() {
+        for args in [
+            &["--host", "mothership:1", "list"][..],
+            &["list", "--host", "mothership:1"][..],
+            &["update", "--host", "h:1"][..],
+            &["--host", "h:1", "update"][..],
+        ] {
+            assert!(parse(args).is_ok(), "{args:?} should parse");
+        }
+        let cli = parse(&["update", "--host", "h:1"]).unwrap();
+        assert_eq!(cli.host.as_deref(), Some("h:1"), "update should carry --host");
+        assert!(!cli.json);
+        // --token-file is honoured there too; --host without a port gets the default one.
+        let cli = parse(&["update", "--token-file", "/tmp/token"]).unwrap();
+        assert_eq!(cli.token_file.as_deref(), Some(std::path::Path::new("/tmp/token")));
+        let cli = parse(&["update", "--host", "other-box"]).unwrap();
+        assert_eq!(cli.host.as_deref(), Some("other-box:7878"));
+    }
+
+    /// A local command's `--help` does not advertise the flags it refuses; `update` keeps the two
+    /// host flags and hides only `--json`, and a client command still advertises all three.
+    #[test]
+    fn local_help_hides_the_client_flags() {
+        for command in ["open", "login-item", "telemetry", "version", "completions", "man"] {
+            let help = help_for(command);
+            for flag in ["--host", "--token-file", "--json"] {
+                assert!(!help.contains(flag), "`{command} --help` should not list {flag}:\n{help}");
+            }
+        }
+        let update = help_for("update");
+        assert!(update.contains("--host") && update.contains("--token-file"), "{update}");
+        assert!(
+            !update.contains("--json"),
+            "`update --help` should not list --json:\n{update}"
+        );
+        let list = help_for("list");
+        for flag in ["--host", "--token-file", "--json"] {
+            assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
     }
 
@@ -3122,7 +3329,7 @@ mod tests {
             assert_eq!(err.exit_code(), EXIT_OK);
         }
         // The command structure itself is internally consistent (every subcommand reachable).
-        Cli::command().debug_assert();
+        cli_command().debug_assert();
     }
 
     /// `--timeout` belongs to `--wait` (a one-shot `pr` has nothing to time out), takes a duration,
