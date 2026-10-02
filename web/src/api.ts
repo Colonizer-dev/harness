@@ -71,6 +71,9 @@ import type {
   PluginListing,
   DownloadableSkillset,
   ProviderHealth,
+  QuotaActionReply,
+  QuotaActionRequest,
+  QuotaCard,
   PullStatus,
   RedTeamRun,
   RedTeamSchedule,
@@ -369,6 +372,10 @@ export interface Api {
   deleteProvider(id: string): Promise<unknown>;
   /** Probes the provider from the Mothership; can take ~5 s. */
   providerHealth(id: string): Promise<ProviderHealth>;
+  /** GET /api/attention: what needs the maintainer beyond a colony's own question — the provider-out-of-quota cards (issue #767). */
+  attention(): Promise<{ quota_cards: QuotaCard[] }>;
+  /** POST /api/providers/{id}/quota-action: answer a provider's out-of-quota card (switch, wait or stop). */
+  quotaAction(provider: string, body: QuotaActionRequest): Promise<QuotaActionReply>;
   models(): Promise<ModelOption[]>;
   orgs(): Promise<OrgInfo[]>;
   /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). */
@@ -727,6 +734,8 @@ export const httpApi: Api = {
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
   providerHealth: (id) => request(`/api/providers/${enc(id)}/health`),
+  attention: () => request("/api/attention"),
+  quotaAction: (provider, body) => post(`/api/providers/${enc(provider)}/quota-action`, body),
   models: () => request("/api/models"),
   orgs: () => request("/api/orgs"),
   spendHistory: (days) => request(`/api/spend/history?days=${days ?? 30}`),

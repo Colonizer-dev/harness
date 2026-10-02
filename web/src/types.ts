@@ -25,6 +25,96 @@ export interface Attention {
   nudges: number;
   /** Why, in the mothership's own words — the failing checks and where their output went for `autopilot_held` (issue #672). Absent otherwise and on older motherships. */
   detail?: string;
+  /** `provider_quota_exhausted` (issue #767): the provider the colony is blocked or parked on. */
+  provider?: string;
+  /** `provider_quota_exhausted` parked from its card: `"wait"`, with the scheduled resume. */
+  action?: "wait";
+  resume_unix?: number | null;
+  reset_at?: string | null;
+}
+
+/** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */
+export interface QuotaAlternative {
+  /** A Claude alias/id, or `<provider>/<model>`. */
+  id: string;
+  label: string;
+  /** `anthropic` for Claude's own models. */
+  provider: string;
+  /** The provider's wire; null for Claude's own models, which any provider can fall back to. */
+  wire?: "anthropic" | "openai" | null;
+  failure_pct: number;
+  rated: boolean;
+  degraded: boolean;
+  healthy: boolean;
+}
+
+/** One colony on a "Provider out of quota" card. */
+export interface QuotaCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  /** Quota answers in a row since its last success; null for a colony only parked on the provider. */
+  hits: number | null;
+  /** Parked on the provider (by the card's Wait, or on its own). */
+  waiting: boolean;
+  /** When a Wait scheduled it back; null otherwise. */
+  resume_unix: number | null;
+}
+
+/** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
+export interface QuotaCard {
+  provider: string;
+  provider_name: string;
+  /** The provider's models the colonies run, most used first. */
+  models: string[];
+  /** e.g. "bailian · qwen3.8-max is out of quota". */
+  title: string;
+  reset_at: string | null;
+  reset_unix: number | null;
+  colonies: QuotaCardColony[];
+  orgs: string[];
+  /** How many of the colonies wait for the reset, and the earliest scheduled resume. */
+  waiting: number;
+  resume_unix: number | null;
+  fallback_model: string | null;
+  /** The provider's wire: a remembered fallback on another provider must speak the same one. */
+  wire?: "anthropic" | "openai";
+  alternatives: QuotaAlternative[];
+}
+
+/** POST /api/providers/{id}/quota-action. */
+export interface QuotaActionRequest {
+  action: "switch" | "wait" | "stop";
+  model?: string;
+  /** `colonies` (default), `org` (their orgs' model settings too) or `all` (every model role on the
+   *  provider install-wide: the agent module's settings and every org's overrides, plus the colonies). */
+  scope?: "colonies" | "org" | "all";
+  colonies?: string[];
+  org?: string;
+  /** Save the model as the provider's `fallback_model`: a Claude model, or one on a provider of the same wire. */
+  remember?: boolean;
+}
+
+/** One setting a quota switch changed, with the value it replaced. */
+export interface QuotaChange {
+  /** `install` (target: the agent module), `org`, `colony` or `provider` (the remembered fallback). */
+  scope: "install" | "org" | "colony" | "provider";
+  target: string;
+  key: string;
+  was: string | null;
+  now: string;
+}
+
+export interface QuotaActionReply {
+  action: string;
+  provider: string;
+  colonies: string[];
+  failed: { id: string; ok: false; error: string }[];
+  /** What a switch changed and what it replaced; older builds omit it. */
+  changes?: QuotaChange[];
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
@@ -289,6 +379,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
+  quota_cards?: QuotaCard[];
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */

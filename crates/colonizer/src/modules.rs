@@ -892,11 +892,11 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
 
 #[derive(Deserialize)]
 pub struct UpdateModule {
-    provider: String,
+    pub(crate) provider: String,
     #[serde(default = "yes")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    settings: Map<String, Value>,
+    pub(crate) settings: Map<String, Value>,
 }
 
 fn yes() -> bool {
@@ -969,7 +969,7 @@ fn check_plugin_dirs(cfg: &Settings, schema: &Value, settings: &Map<String, Valu
 /// Keeps known keys (plus anything already stored) and checks types, enums and ranges. An unknown
 /// key is refused naming it and what the provider does take, never dropped: a setting the operator
 /// sent and lost to a typo would otherwise read as the default silently (#326).
-fn validate_settings(
+pub(crate) fn validate_settings(
     provider: &str,
     schema: &Value,
     input: &Map<String, Value>,

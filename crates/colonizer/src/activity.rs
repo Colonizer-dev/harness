@@ -477,6 +477,12 @@ const RULES: &[Rule] = &[
         Target::Named("provider", "providers"),
     ),
     rule(
+        "POST",
+        "/api/providers/{id}/quota-action",
+        "settings.save",
+        Target::Named("provider", "providers"),
+    ),
+    rule(
         "DELETE",
         "/api/providers/{id}",
         "settings.remove",

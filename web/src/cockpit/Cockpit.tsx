@@ -31,6 +31,7 @@ import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
+import { runQuotaAction } from "./ProviderQuotaCard";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
@@ -612,6 +613,10 @@ export function Cockpit({
             sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
+            quotaCards={status?.quota_cards ?? []}
+            onQuotaAction={(provider, body) =>
+              runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
+            }
           />
         );
       case "history":

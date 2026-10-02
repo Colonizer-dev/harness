@@ -231,6 +231,8 @@ pub(crate) async fn status(
     // The host-wide stall (§diagnosis): live colonies, a waiting queue, and no colony producing
     // an event for ten minutes. Cheap — runtime stamps, else file mtimes, never file contents.
     let stall = diagnosis::status_stall(&app).await;
+    // The provider-out-of-quota cards (issue #767), so the cockpit's attention list needs no second poll.
+    let quota_cards = crate::quota_cards::cards(&app).await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
@@ -264,6 +266,7 @@ pub(crate) async fn status(
             "providers": quota.providers,
             "kind": quota.kind,
         }),
+        "quota_cards": quota_cards,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
         "modules": {

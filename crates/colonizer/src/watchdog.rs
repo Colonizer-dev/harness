@@ -135,16 +135,20 @@ pub async fn run(app: Shared) {
 }
 
 async fn check_all(app: &Shared) {
+    // A colony blocked on an exhausted provider is flagged with the quota reason and left out of the
+    // nudging below (issue #760): nudging it only sends another request the plan cannot answer.
+    // `starting` colonies are included there — one whose agent never got a turn out would otherwise
+    // sit in `starting` with no flag at all.
+    let blocked = crate::quota_cards::flag_blocked(app).await;
     let sessions = app.sessions.read().await.clone();
     let modules = app.modules.read().await.clone();
     let now = Utc::now();
     // A suspended colony is skipped (issue #562): its microVM was removed on purpose and its link
     // with it, so there is nothing to nudge and the question is already a person's to answer — the
     // restore pass, not a nudge, brings it back.
-    for s in sessions
-        .into_iter()
-        .filter(|s| s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none())
-    {
+    for s in sessions.into_iter().filter(|s| {
+        s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none() && !blocked.contains(&s.id)
+    }) {
         let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
             continue;
         };
@@ -163,8 +167,18 @@ async fn check_all(app: &Shared) {
                 current.nudges = 0;
                 current.last_nudge = None;
             }
-            if attention.as_deref().is_some_and(|reason| reason != "waiting_for_answer") {
+            // Gateway traffic alone does not lift the watchdog's final flag (issue #760): an agent
+            // retrying into a failing provider keeps the gateway busy without making progress, and
+            // clearing the flag here left "this colony needs you" in the log with nothing in the
+            // cockpit. Only a real agent event (events.rs) clears `nudges_exhausted`.
+            if attention
+                .as_deref()
+                .is_some_and(|reason| reason != "waiting_for_answer" && reason != "nudges_exhausted")
+            {
                 app.update_session(&s.id, |x| x.attention = None).await;
+                continue;
+            }
+            if attention.as_deref() == Some("nudges_exhausted") {
                 continue;
             }
         }
@@ -210,22 +224,30 @@ async fn check_all(app: &Shared) {
                         activity.nudges
                     ),
                 };
-                app.session_log_as(Origin::Watchdog, &s.id, "error", message).await;
                 let since = if reason == "waiting_for_answer" {
                     activity.question_since.unwrap_or(now)
                 } else {
                     activity.last
                 };
-                app.update_session(&s.id, |x| {
-                    x.attention = Some(json!({"reason": reason, "since": since, "nudges": activity.nudges}));
-                })
-                .await;
+                flag(app, &s.id, reason, since, activity.nudges, message).await;
             }
             Decision::Clear => {
                 app.update_session(&s.id, |x| x.attention = None).await;
             }
         }
     }
+}
+
+/// Raises the watchdog's flag on a colony: the attention flag the cockpit's "needs you" list and
+/// notifications read, and the log line saying why, together (issue #760: the final "needs you"
+/// must reach the cockpit, not only the log). The flag is written first, so a colony whose log
+/// says it needs you always carries the flag that shows it.
+async fn flag(app: &Shared, id: &str, reason: &str, since: DateTime<Utc>, nudges: u64, message: String) {
+    app.update_session(id, |x| {
+        x.attention = Some(json!({"reason": reason, "since": since, "nudges": nudges}));
+    })
+    .await;
+    app.session_log_as(Origin::Watchdog, id, "error", message).await;
 }
 
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
@@ -335,6 +357,70 @@ mod tests {
             decide(&SETTINGS, at(61), Observed::Other, &activity, Some("waiting_for_answer")),
             Decision::Clear
         );
+    }
+
+    /// A colony with a stalled runtime and its nudges spent, under a watchdog of 15 min / 2 nudges.
+    async fn stalled_app(name: &str, status: SessionStatus) -> (Shared, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-watchdog-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            r#"{"acme": {"watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 2}}}"#,
+        )
+        .unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", status);
+        s.id = "w1".into();
+        s.allowed_providers = Some(vec!["bailian".into()]);
+        app.sessions.write().await.push(s);
+        std::fs::create_dir_all(app.session_dir("w1")).unwrap();
+        let rt = app.runtime("w1").await;
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now() - Duration::hours(2);
+            activity.nudges = 2;
+            activity.last_nudge = Some(Utc::now() - Duration::hours(1));
+        }
+        (app, root)
+    }
+
+    /// The final "this colony needs you" raises the attention flag the cockpit reads, not only a
+    /// log line (issue #760), and gateway traffic alone does not take it down again.
+    #[tokio::test]
+    async fn the_final_needs_you_sets_the_attention_flag() {
+        let (app, root) = stalled_app("flag", SessionStatus::Running).await;
+        check_all(&app).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], "nudges_exhausted");
+        assert_eq!(attention["nudges"], 2);
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("this colony needs you"))),
+            "and the log says so: {logs:?}"
+        );
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.unwrap()["reason"],
+            "nudges_exhausted",
+            "the flag stays up"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony blocked on an exhausted provider gets the quota flag and is not nudged: another
+    /// request cannot be answered until the plan resets (issue #760).
+    #[tokio::test]
+    async fn a_quota_blocked_colony_is_flagged_with_the_quota_reason_not_nudged() {
+        let (app, root) = stalled_app("quota", SessionStatus::Running).await;
+        app.gateway
+            .mark_quota_exhausted("bailian", None, Some(Utc::now().timestamp() + 600));
+        app.gateway.note_colony_quota("w1", "bailian");
+        check_all(&app).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], crate::provider_quota::QUOTA_EXHAUSTED_REASON);
+        assert_eq!(attention["provider"], "bailian");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
