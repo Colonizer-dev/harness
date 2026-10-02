@@ -328,7 +328,7 @@ shows "N left in plan". A failing balance check never marks the provider unhealt
   take a colony a little past it before it stops.
 - No provider comes with a plan-balance URL preset. You enter the URL yourself.
 
-The reference is in [README.md, Configuration](../README.md#configuration) and
+The reference is in [configuration.md](configuration.md) and
 [architecture.md, Per-colony limits](architecture.md#per-colony-limits).
 
 ## What a colony cost

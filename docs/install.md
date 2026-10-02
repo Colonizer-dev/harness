@@ -395,8 +395,7 @@ keyed by the SHA-256 of its value, and writes each one as a `.enc` file beside w
 be, removing the plaintext. Unset or blank, secrets are written in plaintext (0600). It protects a
 copied, synced or backed-up config directory, not a machine where something runs as you, since that can
 read the variable too. Use a long random value (32 or more random bytes): the single SHA-256 does no key
-stretching. Without the key, or with the wrong one, an encrypted secret counts as missing. The README's
-[Configuration](https://github.com/Colonizer-dev/harness#configuration) section has the rest: rotation,
+stretching. Without the key, or with the wrong one, an encrypted secret counts as missing. [configuration.md](configuration.md#colonizer_master_key) has the rest: rotation,
 the system keychain, and the per-colony budgets.
 
 ## Updating
