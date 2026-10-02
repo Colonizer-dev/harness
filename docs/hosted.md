@@ -106,8 +106,9 @@ same operation as recovery — re-entering — because there is no re-key comman
 1. Set the new `COLONIZER_MASTER_KEY` and restart the mothership.
 2. Re-enter each credential in Settings. Every save writes a fresh `.enc` under the new key and
    removes the stale one, so no separate cleanup is needed: the provider keys (`provider-keys/`),
-   the GitHub token (`github-token`), the Claude credential (`claude-token`, or
-   `claude-accounts/<account>` when you use several), colony secrets (`colony-secrets/<ENV>`),
+   the GitHub token (`github-token`), the Claude credential (`claude-accounts/<account>` — the
+   token routes save into the default account, and a pre-accounts `claude-token` is migrated into
+   `claude-accounts/default`), colony secrets (`colony-secrets/<ENV>`),
    the notification signing secret (`notify-secret`), the mem0 key (`memory-keys/mem0`), the
    voice keys (`voice-keys/<provider>`) and the web-push VAPID key (`push-vapid-key`).
 3. Alternatively, delete the stale `.enc` files under the config directory first and then

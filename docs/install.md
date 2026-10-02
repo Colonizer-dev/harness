@@ -263,7 +263,7 @@ What the mothership keeps in the config directory:
 | `modules.json` | Module settings, edited in Settings → Modules |
 | `orgs.json`, `known-orgs.json` | Per-org overrides, and the orgs the cockpit has seen |
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
-| `github-token`, `claude-token`, `claude-accounts.json` | Saved GitHub and Claude credentials |
+| `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
 | `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
