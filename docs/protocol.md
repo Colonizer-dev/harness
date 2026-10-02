@@ -2488,7 +2488,8 @@ owned}], chosen, would_catch, verdict, actual_first_failure_ms, focused_first_fa
 checks_run}`, `chosen` being `full` when there is nothing to focus on (fewer than two checks) —
 and `confirmed` still needs every check run green. Each fresh-checkout VM checks for the tool the command
 needs before running it: a tool the colony image does not carry (the default node image has no bun or
-pnpm) makes that check `unverifiable`, named in the summary, never `contradicted`. A branch that
+pnpm, until the colony-node image is pinned) makes that check `unverifiable`, named in the summary,
+never `contradicted`. A branch that
 rewrote an entry a resolved check comes from (`scripts.test`, the Makefile) would be grading its own
 homework: that check comes back `unverifiable` with that said plainly, and nothing runs. A check
 whose directory the branch deleted is skipped rather than run to a meaningless exit 1 — if no check

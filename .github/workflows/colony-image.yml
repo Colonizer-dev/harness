@@ -1,0 +1,185 @@
+# Builds the colony-node image (images/colony-node/Dockerfile): the stock node:24-bookworm plus bun
+# and pnpm, so a colony's done-claim verification can run those managers instead of reporting the
+# check unverifiable (crates/colonizer/src/verify.rs). Yarn classic and corepack already ship in the
+# stock image and are left alone.
+#
+# On every pull request and push to main this checks the Dockerfile's base digest against the node
+# row in crates/colonizer/images.lock (the two pins must not drift), builds the amd64 image, runs the
+# verifier's exact commands for bun and pnpm against the fixtures in images/colony-node/test/,
+# produces a CycloneDX SBOM and scans the image with Grype.
+#
+# Only a push to main or a manual dispatch publishes, as ghcr.io/colonizer-dev/colony-node:24-bookworm
+# for linux/amd64 and linux/arm64; the pushed index digest is printed to the job summary for the
+# follow-up that pins it in images.lock and switches the node preset. This workflow never edits the
+# lock or the preset itself.
+name: Colony image
+
+on:
+  pull_request:
+    paths:
+      - images/colony-node/**
+      - .github/workflows/colony-image.yml
+      # The base digest is checked against this file, so a change to it (a runtime-pin update) must
+      # run the drift check on its pull request. Only the PR trigger carries it: a lock-only merge to
+      # main changes no image, so it must not republish.
+      - crates/colonizer/images.lock
+  push:
+    branches: [main]
+    paths:
+      - images/colony-node/**
+      - .github/workflows/colony-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: colony-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Two pins for the same base image drifting apart is exactly what the lock exists to prevent,
+      # so the Dockerfile's FROM digest must equal the images.lock node row (same awk as ci.yml).
+      - name: Check the base digest against images.lock
+        run: |
+          pin=$(awk '$1 !~ /^#/ && $6 == "node:24-bookworm" && $4 == "image" { print $5; exit }' crates/colonizer/images.lock)
+          from=$(sed -n 's/^FROM node:24-bookworm@sha256:\([0-9a-f]\{64\}\).*/\1/p' images/colony-node/Dockerfile | head -1)
+          if [ -z "$from" ] || [ "$pin" != "$from" ]; then
+            echo "images/colony-node/Dockerfile base ($from) is not images.lock's node digest ($pin)" >&2
+            exit 1
+          fi
+          echo "base digest matches images.lock: $from"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # amd64 only: it is the architecture CI runs on, and --load (needed to run the fixtures and
+      # scan the image locally) takes a single platform. arm64 is added by the publish build.
+      - name: Build (amd64)
+        run: docker buildx build --platform linux/amd64 --load -t colony-node:test images/colony-node
+
+      # The fixtures run the verifier's exact commands (crates/colonizer/src/verify.rs) inside the
+      # built image. The fixture is mounted read-only and copied out first, because an install writes
+      # node_modules beside it; the checkout is left untouched.
+      - name: Smoke-test bun
+        run: |
+          docker run --rm -v "$PWD/images/colony-node/test/bun:/fixture:ro" colony-node:test \
+            sh -euc 'cp -R /fixture /work && cd /work && bun install --frozen-lockfile && bun run test'
+
+      - name: Smoke-test pnpm
+        run: |
+          docker run --rm -v "$PWD/images/colony-node/test/pnpm:/fixture:ro" colony-node:test \
+            sh -euc 'cp -R /fixture /work && cd /work && pnpm install --frozen-lockfile && pnpm test'
+
+      # yarn classic and corepack come from the base image; this fails loudly if a future base drops
+      # either. COREPACK_ENABLE_DOWNLOAD_PROMPT: corepack fetches its pnpm without a TTY to answer a
+      # prompt. Exercised, not just installed, because verify.rs runs `yarn`/`corepack yarn`/`corepack
+      # pnpm` for a repository that declares a packageManager.
+      - name: Smoke-test yarn and corepack
+        run: |
+          docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 colony-node:test \
+            sh -euc 'yarn --version && corepack pnpm --version'
+
+      # SBOM: a record of what went into the image, the same CycloneDX JSON a release is traced with
+      # in supply-chain.yml. Uploaded here rather than by the action so retention matches the repo.
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: colony-node:test
+          format: cyclonedx-json
+          output-file: colony-node.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: colony-node-sbom
+          path: colony-node.cdx.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # A stock Debian (buildpack-deps) base routinely carries High advisories with no fix published
+      # yet, so failing on `high` would make this job red on arrival for things this image cannot
+      # fix. This first scan is the complete picture — every severity, fixed or not — printed for a
+      # reviewer to read and triage; it never fails the build.
+      - name: Scan report (every finding)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: colony-node:test
+          fail-build: false
+          output-format: table
+
+      # The gate: a *fixed* Critical is the one finding that means the image is missing a published
+      # fix — the Dockerfile's apt upgrade layer picks up Debian's, so one surviving it means the base
+      # pin or a tool pin must be bumped. `only-fixed` drops the base's unfixable findings (grype's ignoreNonFixedMatches), so
+      # an unfixable Critical does not fail here — only one this image could actually ship a fix for.
+      # Its SARIF is uploaded (always, so it survives the failure) as the gate's evidence.
+      - name: Scan (gate, fixed Critical)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: colony-node:test
+          severity-cutoff: critical
+          only-fixed: true
+          output-format: sarif
+          output-file: colony-node.grype.sarif
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: colony-node-scan
+          path: colony-node.grype.sarif
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    # A pull request builds and scans but never writes to the registry.
+    if: github.event_name != 'pull_request'
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Dockerfile's RUN steps (the bun/pnpm installs and the version check) execute inside the
+      # target image, so the arm64 half needs binfmt_misc registered for this x64 runner — without
+      # QEMU the multi-arch build fails with "exec format error".
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (multi-arch)
+        id: push
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --metadata-file "$RUNNER_TEMP/metadata.json" \
+            -t ghcr.io/colonizer-dev/colony-node:24-bookworm \
+            --push images/colony-node
+          # containerimage.digest is the index digest for a multi-platform push — the value the
+          # follow-up pins in images.lock.
+          echo "digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Published colony-node"
+            echo
+            echo "Pushed \`ghcr.io/colonizer-dev/colony-node:24-bookworm\` for linux/amd64 and linux/arm64."
+            echo
+            echo "Index digest: \`${{ steps.push.outputs.digest }}\`"
+            echo
+            echo "A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the node preset to this image. This workflow does not edit the lock."
+          } >> "$GITHUB_STEP_SUMMARY"
