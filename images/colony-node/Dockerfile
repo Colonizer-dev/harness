@@ -28,7 +28,17 @@ ARG PNPM_SHA256=90762b8105e833164186b011efe5cde13841693ac8eaf784d2974a6e1c01fba3
 ARG PNPM_EXE_SHA256_amd64=8178a5581db169d9913fd6f918933b141cd6a760aab75a3c1f25e36a3ff1b5d8
 ARG PNPM_EXE_SHA256_arm64=538533d8edc219d75555e436cbb81c21ad89374978d456eca6bcd44c746afadc
 
-# base is buildpack-deps, so curl, ca-certificates and unzip are already present; no apt here.
+# Debian security updates. The base pin above is the current node:24-bookworm, but that image is
+# only rebuilt periodically, so it can lag a Debian security release (openssl 3.0.22-1~deb12u1 was
+# out while the pinned base still shipped 3.0.20). The scan gate in colony-image.yml fails on a
+# Critical that has a fix; applying the archive's upgrades here is how this image picks the fix up
+# without waiting for upstream. apt verifies every package against Debian's signed archive.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get -y upgrade --no-install-recommends; \
+    rm -rf /var/lib/apt/lists/*
+
+# base is buildpack-deps, so curl, ca-certificates and unzip are already present.
 RUN set -eux; \
     case "$TARGETARCH" in \
       amd64) bun_arch=x64-baseline; bun_sha="$BUN_SHA256_amd64"; pnpm_arch=x64; pnpm_sha="$PNPM_EXE_SHA256_amd64" ;; \

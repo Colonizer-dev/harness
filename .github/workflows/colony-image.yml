@@ -114,8 +114,9 @@ jobs:
           fail-build: false
           output-format: table
 
-      # The gate: a *fixed* Critical is the one finding that means the base pin itself must be
-      # bumped. `only-fixed` drops the base's unfixable findings (grype's ignoreNonFixedMatches), so
+      # The gate: a *fixed* Critical is the one finding that means the image is missing a published
+      # fix — the Dockerfile's apt upgrade layer picks up Debian's, so one surviving it means the base
+      # pin or a tool pin must be bumped. `only-fixed` drops the base's unfixable findings (grype's ignoreNonFixedMatches), so
       # an unfixable Critical does not fail here — only one this image could actually ship a fix for.
       # Its SARIF is uploaded (always, so it survives the failure) as the gate's evidence.
       - name: Scan (gate, fixed Critical)
