@@ -8,6 +8,7 @@
 //! The CLI half is `colonizer fleet export` / `colonizer fleet import`, both of which run
 //! locally off `Settings::from_env()` — no mothership needed.
 
+use crate::repo_identity::{self, RepoIdentity};
 use crate::sessions::{Session, SessionStatus};
 use crate::{Settings, util};
 use anyhow::Result;
@@ -239,10 +240,16 @@ pub struct ImportedSession {
     pub boot_timing: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The repository's fleet identity (#763), read from this machine's mirror of `repo`: its
+    /// root commit SHA(s) and normalised origin URL, so records from members that cloned the same
+    /// repository under different names or remotes line up. Absent when there was no mirror to
+    /// read, and in bundles from before #763.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_identity: Option<RepoIdentity>,
 }
 
 impl ImportedSession {
-    fn of(origin: &Origin, s: &Session) -> ImportedSession {
+    fn of(origin: &Origin, s: &Session, repo_identity: Option<RepoIdentity>) -> ImportedSession {
         ImportedSession {
             id: format!("{}:{}", origin.host, s.id),
             origin_host: origin.host.clone(),
@@ -268,6 +275,7 @@ impl ImportedSession {
             boot_timing: s.boot_timing.clone(),
             created_at: s.created_at,
             updated_at: s.updated_at,
+            repo_identity,
         }
     }
 }
@@ -354,8 +362,13 @@ fn collect(data_dir: &Path, origin: &Origin, cats: &Categories) -> anyhow::Resul
 
     if cats.history {
         let mut lines = String::new();
+        let mut identities: BTreeMap<&str, Option<RepoIdentity>> = BTreeMap::new();
         for s in &sessions {
-            lines.push_str(&serde_json::to_string(&ImportedSession::of(origin, s))?);
+            let identity = identities
+                .entry(s.repo.as_str())
+                .or_insert_with(|| mirror_identity(data_dir, &s.repo))
+                .clone();
+            lines.push_str(&serde_json::to_string(&ImportedSession::of(origin, s, identity))?);
             lines.push('\n');
         }
         staged.push(Staged {
@@ -428,6 +441,21 @@ fn collect(data_dir: &Path, origin: &Origin, cats: &Categories) -> anyhow::Resul
         files: staged.iter().map(entry).collect(),
     };
     Ok((manifest, staged))
+}
+
+/// The fleet identity of `repo` read from this machine's bare mirror
+/// (`<data_dir>/repos/<owner>/<repo>.git`, as `App::bare_repo` lays it out). `None` when the
+/// mirror is gone or tells nothing, or when `repo` is not a plain `owner/name` — a record's repo
+/// field never steers a read outside `repos/`.
+fn mirror_identity(data_dir: &Path, repo: &str) -> Option<RepoIdentity> {
+    if repo.is_empty() || !repo.split('/').all(is_safe_segment) {
+        return None;
+    }
+    let mirror = data_dir.join("repos").join(format!("{repo}.git"));
+    if !mirror.is_dir() {
+        return None;
+    }
+    Some(repo_identity::read(&mirror)).filter(|id| !id.is_empty())
 }
 
 /// The exported sessions' span: min `created_at`, max `updated_at`.
@@ -1812,6 +1840,79 @@ mod tests {
         assert!(!member.join(MANIFEST_NAME).exists());
         assert!(member.join("cursor.json").exists());
         assert!(member.join(HISTORY_FILE).exists());
+    }
+
+    /// Test-only git, isolated from the machine's config.
+    fn git_fixture(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn history_records_carry_the_repo_fleet_identity_from_the_mirror() {
+        let (_guard, root) = temp("identity");
+        let data = root.join("data");
+        seed(&data, "s1", "{}\n");
+        // A second colony on a repo with no mirror, and a third whose repo field tries to escape.
+        let mut sessions = vec![session("s1"), session("s2"), session("s3")];
+        sessions[1].repo = "octo/unmirrored".into();
+        sessions[2].repo = "../repos/octo/repo".into();
+        write(&data.join("sessions.json"), &serde_json::to_string(&sessions).unwrap());
+
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        git_fixture(&src, &["init", "-q", "-b", "main"]);
+        write(&src.join("a.txt"), "a");
+        git_fixture(&src, &["add", "-A"]);
+        git_fixture(&src, &["commit", "-q", "-m", "root"]);
+        std::fs::create_dir_all(data.join("repos/octo")).unwrap();
+        git_fixture(
+            &data.join("repos/octo"),
+            &["clone", "-q", "--bare", src.to_str().unwrap(), "repo.git"],
+        );
+        git_fixture(
+            &data.join("repos/octo/repo.git"),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://x-access-token:secret@github.com/Octo/Repo.git",
+            ],
+        );
+
+        let bundle = root.join("b.tar.zst");
+        export_bundle_for(&data, &origin("hostA"), &Categories::default(), &bundle).unwrap();
+        let history = tar_entries(&bundle).into_iter().find(|(n, _)| n == HISTORY_FILE).unwrap().1;
+        let lines: Vec<ImportedSession> = String::from_utf8(history.clone())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let identity = lines[0].repo_identity.clone().expect("the mirrored repo is identified");
+        assert_eq!(identity.roots.len(), 1);
+        assert_eq!(identity.url.as_deref(), Some("github.com/octo/repo"));
+        assert!(lines[1].repo_identity.is_none(), "no mirror, no identity");
+        assert!(lines[2].repo_identity.is_none(), "an unsafe repo field is never read");
+        assert!(
+            !String::from_utf8(history).unwrap().contains("secret"),
+            "the raw remote, with its token, never travels"
+        );
     }
 
     #[test]

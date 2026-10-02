@@ -3068,8 +3068,14 @@ session record itself is exported as an allowlist projection, not whole (below).
   one fleet's import; `origin_host` and `original_id` match `^[A-Za-z0-9_-][A-Za-z0-9._-]*$`.
 - Only those three are required. Everything else — repo, org, issue, issue_title, status, branch,
   base, pr_url, pr_opened_at, merged_at, summary, error, cost_usd, routed_cost_usd, model_tier,
-  model_usage, model_routing, agent, boot_timing, created_at, updated_at — is optional and
-  nullable; an exporter may leave out what its records never held.
+  model_usage, model_routing, agent, boot_timing, created_at, updated_at, repo_identity — is
+  optional and nullable; an exporter may leave out what its records never held.
+- `repo_identity` (#763) is `{"roots": ["<sha>", …], "url": "<host/path>|null"}`, read from the
+  exporting machine's mirror of `repo`: the root commit SHA(s), sorted, and the origin URL
+  normalised (scheme, `user@`/token, port, trailing `/` and `.git` removed; host lowercased;
+  github.com paths lowercased too, since GitHub treats them case-insensitively). The raw remote
+  never travels. Fleet members match repositories by root first, then URL, and treat more than
+  one candidate as no match.
 - The machine-readable shapes — the manifest at the top level, `imported_session`, `chunk` and
   `import_cursor` under `$defs` — are in
   [fleet-export.schema.json](fleet-export.schema.json) (draft 2020-12).
