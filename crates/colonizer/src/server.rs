@@ -252,6 +252,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::status::routes())
         .merge(crate::stream::routes())
         .merge(crate::telemetry::routes())
+        .merge(crate::transcript::routes())
         .merge(crate::update::routes())
         .merge(crate::upload::routes())
         .merge(crate::usage::routes())

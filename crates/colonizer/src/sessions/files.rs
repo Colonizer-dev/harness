@@ -55,7 +55,7 @@ fn container_id(id: &str) -> String {
 /// The colony a files route names, or `None` when there is none for this caller — the handler
 /// answers [`no_such_session`] then. An unknown id and one outside a scoped token's org/repo
 /// limits read the same, exactly as the colony routes hide them (issue #508).
-async fn visible_session(
+pub(crate) async fn visible_session(
     app: &App,
     id: &str,
     scoped: Option<&axum::Extension<crate::api_tokens::ScopedToken>>,

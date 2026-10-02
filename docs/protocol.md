@@ -339,6 +339,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
 | `DELETE /api/sessions/{id}` | Forgets a colony that is not live and not publishing. Its logs are archived first (`<data>/archive/`, see [colonies.md](colonies.md#the-log-archive)); if archiving fails, nothing is deleted. Then the worktree, local branch and record go. `?purge_logs=true` also removes the colony's archive bundles. Answers `{deleted, leftover, archived, purged_bundles, purge_error}`. **404** for an unknown id; **409** `stop the colony first` while it is live or publishing |
 | `GET /api/sessions/{id}/diff` | Everything the colony changed since it branched from `origin/<base>`: committed and uncommitted edits, plus untracked files as new-file diffs (at most 200 of them; binaries and symlinks skipped). `{id, repo, base, files: [{path, added, removed}], added, removed, diff, truncated}`, `diff` capped at 200 KB. Needs the worktree, not a live colony; `colonizer diff` and the MCP server read it. **409** when there is no worktree or no merge base, or git fails |
+| `GET /api/sessions/{id}/transcript?format=common&limit=&cursor=` | The colony's own agent session transcript, normalized to one shape (§4 *Session transcript*, below): `{agent, harness, meta, messages, total, next_cursor}`. `format` is required and must be `common`; `limit` defaults to 100 (max 500) and `cursor` is the message index the last page ended on. **400** for a missing or unknown `format`, a malformed `limit` or a `cursor` naming no message; **404** for an unknown colony (or one outside a scoped token's limits), a module that recorded no transcript, or a native store that cannot be read; **422** for an agent module with no transcript reader; **413** when the store is over the size caps; **500** when a store that is there will not parse |
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
 | `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution. Read scope for API tokens |
@@ -371,6 +372,7 @@ routed together).
 
 - `read` watches: `GET /api/status`, `/api/version`, `/api/sessions` (filtered to the token's
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
+  `/api/sessions/{id}/transcript` (the colony's own agent transcript, §4),
   `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
   `GET /api/maps/…` reads, `GET /api/merge-train`, and `GET /api/tokens/self`. The terminal
@@ -1358,6 +1360,55 @@ Counts and durations are bucket labels, settings are names without values. `bloc
 `COLONIZER_TELEMETRY`, `DO_NOT_TRACK` or `CI` when the environment holds reporting off. `PUT
 {"enabled": bool}` saves the choice (off forgets the id behind `install`, on makes a new one) and
 answers the same status; **409** while the environment holds it off.
+
+### `GET /api/sessions/{id}/transcript?format=common&limit=&cursor=`
+
+The colony's own agent session transcript — the conversation the module that ran it kept
+natively — read back and normalized to one message shape, whatever ran the colony. The agent's
+transcripts directory is host-mounted over the module's `session_resume.dir` at boot, so the
+harness reads it with `txcript`, one reader per format, and folds it through its canonical
+`Common` model:
+
+| agent module | harness | where its sessions live under `<session dir>/transcripts/` |
+| --- | --- | --- |
+| `claude-code` | `claude_code` | `<slug>/<uuid>.jsonl` (the projects root is the mount) |
+| `codex` | `codex` | `sessions/**/rollout-*.jsonl` (its home is the mount) |
+| `grok-build` | `grok` | `sessions/<encoded-cwd>/<id>/` (a session directory) |
+| `opencode` | `opencode` | `opencode.db` (one SQLite database at the mount root) |
+| `hermes` | `hermes` | `state.db` (one SQLite database at the mount root) |
+
+Only `claude-code` and `codex` declare `session_resume` today, so only they persist a transcript; a
+`grok-build`, `opencode` or `hermes` colony has nothing recorded and answers **404**. An `acp`,
+`pi` or unknown module has no reader and answers **422**. The mount is colony-writable, so the
+harness first copies only the files a reader needs — symlinks skipped, never followed — into a
+host-private directory and reads that, and a store past the caps (8 deep, 10 000 entries, 64 MiB a
+file, 256 MiB in sum) answers **413**.
+
+An unreadable native store reads the same as one never written (**404**), because discovery treats
+a store it cannot open as empty; only a store that opens but fails to parse or fold answers
+**500**, and its body does not echo the failure — that is logged, never returned, so no host path
+leaks.
+
+`format` is required and the only value served is `common`; anything else (or no `format`) is
+**400**, leaving room for other formats later. The answer is:
+
+```jsonc
+{
+  "agent": "claude-code",              // the module that ran the colony
+  "harness": "claude_code",            // the reader its transcript was folded through
+  "meta": { "id": "…", "timestamp": "…", "cwd": "…", "model": "…" }, // txcript Meta
+  "messages": [ { "role": "user|assistant", "content": [ /* text, thinking, tool_use, tool_result, … */ ], "timestamp": "…" } ],
+  "total": 128,                         // messages in the whole transcript
+  "next_cursor": "99"                   // null when the last page was reached
+}
+```
+
+Messages page the way the colony list does (§4 scoped API tokens): `limit` defaults to 100 and is
+clamped to at most 500, and `cursor` is the index of the last message already delivered, so the
+next page starts right after it and `next_cursor` is the page's last index while more follow, or
+`null` at the end. A `cursor` that names no message — not an integer, or past the last one — is a
+**400**. The route takes the same visibility guard as the diff and files routes, so a scoped token
+outside its org/repo limits reads an unknown colony (**404**).
 
 ### `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket)
 

@@ -163,6 +163,7 @@
 /api/sessions/{id}/retain                            POST   unauth=401    token=owner            activity=colony.retain
 /api/sessions/{id}/stop                              POST   unauth=401    token=session>=operate activity=colony.stop
 /api/sessions/{id}/terminal                          GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/transcript                        GET    unauth=401    token=session>=read    activity=-
 /api/settings/claude-token                           DELETE unauth=401    token=owner            activity=settings.remove
 /api/settings/claude-token                           POST   unauth=401    token=owner            activity=settings.save
 /api/settings/github-token                           DELETE unauth=401    token=owner            activity=settings.remove

@@ -72,6 +72,9 @@ pub(crate) use agentd::*;
 pub(crate) use api::routes;
 pub use api::*;
 pub(crate) use attention::*;
+// The colony-visibility guard, shared with `transcript.rs` (the files module's
+// own paths keep `crate::sessions::files::…`).
+pub(crate) use files::visible_session;
 pub use launch::*;
 pub use model::*;
 pub use runtime::*;
