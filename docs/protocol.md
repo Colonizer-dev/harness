@@ -1669,8 +1669,10 @@ The decision is recorded three ways:
 - an `info` line in the colony's session log (`model routing: low tier, score 0: a 180-character
   body, no checklist items, 1 path named`), naming the model when it differs from `model`, the
   cost gate when it kept the colony on `model`, and the rule's tier when an override disagrees;
-- a `model_routing` object on the session record — `{tier, rule, source, score, reason, model,
-  agent, misroute, signals, jev, cost, sensitivity}`, where `source` is `off`/`rule`/`override`,
+- a `model_routing` object on the session record — `{point, jev_mode, jev_agrees, floor, tier,
+  rule, source, score, reason, model, agent, misroute, signals, jev, cost, sensitivity}`, where
+  `point` is always `"routing.tier"`, the first four are §6.1c's, `source` is
+  `off`/`rule`/`override`/`jev`,
   `model` is set only when the tier changed it, `agent` names the agent module — the harness — the
   decision was made for, the same name the spend journal's colony rows carry (§6.8), so a routing
   decision can be joined with what the colony went on to spend, `misroute` is true when an operator
@@ -1701,14 +1703,15 @@ added after boot has none, and its requests go to Anthropic like any unrouted mo
 ### 6.1c Jev second opinion (shadow mode)
 
 An optional, default-off external classifier ("Jev", `crates/colonizer/src/jev.rs`) can be consulted
-for a second opinion on the tier §6.1b's rule already picked, in shadow mode only: the opinion is
+for a second opinion on the tier §6.1b's rule already picked. In shadow mode the opinion is
 attached to `Signals`/`Decision` as `jev: Option<JevOpinion>` (tier, model, confidence, an estimated
-cost) and recorded alongside the rule's own decision, but `decide` never reads it — it stays exactly
-the synchronous, pure function §6.1b describes, with no model and no network call inside it. The
+cost) and recorded alongside the rule's own decision without changing the tier; act mode (below)
+lets it pick the tier. Either way `decide` stays the synchronous, pure function §6.1b describes,
+with no model and no network call inside it. The
 network call happens once, in the async boot path in `boot.rs`, before `decide` runs.
 
-Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` (a `claude-code`
-module setting, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
+Two settings gate it, and both must be set or nothing happens: `jev_shadow_mode` or
+`jev_routing_act` (`claude-code` module settings, default `false`) and a `JEV_API_KEY` in the mothership's own environment. The mothership makes this call
 itself, so the key never enters a colony. A missing key, the setting left off, or any
 failure of the call all resolve to `jev: None`; none of them is an error, and none of them blocks or
 meaningfully slows boot. The whole exchange is bounded by a roughly 1.8-second hard timeout, with a
@@ -1723,13 +1726,30 @@ credentials: the issue title with credential-looking tokens redacted, its labels
 "latest" alias, since a second opinion's calibration is specific to one model version and is not
 assumed to carry over to the next. Each call's `estimated_cost_usd` is a rough token estimate against
 an unverified per-token price, logged so the cost of asking stays visible — it is not metered billing,
-and it is not folded into a colony's own routed cost, since this opinion never chooses a model.
+and it is not folded into a colony's own routed cost, since the opinion is a classifier call, not
+the model the colony runs on.
 
-This ships shadow mode only: zero applied decisions. Promoting Jev's tier to an actual input to
-`decide` is a separate, later change, and needs measured evidence first — comparing `routing.jsonl`
-records where `jev.tier` disagreed with `rule` against those sessions' eventual `actual_cost_usd` and
-misroute outcomes over a meaningful sample, to show the second opinion would have beaten the heuristic
-before anything is asked to act on it.
+**Act mode** (issue #583, experimental, default off). `jev_routing_act` (a `claude-code` boolean,
+default `false`) lets the opinion pick the tier: it asks Jev exactly as shadow mode does, with or
+without `jev_shadow_mode`, and when the opinion's `confidence` is at least
+`jev_routing_act_confidence` (a number in 0–1, default `0.8`) `decide` uses Jev's tier instead of
+the rule's, with `source: "jev"`. An opinion that lands on the rule's own tier leaves `source:
+"rule"`. Below the threshold, with no opinion, or in shadow mode, the rule's tier stands. An
+operator's `model_tier` still wins, and routing off still runs on `model`. The #470 cost gate
+applies to a low tier Jev picked just as it does to the rule's. Jev's tier is never below the
+task's **floor**:
+
+- a task is sensitive when the minimum provider mark its class demands of this org's gateway is
+  above `any` (`sensitivity::required_mark` — `vetted` and `restricted` by default, or any class an
+  org's overrides raise). A sensitive task's floor is the rule's own tier: Jev may raise it, never
+  lower it, since the tier picks the model and so the provider the colony starts on;
+- an unknown sandbox preset floors at `medium`, the same clamp the rule applies to itself;
+- both: the higher of the two. Neither: no floor.
+
+Every `routing.jsonl` decision row and `model_routing` record carries `point: "routing.tier"`,
+`jev_mode` (`off`/`shadow`/`act`), `jev_agrees` (whether Jev's tier equals the rule's, `null` with
+no opinion) and `floor` (a tier, or `null`), so Jev-acted decisions can be compared with rule ones
+against each session's `actual_cost_usd` and misroute outcomes.
 
 This second opinion and Jev compaction (Token savings) are separate features sharing only the
 `JEV_API_KEY`: the opinion reads condensed metadata at boot, while compaction sends conversation
