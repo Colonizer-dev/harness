@@ -1511,7 +1511,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         publish = Some((port, AGENTD_PORT));
         app.update_session(id, |x| x.local_port = Some(port)).await;
     }
-    let resolved_egress = crate::egress::resolve(&modules, &org_settings);
+    // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
+    // its vendor's declared hosts without the operator restating them.
+    let resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
     let tls_hosts = tls_edge_hosts(&secrets);
     let (net_profiles, net_rules, egress_record) =
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
@@ -2100,7 +2102,7 @@ mod tests {
             };
             // The default policy is Open with no operator entries: today's fence, plus the
             // always-blocked deny set every colony carries (#303).
-            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default());
+            let resolved = crate::egress::resolve(&ModulesConfig::default(), &orgs::OrgSettings::default(), None);
             let (profiles, rules, record) =
                 colony_network(mesh.clone(), routes, gateway, &resolved, &["api.anthropic.com".into()]);
             // `public` alone, never the broad `host` profile (#375) — in every combination, so a
@@ -2164,6 +2166,7 @@ mod tests {
                 mode: "global".into(),
                 ..Default::default()
             },
+            ..Default::default()
         };
         let (profiles, rules, record) = colony_network(
             Some((vec!["allow@192.168.1.4:udp:41743".into()], 41740)),

@@ -82,7 +82,9 @@ pub struct Pin {
 
 /// The fixed network hosts an agent module's runner needs, declared under `egress` in `module.json`
 /// as four optional arrays of bare hostnames (a leading `*.` wildcard allowed): the vendor's API,
-/// login and telemetry hosts, and everything else fixed. The #304 allowlist is this plus the task's.
+/// login and telemetry hosts, and everything else fixed. A colony in `allowlist` mode adds `api`,
+/// `auth` and `extra` to its allow list (#601); `telemetry` is never added — an operator who wants
+/// a telemetry host lists it in `egress_allow` themselves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Egress {
     pub api: Vec<String>,
@@ -443,6 +445,11 @@ impl AgentModule {
 
     pub(crate) fn requires(mut self, requires: Requires) -> Self {
         self.requires = requires;
+        self
+    }
+
+    pub(crate) fn egress(mut self, egress: Option<Egress>) -> Self {
+        self.egress = egress;
         self
     }
 
