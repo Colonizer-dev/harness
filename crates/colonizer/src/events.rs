@@ -552,16 +552,42 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                                 .await
                         }
                         Autopilot::Hold(reason) => {
-                            app.session_log(
-                                id,
-                                "warn",
-                                format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
-                            )
-                            .await;
-                            app.update_session(id, |x| {
-                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                            })
-                            .await;
+                            // The recovery point (issue #586): holding for a person is the rule, and
+                            // when the point is on Jev may answer with a retry or a narrower task
+                            // instead. Off leaves this arm exactly as it was. A colony the gateway
+                            // already flagged as a provider error is that class, not a plain hold.
+                            let failure = if s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some("model_error") {
+                                crate::recovery::Failure::ProviderError
+                            } else {
+                                crate::recovery::Failure::AutopilotHeld
+                            };
+                            let (action, _) = crate::recovery::handle(app, &s, failure, "ask_human", false).await;
+                            // An option with a message talks to the agent instead of holding — the
+                            // message sets the next turn's work, and no attention flag goes up. An
+                            // option without one (`ask_human`, `stop`) holds as it always did.
+                            if let Some(text) = action.agent_message() {
+                                crate::recovery::send_user_message(rt, "recovery", text);
+                                app.session_log(
+                                    id,
+                                    "info",
+                                    format!(
+                                        "autopilot: Jev chose {} instead of holding; sent the agent a message",
+                                        action.as_str()
+                                    ),
+                                )
+                                .await;
+                            } else {
+                                app.session_log(
+                                    id,
+                                    "warn",
+                                    format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
+                                )
+                                .await;
+                                app.update_session(id, |x| {
+                                    x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                                })
+                                .await;
+                            }
                         }
                     }
                 } else if step == Autopilot::Publish && s.status.is_live() {

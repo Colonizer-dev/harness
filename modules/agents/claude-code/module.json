@@ -150,6 +150,28 @@
         "maximum": 1,
         "default": 0.8
       },
+      "jev_recovery_act": {
+        "type": "boolean",
+        "title": "Let Jev choose the recovery path (experimental)",
+        "description": "When a step fails — a provider error, a tool failure, a watchdog stall, or a colony held after an error — ask the Jev classifier how to recover: retry the same step, split the work into smaller subagent tasks, nudge the agent, ask you, or stop. The pick is used only when it is at least as confident as the threshold below, and only until the per-colony cap below is reached, after which the colony is left for you. Never a push, publish or delete. Off by default; requires a JEV_API_KEY secret. Shadow mode (jev_shadow_mode) records the picks without applying them.",
+        "default": false
+      },
+      "jev_recovery_act_confidence": {
+        "type": "number",
+        "title": "Jev recovery confidence threshold",
+        "description": "Minimum confidence Jev's recovery pick needs before it replaces the harness's own rule (nudge a stalled colony, hold a failed one). Only used when Jev may choose the recovery path.",
+        "minimum": 0,
+        "maximum": 1,
+        "default": 0.8
+      },
+      "jev_recovery_cap": {
+        "type": "integer",
+        "title": "Jev recoveries per colony",
+        "description": "How many machine-chosen recoveries (retry, narrow the task, nudge) Jev may apply to one colony before it falls back to asking you. Recoveries that ask a person or stop do not count. Only used when Jev may choose the recovery path.",
+        "minimum": 0,
+        "maximum": 20,
+        "default": 2
+      },
       "delegate": {
         "type": "string",
         "title": "Delegation",
