@@ -17,6 +17,7 @@ import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
 import { DiskCleanupDialog, DiskCleanupRow, type DiskCleanupTab } from "./DiskCleanupLoop";
 import { diskCleanupBody, isDiskCleanup, reportSummary, toggleAction } from "./diskCleanup";
+import { SupplyChainLoopCard } from "./SupplyChainLoop";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -159,6 +160,8 @@ export function LoopsView({
         </div>
 
         <MergeLoopCard repos={repos} />
+
+        <SupplyChainLoopCard onOpenColony={onOpenColony} />
 
         {builtin && (
           <ul className="m-0 mt-6 list-none overflow-hidden rounded-xl border border-border p-0" aria-label="Built-in loops">

@@ -94,6 +94,7 @@ pub(crate) const KINDS: &[&str] = &[
     "loop.resume",
     "loop.delete",
     "loop.run_now",
+    "loop.supply_chain",
     "loop.docs",
     "redteam.start",
     "redteam.stop",
@@ -447,6 +448,18 @@ const RULES: &[Rule] = &[
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
+    rule(
+        "PUT",
+        "/api/supply-chain-loop",
+        "loop.update",
+        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/supply-chain-loop/run",
+        "loop.run_now",
+        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
+    ),
     rule(
         "PUT",
         "/api/merge-train/loop",

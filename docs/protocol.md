@@ -455,7 +455,7 @@ routed together).
   limits), `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`,
   `/api/sessions/{id}/commits`, `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
-  `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, and `GET /api/tokens/self`. The terminal
+  `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
 - `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|prewarm`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
@@ -3814,6 +3814,9 @@ Bearer token and `Origin` like the other writes.
 | `DELETE /api/loops/{id}` | Removes the loop; its past colonies stay. The built-in `disk-cleanup` loop answers `409`: switch it off instead. |
 | `POST /api/loops/{id}/run-now` | Starts a run now → the new session. `409` while the previous run is still in flight (not checked for an org-wide map loop), when a map loop had nothing to map, or when the loop's API token was revoked (the loop is ended). On the built-in `disk-cleanup` loop it answers the run's report instead — `{at, dry_run, trigger, bytes, categories: [{category, enabled, items: [{path, bytes, colony?}], count, bytes, held?: [{path, reason}], failed?, note?}], free_bytes_after?, used_pct_after?, attention?}` — and `?dry_run=1` answers the same report for a run that removes nothing (`400` on any other loop); `409` while a cleanup is already running. |
 | `GET /api/loops/{id}/runs` | The loop's colonies (origin `loop:<id>`, a map loop's `map:loop:<id>`), newest first. |
+| `GET /api/supply-chain-loop` | The built-in dependencies and supply-chain loop ([loops.md](loops.md#dependencies--supply-chain)): `{name, settings, next_run_at, running, scanners: {"cargo-audit": bool, "cargo-deny": bool, "npm audit": bool, "osv-scanner": bool}, blocked, last_report, history, attention}`. `settings` is `{enabled (false), allow ([]), cadence (daily), max_per_repo (1), max_per_run (3), cooldown_hours (12), min_severity ("moderate"), outdated (false), builtin (true), autopilot (true)}`. Read scope for API tokens. Saved in `<config_dir>/supply-chain-loop.json`. |
+| `PUT /api/supply-chain-loop` | Replaces `settings`. `400` for an allowlist entry that is not an org or `owner/repo`, a self-paced cadence or an interval under 60 minutes, or a cap outside its range. Owner only. |
+| `POST /api/supply-chain-loop/run` | `{dry_run, repo?}` → the run's report: `{id, started_at, finished_at, dry_run, trigger, blocked, repos: [{repo, sha, scanners, findings, notes, missing, error}], counts, dispatched: [{repo, ecosystem, session, title, findings, worst}], skipped: [{repo, ecosystem, reason, findings}], attention, note}`. A dry run starts nothing and saves nothing, and may name any repository; a real run only one on the allowlist. `409` while a run is in progress. Owner only. |
 
 `cadence` is tagged by `every`, all times UTC: `{"every":"interval","minutes":60}` (15–10080),
 `{"every":"daily","hour":9,"minute":0}`, `{"every":"weekly","weekday":0,"hour":9,"minute":0}` (0 =

@@ -1888,7 +1888,7 @@ async fn github_packages(app: &Shared, org: &str) -> Value {
     json!({"packages": out, "note": note})
 }
 
-async fn dependencies(app: &Shared, org: &str, repos: &[String]) -> Result<Value> {
+pub(crate) async fn dependencies(app: &Shared, org: &str, repos: &[String]) -> Result<Value> {
     let scans = scan_all(app, repos).await;
     // (ecosystem, name) → aggregate.
     #[derive(Default)]
@@ -2067,7 +2067,7 @@ fn age_days(at: &Value) -> Option<i64> {
     Some((chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_days())
 }
 
-async fn supply_chain(app: &Shared, org: &str, repos: &[String]) -> Result<Value> {
+pub(crate) async fn supply_chain(app: &Shared, org: &str, repos: &[String]) -> Result<Value> {
     let scans = scan_all(app, repos).await;
     // (eco, name, version) → users, direct, via.
     #[derive(Default)]

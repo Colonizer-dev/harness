@@ -1,0 +1,85 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "semver": {
+      "name": "semver",
+      "severity": "high",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1101088,
+          "name": "semver",
+          "dependency": "semver",
+          "title": "semver vulnerable to Regular Expression Denial of Service",
+          "url": "https://github.com/advisories/GHSA-c2qf-rxjj-qqgw",
+          "severity": "moderate",
+          "cwe": ["CWE-1333"],
+          "cvss": {"score": 5.3, "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"},
+          "range": ">=7.0.0 <7.5.2"
+        }
+      ],
+      "effects": ["make-dir"],
+      "range": "7.0.0 - 7.5.1",
+      "nodes": ["node_modules/semver"],
+      "fixAvailable": true
+    },
+    "make-dir": {
+      "name": "make-dir",
+      "severity": "moderate",
+      "isDirect": true,
+      "via": ["semver"],
+      "effects": [],
+      "range": "3.0.0 - 3.1.0",
+      "nodes": ["node_modules/make-dir"],
+      "fixAvailable": true
+    },
+    "lodash.template": {
+      "name": "lodash.template",
+      "severity": "critical",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 1106913,
+          "name": "lodash.template",
+          "dependency": "lodash.template",
+          "title": "Command Injection in lodash.template",
+          "url": "https://github.com/advisories/GHSA-35jh-r3h4-6jhm",
+          "severity": "critical",
+          "cwe": ["CWE-77"],
+          "cvss": {"score": 9.8, "vectorString": null},
+          "range": "<=4.5.0"
+        }
+      ],
+      "effects": [],
+      "range": "*",
+      "nodes": ["node_modules/lodash.template"],
+      "fixAvailable": false
+    },
+    "vite": {
+      "name": "vite",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 1102100,
+          "name": "vite",
+          "dependency": "vite",
+          "title": "vite server.fs.deny bypass",
+          "url": "https://github.com/advisories/GHSA-xxxx-yyyy-zzzz",
+          "severity": "high",
+          "cwe": ["CWE-200"],
+          "cvss": {"score": 7.5, "vectorString": null},
+          "range": ">=5.0.0 <5.4.12"
+        }
+      ],
+      "effects": [],
+      "range": "5.0.0 - 5.4.11",
+      "nodes": ["node_modules/vite"],
+      "fixAvailable": {"name": "vite", "version": "6.0.9", "isSemVerMajor": true}
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {"info": 0, "low": 0, "moderate": 2, "high": 1, "critical": 1, "total": 4},
+    "dependencies": {"prod": 120, "dev": 300, "optional": 4, "peer": 0, "peerOptional": 0, "total": 424}
+  }
+}
