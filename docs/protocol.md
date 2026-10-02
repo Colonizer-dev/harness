@@ -3746,6 +3746,14 @@ Monday), `{"every":"monthly","day":31,"hour":6,"minute":0}` (clamped to the mont
 first strictly after the last firing plus `days − 1` days, so a late firing never drifts), or
 `{"every":"self_paced"}`.
 
+The built-in TypeScript any loop ([loops.md](loops.md#typescript-remove-any)) has its own routes:
+
+| Route | What it does |
+|---|---|
+| `GET /api/ts-any-loop` | `{name, settings, next_run_at, running, node, blocked, last_report, history, attention, trend}`. `settings` is `{enabled (false), allow ([]), cadence (daily), batch_cap (20), max_per_run (3), cooldown_hours (20), implicit (false), offline_install (true), autopilot (true)}`; `trend` maps each repository to its totals, oldest first. Read scope for API tokens. Saved in `<config_dir>/ts-any-loop.json`. |
+| `PUT /api/ts-any-loop` | Replaces `settings`. `400` for an allowlist entry that is not an org or `owner/repo`, a self-paced cadence or an interval under 60 minutes, or a cap outside its range. Owner only. |
+| `POST /api/ts-any-loop/run` | `{dry_run, repo?}` → the run's report: `{id, started_at, finished_at, dry_run, trigger, blocked, repos: [{repo, sha, typescript, method ("typescript" or "token_scan"), method_note, ts_version, total, implicit, as_casts, suppressions, ts_files, forms, modules, files, previous, notes, error}], total, dispatched: [{repo, module, session, title, occurrences, module_total}], skipped: [{repo, module, reason}], checks: [{session, repo, module, pr_url, flagged, summary}], attention, note}`. A dry run starts nothing, recounts nothing and saves nothing, and may name any repository; a real run only one on the allowlist. `409` while a run is in progress. Owner only. |
+
 A loop's colony emits two runner events (§2), acted on only for colonies whose origin names a loop:
 
 ```json

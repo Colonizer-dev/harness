@@ -99,6 +99,9 @@ import type {
   UpdateStatus,
   UsageStatus,
   VoiceStatus,
+  TsAnyLoop,
+  TsAnyReport,
+  TsAnySettings,
   LoginItemStatus,
   PushSubscriptionSummary,
   PushSubscribeBody,
@@ -516,6 +519,12 @@ export interface Api {
   setDocsLoopTarget(target: string, enabled: boolean): Promise<DocsLoopView>;
   /** POST /api/docs-loop/run: a run now; a dry run launches and records nothing. */
   runDocsLoop(dryRun: boolean): Promise<DocsReport>;
+  /** GET /api/ts-any-loop: the built-in "TypeScript: remove any" loop. */
+  tsAnyLoop(): Promise<TsAnyLoop>;
+  /** PUT /api/ts-any-loop: replaces its settings (off, with an empty allowlist, by default). */
+  saveTsAnyLoop(settings: TsAnySettings): Promise<TsAnyLoop>;
+  /** POST /api/ts-any-loop/run: a run now, or a dry run that writes nothing. 409 while one runs. */
+  runTsAnyLoop(body: { dry_run: boolean; repo?: string }): Promise<TsAnyReport>;
   /** GET /api/merge-train: the merge train per repository (issue #671); empty until a repository opts in. */
   mergeTrain(): Promise<MergeTrainStatus>;
   /** GET /api/merge-train/loop: the merge-train loop's settings, paused repositories and run history (issue #754). */
@@ -854,6 +863,9 @@ export const httpApi: Api = {
   saveDocsLoop: (settings) => put("/api/docs-loop", settings),
   setDocsLoopTarget: (target, enabled) => post(`/api/docs-loop/${enabled ? "enable" : "disable"}`, { target }),
   runDocsLoop: (dryRun) => post("/api/docs-loop/run", { dry_run: dryRun }),
+  tsAnyLoop: () => request("/api/ts-any-loop"),
+  saveTsAnyLoop: (settings) => put("/api/ts-any-loop", settings),
+  runTsAnyLoop: (body) => post("/api/ts-any-loop/run", body),
   mergeTrain: () => request("/api/merge-train"),
   mergeLoop: () => request("/api/merge-train/loop"),
   saveMergeLoop: (settings) => put("/api/merge-train/loop", settings),

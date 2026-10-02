@@ -85,7 +85,10 @@ pub fn clean(answer: &str) -> Option<String> {
     while text.ends_with('.') {
         text.pop();
     }
-    let text = text.trim().to_string();
+    // #761: the summary is model output kept in sessions.json and shown on every colony card, so a
+    // credential the model lifted out of an issue is redacted — before the clamp, which could
+    // otherwise cut a token short of the shape the redactor knows.
+    let text = crate::redact::redact_text(text.trim()).into_owned();
     if text.is_empty() {
         return None;
     }
@@ -543,6 +546,11 @@ mod tests {
             Some("Add retries to the gateway")
         );
         assert_eq!(clean("   "), None);
+        // #761: a credential in the model's answer is stored as the mark.
+        assert_eq!(
+            clean("Rotate ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5 in CI").as_deref(),
+            Some("Rotate [REDACTED:github_token] in CI")
+        );
         let long = "word ".repeat(60);
         let out = clean(&long).unwrap();
         assert!(out.chars().count() <= SUMMARY_LIMIT);

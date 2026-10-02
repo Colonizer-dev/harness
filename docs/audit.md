@@ -81,6 +81,37 @@ limits.
   `gateway.jsonl`: provider, wire, method, path, requested and sent model, status, a typed failure
   code, durations, bytes and token counts. The record is a fixed struct, so keys, tokens and
   request bodies never reach it (`crates/colonizer/src/gateway_audit.rs`).
+- **Log redaction** (#761). A credential that reaches a colony's logs anyway (an agent echoing
+  a token, a tool printing a connection string, a request path with a key in its query string) is
+  replaced with `[REDACTED:<kind>]` before the line is written to `events.jsonl`, `harness.jsonl`
+  or `gateway.jsonl`, and before the line is broadcast to the cockpit. The detectors are layered:
+  provider token prefixes (GitHub, Anthropic, OpenAI, AWS, Stripe, Slack), a corpus of other
+  credential shapes (PEM private keys, JWTs, `Bearer` values, webhook URLs, more token prefixes),
+  passwords in `scheme://user:pass@host` and in database and broker connection strings, values of
+  `KEY=value` pairs and JSON fields whose name says secret, and, last, long high-entropy strings.
+  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. JSON lines are redacted
+  field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
+  bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
+  second line behind keeping secrets out of the colony, not a replacement
+  (`crates/colonizer/src/redact.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
+  written, and a fleet export redacts the logs it carries.
+  The same redactor covers the other text the mothership keeps or sends from agent and model
+  output: a filed finding (`finding-body.md` and the issue), an independent review (`review.md`
+  and the PR comment), the commit subject and pull request taken from `pr.md` (`pr-body.md` and
+  the PR itself), chat transcripts (`chats/<id>.jsonl`), colony summaries (`sessions.json`) and
+  the activity log (`activity.jsonl`). Redaction does not hide the leak: when it changed
+  `pr.md`, `review.md` or a finding, the colony's log gets a warning naming what went (`pr.md
+  contained 1 secret (github token), redacted before publishing`), and autopilot does not publish
+  such a `pr.md`: it holds the colony (`autopilot_held`) for a person to press Create PR, since the
+  colony had the secret in hand and the diff itself is not redacted. A rotated `events-N.jsonl` is renamed, not rewritten, so it
+  holds what was written: one from before redaction existed is redacted whenever it is read back
+  (the cockpit's diagnosis and a resumed colony's prompt) or bundled. Not covered: the rest of
+  `sessions.json` (a colony's `error` and its pending question), architecture maps, and the
+  numeric stats files (routing, spend, jev ladder).
+- **Credentials stay in the session directory.** An archive bundle or a fleet export never holds
+  a session's `vm/token`, `gateway-token`, `vm/mesh-authkey` or `vm/session.json`, nor any file
+  there named like a credential (`*token*`, `*authkey*`, `*.key`, `*.pem`, `secrets*`)
+  (`is_credential_file` in `crates/colonizer/src/archive.rs`).
 - **Inside the colony.** Credential files in the worktree are masked and agent config is pinned
   read-only ([path-policy.md](path-policy.md), #545); every colony boots behind an egress policy
   with a deny set no setting can reopen ([sandbox-network.md](sandbox-network.md#egress-policy-303),

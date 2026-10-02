@@ -295,12 +295,25 @@ pub(crate) fn pr_due(last_checked: Instant, backoff: Duration, now: Instant) -> 
 }
 
 /// The next check interval: doubled after a check with no news, reset when the state actually changed.
-/// A failed `gh` call counts as no news, so a broken checkout backs off like an untouched PR.
+/// A failed `gh` call counts as no news, so a broken checkout backs off like an untouched PR. The
+/// one exception — an open pull request whose checks are still running — is [`pr_backoff_for`].
 pub(crate) fn pr_backoff(current: Duration, changed: bool) -> Duration {
     if changed {
         PR_POLL_FIRST
     } else {
         (current * 2).min(PR_POLL_MAX)
+    }
+}
+
+/// The interval a fresh reading arms next: [`pr_backoff`]'s answer, except that an open pull
+/// request whose checks are still pending holds the first interval. Its verdict is expected within
+/// minutes, and `colonizer pr <id> --wait` follows it — a doubled gap here would be pure latency
+/// after CI settles, for a poll nobody needed to save.
+pub(crate) fn pr_backoff_for(current: Duration, changed: bool, open: bool, ci: github::CiState) -> Duration {
+    if open && ci == github::CiState::Pending {
+        PR_POLL_FIRST
+    } else {
+        pr_backoff(current, changed)
     }
 }
 
@@ -788,7 +801,12 @@ pub async fn watch_pull_requests(app: Shared) {
                         })
                         .await;
                     }
-                    poll.backoff = pr_backoff(poll.backoff, merge_changed || changed);
+                    poll.backoff = pr_backoff_for(
+                        poll.backoff,
+                        merge_changed || changed,
+                        state == github::PrState::Open,
+                        info.ci,
+                    );
                 }
                 Err(e) => {
                     // No news is no change: leave the colony's status alone and try again later.
@@ -1228,6 +1246,36 @@ mod tests {
         assert_eq!(pr_backoff(Duration::from_secs(4000), false), Duration::from_secs(3600));
         // Real news buys a fast next check again (e.g. a closed PR reopened).
         assert_eq!(pr_backoff(Duration::from_secs(3600), true), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn an_open_pull_request_with_checks_running_holds_the_first_interval() {
+        // `colonizer pr --wait` follows these readings, so a pending verdict is re-checked fast:
+        // doubling here would be pure latency after CI settles.
+        assert_eq!(
+            pr_backoff_for(Duration::from_secs(1920), false, true, github::CiState::Pending),
+            PR_POLL_FIRST
+        );
+        assert_eq!(
+            pr_backoff_for(Duration::from_secs(60), true, true, github::CiState::Pending),
+            PR_POLL_FIRST,
+            "a change and a pending verdict arm the same short interval"
+        );
+        // A settled verdict is no news, and backs off like any other.
+        assert_eq!(
+            pr_backoff_for(Duration::from_secs(60), false, true, github::CiState::Success),
+            Duration::from_secs(120)
+        );
+        // A no-checks PR has nothing running to be quick about.
+        assert_eq!(
+            pr_backoff_for(Duration::from_secs(60), false, true, github::CiState::NoChecks),
+            Duration::from_secs(120)
+        );
+        // The fast lane is for open pull requests only: a merged or closed colony is winding down.
+        assert_eq!(
+            pr_backoff_for(Duration::from_secs(60), false, false, github::CiState::Pending),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]

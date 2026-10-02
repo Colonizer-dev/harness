@@ -86,6 +86,7 @@ pub(crate) const KINDS: &[&str] = &[
     "colonize.colony",
     "publish.merge_train",
     "loop.create",
+    "loop.ts_any",
     "loop.update",
     "loop.pause",
     "loop.resume",
@@ -292,6 +293,10 @@ async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
     let Ok(line) = serde_json::to_string(&entry) else {
         return; // a fixed-shape line cannot fail to serialize
     };
+    // #761: a failure's `detail` or a colony's `title` can quote tool output or an issue, so the
+    // line is redacted field by field before it lands in the History log; a clean line is kept
+    // byte for byte.
+    let line = crate::redact::redact_line(&line).into_owned();
     let live = live_file(&data_dir);
     if tokio::fs::metadata(&live).await.is_ok_and(|m| m.len() >= rotate_bytes)
         && let Err(e) = tokio::fs::rename(&live, rolled_file(&data_dir)).await
@@ -424,6 +429,18 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/chat/{id}/issue", "chat.issue", Target::None),
     rule("POST", "/api/repos/{owner}/{name}/issues", "colonize.issue", Target::NewIssue),
     rule("POST", "/api/loops", "loop.create", Target::NewLoop),
+    rule(
+        "PUT",
+        "/api/ts-any-loop",
+        "loop.update",
+        Target::Fixed(crate::ts_any_loop::NAME, "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/ts-any-loop/run",
+        "loop.run_now",
+        Target::Fixed(crate::ts_any_loop::NAME, "loops"),
+    ),
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
@@ -1179,6 +1196,29 @@ mod tests {
         let seqs: Vec<u64> = all(&again).iter().map(|e| e.seq).collect();
         assert_eq!(seqs.last(), Some(&41));
         assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+    }
+
+    /// #761: a credential in a failure's detail is stored as the mark; names and targets that
+    /// merely mention secrets are kept as written.
+    #[tokio::test]
+    async fn a_secret_in_an_activity_line_is_stored_redacted() {
+        let root = root();
+        let app = test_app(&root);
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let mut failed = Entry::new("outcome.failed", "colony");
+        failed.detail = Some(format!("git push: remote rejected https://x:{secret}@github.com/acme/web"));
+        record(&app, failed).await;
+        record(
+            &app,
+            Entry::new("secret.save", "you").target("secret provider-keys:openrouter"),
+        )
+        .await;
+        let text = std::fs::read_to_string(root.join("data").join(FILE)).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        let lines = all(&app);
+        assert!(lines[0].detail.as_deref().unwrap().contains("[REDACTED:"), "{lines:?}");
+        assert_eq!(lines[1].target.as_deref(), Some("secret provider-keys:openrouter"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

@@ -256,6 +256,7 @@ can install it.
 | `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
 | `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
+| `loops` | Besides the loops you write, a built-in "TypeScript: remove any" loop that counts the explicit `any` in the TypeScript repositories you opt in, with their own compiler or a token scan and no model, and hands one small batch per repository to a colony that types them properly, then recounts its pull request. Off, with an empty allowlist, until configured ([docs/loops.md](docs/loops.md#typescript-remove-any)) | — |
 | `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](docs/burn-down.md)) | — |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
