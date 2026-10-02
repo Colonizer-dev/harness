@@ -273,13 +273,20 @@ pub enum Denial {
     NotVisible,
     /// The credential itself was refused.
     BadCredential,
+    /// GitHub has suspended the account: a 403 whose body says so. Reconnecting the same account
+    /// does not help, so it is told apart from a refused credential.
+    Suspended,
 }
 
 /// Classifies a failed `gh` invocation. Kept separate from the message so it can be tested without
 /// GitHub, and so the wording lives in one place.
 pub fn classify(error: &str) -> Option<Denial> {
     let text = error.to_ascii_lowercase();
-    if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
+    // Checked first: GitHub answers a suspended account with a 403, which would otherwise read as a
+    // refused credential and send the operator off to reconnect an account that cannot be used.
+    if text.contains("suspended") && (text.contains("http 403") || text.contains("account")) {
+        Some(Denial::Suspended)
+    } else if text.contains("http 404") || text.contains("not found") || text.contains("could not resolve to a repository") {
         Some(Denial::NotVisible)
     } else if text.contains("http 401") || text.contains("http 403") || text.contains("bad credentials") {
         Some(Denial::BadCredential)
@@ -297,6 +304,14 @@ pub fn classify(error: &str) -> Option<Denial> {
 pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow::Error {
     let raw = format!("{error:#}");
     let Some(denial) = classify(&raw) else { return error };
+    if denial == Denial::Suspended {
+        // No `gh api user` here: it would be refused the same way, and the suspension is the message.
+        return anyhow!(
+            "GitHub has suspended the account signed in on this machine, so {repo} cannot be read. Reconnecting \
+             the same account will not help; a colony that already has a worktree keeps it and can still be \
+             resumed. (GitHub said: {raw})"
+        );
+    }
     let who = match viewer(app).await {
         Ok(user) => user["login"]
             .as_str()
@@ -304,16 +319,17 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
             .unwrap_or_else(|| "this machine".into()),
         Err(_) => "this machine".into(),
     };
-    match denial {
-        Denial::NotVisible => anyhow!(
+    if denial == Denial::NotVisible {
+        anyhow!(
             "GitHub cannot see {repo} as {who}. It may have been deleted or renamed, or {who} may not have access \
              to it — GitHub answers the same way to all three. The colony's worktree is kept, so it can be resumed \
              once access is back; otherwise delete the colony. (GitHub said: {raw})"
-        ),
-        Denial::BadCredential => anyhow!(
+        )
+    } else {
+        anyhow!(
             "GitHub refused the credentials for {repo}. Reconnect GitHub in Settings → Connections, then resume. \
              (GitHub said: {raw})"
-        ),
+        )
     }
 }
 
@@ -2778,6 +2794,11 @@ mod tests {
         assert_eq!(
             classify("gh: Resource not accessible (HTTP 403)"),
             Some(Denial::BadCredential)
+        );
+        // A suspended account is its own answer, not a credential to reconnect.
+        assert_eq!(
+            classify("gh: Sorry. Your account was suspended. (HTTP 403)"),
+            Some(Denial::Suspended)
         );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
