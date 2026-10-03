@@ -943,6 +943,7 @@ mod tests {
             allowed_providers: None,
             allowed_models: None,
             sensitivity: None,
+            model_substitutions: Vec::new(),
             cleaned_up: false,
             keep_worktree: false,
             attention: None,

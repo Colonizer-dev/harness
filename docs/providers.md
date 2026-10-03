@@ -134,7 +134,15 @@ them so the form prefills.
   `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
-  and the colony log says why.
+  and the colony log says why. The launch resolves the orchestrator, subagent, background and small
+  models against the task's class first (issue #704): one routed to a connection this gate would
+  refuse is replaced with an eligible model — the orchestrator's, or the module's own `model` — and
+  the substitution is logged and recorded on the colony, so the cockpit shows what it is really
+  running on instead of a colony that 403s every subtask. A model the operator named at launch is
+  resolved the same way. When the eligible model is itself blank — the default setup, where the
+  module names no `model` — the setting is cleared so the task inherits the harness default, recorded
+  as "the orchestrator's model". If no eligible model exists at all the setting is left as it is and
+  the boot warns.
 - **`vetted`** — off by default, and implied by `trusted`. Paths a repository classifies `vetted`
   in `.colonizer/sensitivity.toml` need a connection marked `vetted: true` or better; the looser
   classes (`open`, `standard`, `custom`) run on any connection unless an org's settings raise their
