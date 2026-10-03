@@ -405,6 +405,7 @@ pub async fn quota_action(
                         enabled: modules.agent.enabled,
                         settings,
                         save_anyway: false,
+                        confirm_content: false,
                     };
                     // Through the modules API's own handler, so the save is validated and written
                     // exactly as a Settings save would be.

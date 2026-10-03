@@ -16,7 +16,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path as FsPath, PathBuf};
 
-pub const KINDS: [&str; 14] = [
+pub const KINDS: [&str; 15] = [
     "source",
     "sandbox",
     "mesh",
@@ -31,6 +31,7 @@ pub const KINDS: [&str; 14] = [
     "burn_down",
     "voice",
     "screen",
+    "observability",
 ];
 
 /// An agent module discovered from `modules/agents/<id>/module.json` in the app assets.
@@ -829,6 +830,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             .into_iter()
             .map(|(id, name, description, schema)| p(id, name, description, schema))
             .collect(),
+        "observability" => crate::observability::settings::providers(),
         "screen" => vec![p(
             "promptdecode",
             "Prompt screening",
@@ -912,6 +914,10 @@ pub struct UpdateModule {
     /// settings a probe would refuse, on purpose. Defaults off, so a normal save is checked.
     #[serde(default)]
     pub(crate) save_anyway: bool,
+    /// Observability only: a save that turns on conversation content or thinking must also carry
+    /// `"confirm_content": true`. A request field, not a setting — it is validated, never persisted.
+    #[serde(default)]
+    pub(crate) confirm_content: bool,
 }
 
 fn yes() -> bool {
@@ -919,7 +925,7 @@ fn yes() -> bool {
 }
 
 /// The kinds a harness is not a harness without; every other kind may be switched off.
-fn is_required(kind: &str) -> bool {
+pub(crate) fn is_required(kind: &str) -> bool {
     matches!(kind, "source" | "sandbox" | "agent" | "publish" | "resume")
 }
 
@@ -946,6 +952,18 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
         .unwrap_or_default();
     let settings = validate_settings(&provider.id, &provider.schema, &req.settings, &stored)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    // A kind with rules the generic checks cannot express (observability today) says so by name
+    // here, on the settings this save would leave in place: the keys already stored ride under
+    // what the request set, since a save that omits a key does not reset it. `confirm_content` is
+    // a request field, passed in and never persisted.
+    if kind == "observability" {
+        let mut effective = stored.clone();
+        for (key, value) in settings.iter() {
+            effective.insert(key.clone(), value.clone());
+        }
+        crate::observability::settings::validate(&provider.id, &stored, &effective, req.enabled, req.confirm_content)
+            .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
     // The autonomy judge is checked against the real world before it is stored (issue #875): its
@@ -1375,6 +1393,7 @@ mod tests {
                 enabled: true,
                 settings,
                 save_anyway: false,
+                confirm_content: false,
             };
             update(State(app.clone()), Path("agent".into()), Json(req))
         };
@@ -1397,6 +1416,7 @@ mod tests {
                 enabled: true,
                 settings,
                 save_anyway: false,
+                confirm_content: false,
             };
             update(State(app.clone()), Path("source".into()), Json(req))
         };

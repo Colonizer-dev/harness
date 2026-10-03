@@ -1813,6 +1813,7 @@ mod tests {
                 enabled: true,
                 settings: judge_settings("primary/bad-model", ""),
                 save_anyway,
+                confirm_content: false,
             };
             crate::modules::update(
                 axum::extract::State(app.clone()),
