@@ -524,7 +524,7 @@ pub async fn command(force: bool, host: &str, token: &str) -> Result<()> {
         Preflight::Proceed { installed, latest } => (installed, latest),
     };
     if force {
-        println!("{}", force_warning(&client, &base, &token, &installed, &latest).await);
+        println!("{}", force_warning(&client, &base, token, &installed, &latest).await);
     }
     println!("updating from {installed} to {latest}");
 
