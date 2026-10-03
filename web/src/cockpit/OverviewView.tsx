@@ -22,11 +22,12 @@ import { formatDuration, isLive, orgOf, sameOrg, stored, timeAgo } from "../comp
 import { needsYou } from "../notifications";
 import type { OrgEntry } from "../orgs";
 import { HIDE_EMPTY_ORGS_KEY, hideEmptyOrgEntries, parseHideEmptyOrgs } from "../orgs";
-import { formatCost, formatTokens, orgCost, sumCosts } from "../spend";
+import { formatCost, formatTokens, orgCost, spendToday, sumCosts } from "../spend";
 import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { AreaChart, ChartSection, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, TrendLine, type KpiDef } from "./DashChart";
 import { deliveryKpis } from "./delivery";
+import { FleetColonies } from "./FleetColonies";
 import { FleetPanel } from "./FleetPanel";
 import { isBumped, isFlashed, useLiveEvents } from "./liveEvents";
 import { OrgDashboard } from "./OrgDashboard";
@@ -218,6 +219,9 @@ export function OverviewView({
   // Range windows over wall-clock time for the session-derived figures. Merged sessions
   // bucket by merge date (merged_at, falling back to created_at); failed ones by created_at.
   const nowMs = Date.now();
+  // Today's spend from the spend journal — the same history fetch the sparklines read, so no extra
+  // request — shown beside the running total. Null when today has no measured row (issue #613).
+  const todaySpend = spendToday(spendHistory?.days, new Date(nowMs));
   const fromMs = nowMs - range * 86_400_000;
   const prevFromMs = fromMs - range * 86_400_000;
   const days = rangeDays(range, nowMs);
@@ -357,6 +361,7 @@ export function OverviewView({
               {needList.length} {needList.length === 1 ? "colony needs" : "colonies need"} you · {counts.live} live · {counts.queued} queued across {workspaces.length}{" "}
               {workspaces.length === 1 ? "workspace" : "workspaces"}
               {headerCost !== null && <> · {formatCost(headerCost)} spent</>}
+              {todaySpend !== null && <> · {formatCost(todaySpend)} today</>}
             </div>
           </div>
           {rangePicker}
@@ -638,6 +643,7 @@ export function OverviewView({
         <div className="flex flex-col gap-4">
           <BurnDownCard />
           <FleetPanel hosts={fleetHosts} />
+          <FleetColonies hosts={fleetHosts} sessions={sessions} />
           <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
         </div>
       <RedTeamWizard

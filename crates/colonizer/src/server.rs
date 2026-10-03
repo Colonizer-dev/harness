@@ -340,6 +340,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::fleet::routes())
         .merge(crate::fleet_history::routes())
         .merge(crate::fleet_members::routes())
+        .merge(crate::fleet_policy::routes())
         .merge(crate::fleet_sync::routes())
         .merge(crate::gateway::routes())
         .merge(crate::github::routes())
@@ -361,6 +362,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::packages::routes())
         .merge(crate::phone::routes())
         .merge(crate::plugins::routes())
+        .merge(crate::previews::routes())
         .merge(crate::providers::routes())
         .merge(crate::publish::routes())
         .merge(crate::quota_cards::routes())
@@ -377,6 +379,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::status::routes())
         .merge(crate::stream::routes())
         .merge(crate::telemetry::routes())
+        .merge(crate::transcript::routes())
         .merge(crate::ts_any_loop::routes())
         .merge(crate::uhp::routes())
         .merge(crate::update::routes())
@@ -452,7 +455,10 @@ pub(crate) async fn serve() -> Result<()> {
     for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    let (mut sessions, corrupt) = load_sessions(&cfg.data_dir.join("sessions.json"))?;
+    // The one store this run reads and writes through (docs/session-store.md): built once here and
+    // threaded into startup and the `App`, so every later save and append answers by the same name.
+    let store: Arc<dyn crate::store::SessionStore> = Arc::new(crate::store::LocalDirStore::new(cfg.data_dir.clone()));
+    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &cfg.data_dir.join("sessions.json")).await?;
     for s in &mut sessions {
         if s.org.is_empty() {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
@@ -496,6 +502,7 @@ pub(crate) async fn serve() -> Result<()> {
         agent_problems,
         load_damage,
         api_token,
+        store,
     };
     let app = Arc::new(App::new(cfg, boot)?);
 

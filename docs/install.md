@@ -7,14 +7,15 @@ environment is under [Settings](#settings).
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
-  or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
-  aarch64-only. On Linux the host also needs glibc 2.28 or newer, which the pinned microsandbox
-  binary requires.
+  or an Apple Silicon Mac. On a stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
+  `kvm` group and log back in: `sudo usermod -aG kvm "$USER"`. An Intel Mac can't run Colonizer, because
+  microsandbox's libkrun backend is aarch64-only. On Linux the host also needs glibc 2.28 or newer,
+  which the pinned microsandbox binary requires.
 - **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar` (with xz support, for the
   Node.js runtime the installer unpacks). The installer also uses `gh`, when it is present, to verify
   a release's build provenance ([Install a release](#install-a-release)). A build from source also
   needs `npm`, Node.js 20.19 or newer (or 22.12 or newer; the web UI's Vite requires one of those),
-  and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
+  and a Rust toolchain of 1.98 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
   the safe bet.
 - **Claude Code**: on Linux, a native Claude Code install, which colonies use. On a Mac the installer
   fetches the Linux build a colony needs ([On a Mac](#on-a-mac)).
@@ -144,6 +145,8 @@ this machine and read the same environment the mothership does:
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
+| `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
+| `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
 
@@ -192,6 +195,9 @@ taskbar icon, the same sign-in.
 - **iPhone or iPad:** open the cockpit in Safari and pick **Add to Home Screen** from the share
   sheet. When the device isn't installed yet, **Settings → Notifications** and **Settings →
   Desktop** show those steps in the app itself, next to the web push they unlock.
+
+> **Coming.** One step from the address to the home screen, with the cockpit's address made obvious
+> ([#867](https://github.com/Colonizer-dev/harness/issues/867)).
 
 The installed app carries a few shortcuts — **Inbox**, **Colonize**, **Nest** — from the icon's
 long-press menu (right-click on the taskbar/Dock icon). Sharing a GitHub issue or pull request link
@@ -271,7 +277,7 @@ What the mothership keeps in the config directory:
 | `modules.json` | Module settings, edited in Settings → Modules |
 | `orgs.json`, `known-orgs.json` | Per-org overrides, and the orgs the cockpit has seen |
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
-| `github-token`, `claude-token`, `claude-accounts.json` | Saved GitHub and Claude credentials |
+| `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
 | `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
@@ -280,6 +286,8 @@ What the mothership keeps in the config directory:
 | `updates.json` | The update check switch ([docs/updates.md](updates.md)) |
 | `loops.json`, `redteam-schedules.json` | Scheduled loops and red-team runs |
 | `colonizer.toml` | Optional hand-written file; today it holds `[publish] co_author` |
+| `fleet.json` | [Fleet](fleet.md) membership: pairings, members and this machine's own fleet token |
+| `phones.json` | Paired phones: each phone's credential, stored as a SHA-256 |
 | `remote/` | The remote-access identity key pair |
 | `host_id` | This mothership's id |
 
@@ -289,7 +297,8 @@ system keychain; the Secrets page shows which.
 What it keeps in the data directory: `sessions.json` (the colony list, read back at every start) and
 `sessions/<id>/` (each colony's logs and state), `repos/` and `worktrees/` (clones and each colony's
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
-`archive/`, `cache/`, `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
+`archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
+`colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
 `routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
 `mothership.out` when the mothership is started at login.
 
@@ -298,7 +307,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`) read the same variables.
+`telemetry`, `migrate-store`, `fleet export`, `fleet import`) read the same variables.
 
 ### The mothership
 
@@ -362,6 +371,7 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `MEM0_API_KEY` | The mem0 shared-memory provider |
 | `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). Never saved; only the environment |
 | `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in the composer, one per voice service (the last is the OpenAI-compatible one) |
+| `OPENAI_API_KEY`, `XAI_API_KEY` | Also the vendor key the `codex` and `grok-build` agent modules get, when no `openai` or `xai-grok` provider has a saved key ([docs/runner-authoring.md](runner-authoring.md)) |
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
 
 A login item does not carry any of these ([above](#desktop-install-the-cockpit-as-an-app-start-at-login)).

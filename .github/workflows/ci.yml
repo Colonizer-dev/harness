@@ -235,6 +235,12 @@ jobs:
       - name: Test the exec-bit check
         run: sh scripts/test/check-exec-bits.test.sh
 
+      # Two tracked paths that differ only in letter case (or script modules whose names do, once
+      # the extension is dropped) pass every Linux job and break a macOS or Windows checkout: the
+      # macOS release build of v0.2.0 failed that way (issue #915). This catches it on the PR.
+      - name: Check case-only path collisions
+        run: sh scripts/ci/check-case-collisions.sh
+
   # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
   # so there is nothing to install and `npm test` is plain `node --test`.
   telemetry:

@@ -602,6 +602,10 @@ pub(crate) async fn park_colony(
         app.session_log(&s.id, "warn", format!("park: {why_kept}")).await;
     }
     let vm_kept = !discard;
+    // The question the colony was parked on, if any: its risk class rides on the park record, so the
+    // hold-timeout backoff can tell a question the autonomy judge may answer from one it never may
+    // without reaching for a runtime a cold park has torn down.
+    let question_risk = app.runtime(&s.id).await.open_question().await.map(|(_, _, risk)| risk);
     let lifecycle = app.session_lock(&s.id).await;
     let _lifecycle = lifecycle.lock().await;
     let claimed = app
@@ -617,6 +621,7 @@ pub(crate) async fn park_colony(
                     reason: reason.into(),
                     resets_at: resets_at.clone(),
                     vm_kept,
+                    question_risk,
                 });
                 x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
                 // Parked by the host ends the wait outright, as a stop does: the held answer and
@@ -778,9 +783,10 @@ fn over_host_disk(bytes: u64, quota_bytes: u64) -> bool {
 }
 
 /// What a colony leaves on the host: its worktree (bind-mounted rw at `/workspace` inside the microVM,
-/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, and the
-/// append-only logs). The microVM's root disk is a separate limit, microsandbox's `--root-disk`. Walked
-/// on the blocking pool: it is plain IO over trees that can be gigabytes.
+/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, the append-only
+/// logs, and — behind the false snapshot gate — `<session dir>/snapshots/`, which the walk counts with
+/// everything else, issue #702). The microVM's root disk is a separate limit, microsandbox's `--root-disk`.
+/// Walked on the blocking pool: it is plain IO over trees that can be gigabytes.
 async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
     let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
     // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
@@ -1063,6 +1069,9 @@ pub async fn resume(
             x.attention = None;
             x.mesh = None;
             x.local_port = None;
+            // The old microVM's preview is closed with its address (previews.rs): a resumed colony
+            // starts with no preview and the owner opens one again.
+            x.preview_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
             // the boot; any held answer stays on the record, and the boot delivers it. The boot is
             // told whether it is restoring a suspension (issue #700) before the flag goes. A pending
@@ -1076,6 +1085,11 @@ pub async fn resume(
             x.parked = None;
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
+            // An operator resume starts the boot afresh (issue #881): a stale retry wait must not
+            // hold it and a spent transient budget must not fail it, so the bookkeeping is cleared.
+            x.retry_at = None;
+            x.failure_class = None;
+            x.boot_retries = 0;
             x.updated_at = Utc::now();
             Ok(Some((x.clone(), admitted, waiting)))
         },
@@ -1137,6 +1151,18 @@ pub async fn resume(
         app.storage_failed("rotate the old event log", &e).await;
         app.session_log(&id, "error", message.clone()).await;
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
+    }
+    // Issue #702: behind this gate a suspended colony comes back from its sealed memory snapshot
+    // (snapshot.rs) instead of the transcript. `resume` decrypts it into a staging file and re-mints
+    // the credentials a restored runtime carries; any failure — missing, expired, corrupt, no key —
+    // falls back to the fresh boot below. The gate is false, so the branch does not run: the pinned
+    // msb cannot restore a `--secret`-carrying sandbox (sandbox.rs has the measurement).
+    if admitted
+        && crate::sandbox::supports_memory_snapshot()
+        && crate::snapshot::resume(&app, &id, &s.sandbox, suspension.as_ref().and_then(|x| x.snapshot.clone())).await
+    {
+        let s = app.session(&id).await.unwrap_or(s);
+        return Ok(Json(s));
     }
     if admitted {
         // A park that kept the microVM (issue #213) but could not resume warm — the link is gone
@@ -1237,6 +1263,9 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
     let lifecycle = app.session_lock(id).await;
     let _lifecycle = lifecycle.lock().await;
     let reason = park.reason.clone();
+    // The one-shot note this resume carries (issue #876): a warm resume never boots, so it is taken
+    // off the record here and handed over on the prompt below.
+    let mut note = None;
     let claimed = with_slot(
         &app.sessions,
         &s.org,
@@ -1252,6 +1281,7 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
             if x.status != SessionStatus::Parked || !room || app.drain.draining() {
                 return None;
             }
+            note = x.resume_note.take();
             x.status = SessionStatus::Running;
             x.error = None;
             x.attention = None;
@@ -1272,15 +1302,26 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         format!("warm resume: the kept microVM is still running (parked for {reason}); prompting the agent to continue"),
     )
     .await;
+    // The kept runtime still carries the `pr.md` mark from before the park; clear it so the resumed
+    // colony's first completed turn counts as done even if it leaves an existing description
+    // untouched (a cold resume gets the same effect from `Runtime::load` seeding the mark empty).
+    *rt.pr_mark.lock().await = None;
     // The same channel the transcript's user messages take (sessions/api.rs `client_command`): the
     // runner starts a turn on it, which is all a warm resume is.
+    let mut text = format!(
+        "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
+         never stopped. Pick up where you left off and continue with the task."
+    );
+    // The note the resume carries, if any: the hold-timeout backoff's "choose for yourself", or the
+    // answer that arrived while the colony was parked.
+    if let Some(note) = &note {
+        text.push_str("\n\n");
+        text.push_str(note);
+    }
     let _ = rt.commands.send(json!({
         "type": "user_message",
         "id": format!("u-{}", crate::util::short_id()),
-        "text": format!(
-            "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
-             never stopped. Pick up where you left off and continue with the task."
-        ),
+        "text": text,
     }));
     Some(Ok(Json(s)))
 }
@@ -1602,6 +1643,17 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
     } else {
         (0, None)
     };
+    // The colony's snapshots go with it (issue #702): best-effort `msb snapshot remove`, then the
+    // sealed directory and the key file — the key lives under the private state rather than the
+    // session dir removed below, so it would otherwise outlive the colony forever.
+    let snapshot_name = s
+        .suspended
+        .as_ref()
+        .and_then(|x| x.snapshot.as_ref())
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    crate::snapshot::remove(&app, &id, snapshot_name.as_deref()).await;
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
@@ -2987,6 +3039,7 @@ exit 0
                 reason: "hold_timeout".into(),
                 resets_at: None,
                 vm_kept,
+                question_risk: None,
             });
             app.sessions.write().await.push(s);
             tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();

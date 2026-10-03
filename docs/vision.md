@@ -92,27 +92,34 @@ Two labels are used everywhere below, and they set the tense of the sentence aro
   "edgeLabelBackground":"#0E121A"
 }} }%%
 flowchart LR
-  U(["browser"]):::req --> M
+  U(["cockpit · CLI · MCP"]):::req --> M
 
   subgraph HOST["YOUR MACHINE · THE MOTHERSHIP"]
-    M["<b>colonizer</b><br/>modules · colonies · publish"]:::core
+    M["<b>colonizer</b><br/>queue · colonies · publish"]:::core
+    MOD["modules<br/>watchdog · autonomy · memory<br/>notify · loops · merge train"]:::mod
+    GW["provider gateway<br/>keys stay here"]:::mod
     HS["headscale<br/>bundled control plane"]:::mod
     TS["tailscaled<br/>userspace node"]:::mod
-    M --> HS & TS
+    M --- MOD
+    M --> HS & TS & GW
   end
 
   subgraph C["ONE TASK · ONE MICROVM · ONE WORKTREE"]
     AD["<b>colonizer-agentd</b><br/>events · terminals"]:::port
-    AG["agent runner<br/>Claude Code"]:::mod
+    AG["agent runner<br/>Claude Code · Codex · OpenCode · Pi"]:::mod
     WT[("/workspace<br/>git worktree")]:::vendor
     AD --> AG --> WT
   end
 
   TS == "private mesh" ==> AD
-  M --> GH["GitHub<br/>issues · pull requests"]:::vendor
-  AG -. "placeholder, swapped at the edge" .-> API["api.anthropic.com"]:::vendor
-  C2["another colony"]:::ghost
+  AG -. "Claude · placeholder key,<br/>swapped at the edge" .-> ANT["api.anthropic.com"]:::vendor
+  AG -. "provider/model" .-> GW
+  GW --> API["other model providers<br/>DeepSeek · Z.AI · local"]:::vendor
+  M --> GH["GitHub<br/>issues · pull requests · merges"]:::vendor
+  C2["more colonies"]:::ghost
   TS -.-> C2
+  F["other motherships<br/>fleet members"]:::ghost
+  M -. "fleet view" .- F
 
   classDef req fill:#0E121A,stroke:#FF6B35,stroke-width:1.5px,color:#EDEBE6
   classDef core fill:#141821,stroke:#FF6B35,stroke-width:1.5px,color:#EDEBE6
@@ -217,6 +224,8 @@ a card. Autopilot can't publish in the middle of a question.
 | Merge train, off by default: green, clean colony pull requests squash-merged one at a time and rebased when behind, with an opt-in loop that drives it ([docs/architecture.md](architecture.md#merge-train), [docs/loops.md](loops.md#merge-train), [#671](https://github.com/Colonizer-dev/harness/issues/671), [#754](https://github.com/Colonizer-dev/harness/issues/754)) | `SHIPPING` |
 | Network policies as a module of their own | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
+| Optional observability add-on: OTLP export to Grafana, Datadog, Honeycomb and others, off by default, conversation content only with org opt-in ([#839](https://github.com/Colonizer-dev/harness/issues/839)) | `PLANNED` |
+| Your cockpit on your phone: its address obvious and one step onto the home screen ([#867](https://github.com/Colonizer-dev/harness/issues/867)) | `PLANNED` |
 
 The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit
 sets four release checkpoints ([docs/audit.md](audit.md)).

@@ -7,8 +7,7 @@
 // and three colonies on the same issue read as the same event three times. The log records an
 // outcome once, at the transition, and a person's action once, at the press; the colony list only
 // supplies an outcome for a colony whose transition predates the log, marked as approximate.
-import { dayLabel } from "./feed";
-import { needsYou } from "../notifications";
+import { currentOutcome, dayLabel } from "./feed";
 import type { ActivityEntry, Session } from "../types";
 
 /** How a row is drawn: its icon and colour. */
@@ -221,27 +220,6 @@ function fromEntry(entry: ActivityEntry, waitingIds: ReadonlySet<string>): Histo
     detail: entry.detail ?? null,
     approximate: false,
   };
-}
-
-/** The outcome kind a colony is showing now, or null while it is in between. */
-export function currentOutcome(session: Session): string | null {
-  if (needsYou(session) && session.status === "waiting_for_answer") return "outcome.question";
-  switch (session.status) {
-    case "pr_opened":
-      return "outcome.pr_opened";
-    case "merged":
-      return "outcome.merged";
-    case "closed":
-      return "outcome.closed";
-    case "no_changes":
-      return "outcome.no_changes";
-    case "stopped":
-      return "outcome.stopped";
-    case "failed":
-      return "outcome.failed";
-    default:
-      return null;
-  }
 }
 
 /** When a colony's current outcome happened, as best the colony list knows, and whether that is exact. */

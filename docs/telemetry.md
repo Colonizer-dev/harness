@@ -14,6 +14,10 @@ how the harness is used, with its own switch and a different random id, and on b
 is sent at most once a day and only when `COLONIZER_TELEMETRY_ENDPOINT` names a collector — unset,
 nothing is sent at all. The environment switches below keep both off.
 
+A [planned observability add-on](https://github.com/Colonizer-dev/harness/issues/839) is a third,
+separate and opt-in thing: it exports your own runs over OTLP to *your* backend — Grafana, Datadog,
+Honeycomb or another — and never to colonizer.dev.
+
 ## What is sent
 
 While it is on, the mothership sends a heartbeat to `https://telemetry.colonizer.dev/v1/heartbeat` every
