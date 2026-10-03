@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 
 import { Avatar } from "../components/Avatar";
+import { IconNetwork } from "../components/icons";
 import { sameOrg } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import type { LiveConnection } from "../liveStream";
@@ -57,8 +58,11 @@ export function Header(props: {
   onOpenRemote: () => void;
   /** The autonomy judge's health (issue #875); a chip appears once it has failed repeatedly. */
   judge?: AutonomyStatus | null;
+  /** Opens Settings → Your cockpit: the address to bookmark (issue #867). */
+  onOpenCockpit?: () => void;
 }): ReactElement {
-  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge } = props;
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit } =
+    props;
 
   return (
     <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
@@ -104,6 +108,17 @@ export function Header(props: {
 
       <div className="min-w-0 flex-1" />
 
+      {onOpenCockpit && (
+        <button
+          type="button"
+          onClick={onOpenCockpit}
+          aria-label="Your cockpit address"
+          title="Your cockpit address — bookmark it on any device"
+          className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-muted transition-colors hover:bg-panel-2 hover:text-text"
+        >
+          <IconNetwork size={17} />
+        </button>
+      )}
       {inbox && <NotificationsBell {...inbox} />}
       {user && <UserMenu {...user} />}
     </header>

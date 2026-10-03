@@ -93,6 +93,7 @@ import type {
   RemotePairing,
   RemoteStatus,
   Phones,
+  PhoneOrigin,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1414,6 +1415,14 @@ export function createMockApi(): Api {
   let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
   const phoneState: Phones = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
   let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
+  // Where a phone might reach this cockpit, in the mothership's preference order: the relay when
+  // remote access is on, otherwise a plain-http lan address (so the insecure-origin warning has a
+  // real case). GET /api/phone answers with this list too — bare origins, no code — so a bookmark
+  // can name the network address without minting an invite (issue #867).
+  const phoneOrigins = (): PhoneOrigin[] =>
+    remoteState.enabled
+      ? [{ kind: "relay", url: `https://${remoteHost}`, reachable: true, secure: true, note: null }]
+      : [{ kind: "lan", url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" }];
   const remotePairingState: RemotePairing = {
     owner: null,
     pending: [{ code: "481516", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 600 }],
@@ -2696,6 +2705,8 @@ export function createMockApi(): Api {
       host: mockHost(live),
       // Reclamation counts for the sidebar's Storage dot (issue #223).
       reclaim: { reclaimable: 2, unpushed: 1 },
+      // The drain flag (issue #880): off by default; ?draining=1 could model an update in flight.
+      draining: false,
       // Disk health for the sidebar's Storage dot (issue #220): plenty free, so neither
       // low_disk nor admission_paused. ?runtime=old omits storage with the rest, as a
       // mothership from before the probe did not.
@@ -2776,11 +2787,13 @@ export function createMockApi(): Api {
     applyUpdate: async () => {
       await sleep(200);
       const live = [...sessions.values()].map((s) => s.session).filter((s) => isLive(s.status));
-      if (live.some((s) => s.status === "publishing")) throw new ApiError("a colony is publishing", 409);
+      // The real one drains first — holding the queue while the colonies still booting or publishing
+      // finish, a publish being waited for rather than refused (issue #880) — then installs and
+      // restarts. The mock just reports the phases.
       mockUpdate = {
     ...mockUpdate,
     apply: {
-      phase: "installing",
+      phase: "draining",
       version: mockUpdate.latest?.version ?? null,
       started_at: new Date().toISOString(),
       error: null,
@@ -2789,7 +2802,10 @@ export function createMockApi(): Api {
       backup: null,
     },
       };
-      // The real one replaces the process here; the mock just reports it did.
+      // The drain finishes (nothing is really in flight here), then the process is replaced.
+      setTimeout(() => {
+    mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "installing" } };
+      }, 1500);
       setTimeout(() => {
     mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
       }, 2500);
@@ -2980,7 +2996,7 @@ export function createMockApi(): Api {
     // switch, and the lan origin is plain http so the insecure-origin warning has a real case. The
     // mock has no phone to scan with, so a minted invite shows up as one phone waiting for a code
     // ("123 456"), which confirming turns into a paired phone.
-    phones: () => later(() => clone(phoneState)),
+    phones: () => later(() => clone({ ...phoneState, origins: phoneOrigins() })),
     phoneInvite: async () => {
       await sleep(250);
       phoneState.pending = [{ id: `ph_${mockId()}`, label: "iPhone", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
@@ -2988,11 +3004,7 @@ export function createMockApi(): Api {
         code: `${mockId()}${mockId()}`,
         expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
         ttl_secs: 300,
-        origins: [
-          remoteState.enabled
-            ? { kind: "relay" as const, url: `https://${remoteHost}`, reachable: true, secure: true, note: null }
-            : { kind: "lan" as const, url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" },
-        ],
+        origins: phoneOrigins(),
       });
     },
     confirmPhone: async (code) => {
@@ -4444,7 +4456,7 @@ export function createMockApi(): Api {
 const mockKeychain = { available: true, backend: "macOS Keychain", reason: null, checked_at: new Date().toISOString() };
 const mockSecrets: import("./types").SecretRow[] = [
   { id: "github-token", label: "GitHub token", group: "connections", used_by: "Issues, pushes and pull requests", icon: "github", location: "file", env: null, env_set: false, updated_at: "2026-09-20T10:00:00Z", editable: true, colonies: { kind: "none", hosts: [] } },
-  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "keychain", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
+  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "file", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: false, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
   { id: "api-token", label: "Cockpit API token", group: "connections", used_by: "The cockpit sign-in and the colonizer CLI", icon: "key", location: "file", env: null, env_set: false, updated_at: null, editable: false, colonies: { kind: "none", hosts: [] } },
   { id: "provider-keys:zai", label: "Z.AI", group: "providers", used_by: "Models routed to zai", icon: "plug", location: "file", env: null, env_set: false, updated_at: "2026-09-17T04:00:00Z", editable: true, colonies: { kind: "gateway", hosts: [] } },
   { id: "provider-keys:bailian", label: "Alibaba Bailian", group: "providers", used_by: "Models routed to bailian", icon: "plug", location: "unset", env: null, env_set: false, updated_at: null, editable: true, colonies: { kind: "gateway", hosts: [] } },

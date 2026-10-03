@@ -288,7 +288,7 @@ fn escalates(failure: &JudgeError, consecutive_failures: u64) -> bool {
 /// newer runner knows sorts above every known one (protocol.rs), so a question outside the
 /// vocabulary is never answered — and since the derived order puts `Unknown` highest, an unknown
 /// ceiling needs stating separately: it is the one ceiling that answers nothing at all.
-fn within_ceiling(risk: QuestionRisk, ceiling: QuestionRisk) -> bool {
+pub(crate) fn within_ceiling(risk: QuestionRisk, ceiling: QuestionRisk) -> bool {
     match (risk, ceiling) {
         (QuestionRisk::Unknown, _) | (_, QuestionRisk::Unknown) => false,
         (risk, ceiling) => risk <= ceiling,

@@ -140,6 +140,12 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// How long the agent waits for the mothership to stop before killing it. systemd's `TimeoutStopSec`
+/// and launchd's `ExitTimeOut` both default too low for the drain: on SIGTERM the mothership stops
+/// taking new boots and waits up to five minutes (`COLONIZER_DRAIN_TIMEOUT_SECS`, default 300) for the
+/// boots and publishes in flight to finish. 330 leaves half a minute of slack on top of that.
+const STOP_TIMEOUT_SECS: u32 = 330;
+
 /// The LaunchAgent: runs at load, restarts only after a crash (a clean exit — including the
 /// "already running" one — is left alone), and appends to the mothership log.
 pub fn render_plist(layout: &Layout, env: &[(String, String)]) -> String {
@@ -174,6 +180,9 @@ pub fn render_plist(layout: &Layout, env: &[(String, String)]) -> String {
 	<integer>10</integer>
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<!-- Long enough for the SIGTERM drain (COLONIZER_DRAIN_TIMEOUT_SECS, default 300s) plus slack. -->
+	<key>ExitTimeOut</key>
+	<integer>{STOP_TIMEOUT_SECS}</integer>
 	<key>StandardOutPath</key>
 	<string>{log}</string>
 	<key>StandardErrorPath</key>
@@ -190,6 +199,9 @@ fn systemd_quote(s: &str) -> String {
 }
 
 /// The user unit: starts with the user session, restarts only on failure, appends to the log.
+/// `KillMode=mixed` sends SIGTERM to the mothership alone (so it can drain and clean up its own
+/// children) and only SIGKILLs whatever it left behind after `TimeoutStopSec`, instead of taking
+/// every boot's helper process down with it.
 pub fn render_unit(layout: &Layout, env: &[(String, String)]) -> String {
     let env_lines: String = env
         .iter()
@@ -198,6 +210,8 @@ pub fn render_unit(layout: &Layout, env: &[(String, String)]) -> String {
     format!(
         "[Unit]\nDescription=Colonizer mothership\nAfter=network-online.target\nWants=network-online.target\n\n\
          [Service]\nType=simple\nExecStart={}\n{env_lines}Restart=on-failure\nRestartSec=10\n\
+         # Long enough for the SIGTERM drain (COLONIZER_DRAIN_TIMEOUT_SECS, default 300s) plus slack.\n\
+         KillMode=mixed\nTimeoutStopSec={STOP_TIMEOUT_SECS}\n\
          StandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         systemd_quote(&layout.binary.display().to_string()),
         layout.log.display(),
@@ -440,6 +454,8 @@ mod tests {
         assert!(plist.contains("<key>SuccessfulExit</key>\n\t\t<false/>"));
         assert!(plist.contains("<string>/usr/bin&amp;x</string>"), "values are XML-escaped");
         assert_eq!(plist.matches("mothership.out").count(), 2);
+        // launchd must outwait the mothership's 5-minute drain before it SIGKILLs the stop.
+        assert!(plist.contains("<key>ExitTimeOut</key>\n\t<integer>330</integer>"));
     }
 
     #[test]
@@ -450,6 +466,10 @@ mod tests {
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(unit.contains("StandardOutput=append:/Users/a/.local/share/colonizer/mothership.out"));
+        // SIGTERM reaches the mothership alone so it can drain; only leftover children are SIGKILLed,
+        // and not before the drain's own timeout.
+        assert!(unit.contains("KillMode=mixed"));
+        assert!(unit.contains("TimeoutStopSec=330"));
     }
 
     #[test]

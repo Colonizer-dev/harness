@@ -39,6 +39,8 @@ import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
 import { Page } from "./Page";
 import { PhoneWelcomeSheet } from "../components/PhoneWelcomeSheet";
+import { BookmarkPrompt } from "../components/BookmarkPrompt";
+import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -717,6 +719,7 @@ export function Cockpit({
         remoteOn={remoteOn}
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
+        onOpenCockpit={() => onOpenSettings("cockpit")}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -743,6 +746,19 @@ export function Cockpit({
               onResumeAll={() => void resumeAllQuotaParked()}
               onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
             />
+          ) : null}
+          {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
+              so above every view, like the quota banner. It clears itself when the drain finishes,
+              so there is nothing to dismiss. Absent on a mothership from before the drain. */}
+          {status?.draining ? (
+            <div className="px-6 pt-4">
+              <div
+                role="status"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+              >
+                Draining for an update or restart: new colonies stay queued until it finishes.
+              </div>
+            </div>
           ) : null}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {body()}
@@ -823,6 +839,11 @@ export function Cockpit({
       {/* The phone sign-in welcome (issue #746): offered once, gone on dismiss or on reload —
           the ?welcome= that opened it is stripped at boot. */}
       {welcome && <PhoneWelcomeSheet onClose={() => setWelcome(null)} />}
+      {/* The bookmark prompt (issue #867): once per device in the signed-in cockpit, and never
+          again once dismissed or installed. Held back while the phone welcome sheet is up so the two
+          do not stack, and left out of the hosted demo, which has no real cockpit to bookmark.
+          Self-gating, so it renders null when it has nothing to say. */}
+      {!welcome && !DEMO && <BookmarkPrompt />}
     </div>
     </ColonizeProvider>
   );

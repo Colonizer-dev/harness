@@ -43,6 +43,15 @@ Every finding below is still open on `main`:
 | R5 | Yes | `bodies` and `ws_in` still use unbounded channels (`remote.rs:704`, `:833`); the tunnel is still dialled with tungstenite's default config (`remote.rs:442-445`). |
 | L1–L5 | Yes | `safeNext` (`auth.js:81-85`), the optional limiter (`worker.js:62`, `:111`), bare `create_dir_all` (`remote.rs:169`, `:275`), the `sec-websocket-*` strip (`remote.rs:1048`) and the `via` field without a tunnel marker are all unchanged. |
 
+**Since then (re-checked 2026-10-03).** R1 is fixed: `stripHopByHop` now reads `[name, value]`
+pairs and keeps repeated `set-cookie`, with an end-to-end test that runs the real Rust client
+through the real relay (#618, PR #659). R2 is narrowed but not closed: **Reset link** now sends the
+old install a signed `DELETE …/owner` before replacing the key, so the old link loses its owner
+(`reset_identity` in `remote.rs`, #599, PR #663), but the old install stays registered at the relay,
+which still has no endpoint that deletes one. R3–R5 are unchanged: `http_base` still accepts `ws://`
+for any host, the relay still passes `Domain=` through, the cockpit cookie still has no `Secure`
+(`set_cookie_header` in `auth.rs`), and `ws_in` and `bodies` are still unbounded channels.
+
 No issue with any of the five R titles is in the public tracker as of 2026-09-27; if they were
 filed privately (as security advisories), this document cannot see them.
 
@@ -157,7 +166,7 @@ Each was confirmed by code reading; L1 also by a proof-of-concept run.
 
 ## Before the relay is deployed
 
-- R1 fixed, with a relay e2e test that uses the Rust client's exact frame shape.
+- R1 fixed, with a relay e2e test that uses the Rust client's exact frame shape. Done in #659.
 - R2 and R3 fixed, or the relay's trust level — it can read everything and act as the owner —
   accepted in writing.
 - Deploy configuration: `SESSION_SECRET` set (the relay fails closed without it), `REGISTER_LIMITER`

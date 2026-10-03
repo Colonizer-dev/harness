@@ -1,0 +1,1 @@
+**The vision page's Shape diagram matches today's harness.** Model calls go through the mothership's provider gateway (keys stay on the host) to any configured provider, the agent runner can be Claude Code, Codex, OpenCode or Pi, and the diagram now shows the modules (watchdog, autonomy, memory, notify, loops, merge train) and fleet members.

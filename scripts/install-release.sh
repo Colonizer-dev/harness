@@ -127,6 +127,9 @@ main() {
   previous=$(readlink "$app" || true)
   slot=$name-a
   [ "$previous" != "$name-a" ] || slot=$name-b
+  inuse=$(slot_pids "$dir/$slot")
+  [ -z "$inuse" ] ||
+    fail "$dir/$slot is in use by pid(s) $inuse; restart colonizer (or wait for 'colonizer update') then install again"
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
 
@@ -146,11 +149,22 @@ main() {
   # canonicalises the symlink away), so removing it under a running colony takes
   # its plugins with it. An update applied by a running mothership sets
   # COLONIZER_KEEP_PREVIOUS=1 and cleans the slot up itself, once nothing is
-  # using it. A person running the installer by hand keeps today's behaviour.
+  # using it. A person running the installer by hand keeps today's behaviour,
+  # except that a slot a process is still running from is never removed either:
+  # the mothership's own sweep knows when colonies have let go of it.
   if [ "${COLONIZER_KEEP_PREVIOUS:-0}" = 1 ]; then
     case "$previous" in "$name-a" | "$name-b") say "keeping the previous version at $dir/$previous" ;; esac
   else
-    case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+    case "$previous" in
+      "$name-a" | "$name-b")
+        prev_inuse=$(slot_pids "$dir/$previous")
+        if [ -n "$prev_inuse" ]; then
+          say "keeping the previous version at $dir/$previous: pid(s) $prev_inuse still run from it (swept on the next start)"
+        else
+          rm -rf "${dir:?}/$previous"
+        fi
+        ;;
+    esac
   fi
 
   mkdir -p "$HOME/.local/bin"
@@ -220,6 +234,38 @@ relink() {
   ln -s "$1" "$2.new"
   mv -T "$2.new" "$2" 2>/dev/null || mv -h "$2.new" "$2" 2>/dev/null ||
     { rm -f "$2.new"; ln -sfn "$1" "$2"; }
+}
+
+# The pids whose command line, or whose real executable, lives under $1 (used as a path prefix, so
+# pass the slot directory). A slot is only safe to delete when nothing executes from it — the
+# mothership, or a boot's msb. The mothership is started through a symlink outside the slot
+# (~/.local/bin/colonizer, the unit's ExecStart, or $dir/app/bin/colonizer after an update restarts
+# itself), so `ps` shows the symlink, not the slot: on Linux every /proc/<pid>/exe link is resolved
+# with readlink, and on macOS the text segment lsof reports is mapped back to pids when lsof is
+# installed. Errors (a vanished pid, a kernel thread, another user's process) are ignored. The argv
+# match stays, for anything that execs from the slot directly. Both use a trailing-slash prefix so
+# `app-a` does not match `app-ab`; our own shell is dropped so the walk cannot report the installer
+# itself. `ps -ww -axo` is Linux and macOS. Mirrors the same helper in scripts/install.sh.
+slot_pids() {
+  slot=${1%/}/
+  # The ps table is read before awk matches it, so awk is not in its own snapshot.
+  ps_out=$(ps -ww -axo pid=,command= 2>/dev/null || true)
+  argv_pids=$(printf '%s\n' "$ps_out" | awk -v p="$slot" 'index($0, p) { print $1 }')
+  exe_pids=
+  if [ -d /proc ]; then
+    exe_pids=$(for link in /proc/[0-9]*/exe; do
+      real=$(readlink "$link" 2>/dev/null) || continue
+      case "$real" in
+        "$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
+      esac
+    done)
+  elif command -v lsof >/dev/null 2>&1; then
+    exe_pids=$(lsof -nP -d txt -Fpn 2>/dev/null | awk -v p="$slot" '
+      /^p/ { pid = substr($0, 2) }
+      /^n/ { if (index(substr($0, 2), p) == 1) print pid }')
+  fi
+  printf '%s\n%s\n' "$argv_pids" "$exe_pids" |
+    awk -v self="$$" 'NF && $1 != self && !seen[$1]++ { printf "%s%s", (n++ ? " " : ""), $1 }'
 }
 
 # The checksums say the archive matches SHA256SUMS, and SHA256SUMS comes from the same release as the

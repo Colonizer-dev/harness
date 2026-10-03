@@ -416,8 +416,8 @@ export interface Api {
   quotaAction(provider: string, body: QuotaActionRequest): Promise<QuotaActionReply>;
   models(): Promise<ModelOption[]>;
   orgs(): Promise<OrgInfo[]>;
-  /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). */
-  spendHistory(days?: number): Promise<SpendHistory>;
+  /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). `tzOffsetMinutes` (the browser's `-getTimezoneOffset()`) buckets the days by the reader's local calendar instead of UTC (issue #613). */
+  spendHistory(days?: number, tzOffsetMinutes?: number): Promise<SpendHistory>;
   /** GET /api/activity: the activity log newest first, one page at a time (docs/protocol.md §6.9). */
   activity(query?: ActivityQuery): Promise<ActivityPage>;
   /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
@@ -813,7 +813,8 @@ export const httpApi: Api = {
   quotaAction: (provider, body) => post(`/api/providers/${enc(provider)}/quota-action`, body),
   models: () => request("/api/models"),
   orgs: () => request("/api/orgs"),
-  spendHistory: (days) => request(`/api/spend/history?days=${days ?? 30}`),
+  spendHistory: (days, tzOffsetMinutes) =>
+    request(`/api/spend/history?days=${days ?? 30}${tzOffsetMinutes != null ? `&tz_offset_minutes=${tzOffsetMinutes}` : ""}`),
   activity: (q = {}) =>
     request(
       `/api/activity${query({ before: q.before?.toString(), limit: q.limit?.toString(), kind: q.kind, actor: q.actor, org: q.org, repo: q.repo, q: q.q })}`,

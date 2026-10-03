@@ -129,10 +129,46 @@ cleanup_install() {
   [ -z "$parked" ] || [ -e "$app" ] || mv "$parked" "$app"
 }
 
+# The pids whose command line, or whose real executable, lives under $1 (used as a path prefix, so
+# pass the slot directory). A slot is only safe to delete when nothing executes from it — the
+# mothership, or a boot's msb. The mothership is started through a symlink outside the slot
+# (~/.local/bin/colonizer, the unit's ExecStart, or $dir/app/bin/colonizer after an update restarts
+# itself), so `ps` shows the symlink, not the slot: on Linux every /proc/<pid>/exe link is resolved
+# with readlink, and on macOS the text segment lsof reports is mapped back to pids when lsof is
+# installed. Errors (a vanished pid, a kernel thread, another user's process) are ignored. The argv
+# match stays, for anything that execs from the slot directly. Both use a trailing-slash prefix so
+# `app-a` does not match `app-ab`; our own shell is dropped so the walk cannot report the installer
+# itself. `ps -ww -axo` is Linux and macOS. Mirrored in scripts/install-release.sh.
+slot_pids() {
+  slot=${1%/}/
+  # The ps table is read before awk matches it, so awk is not in its own snapshot.
+  ps_out=$(ps -ww -axo pid=,command= 2>/dev/null || true)
+  argv_pids=$(printf '%s\n' "$ps_out" | awk -v p="$slot" 'index($0, p) { print $1 }')
+  exe_pids=
+  if [ -d /proc ]; then
+    exe_pids=$(for link in /proc/[0-9]*/exe; do
+      real=$(readlink "$link" 2>/dev/null) || continue
+      case "$real" in
+        "$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
+      esac
+    done)
+  elif command -v lsof >/dev/null 2>&1; then
+    exe_pids=$(lsof -nP -d txt -Fpn 2>/dev/null | awk -v p="$slot" '
+      /^p/ { pid = substr($0, 2) }
+      /^n/ { if (index(substr($0, 2), p) == 1) print pid }')
+  fi
+  printf '%s\n%s\n' "$argv_pids" "$exe_pids" |
+    awk -v self="$$" 'NF && $1 != self && !seen[$1]++ { printf "%s%s", (n++ ? " " : ""), $1 }'
+}
+
 # Stages $1 beside $app, into whichever of the two slots $app is not using, and points $app at it
 # with one rename. A legacy install left the app in the directory itself, and no rename can replace
 # a directory with a symlink, so it is parked at $app.old first, and the traps put it back if we are
 # killed before the new link lands. Reads and writes the $app/$parked globals.
+#
+# Neither slot is removed while a process runs out of it: a restart can leave the mothership or a
+# colony's boot there. The target slot in use is a refusal; the previous slot in use is kept for the
+# mothership's own sweep, which knows when colonies are done with it.
 swap_app() {
   src=$1
   dir=$(dirname "$app")
@@ -143,6 +179,11 @@ swap_app() {
   previous=$(readlink "$app" || true)
   slot=$name-a
   [ "$previous" != "$name-a" ] || slot=$name-b
+  inuse=$(slot_pids "$dir/$slot")
+  if [ -n "$inuse" ]; then
+    echo "colonizer install: $dir/$slot is in use by pid(s) $inuse; restart colonizer (or wait for 'colonizer update') then install again" >&2
+    return 1
+  fi
   rm -rf "${dir:?}/$slot"
   cp -a "$src" "$dir/$slot"
   if [ -L "$app" ] || [ ! -e "$app" ]; then
@@ -154,7 +195,16 @@ swap_app() {
     parked=
     rm -rf "$app.old"
   fi
-  case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+  case "$previous" in
+    "$name-a" | "$name-b")
+      prev_inuse=$(slot_pids "$dir/$previous")
+      if [ -n "$prev_inuse" ]; then
+        echo "note: keeping the previous version at $dir/$previous: pid(s) $prev_inuse still run from it (swept on the next start)"
+      else
+        rm -rf "${dir:?}/$previous"
+      fi
+      ;;
+  esac
 }
 
 echo "==> colonizer-agentd (static musl build inside a microVM)"
