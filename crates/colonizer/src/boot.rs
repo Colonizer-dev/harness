@@ -1557,6 +1557,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
     }
+    // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
+    // write into the microVM's discardable root filesystem from one into a host-backed path: only
+    // the writable mounts below survive the VM, so only they can still be the host's to protect.
+    // Written before the VM starts, like the path policy above (a failed write fails the launch; a
+    // missing list would leave the policy's conservative fallback — every absolute path asks).
+    std::fs::write(vm_dir.join(sandbox::HOST_MOUNTS_FILE), sandbox::host_mounts_text(&mounts))?;
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
