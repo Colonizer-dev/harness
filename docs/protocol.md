@@ -9,6 +9,11 @@ agent runner ──stdio JSONL──▶ colonizer-agentd ──WS (mesh)──�
 All messages are single-line JSON objects with a `type` field. Unknown `type`s and unknown fields
 must be ignored (forward compatibility).
 
+Model calls take a path of their own, outside these hops: a routed `<provider>/<model>` goes from
+the colony through the mothership's provider gateway (§6.5), which holds the provider keys, and
+an unrouted model goes from the colony straight to the API its agent module's manifest names
+(`egress.api` in `module.json`: `api.anthropic.com` for Claude Code, `api.openai.com` for Codex).
+
 ---
 
 ## 1. Files inside the VM
@@ -269,7 +274,7 @@ the proposer's — a value outside this vocabulary, read as the proposer and nev
 ### `GET /v1/health`
 
 ```json
-{"ok": true, "version": "0.1.0", "agent": {"state": "working", "running": true, "last_seq": 42}}
+{"ok": true, "version": "0.2.0", "agent": {"state": "working", "running": true, "last_seq": 42}}
 ```
 
 ### `GET /v1/events?since=<seq>` (WebSocket)
@@ -460,9 +465,10 @@ routed together).
   `/api/sessions/{id}/commits`, `/api/sessions/{id}/transcript` (the colony's own agent transcript, §4),
   `/api/sessions/{id}/files` (the artifact list, single download and archive, §7.5),
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
-  `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`, and `GET /api/tokens/self`. The terminal
+  `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`,
+  `GET /api/ts-any-loop`, `POST /api/sessions/{id}/seen` (looking is not driving), and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|prewarm`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|keep|prewarm`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -710,7 +716,9 @@ and `superseded` is set when a same-repository colony's pull request merged over
 Both are left out entirely on a colony they do not apply to.
 
 `origin` names what launched the colony: `burn_down` (§6.2c), `redteam` (§6.7), `map` or
-`map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), or `chat` / `colonize` for a
+`map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), the built-in loops'
+`docs-loop`, `supply-chain:<ecosystem>`, `ts-any:<module>`, `merge-train:redo:<colony id>` and
+`merge-train:fix:<owner/repo>` (Loops, below), or `chat` / `colonize` for a
 colony a person started from the chat or the Colonize pane. It is taken from the create body, and
 absent for a plain launch.
 
@@ -1820,11 +1828,12 @@ not to print, log, commit or persist them. The harness log records which names a
 - Stack: Vite + React + TypeScript + Tailwind v4 + assistant-ui (`useExternalStoreRuntime`) + xterm.js.
   Built to `web/dist`; dev server proxies `/api` (incl. WebSockets) to `http://127.0.0.1:7878`.
 - Layout: the cockpit (`web/src/cockpit/Cockpit.tsx`) is one page with a navigation rail (a tab bar
-  on a phone) and these views: overview (the nest), launch, a colony view (status, branch, cost, host
+  on a phone) and these views: overview, the nest, launch, a colony view (status, branch, cost, host
   disk, the actions Create PR, Stop, Resume, Clean up; chat beside a terminal), Code, Chat, Loops,
-  Secrets, Host, Inbox and History, plus memory and settings. The Settings dialog has Setup,
-  Connections, Model providers, Runtime, Live map, Remote access, Add your phone, Updates, Usage
-  data, Notifications and Desktop, and the module settings.
+  Secrets, Host, Inbox (behind the bell) and History, plus memory and settings. The Settings dialog
+  has Setup, Connections, Model providers, Runtime, Live map, Remote access, Add your phone, API
+  tokens, Fleet, Updates, Usage data, Notifications and Desktop, the module settings, and one entry
+  per org workspace.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.
@@ -2234,9 +2243,9 @@ Failures are quiet and never spike: unknown `allowance_usd` → `state: "unknown
 nothing launches; an unparseable `reset_time`/`reset_weekday` → `next_reset` null and the window
 never opens; a launch that fails is logged and retried on the next tick.
 
-Hunt colonies currently run a generic bug-hunt prompt — find real bugs, verify before filing, keep
-pull requests small; they will adopt the red-team runs of
-[#212](https://github.com/Colonizer-dev/harness/issues/212) when those land.
+Hunt colonies run a generic bug-hunt prompt — find real bugs, verify before filing, keep pull
+requests small. They do not use the red-team runs of
+[#212](https://github.com/Colonizer-dev/harness/issues/212) (§6.7), which shipped separately.
 
 ### 6.3 Mothership API additions
 
