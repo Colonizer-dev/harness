@@ -54,3 +54,6 @@ above, with the entries sorted by file name (issue numbers numerically first). L
 merged, deduplicated and sorted, and the fragments are deleted. Reorder or edit the result by hand
 if the release reads better that way, since the release pull request is the one place
 `CHANGELOG.md` may change. The release workflow refuses a tag whose commit still has fragments here.
+If the release should carry hand-written notes, add `docs/release-notes/<tag>.md` — the release
+workflow (`.github/workflows/release.yml`) prepends it to the GitHub release body — and refresh its
+"What's new" from the assembled `CHANGELOG.md`.

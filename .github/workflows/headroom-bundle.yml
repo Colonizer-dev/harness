@@ -101,5 +101,5 @@ jobs:
             echo '```'
           } > notes.md
           gh release create "headroom-$RELEASE" headroom-*.tar.gz SHA256SUMS \
-            --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --latest=false --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Headroom bundle $RELEASE" --notes-file notes.md
