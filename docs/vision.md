@@ -224,6 +224,8 @@ a card. Autopilot can't publish in the middle of a question.
 | Merge train, off by default: green, clean colony pull requests squash-merged one at a time and rebased when behind, with an opt-in loop that drives it ([docs/architecture.md](architecture.md#merge-train), [docs/loops.md](loops.md#merge-train), [#671](https://github.com/Colonizer-dev/harness/issues/671), [#754](https://github.com/Colonizer-dev/harness/issues/754)) | `SHIPPING` |
 | Network policies as a module of their own | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
+| Optional observability add-on: OTLP export to Grafana, Datadog, Honeycomb and others, off by default, conversation content only with org opt-in ([#839](https://github.com/Colonizer-dev/harness/issues/839)) | `PLANNED` |
+| Your cockpit on your phone: its address obvious and one step onto the home screen ([#867](https://github.com/Colonizer-dev/harness/issues/867)) | `PLANNED` |
 
 The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit
 sets four release checkpoints ([docs/audit.md](audit.md)).
