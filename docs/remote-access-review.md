@@ -10,7 +10,7 @@ against three revisions, and every line reference below points at them:
 - **The tunnel client**: `crates/colonizer/src/remote.rs`, plus its `host_guard` and `/api/remote`
   changes in `crates/colonizer/src/main.rs`, at commit `a518798` — the
   [#533](https://github.com/Colonizer-dev/harness/issues/533) branch, unmerged at review time.
-- Other cockpit refs (`auth.rs`, `notify.rs`, `providers.rs`, `gateway.rs`, `mesh.rs`, `util.rs`,
+- Other cockpit refs (`auth.rs`, `notify.rs`, `providers.rs`, `gateway/mod.rs`, `mesh.rs`, `util.rs`,
   `activity.rs` under `crates/colonizer/src/`) are at `main`.
 
 Method: code reading split by threat area — the relay edge, the frame protocol and tunnel, and the
@@ -87,7 +87,7 @@ opens TCP only to the relay — register and dial (`remote.rs:288-300`, `:414-44
 is in-process. Two pre-existing settings reachable by any token holder do accept loopback URLs —
 the notify webhook (`notify.rs:449-474`) and a provider's `base_url` (`providers.rs:512-527`) — but
 the loopback services they could reach authenticate on their own (the gateway wants a per-colony
-token, `gateway.rs:626-641`; headscale sits behind a 0700 socket and API keys,
+token, `gateway/mod.rs:626-641`; headscale sits behind a 0700 socket and API keys,
 `mesh.rs:245-296`), so a remote token holder gains nothing a local one lacks. Blocking loopback and
 link-local targets there is hardening independent of remote access
 ([sandbox-network.md](sandbox-network.md) covers the colony-side fence).

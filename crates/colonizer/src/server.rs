@@ -726,7 +726,7 @@ mod tests {
     async fn a_colony_gateway_token_is_not_an_api_token() {
         let root = temp_root();
         let app = test_app(&root);
-        // The token boot issues the colony for its gateway routes (gateway.rs checks it against the
+        // The token boot issues the colony for its gateway routes (gateway/mod.rs checks it against the
         // session dir) is not a credential for the cockpit API: presented as a Bearer there it is
         // just an unauthenticated request, on a loopback Host with no Origin.
         let token = crate::util::random_token();
