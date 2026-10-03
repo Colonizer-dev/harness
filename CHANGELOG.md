@@ -18,7 +18,25 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.1] - 2026-10-03
+
+v0.2.0 was tagged but never published: its release build failed on macOS (below), so it has no
+GitHub release and never reached crates.io. v0.2.1 is v0.2.0 plus this fix; everything listed under
+v0.2.0 ships for the first time here.
+
+### Fixed
+
+- **The web UI builds on macOS and Windows again.** `web/src/cockpit/fleetColonies.ts` sat next to
+  `FleetColonies.tsx`, names that differ only in letter case, so on a case-insensitive filesystem
+  `tsc` resolved the view's import to the wrong file and the build failed; that is what stopped the
+  v0.2.0 macOS release build. The model file is now `fleetColoniesModel.ts`, and CI fails any pull
+  request that adds tracked paths (or script modules, ignoring the extension) differing only in
+  case. ([#915])
+
 ## [v0.2.0] - 2026-10-03
+
+Never published: the tag exists, but the release build failed and nothing reached GitHub releases or
+crates.io. These changes ship in [v0.2.1].
 
 ### Added
 
@@ -2057,6 +2075,8 @@ Macs. ([#74])
 [#767]: https://github.com/Colonizer-dev/harness/issues/767
 [#774]: https://github.com/Colonizer-dev/harness/issues/774
 [#818]: https://github.com/Colonizer-dev/harness/issues/818
+[#915]: https://github.com/Colonizer-dev/harness/issues/915
+[v0.2.1]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.0
 [v0.1.11]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.11
 [v0.1.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.10
