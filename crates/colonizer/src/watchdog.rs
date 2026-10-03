@@ -2,10 +2,15 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
-use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus};
+use crate::{
+    Shared,
+    orgs::effective_watchdog,
+    protocol::Origin,
+    sessions::{Runtime, Session, SessionStatus},
+};
 use chrono::{DateTime, Duration, Utc};
-use serde_json::json;
-use std::sync::atomic::Ordering;
+use serde_json::{Value, json};
+use std::sync::{Arc, atomic::Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WatchdogSettings {
@@ -130,6 +135,129 @@ pub fn nudge_text(minutes: u64) -> String {
     )
 }
 
+/// How long a final `assistant_text` may stand with no tool call in flight, no open question and no
+/// gateway request before the watchdog treats the still-open turn as wedged (issue #878). Two
+/// minutes against the 60 s tick: a runner that is only thinking between blocks is left alone, and a
+/// turn the runner will never end is finished within three.
+const TURN_END_GRACE: Duration = Duration::seconds(120);
+
+/// Whether a colony's quiet final answer is a turn the watchdog should finish (issue #878): the
+/// runner said it was done, its final text is past the grace, and nothing is in flight — no tool
+/// call, no open question, no request through the gateway. Pure, so every condition is pinned with a
+/// fixed clock.
+fn turn_end_due(
+    now: DateTime<Utc>,
+    final_text_at: Option<DateTime<Utc>>,
+    open_tool_calls: usize,
+    open_question: bool,
+    gateway_busy: bool,
+) -> bool {
+    let Some(final_at) = final_text_at else { return false };
+    now - final_at >= TURN_END_GRACE && open_tool_calls == 0 && !open_question && !gateway_busy
+}
+
+/// Whether agentd's `/v1/health` body says its runner is running. A body that cannot be read is not
+/// a "yes": the finish runs only on an unambiguous liveness signal.
+fn runner_running(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v["agent"]["running"].as_bool())
+        .unwrap_or(false)
+}
+
+/// Finishes a colony's turn the runner said was over but never ended (issue #878). The runner emits
+/// its final `assistant_text` and then stops before `turn_end` — a wedge its own event stream can
+/// never report — so the watchdog detects it and, when agentd still answers with its runner running,
+/// synthesises the end: a `watchdog_turn_end` line goes on the record and the ordinary turn-end path
+/// runs, so verification and publish proceed.
+///
+/// The probe is a liveness check only — that agentd and the runner process are up — not a reading of
+/// the turn's state: agentd's `running` is process liveness, and the claude-code runner emits
+/// `turn_end` only as it goes idle, so a wedged turn reads `working` either way. Whether the turn is
+/// done is decided on the mothership side, by [`turn_end_due`]: no tool call in flight, no open
+/// question, nothing through the gateway.
+///
+/// The claim is consumed only on the success path: a probe that times out leaves the final answer
+/// standing, so the next tick retries rather than losing the recovery. The success path re-reads the
+/// conditions after the probe — the probe can take ten seconds, and an agent that starts working in
+/// that window is not interrupted. A later real `turn_end` is harmless — `pr_mark` (`events.rs`)
+/// does not publish over an unchanged description, and a synthetic end carries no spend to
+/// double-count.
+async fn maybe_finish_turn(app: &Shared, s: &Session, rt: &Arc<Runtime>, settings: &WatchdogSettings, now: DateTime<Utc>) {
+    if !settings.enabled || s.status != SessionStatus::Running {
+        return;
+    }
+    let final_text_at = *rt.final_text_at.lock().await;
+    let open_tool_calls = rt.open_tool_calls.lock().await.len();
+    let open_question = rt.open_question.lock().await.is_some();
+    let busy = app.gateway.colony_busy(&s.id);
+    if !turn_end_due(now, final_text_at, open_tool_calls, open_question, busy) {
+        return;
+    }
+    let final_at = final_text_at.expect("turn_end_due is true only with a final timestamp");
+    match crate::sessions::agentd_http(app, s, "GET", "/v1/health").await {
+        Ok((200, body)) if runner_running(&body) => {
+            // The probe can take up to ten seconds, and the runner may have started working again in
+            // that window — a tool call, a delta, a fresh question — or a request may have arrived
+            // through the gateway. A busy agent is not interrupted: re-read the conditions now and
+            // claim the end only if the final answer is the same one and the turn still reads quiet,
+            // the compare and the clear under the one lock so a racing event cannot slip between them.
+            let open_tool_calls = rt.open_tool_calls.lock().await.len();
+            let open_question = rt.open_question.lock().await.is_some();
+            let busy = app.gateway.colony_busy(&s.id);
+            {
+                let mut claim = rt.final_text_at.lock().await;
+                if !(*claim == Some(final_at) && turn_end_due(now, *claim, open_tool_calls, open_question, busy)) {
+                    return;
+                }
+                *claim = None;
+            }
+            crate::validation::emit_chain(
+                app,
+                &s.id,
+                json!({"type": "watchdog_turn_end", "after_secs": (now - final_at).num_seconds()}),
+            )
+            .await;
+            app.session_log_as(
+                Origin::Watchdog,
+                &s.id,
+                "warn",
+                "watchdog: the agent said it was done but its turn never ended; finishing the turn so the work can publish"
+                    .into(),
+            )
+            .await;
+            crate::usage::note_watchdog_turn_end();
+            crate::events::finish_turn(app, &s.id, rt, false, None, None, None).await;
+        }
+        // agentd is up but its runner is not running: the status path already owns that state (an
+        // `exited`/`error` runner is held or parked there), so this leaves it alone and consumes the
+        // claim without a log.
+        Ok((200, _)) => *rt.final_text_at.lock().await = None,
+        // agentd itself is not answering, so its runner cannot be restarted through it. Leave the
+        // claim standing: a transient probe failure must not lose the recovery, so the next tick
+        // retries. Record it once per final answer, not every tick, and let the existing stall
+        // handling (a nudge, then the flag) take over in the meantime.
+        _ => {
+            let first = {
+                let mut logged = rt.final_text_logged.lock().await;
+                let first = *logged != Some(final_at);
+                *logged = Some(final_at);
+                first
+            };
+            if first {
+                app.session_log_as(
+                    Origin::Watchdog,
+                    &s.id,
+                    "error",
+                    "watchdog: the agent's turn never ended and agentd is not answering; leaving this to the stall handling"
+                        .into(),
+                )
+                .await;
+            }
+        }
+    }
+}
+
 /// Runs the watchdog forever, checking every live colony once a minute.
 pub async fn run(app: Shared) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -159,6 +287,9 @@ async fn check_all(app: &Shared) {
             continue;
         };
         let settings = effective_watchdog(&modules, &app.org_settings(&s.org));
+        // A turn the runner said was over but never ended is finished first (issue #878): the agent
+        // is done, so it must not also be nudged as though it had stalled.
+        maybe_finish_turn(app, &s, &rt, &settings, now).await;
         let state = match s.status {
             SessionStatus::Running => Observed::Working,
             SessionStatus::WaitingForAnswer => Observed::WaitingForAnswer,
@@ -517,5 +648,231 @@ mod tests {
             decide(&SETTINGS, at(500), Observed::Other, &activity, Some("autopilot_held")),
             Decision::Nothing
         );
+    }
+
+    #[test]
+    fn a_turn_is_finished_only_when_the_runner_is_quiet() {
+        let now = at(0);
+        let stale = now - Duration::seconds(120);
+        assert!(turn_end_due(now, Some(stale), 0, false, false), "the grace is met");
+        assert!(
+            !turn_end_due(now, Some(now - Duration::seconds(119)), 0, false, false),
+            "inside the grace it is left alone"
+        );
+        assert!(!turn_end_due(now, None, 0, false, false), "no final answer to finish");
+        assert!(!turn_end_due(now, Some(stale), 1, false, false), "a tool call is in flight");
+        assert!(!turn_end_due(now, Some(stale), 0, true, false), "a question is open");
+        assert!(
+            !turn_end_due(now, Some(stale), 0, false, true),
+            "a gateway request is in flight"
+        );
+    }
+
+    #[test]
+    fn only_a_running_runner_is_read_as_alive() {
+        assert!(runner_running(r#"{"agent":{"running":true,"state":"working"}}"#));
+        assert!(!runner_running(r#"{"agent":{"running":false,"state":"idle"}}"#));
+        assert!(!runner_running("{}"));
+        assert!(!runner_running("not json"));
+    }
+
+    /// A colony with agentd answering `/v1/health` with `body` on a local port, its token on disk,
+    /// and its stall clock quiet, so only the turn-end recovery is under test. The probe walks the
+    /// real path (`sessions::agentd::agentd_http`), not a stub.
+    async fn app_with_agentd(name: &str, body: &str) -> (Shared, std::path::PathBuf) {
+        let (app, root) = stalled_app(name, SessionStatus::Running).await;
+        {
+            let rt = app.runtime("w1").await;
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now();
+            activity.nudges = 0;
+            activity.last_nudge = None;
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let response = response.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let vm = app.session_dir("w1").join("vm");
+        std::fs::create_dir_all(&vm).unwrap();
+        std::fs::write(vm.join("token"), "test-token\n").unwrap();
+        app.update_session("w1", |x| x.local_port = Some(port)).await;
+        (app, root)
+    }
+
+    /// Acceptance (issue #878): a final answer the runner never ended, with agentd still answering,
+    /// is finished — the `watchdog_turn_end` event is recorded and the turn-end path runs.
+    #[tokio::test]
+    async fn a_final_answer_the_runner_never_ended_is_finished() {
+        let (app, root) = app_with_agentd("finish", r#"{"agent":{"running":true,"state":"working"}}"#).await;
+        app.update_session("w1", |x| x.autopilot = true).await;
+        let rt = app.runtime("w1").await;
+        crate::events::handle_agent_event(
+            &app,
+            "w1",
+            &rt,
+            r#"{"seq":1,"type":"assistant_text","message_id":"m","block_index":0,"text":"all done"}"#,
+        )
+        .await;
+        // Two minutes pass with the runner silent: the final answer's clock is what the watchdog reads.
+        rt.final_text_at.lock().await.replace(Utc::now() - Duration::minutes(3));
+        check_all(&app).await;
+
+        assert!(rt.final_text_at.lock().await.is_none(), "the claim is spent");
+        let events = std::fs::read_to_string(&rt.events_path).unwrap();
+        assert!(
+            events.contains(r#""type":"watchdog_turn_end""#),
+            "the end is on the record: {events}"
+        );
+        // The turn-end path ran: its autopilot decision is in the colony's log.
+        let logs = rt.logs.lock().await.clone();
+        assert!(
+            logs.iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("finishing the turn"))),
+            "{logs:?}"
+        );
+        assert!(
+            logs.iter().any(|l| l["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("autopilot: not publishing yet"))),
+            "the ordinary turn-end path ran: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Acceptance: a tool call in flight is not an ended turn, so it is left alone.
+    #[tokio::test]
+    async fn a_tool_call_in_flight_holds_the_turn_open() {
+        let (app, root) = app_with_agentd("tool", r#"{"agent":{"running":true,"state":"working"}}"#).await;
+        let rt = app.runtime("w1").await;
+        rt.final_text_at.lock().await.replace(Utc::now() - Duration::minutes(3));
+        rt.open_tool_calls.lock().await.insert("toolu_1".into());
+        check_all(&app).await;
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "not finished while a call is in flight"
+        );
+        assert!(
+            !std::fs::read_to_string(&rt.events_path)
+                .unwrap_or_default()
+                .contains("watchdog_turn_end")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Acceptance: a request in flight through the gateway is progress, not a wedge.
+    #[tokio::test]
+    async fn a_gateway_request_in_flight_holds_the_turn_open() {
+        let (app, root) = app_with_agentd("busy", r#"{"agent":{"running":true,"state":"working"}}"#).await;
+        let rt = app.runtime("w1").await;
+        rt.final_text_at.lock().await.replace(Utc::now() - Duration::minutes(3));
+        app.gateway.colony_counter("w1").fetch_add(1, Ordering::SeqCst);
+        check_all(&app).await;
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "not finished while the gateway is busy"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Acceptance: the probe can take seconds, and a busy agent is not interrupted. If the runner
+    /// starts a tool call while the probe is in flight, the end is not synthesised even though the
+    /// probe answers that the runner is alive — the state is re-read after the probe.
+    #[tokio::test]
+    async fn a_tool_call_started_during_the_probe_holds_the_turn_open() {
+        let (app, root) = stalled_app("race", SessionStatus::Running).await;
+        let rt = app.runtime("w1").await;
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now();
+            activity.nudges = 0;
+            activity.last_nudge = None;
+            rt.final_text_at.lock().await.replace(Utc::now() - Duration::minutes(3));
+        }
+        // A health stub that opens a tool call on the real Runtime *before* it answers, standing in
+        // for the runner beginning work during the probe's window.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = r#"{"agent":{"running":true,"state":"working"}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let stub_rt = rt.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let response = response.clone();
+                let rt = stub_rt.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    rt.open_tool_calls.lock().await.insert("toolu_race".into());
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let vm = app.session_dir("w1").join("vm");
+        std::fs::create_dir_all(&vm).unwrap();
+        std::fs::write(vm.join("token"), "test-token\n").unwrap();
+        app.update_session("w1", |x| x.local_port = Some(port)).await;
+
+        check_all(&app).await;
+
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "the claim is kept: the runner started working during the probe"
+        );
+        assert!(
+            !std::fs::read_to_string(&rt.events_path)
+                .unwrap_or_default()
+                .contains("watchdog_turn_end"),
+            "no end is synthesised for a busy runner"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose agentd is gone is wedged, not finished: the recovery keeps the final answer so
+    /// the next tick can retry, logs that it could not run once (not once per tick), and leaves the
+    /// colony to the stall handling rather than restarting it.
+    #[tokio::test]
+    async fn an_unreachable_agentd_leaves_the_turn_to_the_stall_handling() {
+        let (app, root) = stalled_app("wedged", SessionStatus::Running).await;
+        let rt = app.runtime("w1").await;
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now();
+            activity.nudges = 0;
+            activity.last_nudge = None;
+            rt.final_text_at.lock().await.replace(Utc::now() - Duration::minutes(3));
+        }
+        // No token file and no local port: dial_agentd fails at once, as an unreachable agentd would.
+        check_all(&app).await;
+        check_all(&app).await;
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "a probe that failed leaves the claim for the next tick to retry"
+        );
+        let logs = rt.logs.lock().await.clone();
+        assert_eq!(
+            logs.iter()
+                .filter(|l| l["message"].as_str().is_some_and(|m| m.contains("agentd is not answering")))
+                .count(),
+            1,
+            "logged once per final answer, not once per tick: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

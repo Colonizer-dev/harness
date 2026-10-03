@@ -302,6 +302,16 @@ fn terminal_count(sessions: &[Session], status: SessionStatus) -> &'static str {
     bucket_count(sessions.iter().filter(|s| s.status == status).count())
 }
 
+/// Watchdog turn-ends synthesised for a wedged colony this install has seen (issue #878). A
+/// process-global counter, like the gateway's provider tallies: the report is about the install, not
+/// one colony, and no colony record carries it.
+static WATCHDOG_TURN_ENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Records one watchdog-synthesised turn end for the usage batch (`watchdog.turn_end.<bucket>`).
+pub(crate) fn note_watchdog_turn_end() {
+    WATCHDOG_TURN_ENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The pure half of [`build`]: the same plain values, mapped into Cratefield's payload JSON, with
 /// the declared vocabulary that names exactly the events it carries — so [`payload::Batch::parse`]
 /// can hold the result against the grammar the collector parses. docs/usage-data.md documents the
@@ -368,6 +378,12 @@ fn cratefield_value(
     for (kind, bucket) in &kinds {
         events.push(counted(format!("error.{kind}.{bucket}")));
     }
+    // How often the watchdog had to finish a turn the runner never ended (issue #878). A lifetime
+    // count for the install, so it is appended last with the other install-wide tallies.
+    events.push(counted(format!(
+        "watchdog.turn_end.{}",
+        bucket_count(WATCHDOG_TURN_ENDS.load(std::sync::atomic::Ordering::Relaxed) as usize)
+    )));
 
     let value = json!({
         "schema": payload::SCHEMA,
@@ -1061,6 +1077,9 @@ mod tests {
         "boot",
         "providers",
         "error",
+        // The watchdog's own tally: turn-ends it synthesised for a turn the runner never ended.
+        "watchdog",
+        "turn_end",
         // Failure kinds: the harness's own names and the attention reasons it sets.
         "agentd_not_ready",
         "harness_restarted",
@@ -1727,6 +1746,25 @@ mod tests {
             error_kinds(&[errored]),
             BTreeMap::from([(crate::gateway::MODEL_ERROR_REASON, "1")]),
             "a colony the gateway flagged after an upstream 4xx/5xx buckets under model_error"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_turn_end_tally_is_counted_and_reported() {
+        let before = WATCHDOG_TURN_ENDS.load(std::sync::atomic::Ordering::Relaxed);
+        note_watchdog_turn_end();
+        assert!(
+            WATCHDOG_TURN_ENDS.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "the counter moves"
+        );
+        let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
+        let name = names(&batch)
+            .into_iter()
+            .find(|name| name.starts_with("watchdog.turn_end."))
+            .expect("the tally is reported");
+        assert!(
+            name.split('.').all(|part| TOKENS.contains(&part)),
+            "a closed label, like every other count: {name}"
         );
     }
 
