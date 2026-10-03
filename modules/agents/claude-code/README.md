@@ -160,8 +160,9 @@ it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly
 Predicates: `command` (regex over the command), `touches` (path globs matched against the path-like
 tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
 `/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
-contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style
-target that is an absolute path outside the repository — `/tmp` and the `/dev` sinks don't count).
+contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
+outside the repository *and on a host-backed mount* — `/tmp`, the `/dev` sinks and the microVM's own
+root filesystem don't count).
 Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env*` and the files the
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
@@ -170,6 +171,15 @@ stays the egress policy's business; ask `writes-outside-repo`), **install** (the
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
 rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. Note
 this is guidance in front of the model, like the delegation gate — not a boundary; the microVM is.
+
+`writes_outside` reads the boot's writable-bind list (`/colonizer/host-mounts`; env override
+`COLONIZER_HOST_MOUNTS`, a file path). The microVM's root filesystem is discarded when the colony
+stops, so a write there — `mkdir -p /root/target`, a rustup install under `/root/.cargo`, an install
+under `/usr` — is not the host's to protect: only a path at, under or above a listed mount
+(`/workspace`, `/harness/out`, the resume directory, `/colonizer/services`) asks. A write *above* a
+mount asks too, so `rm -rf /root` still asks while `/root/.claude/projects` is mounted. When the
+list is absent — an older mothership, or a runner outside a VM — every absolute path outside the
+repository asks, as before.
 
 Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, Hermes, OpenCode and
 Pi do not — the harness refuses to launch a colony on one of them while a policy is set (the
