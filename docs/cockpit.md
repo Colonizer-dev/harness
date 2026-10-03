@@ -30,6 +30,9 @@ A browser without the cookie gets a "Sign in to your cockpit" page that tells yo
 A phone pairs through [Add your phone](#add-your-phone) instead, and gets a sign-in of its own:
 the API token never appears on it or in any URL.
 
+> **Coming.** Making the cockpit address obvious and getting it on your phone's home screen in one
+> step ([#867](https://github.com/Colonizer-dev/harness/issues/867)).
+
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file

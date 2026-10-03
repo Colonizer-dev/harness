@@ -193,6 +193,9 @@ taskbar icon, the same sign-in.
   sheet. When the device isn't installed yet, **Settings → Notifications** and **Settings →
   Desktop** show those steps in the app itself, next to the web push they unlock.
 
+> **Coming.** One step from the address to the home screen, with the cockpit's address made obvious
+> ([#867](https://github.com/Colonizer-dev/harness/issues/867)).
+
 The installed app carries a few shortcuts — **Inbox**, **Colonize**, **Nest** — from the icon's
 long-press menu (right-click on the taskbar/Dock icon). Sharing a GitHub issue or pull request link
 to Colonizer (Android's share sheet) opens the colony holding it, or Colonize with that issue
