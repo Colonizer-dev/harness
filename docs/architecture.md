@@ -11,7 +11,7 @@ also needs glibc 2.28 or newer, which the pinned microsandbox binary requires.
 
 ```mermaid
 flowchart TB
-  browser["browser"]
+  browser["browser · CLI · MCP"]
 
   subgraph mothership["mothership"]
     direction TB
@@ -19,6 +19,7 @@ flowchart TB
     hs["headscale<br/>127.0.0.1 · control plane"]
     ts["tailscaled --tun=userspace<br/>the harness's own mesh node"]
     gw["provider gateway<br/>127.0.0.1:41750"]
+    mods["modules<br/>watchdog · autonomy · memory · notify<br/>burn-down · screen · voice · merge train"]
   end
 
   mesh{{"private mesh<br/>never your own tailnet"}}
@@ -27,14 +28,20 @@ flowchart TB
     direction TB
     vmts["tailscaled (static)<br/>joins the mesh at boot"]
     agentd["colonizer-agentd :7070<br/>events · pty · shutdown"]
-    runner["agent runner (module)<br/>Claude Code by default"]
+    runner["agent runner (module)<br/>Claude Code by default · Codex<br/>OpenCode · Pi · ACP · …"]
     ws["/workspace<br/>git worktree (rw)"]
   end
 
+  providers["model providers<br/>Anthropic · OpenAI-compatible · local"]
+  fleet["fleet members<br/>other motherships"]
+
   browser -->|HTTP/WS| host
+  host --- mods
   host --> hs
   host --> ts
   host --> gw
+  gw --> providers
+  fleet -.->|"fleet@ → harness only"| mesh
   ts -->|SOCKS5| mesh
   hs -.->|control| mesh
   mesh --> vmts
@@ -45,7 +52,7 @@ flowchart TB
 
   classDef box fill:#12151d,stroke:#2a3040,color:#e7e9ef
   classDef edge fill:#0f1218,stroke:#ff7b2c,color:#ff7b2c
-  class browser,host,hs,ts,gw,vmts,agentd,runner,ws box
+  class browser,host,hs,ts,gw,mods,vmts,agentd,runner,ws,providers,fleet box
   class mesh edge
 ```
 
@@ -64,6 +71,7 @@ editable in Settings → Modules). A module kind has one active provider:
 | `publish` | `github-pr` | Commit, push and open the pull request on the host, each only when not already done; its optional merge train squash-merges open colony pull requests afterward (see [Merge train](#merge-train)) |
 | `memory` | `files`, `mem0` | Shared notes per repository, org and globally; agents propose, the user approves. `mem0` stores approved notes in a mem0 project and writes each colony's copy at boot. See [Shared memory access](#shared-memory-access) |
 | `watchdog` | `default` | Nudges colonies that stop making progress and flags the ones that need the user |
+| `resume` | `default` | How a parked colony comes back: `discard_vm` (on by default) tears its microVM down and resumes cold on the kept worktree; off keeps the microVM and resumes warm |
 | `autonomy` | `off`, `judge` | A model answers a colony's questions when nobody does, among the options the agent offered; off by default |
 | `notify` | `default` | Announces a colony asking a question, stalling, failing or opening a pull request, or a model provider starting to fail, to the desktop or a webhook. Absent from `modules.json` until first configured; what leaves the mothership is one short line about the colony, never repository content |
 | `burn_down` | `default` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured; see [burn-down](burn-down.md) |
@@ -96,7 +104,7 @@ Two settings layers sit next to the modules:
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Codex on an OpenAI API key; Pi, reaching models only through the provider gateway; Grok Build (experimental) and ACP (Gemini CLI handshake verified, `PLANNED`), both fetching their pinned CLI on first boot; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -105,6 +113,8 @@ Two settings layers sit next to the modules:
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
 | `loops` | Besides the loops you write, a built-in "TypeScript: remove any" loop that counts the explicit `any` in the TypeScript repositories you opt in, with their own compiler or a token scan and no model, and hands one small batch per repository to a colony that types them properly, then recounts its pull request. Off, with an empty allowlist, until configured ([docs/loops.md](loops.md#typescript-remove-any)) | — |
 | `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](burn-down.md)) | — |
+| `screen` | Screens the final diff and pull request body for hidden code points at publish time, warning or blocking; local, no model ([docs/prompt-screening.md](prompt-screening.md)) | — |
+| `voice` | Speech-to-text for the composer's microphone: the browser's own recogniser by default, or OpenAI, Groq, Deepgram, ElevenLabs or any OpenAI-compatible transcription server | — |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
@@ -151,9 +161,11 @@ mothership's saved key for the provider is injected.
 | [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
 | [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
 | [`modules/agents/codex`](../modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
+| [`modules/agents/grok-build`](../modules/agents/grok-build) | xAI's Grok Build CLI driven headlessly on the same runner protocol; the runner fetches the pinned `grok` on first boot | experimental — not yet run in a real colony |
 | [`modules/agents/acp`](../modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
 | [`web`](../web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
 | [`vendor`](../vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and a snapshot of the built-in subagents of the guest Claude Code build (`claude-code-builtins.json`) | `SHIPPING` |
+| [`services`](../services) | Cloudflare Workers the project hosts: the `my.colonizer.dev` remote-access relay and the live map's telemetry receiver | `SHIPPING` |
 | [`scripts`](../scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
 
 ## How the mothership's code is put together
@@ -654,7 +666,9 @@ The filed refusals will read:
   on Linux it comes from upstream's tgz.
 - VMs get one narrow extra rule, `allow@<host-lan-ip>:udp:<harness-udp-port>`, so WireGuard
   connects directly (≈1 ms) instead of through a public DERP relay. LAN access stays blocked.
-- Users: `harness` and `vms`. Policy: `harness@` may reach `vms@:*`; VMs cannot reach each other.
+- Users: `harness`, `vms` and, once another mothership joins the [fleet](fleet.md), `fleet`. Policy:
+  `harness@` may reach `vms@:*`; VMs cannot reach each other; while the fleet has members, `fleet@`
+  may reach `harness@:*` and nothing else, so a member never reaches a colony.
 - VM keys are single-use, 30-minute pre-auth keys. They are deliberately not ephemeral: headscale
   would delete an ephemeral node when it disconnects, and a colony that outlives a mothership
   restart, or is stopped and resumed, would lose its place on the mesh. The harness deletes a
@@ -814,19 +828,26 @@ or a real GitHub write would do.
 
 ## Packaging
 
-`scripts/install.sh` produces a self-contained app directory (`COLONIZER_HOME`, default
-`~/.local/share/colonizer/app`):
+`scripts/install.sh` produces a self-contained app directory in `dist/`; `--install` moves it to
+`~/.local/share/colonizer/app` (a symlink to the slot the installed version lives in), and
+`COLONIZER_HOME` points a binary at another app directory:
 
 ```
 bin/colonizer            host server
 bin/colonizer-agentd             static musl build (built in a rust:alpine microVM)
 bin/claude-guest                 Mac only: linux-arm64 Claude Code, fetched at install time (the host's own binary is Mach-O)
+bin/node-guest                   the guest's Linux Node.js runtime, pinned by vendor/node.lock
+bin/rtk                          static musl build, for colonies that switch on compact command output
+vendor/microsandbox/          msb and its libkrunfw, pinned + sha256-verified (vendor/vendor.lock)
 vendor/headscale              pinned + sha256-verified (vendor/vendor.lock)
 vendor/tailscale/{tailscale,tailscaled}   static, pinned + verified (built from source on a Mac)
 vendor/derpmap.yaml           DERP relay map snapshot (committed)
-modules/agents/claude-code/   runner + production node_modules
+plugins/                      vendored skill packs (vendor/vendor.lock)
+modules/agents/<id>/          every agent module: runner + production node_modules
 web/                          built UI
+scripts/install-release.sh    the release installer, for upgrades
 claude-code.lock              guest Claude Code pin: version + sha256 per platform, read at install
+node.lock                     guest Node.js pin, read at install
 images.lock                   each preset's colony image pinned by OCI digest (also compiled in)
 ```
 
