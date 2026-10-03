@@ -1931,6 +1931,10 @@ export interface Loop {
   /** What a run starts: a colony from `prompt` (the default), the repository's architecture map, or —
    * for the one built-in loop, id `disk-cleanup` — the mothership's own disk cleanup. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778): before it launches, the mothership checks it can reach
+   * `repo`, and the colony gets the read-only `/colonizer/github` context and the host-proxied
+   * `colonizer_github` tools. Colony loops only. */
+  needs_github?: boolean;
   /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
   pending?: string[];
   /** The built-in disk-cleanup loop only: its settings, run history and attention item. */
@@ -2119,6 +2123,8 @@ export interface NewLoop {
   /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. `disk_cleanup`
    * only on the built-in loop's own PUT. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778); see `Loop.needs_github`. Colony loops only. */
+  needs_github?: boolean;
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;

@@ -3010,8 +3010,8 @@ transcript show the whole chain:
 ```
 
 These five are host-generated: the mothership appends them to the hunter colony's events.jsonl, the
-runner never emits them, and the runner-event schema in `docs/agent-events.schema.json` is unchanged —
-the runner events stay the §2 set plus `finding`. The publish gate's `verification` event (§6.3,
+runner never emits them, and they are not in `docs/agent-events.schema.json` — the runner events stay
+the §2 set plus `finding` and `github_action` (§6.12). The publish gate's `verification` event (§6.3,
 Autopilot) is host-generated the same way, on the writing colony's own event log. Every transition is
 also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records
@@ -3600,6 +3600,43 @@ before the join.
 `version` greater than it supports; version 1 is this document. Two additions are planned and
 deliberately *not* in version 1: optional categories (approved memory notes, loops and schedules,
 repo claims — off by default) and the cockpit's origin-host marking of imported colonies.
+
+### 6.12 GitHub loops (issue #778)
+
+Some loops do GitHub's work (triaging issues, CI flakes, merged PRs), but a colony has no GitHub
+token. Such a loop sets `needs_github: true` on its definition (colony loops only; the map and
+disk-cleanup loops ignore it) — a full-replace field on `POST /api/loops` and `PUT /api/loops/{id}`,
+set by the cockpit's "Needs GitHub" switch and by the templates that need it.
+
+**Preflight.** Before such a loop launches anything (a scheduled firing or run-now) the mothership
+checks it can read the loop's repository. If it cannot — no token, no access, no such repository, or
+GitHub is unreachable just now — no colony boots, and the loop records one `last_note` saying what is
+missing and how to fix it. A scheduled loop tries again at its next slot.
+
+**Read-only context.** A run that does launch gets the loop's inputs as read-only JSON under
+`/colonizer/github` (the session's `vm` dir, mounted read-only): `issues.json`, `ci-failures.json`
+and `merged-prs.json`, each narrowed server-side to what happened since the loop's last run (the 24
+hours before a first run) and carrying the `since` timestamp. A fetch that fails writes nothing for
+that file and logs; it never fails the boot.
+
+**Host-proxied writes.** When the context was written, boot sets `COLONIZER_GITHUB=true`, which adds
+the runner's in-process MCP server `colonizer_github` — three write tools the orchestrator alone may
+call (a subagent's call is refused by a `PreToolUse` hook, as with `finding_file`):
+
+```jsonc
+{"type":"github_action","tool":"issue_label","issue":42,"labels":["bug","P1"]}
+{"type":"github_action","tool":"issue_comment","issue":42,"body":"markdown…"}
+{"type":"github_action","tool":"issue_close_duplicate","issue":43,"duplicate_of":42}
+```
+
+`github_action` is host-consumed (the web ignores it, like `loop_next`/`loop_stop`). The `loop_github`
+module validates it (positive issue numbers, ≤ 10 labels of ≤ 100 chars, a comment ≤ 20 000 chars, no
+self-duplicate), refuses it while external writes are blocked (§6.3: `ignored a github action:
+external writes are blocked …`), caps one colony at 30 writes counted from `sessions/<id>/github.jsonl`,
+and makes the `gh` call on the colony's own repository — the guest never names a repository. Every
+outcome, success or failure, is one ledger line `{ts, repo, issue, outcome, tool, …}` and one line of
+the colony log; the agent is told only that the call was handed over. Because the cap is counted from
+the ledger, a partial failure (a close-duplicate's comment written, its close refused) still counts.
 
 ---
 

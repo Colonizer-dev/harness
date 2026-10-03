@@ -64,6 +64,7 @@ mod jev_ladder;
 mod ledger;
 mod lifecycle;
 mod login_item;
+mod loop_github;
 mod loops;
 mod maps;
 mod mcp;

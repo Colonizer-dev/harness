@@ -449,6 +449,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
         }
+        // Spawned for the same reason: a GitHub-needing loop's write is a host-side `gh` call
+        // (loop_github.rs), validated, capped per colony and held back by the write kill-switch.
+        AgentEvent::GithubAction { .. } => {
+            tokio::spawn(crate::loop_github::perform(
+                app.clone(),
+                id.to_string(),
+                rt.clone(),
+                event.clone(),
+            ));
+        }
         AgentEvent::LoopNext { delay_minutes, reason } => {
             crate::loops::on_next(app, id, delay_minutes, &reason).await;
         }
