@@ -308,9 +308,12 @@ impl App {
         self.claude_cred_for(None)
     }
 
-    /// The credential for one Claude account: the requested account's stored secret, else the
-    /// single-token file a pre-accounts install left behind, else the environment. `None` selects
-    /// the install default, so `claude_cred` — every existing caller — keeps working unchanged.
+    /// The credential for one Claude account. Precedence: the named (else default) account's stored
+    /// secret, then the single-token file a pre-accounts install left behind, then
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY`. `None` selects the install default, so
+    /// `claude_cred` — every existing caller — keeps working unchanged. The settings token route and
+    /// the claude-login flow save into the default account (`claude_accounts::save_default_token`),
+    /// so the legacy file only serves a token an older version left behind.
     pub fn claude_cred_for(&self, account: Option<&str>) -> Option<ClaudeCred> {
         let _ = claude_accounts::migrate_legacy(&self.cfg.config_dir);
         let meta = claude_accounts::load_meta(&self.cfg.config_dir);
