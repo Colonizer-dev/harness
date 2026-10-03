@@ -124,6 +124,7 @@ With **All workspaces** chosen, Overview shows everything at once:
   red-team buttons ([Red team](#red-team)),
 - **Colonies**: every colony in a table,
 - a system strip about the host,
+- the fleet panel and the [fleet colony list](fleet.md#the-fleet-colony-list), when there is a fleet,
 - the [storage panel](#storage).
 
 The range picker switches between 7, 30 and 90 days. **Compare** overlays the previous period of
@@ -683,8 +684,8 @@ Each setting can follow the global default or be overridden for this workspace:
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
   several are early: Pi cannot ask you questions, and the Hermes and ACP-grok binaries are not
-  yet staged into the colony image, while Codex, Grok Build and the ACP gemini preset fetch their
-  pinned CLI on first boot. Each module's description in Settings, Modules says what it
+  yet staged into the colony image, while Codex, OpenCode, Grok Build and the ACP gemini preset fetch
+  their pinned CLI on first boot. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
   colony.

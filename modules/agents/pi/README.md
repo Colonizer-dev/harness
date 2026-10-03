@@ -30,7 +30,7 @@ cockpit has run on it yet. CI runs the fake-Pi tests (`npm test` in this directo
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `COLONIZER_MODEL` | none | The model Pi runs on, as `<provider>/<model>` for a provider configured under Settings → Providers |
+| `COLONIZER_MODEL` | none | The model Pi runs on, as `<provider>/<model>` for a provider configured under Settings → Model providers |
 | `COLONIZER_EFFORT` | none | Thinking level passed as `--thinking`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` |
 | `COLONIZER_DISABLED_TOOLS` | none | Pi tool names passed as `--exclude-tools`, e.g. `bash`, `write`, on top of the default read, bash, edit, write set; grep, find and ls are never enabled in a colony, so listing them disables nothing |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.1); set by the mothership, not by hand |
@@ -40,7 +40,7 @@ All three settings are edited in the cockpit as the module's `model`, `effort` a
 ## Models
 
 Pi reaches models only through the provider gateway: there is no Claude login inside the VM and no
-credential for Anthropic, so a provider must be configured under Settings → Providers and the `model`
+credential for Anthropic, so a provider must be configured under Settings → Model providers and the `model`
 setting must name one of its models (`deepseek/deepseek-chat`). An empty or unmatched setting stops
 the colony with instructions instead of falling back. The runner writes the colony's route into a
 private `models.json` (mode 0600, deleted with the session): one provider speaking the gateway's

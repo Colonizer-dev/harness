@@ -107,6 +107,12 @@ pub struct Loop {
     /// back as one) or `map`.
     #[serde(default)]
     pub kind: LoopKind,
+    /// The loop's work is GitHub's (issue #778: triage, CI flakes, merged PRs): before it launches
+    /// anything the mothership checks it can reach the repository, and the colony it starts gets the
+    /// read-only context under `/colonizer/github` and the host-proxied write tools. `false` — the
+    /// default, so a loop saved before the field existed reads back as one — for every other loop.
+    #[serde(default)]
+    pub needs_github: bool,
     /// The operator's UTC offset when the loop was saved, so the cockpit can show local times; the
     /// cadence itself is UTC.
     #[serde(default)]
@@ -297,6 +303,12 @@ pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool) -> String {
         "It runs on a fixed schedule; you don't need to schedule the next run.".to_string()
     };
     let mut says = vec![format!("You are run {run} of the loop \"{}\" on {}.", l.name, l.repo), pacing];
+    if l.needs_github {
+        says.push(format!(
+            "This loop works on GitHub, and you have no GitHub token: read what the mothership fetched for you under {dir} — issues.json (open issues touched since last run), ci-failures.json (failed runs on the default branch) and merged-prs.json (pull requests merged since last run), each with a \"since\" timestamp; do not try `gh` yourself.",
+            dir = crate::loop_github::CONTEXT_DIR
+        ));
+    }
     if loop_tools {
         says.push("If the loop's goal is met, or it should not run again, call loop_stop with the reason.".to_string());
     }
@@ -308,7 +320,7 @@ pub fn loop_instructions(l: &Loop, run: u32, loop_tools: bool) -> String {
 }
 
 pub struct LoopStore {
-    loops: RwLock<Vec<Loop>>,
+    pub(crate) loops: RwLock<Vec<Loop>>,
     file: PathBuf,
     persist: Mutex<()>,
 }
@@ -395,6 +407,9 @@ pub struct NewLoop {
     cadence: Cadence,
     #[serde(default)]
     kind: LoopKind,
+    /// Whether the loop's work is GitHub's (issue #778); see [`Loop::needs_github`].
+    #[serde(default)]
+    needs_github: bool,
     #[serde(default)]
     tz_offset_minutes: Option<i32>,
     #[serde(default)]
@@ -471,6 +486,9 @@ fn loop_from(
     let model = sessions::launch_model(app, req.model.as_deref(), "model")?;
     let subagent_model = sessions::launch_model(app, req.subagent_model.as_deref(), "subagent model")?;
     let enabled = req.enabled.unwrap_or(true);
+    // Only a colony loop runs in GitHub's domain; a map refresh or the disk cleanup has no use for
+    // the context or the write tools.
+    let needs_github = req.needs_github && req.kind == LoopKind::Colony;
     Ok(Loop {
         id,
         name,
@@ -483,6 +501,7 @@ fn loop_from(
         next_run_at: enabled.then(|| next_run_after(&req.cadence, now)),
         cadence: req.cadence,
         kind: req.kind,
+        needs_github,
         tz_offset_minutes: req.tz_offset_minutes.unwrap_or(0),
         model,
         subagent_model,
@@ -805,6 +824,13 @@ async fn run_token(app: &Shared, l: &Loop) -> Result<Option<ScopedToken>, crate:
     }
 }
 
+/// Whether a launch must clear the GitHub preflight first, and whether a session is a run of such a
+/// loop (issue #778). `loop_from` already drops the need from anything but a colony loop, so this is
+/// only ever true for one the operator asked for; pure, so the decision is tested without `gh`.
+pub(crate) fn needs_preflight(l: &Loop) -> bool {
+    l.needs_github && l.kind == LoopKind::Colony
+}
+
 /// Launches a colony loop's run through the normal admission path and books the next.
 async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
@@ -818,6 +844,17 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
 /// run through the same path a hand launch takes, under the loop's token when it has one. `run` is
 /// the number the brief names.
 async fn start_run(app: &Shared, l: &Loop, run: u32, scoped: Option<ScopedToken>) -> Result<Session, crate::AppError> {
+    // Issue #778: a loop whose work is GitHub's launches no colony until the mothership can reach
+    // the repository — otherwise the colony only parks on a question. The note is recorded here so
+    // run-now and a re-run (issue #881) get it too; the scheduler's error handler adds the tick's
+    // own wording.
+    if needs_preflight(l)
+        && let Err(e) = crate::loop_github::preflight(app, l).await
+    {
+        let note = format!("{e:#}");
+        app.loops.update(&l.id, |x| x.last_note = Some(note.clone())).await;
+        return Err(client_error(StatusCode::CONFLICT, &note));
+    }
     // Whether the brief may name the loop tools: the same resolution `sessions::create` is about
     // to launch on — the repository's org's pick, else the install's (issue #643).
     let owner = l.repo.split('/').next().unwrap_or_default();
@@ -1217,6 +1254,7 @@ mod tests {
             prompt: "Triage new issues".into(),
             cadence,
             kind: LoopKind::Colony,
+            needs_github: false,
             tz_offset_minutes: 120,
             model: None,
             subagent_model: None,
@@ -1242,6 +1280,27 @@ mod tests {
         assert_eq!(loop_id_of("burn_down"), None);
     }
 
+    /// Issue #778: the gate is asked for a GitHub colony loop and nothing else, and a GitHub loop's
+    /// brief says where its inputs are (and that it has no `gh`). Pure — `loop_github` owns the note
+    /// the gate leaves, `github.mjs` the tool list.
+    #[test]
+    fn a_github_loop_is_gated_on_github_and_told_where_its_inputs_are() {
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        assert!(!needs_preflight(&l), "a loop that did not ask is not gated");
+        l.needs_github = true;
+        assert!(needs_preflight(&l));
+
+        let brief = loop_instructions(&l, 1, false);
+        assert!(brief.contains("/colonizer/github"), "{brief}");
+        assert!(brief.contains("issues.json") && brief.contains("merged-prs.json"), "{brief}");
+        assert!(brief.contains("you have no GitHub token"), "{brief}");
+
+        // The need is a colony loop's only: a map loop carries it dropped, never gated.
+        let mut map = l.clone();
+        map.kind = LoopKind::Map;
+        assert!(!needs_preflight(&map));
+    }
+
     #[tokio::test]
     async fn a_map_loop_may_cover_the_org_without_a_prompt_a_colony_loop_may_not() {
         let root = std::env::temp_dir().join(format!("colonizer-loops-from-{}", short_id()));
@@ -1257,6 +1316,7 @@ mod tests {
                 minute: 0,
             },
             kind,
+            needs_github: false,
             tz_offset_minutes: None,
             model: None,
             subagent_model: None,
@@ -1274,6 +1334,10 @@ mod tests {
             "the prompt is ignored and the pending list is server-owned"
         );
         assert!(map.pending.is_empty());
+        // A map loop has no use for the GitHub need (issue #778): it is dropped, not carried.
+        let mut wanted = req("acme/*", LoopKind::Map, "");
+        wanted.needs_github = true;
+        assert!(!loop_from(&app, wanted, "loop_g".into(), now, now).unwrap().needs_github);
 
         let err = loop_from(&app, req("acme/*", LoopKind::Colony, "Triage"), "loop_c".into(), now, now).unwrap_err();
         assert!(err.message().contains("owner/* is only for map loops"), "{}", err.message());

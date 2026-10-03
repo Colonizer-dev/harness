@@ -3,8 +3,11 @@
 First slice of [#141](https://github.com/Colonizer-dev/harness/issues/141) (closed with
 this slice). It draws the control/execution seam and ships the local side of it. Remote
 outposts — other machines joining the mesh and hosting colonies — are PLANNED, not
-present. The open design gate for them, and for a hosted Colonizer, is
-[#298](https://github.com/Colonizer-dev/harness/issues/298).
+present. The design gate for them, and for a hosted Colonizer, was
+[#298](https://github.com/Colonizer-dev/harness/issues/298), closed with the hosted contract
+([hosted.md](hosted.md#the-outpost-seam)); the outpost protocol and enrollment it names are a
+follow-up with no tracking issue yet
+([#929](https://github.com/Colonizer-dev/harness/issues/929)).
 
 Terms follow [vision.md](vision.md): the **Mothership** is the Colonizer app on your
 machine, a **Colony** is one session (a microVM plus worktree plus agent), and the
@@ -67,18 +70,21 @@ The exact handshake is unwritten; this paragraph is the whole of the sketch.
 Local-first: the mothership runs its own colonies before asking anyone else. When
 there is anywhere else to ask, nodes advertise `Capabilities` (`kvm`, plus `labels`
 such as `gpu`), and the scheduler matches colonies to nodes that qualify. The
-labels exist in the trait today; the scheduler does not.
+labels exist in the trait today, but nothing reads them: fleet placement
+(`crates/colonizer/src/placement.rs`, below) picks a member from its platform, KVM
+verdict and free slots, and a colony still runs on the member that launched it.
 
 ## Status
 
 - **Local backend: SHIPPING.** The only `ExecutionBackend`, delegating to the
   sandbox module. No behavior change.
-- **Remote outpost: PLANNED.** No protocol, no enrollment, no scheduler. The trait
+- **Remote outpost: PLANNED.** No protocol, no enrollment, and placement only
+  decides; nothing runs a colony elsewhere. The trait
   is the seam it will plug into.
 
 ## Related pieces that do exist
 
-Three things built since this slice point the same way. None of them runs a colony on
+Four things built since this slice point the same way. None of them runs a colony on
 another machine.
 
 - **The fleet view** ([#231](https://github.com/Colonizer-dev/harness/issues/231)).
@@ -96,6 +102,11 @@ another machine.
   sync its finished colonies' history to the owner once its operator opts in. Pairing
   does not enroll a member into the owner's mesh; that waits on this design gate
   ([fleet.md](fleet.md)).
+- **Fleet placement** ([#688](https://github.com/Colonizer-dev/harness/issues/688)).
+  Each launch decides which fleet member could take the colony — online, able to boot the
+  microVM image, a free slot — and records why on the colony as `placement`. A pin to
+  another member is refused with a 409 until cross-member launch exists, so the decision is
+  shown, not acted on ([fleet.md](fleet.md#placement)).
 - **The session store** ([#325](https://github.com/Colonizer-dev/harness/issues/325)).
   Colony records sit behind a `SessionStore` interface so a different backend can
   hold them later. A mothership uses the local files today; an in-memory object store

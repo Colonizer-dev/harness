@@ -5,7 +5,7 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{Shared, findings, github, memory, orgs, provider_quota, spend, util::append_line};
+use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -249,16 +249,26 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // one re-serialisation the host makes on every line (agentd's own output is sorted-key JSON
         // too, so nothing else moves).
         let (file_seq, file_line);
+        // Through the store, so the line lands in `sessions/<id>/events.jsonl` by the same name a
+        // remote backend would answer by; the store adds the newline, as `append_line` did.
         let err = if seq <= rt.last_seq.load(Ordering::SeqCst) {
             event["seq"] = json!(rt.last_seq.load(Ordering::SeqCst) + 1);
             event["a_seq"] = json!(seq);
             file_seq = event["seq"].as_u64().unwrap_or(seq);
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         } else {
             file_seq = seq;
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         };
         (
             match err {
@@ -312,13 +322,28 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // answer would otherwise stall-proof a colony that is only talking to itself. A person's
     // message and the agent working count, as before.
     if is_watchdog_progress(origin, event["type"].as_str().unwrap_or_default()) {
-        {
+        // A denied tool result is not progress (issue #609): the colony is circling a boundary it
+        // cannot cross, so the result neither restarts the stall clock nor spends a nudge, and its
+        // streak is on record for `decide` and the nudge. A successful result ends the streak, and
+        // so does anything that is a real break in the loop — a person's message, a question, a
+        // turn end. While the streak stands even real work — a retried call, a line of text — must
+        // not spend the nudges, or the loop would stall-proof itself: `last` still moves, so the
+        // cockpit's activity stamp stays truthful, and `decide` reads `denied_since` instead.
+        let progress = {
             let mut activity = rt.activity.lock().await;
-            activity.last = Utc::now();
-            activity.nudges = 0;
-            activity.last_nudge = None;
-        }
-        if app.session(id).await.is_some_and(|s| s.attention.is_some()) {
+            let kind = event["type"].as_str().unwrap_or_default();
+            let denied = crate::watchdog::note_denials(&mut activity, kind, &event);
+            if !denied {
+                activity.last = Utc::now();
+            }
+            let looping = activity.denials >= crate::watchdog::HINT_LOOP_DENIALS;
+            if !denied && !looping {
+                activity.nudges = 0;
+                activity.last_nudge = None;
+            }
+            !denied && !looping
+        };
+        if progress && app.session(id).await.is_some_and(|s| s.attention.is_some()) {
             app.update_session(id, |x| x.attention = None).await;
         }
     }
@@ -448,6 +473,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
+        }
+        // Spawned for the same reason: a GitHub-needing loop's write is a host-side `gh` call
+        // (loop_github.rs), validated, capped per colony and held back by the write kill-switch.
+        AgentEvent::GithubAction { .. } => {
+            tokio::spawn(crate::loop_github::perform(
+                app.clone(),
+                id.to_string(),
+                rt.clone(),
+                event.clone(),
+            ));
         }
         AgentEvent::LoopNext { delay_minutes, reason } => {
             crate::loops::on_next(app, id, delay_minutes, &reason).await;
@@ -1009,7 +1044,14 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
-        let recorded = append_line(&record, &crate::redact::redact_line(&entry.to_string())).await;
+        // Through the store, so the ledger line lands in `sessions/<id>/findings.jsonl` by the same
+        // name a remote backend would answer by; the store adds the newline, as `append_line` did.
+        let text = entry.to_string();
+        let recorded = app
+            .store()
+            .append(&id, "findings.jsonl", crate::redact::redact_line(&text).as_bytes())
+            .await
+            .map_err(anyhow::Error::from);
         if let Err(e) = recorded {
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.
@@ -1721,6 +1763,105 @@ mod tests {
         );
         assert_eq!(activity.nudges, 1, "so the next tick nudges again");
         drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A denied tool result is not progress (issue #609): it neither restarts the stall clock nor
+    /// spends a nudge, and once the streak reaches the loop threshold the loop's own retried calls
+    /// do not either. A successful result ends the loop and is progress again.
+    #[tokio::test]
+    async fn a_denied_tool_result_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = stalled_since;
+            activity.nudges = 2;
+        }
+        let denied = |seq: u64| {
+            format!(
+                r#"{{"seq":{seq},"type":"tool_result","tool_call_id":"t","output":"blocked","is_error":true,"denial":{{"class":"egress","hint":"denied host example.com"}}}}"#
+            )
+        };
+        handle_agent_event(&app, "abc", &rt, &denied(1)).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.last, stalled_since, "a denial does not restart the stall clock");
+            assert_eq!(activity.nudges, 2, "and does not spend a nudge");
+            assert_eq!(activity.denials, 1);
+            assert_eq!(activity.denied_since, Some(stalled_since), "the loop's clock starts here");
+        }
+        handle_agent_event(&app, "abc", &rt, &denied(2)).await;
+        assert_eq!(rt.activity.lock().await.denials, 2, "two in a row reach the loop threshold");
+        // The loop's own retry is not progress either: it must not spend the nudges back.
+        let retry = r#"{"seq":3,"type":"tool_call","message_id":"m","tool_call_id":"t","name":"Bash","input":{}}"#;
+        handle_agent_event(&app, "abc", &rt, retry).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.nudges, 2, "a retried call in a hint loop does not spend the nudges");
+            assert!(activity.last > stalled_since, "but the activity stamp still moves");
+            assert_eq!(activity.denied_since, Some(stalled_since));
+        }
+        // A successful result ends the loop and is progress again.
+        let ok = r#"{"seq":4,"type":"tool_result","tool_call_id":"t","output":"fine","is_error":false}"#;
+        handle_agent_event(&app, "abc", &rt, ok).await;
+        let activity = rt.activity.lock().await;
+        assert_eq!(activity.denials, 0);
+        assert_eq!(activity.last_denial, None);
+        assert_eq!(activity.nudges, 0, "a success is progress again");
+        drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A person's message, a question and a turn end break a running hint loop (issue #609): they
+    /// count as progress as before, so a maintainer's reply resets the nudges and clears the flag
+    /// rather than leaving the colony to be flagged `nudges_exhausted` right after they intervened.
+    #[tokio::test]
+    async fn a_hint_loop_breaks_on_a_persons_message_or_a_phase_break() {
+        async fn seed(app: &Shared, since: chrono::DateTime<Utc>) {
+            {
+                let rt = app.runtime("abc").await;
+                let mut activity = rt.activity.lock().await;
+                activity.last = since;
+                activity.nudges = 2;
+                activity.denials = 3;
+                activity.denied_since = Some(since);
+                activity.last_denial = Some(("egress".to_string(), "denied host example.com".to_string()));
+            }
+            app.update_session("abc", |x| x.attention = Some(json!({"reason": "stalled", "nudges": 2})))
+                .await;
+        }
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+
+        let message = r#"{"seq":1,"type":"user_message","id":"m1","text":"try X instead"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, message).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a person's word ends the loop");
+            assert_eq!(activity.denied_since, None);
+            assert_eq!(activity.nudges, 0, "and spends the nudges");
+            assert!(activity.last > stalled_since, "and restarts the stall clock");
+        }
+        assert!(app.session("abc").await.unwrap().attention.is_none(), "the flag clears");
+
+        let turn_end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.0,"duration_ms":1.0}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, turn_end).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a turn end ends the loop");
+            assert_eq!(activity.last_denial, None);
+        }
+
+        let question =
+            r#"{"seq":3,"type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}],"risk":"read_only"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, question).await;
+        assert_eq!(rt.activity.lock().await.denials, 0, "a question ends the loop");
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -435,6 +435,7 @@ pub fn builtin(now: DateTime<Utc>) -> Loop {
             minutes: DEFAULT_INTERVAL_MINUTES,
         },
         kind: LoopKind::DiskCleanup,
+        needs_github: false,
         tz_offset_minutes: 0,
         model: None,
         subagent_model: None,
