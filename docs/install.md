@@ -31,6 +31,12 @@ curl -fsSL https://colonizer.dev/install.sh | sh
 Then run `colonizer`. It prints a sign-in link and opens it in your browser; `colonizer open` prints it
 again. Opening <http://127.0.0.1:7878> without that link asks you to sign in.
 
+That link carries a one-time token in its query string and is spent the first time it opens; the
+plain address — <http://127.0.0.1:7878> — is what you come back to afterwards, the browser having
+remembered the sign-in. To bookmark it, use **Settings → Your cockpit** (also reachable from the
+small header button and the end of Setup): it lists this cockpit's addresses with **Copy** and a QR
+code, the same ones the first-sign-in prompt offers you.
+
 The installer picks the app for your machine from the latest
 [release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
 `SHA256SUMS`. It installs the app to `~/.local/share/colonizer/app`, a symlink to the directory the
