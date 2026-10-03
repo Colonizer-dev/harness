@@ -1,4 +1,6 @@
 /api/activity                                        GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     POST   unauth=401    token=owner            activity=-
 /api/archive                                         GET    unauth=401    token=owner            activity=-
 /api/archive/retention                               POST   unauth=401    token=owner            activity=-
 /api/attention                                       GET    unauth=401    token=owner            activity=-
@@ -58,6 +60,8 @@
 /api/fleet/peer/rows                                 POST   unauth=401    token=fleet            activity=-
 /api/fleet/pending/{id}/approve                      POST   unauth=401    token=owner            activity=-
 /api/fleet/pending/{id}/reject                       POST   unauth=401    token=owner            activity=-
+/api/fleet/policy                                    GET    unauth=401    token=fleet            activity=-
+/api/fleet/policy                                    PUT    unauth=401    token=owner            activity=-
 /api/fleet/sync                                      GET    unauth=401    token=owner            activity=-
 /api/fleet/sync                                      POST   unauth=401    token=owner            activity=-
 /api/fleet/sync/consent                              POST   unauth=401    token=owner            activity=-
@@ -114,6 +118,16 @@
 /api/plugins                                         GET    unauth=401    token=owner            activity=-
 /api/plugins/graft                                   GET    unauth=401    token=owner            activity=-
 /api/plugins/graft/download                          POST   unauth=401    token=owner            activity=-
+/api/previews/{id}/                                  DELETE unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  GET    unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  PATCH  unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  POST   unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  PUT    unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           DELETE unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           GET    unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           PATCH  unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           POST   unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           PUT    unauth=401    token=fleet            activity=-
 /api/providers                                       GET    unauth=401    token=owner            activity=-
 /api/providers/{id}                                  DELETE unauth=401    token=owner            activity=settings.remove
 /api/providers/{id}                                  PUT    unauth=401    token=owner            activity=settings.save
@@ -191,6 +205,8 @@
 /api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/keep                              POST   unauth=401    token=session>=operate activity=colony.keep
 /api/sessions/{id}/messages                          POST   unauth=401    token=session>=operate activity=-
+/api/sessions/{id}/preview                           DELETE unauth=401    token=owner            activity=-
+/api/sessions/{id}/preview                           POST   unauth=401    token=owner            activity=-
 /api/sessions/{id}/prewarm                           POST   unauth=401    token=session>=operate activity=-
 /api/sessions/{id}/publish                           POST   unauth=401    token=owner            activity=colony.publish
 /api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
@@ -199,6 +215,7 @@
 /api/sessions/{id}/seen                              POST   unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/stop                              POST   unauth=401    token=session>=operate activity=colony.stop
 /api/sessions/{id}/terminal                          GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/transcript                        GET    unauth=401    token=session>=read    activity=-
 /api/settings/claude-token                           DELETE unauth=401    token=owner            activity=settings.remove
 /api/settings/claude-token                           POST   unauth=401    token=owner            activity=settings.save
 /api/settings/github-token                           DELETE unauth=401    token=owner            activity=settings.remove

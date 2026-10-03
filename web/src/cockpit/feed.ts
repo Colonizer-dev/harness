@@ -1,24 +1,30 @@
-// What the inbox shows, derived from the colony list alone: every entry is a reading of a colony's
-// *current* state stamped with its `updated_at`, one entry per colony. History does not read these:
-// `updated_at` moves on every housekeeping write, so it reads the activity log instead (history.ts).
+// What the inbox shows, read two ways. The colony list gives every colony's *current* state stamped
+// with its `updated_at`, one entry per colony (`feedEntries`); the activity log gives the events
+// themselves, each at the time it happened, so a question that was answered, or a pull request
+// opened then merged, keeps a line of its own (`inboxEntries`). History reads the log too, for a
+// longer, pageable timeline (history.ts).
 import { needsYou } from "../notifications";
 import { colonyLabel } from "../notifications";
 import { isLive, occupiesSlot, orgOf, parkedLabel, sameOrg } from "../components/ui";
-import type { Session, SessionStatus } from "../types";
+import type { ActivityEntry, Session, SessionStatus } from "../types";
 
 export type FeedKind = "question" | "returned" | "failed" | "launched" | "queued" | "stopped";
 
 export interface FeedEntry {
-  /** The colony this reads; the row opens it. */
+  /** Stable across polls: a colony id for a reading of the list, `seq:<n>` for a log line. */
   id: string;
   kind: FeedKind;
   /** One plain line, in the colony's own voice. */
   text: string;
   /** `owner/repo #12`, the address the notifications use. */
   label: string;
-  /** The colony's `updated_at`, which is as close to "when" as the API gets. */
+  /** When: the colony's `updated_at` for a reading of the list, the log line's `ts` for an event. */
   at: string;
   prUrl: string | null;
+  /** The colony the row opens; null when a log line names one the workspace no longer has. */
+  colonyId: string | null;
+  /** Set once nothing is waiting on you for it — "answered", "merged", "closed" or "handled"; null while it still is. */
+  handled: string | null;
 }
 
 /** Which kind of line a colony is on right now. `needsYou` wins over status: that is the one thing worth interrupting for. */
@@ -89,6 +95,8 @@ export function feedEntry(session: Session): FeedEntry {
     label: colonyLabel(session.repo, session.issue),
     at: session.updated_at,
     prUrl: session.pr_url,
+    colonyId: session.id,
+    handled: null,
   };
 }
 
@@ -97,6 +105,150 @@ export function feedEntries(sessions: Session[]): FeedEntry[] {
   return sessions
     .map(feedEntry)
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/** The outcome kind a colony is showing now, or null while it is in between. */
+export function currentOutcome(session: Session): string | null {
+  if (needsYou(session) && session.status === "waiting_for_answer") return "outcome.question";
+  switch (session.status) {
+    case "pr_opened":
+      return "outcome.pr_opened";
+    case "merged":
+      return "outcome.merged";
+    case "closed":
+      return "outcome.closed";
+    case "no_changes":
+      return "outcome.no_changes";
+    case "stopped":
+      return "outcome.stopped";
+    case "failed":
+      return "outcome.failed";
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The inbox read from the activity log: one line per event, at its own time, kept even after it
+// has been dealt with. The colony list still supplies a colony whose current state the log has no
+// line for, so an empty or failed fetch reads exactly as the inbox did before.
+// ---------------------------------------------------------------------------
+
+/** The outcome kinds the inbox reads, as the feed kind each reads as. Housekeeping outcomes
+ *  (stopped, suspended, restored) and people's actions never want a person, so they are left out. */
+const INBOX_KINDS: Record<string, FeedKind> = {
+  "outcome.question": "question",
+  "outcome.pr_opened": "returned",
+  "outcome.no_changes": "returned",
+  "outcome.merged": "returned",
+  "outcome.closed": "returned",
+  "outcome.failed": "failed",
+};
+
+/** One log line's sentence, in the same voice as `textFor`. */
+function inboxText(entry: ActivityEntry, handled: string | null): string {
+  const short = (entry.repo ?? "").split("/")[1] ?? entry.repo ?? "a colony";
+  const at = entry.issue != null ? `${short}#${entry.issue}` : short;
+  switch (entry.kind) {
+    case "outcome.question":
+      return handled ? `${at} asked you a question` : `${at} is waiting on your answer`;
+    case "outcome.pr_opened":
+      return `${at} returned a pull request`;
+    case "outcome.no_changes":
+      return `${at} finished with nothing to change`;
+    case "outcome.merged":
+      return `${at} was merged`;
+    case "outcome.closed":
+      return `${at} had its pull request closed`;
+    case "outcome.failed":
+      return `${at} failed`;
+    default:
+      return at;
+  }
+}
+
+/** Whether a line still wants a person (null), or the word for how it was dealt with. */
+function handledFor(
+  entry: ActivityEntry,
+  session: Session | undefined,
+  latest: ReadonlyMap<string, ActivityEntry>,
+  answered: ReadonlyMap<string, number>,
+): string | null {
+  // A merge or a close is itself the resolution: nothing waits on you once it lands.
+  if (entry.kind === "outcome.merged") return "merged";
+  if (entry.kind === "outcome.closed") return "closed";
+  const colony = entry.colony ?? null;
+  // A question answered after it was asked is dealt with, whatever the colony shows now.
+  if (entry.kind === "outcome.question" && colony && (answered.get(colony) ?? 0) > entry.seq) return "answered";
+  // Superseded by a later outcome, or a colony the workspace no longer has: nothing waits on you.
+  if (!colony || !session || latest.get(colony)?.seq !== entry.seq) return "handled";
+  // Otherwise it is open only while the colony still shows that very state.
+  const waiting =
+    entry.kind === "outcome.question"
+      ? feedKind(session) === "question"
+      : entry.kind === "outcome.pr_opened"
+        ? session.status === "pr_opened"
+        : entry.kind === "outcome.no_changes"
+          ? session.status === "no_changes"
+          : entry.kind === "outcome.failed"
+            ? session.status === "failed"
+            : false;
+  return waiting ? null : "handled";
+}
+
+/**
+ * The inbox read from the activity log. Each event is one line at its own `ts`; answered or
+ * resolved ones stay, marked `handled`, rather than being dropped. A colony that needs you now but
+ * whose current status the log carries no outcome for as its newest line — the fetch failed, or the
+ * page does not reach back that far — is read off the colony list instead, so an empty log degrades
+ * to the old inbox.
+ */
+export function inboxEntries(log: readonly ActivityEntry[], sessions: readonly Session[]): FeedEntry[] {
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  // The newest need-you outcome per colony, and the newest answer to one: what decides whether an
+  // older question or outcome has been superseded.
+  const latest = new Map<string, ActivityEntry>();
+  const answered = new Map<string, number>();
+  const seen = new Set<number>();
+  const picked: { entry: ActivityEntry; kind: FeedKind }[] = [];
+  for (const entry of log) {
+    if (seen.has(entry.seq)) continue;
+    seen.add(entry.seq);
+    const kind = INBOX_KINDS[entry.kind];
+    const colony = entry.colony ?? null;
+    if (colony && kind && entry.seq > (latest.get(colony)?.seq ?? 0)) latest.set(colony, entry);
+    if (colony && entry.kind === "colony.answer" && entry.seq > (answered.get(colony) ?? 0)) answered.set(colony, entry.seq);
+    if (kind) picked.push({ entry, kind });
+  }
+
+  const entries: FeedEntry[] = [];
+  for (const { entry, kind } of picked) {
+    const colony = entry.colony ?? null;
+    const session = colony ? byId.get(colony) : undefined;
+    const handled = handledFor(entry, session, latest, answered);
+    entries.push({
+      id: `seq:${entry.seq}`,
+      kind,
+      text: inboxText(entry, handled),
+      label: colonyLabel(entry.repo ?? "", entry.issue ?? null),
+      at: entry.ts,
+      prUrl: entry.pr_url ?? null,
+      // Only a colony the workspace still has can be opened; a line about a deleted one is history.
+      colonyId: session ? colony : null,
+      handled,
+    });
+  }
+  // A colony that needs you now whose current status has no line of its own as the newest outcome
+  // for it — the fetch failed, the page does not reach back that far, or (a stall, a fresh failure)
+  // the log line for it is of another kind: read it off the list, as the inbox always did, so
+  // nothing waiting is ever hidden and nothing is shown twice.
+  for (const session of sessions) {
+    const kind = feedKind(session);
+    if (kind !== "question" && kind !== "returned" && kind !== "failed") continue;
+    if (latest.get(session.id)?.kind === currentOutcome(session)) continue;
+    entries.push(feedEntry(session));
+  }
+  return entries.sort((a, b) => Date.parse(b.at) - Date.parse(a.at) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 // ---------------------------------------------------------------------------

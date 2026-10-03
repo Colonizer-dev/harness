@@ -83,9 +83,10 @@ colonizer update --force
 ```
 
 That installs the latest release anyway. It prints a warning naming both
-versions first, backs `sessions.json` up and prints where, and is still refused
-while a colony is publishing. Forcing needs a known latest release, like any
-update.
+versions first, backs `sessions.json` up and prints where, and still steps back
+rather than restarting if a colony is publishing when the drain runs out: a
+publish is waited for first, and the update is refused rather than cutting the
+push off. Forcing needs a known latest release, like any update.
 
 Both do the same thing, because the command is a client of the same two routes
 the pane uses — `GET /api/update` and `POST /api/update/apply`. Neither
@@ -98,11 +99,7 @@ as it was.
 
 What happens, in order:
 
-1. **Colonies are looked at first.** A colony that is publishing holds the
-   update: its microVM is already gone and the host is committing and pushing,
-   and interrupting that leaves a colony `failed` with its pull request
-   unopened. The pane says which colony, and you try again when it is done.
-   As the install starts, `sessions.json` is copied to
+1. **The backup is taken first.** `sessions.json` is copied to
    `sessions.json.pre-update-<unix-timestamp>` beside it; if that copy fails,
    the update is marked failed and nothing is installed. The copies are not
    pruned, and are safe to delete. The copy's path is reported on the update
@@ -110,12 +107,28 @@ What happens, in order:
    update` prints it as `sessions.json backed up to <path>` while it waits. The mothership also logs it
    to its own output, so the path survives the restart for an update started from Settings, whose
    progress is in memory.
-2. **The release is unpacked beside the running app**, into whichever of the two
+2. **The mothership drains.** It stops admitting new boots — a launch or a resume
+   asked for while it drains is queued rather than started, so no boot begins a
+   microVM the restart would strand — and waits for what is already in flight: a
+   colony still booting or publishing gets up to five minutes
+   (`COLONIZER_DRAIN_TIMEOUT_SECS`) to finish. Scripts can drive the same flag
+   through `GET`/`POST /api/admin/drain` (owner token; the routes are in the
+   table [below](#the-routes)) and poll until `ready`. A boot the wait gives up
+   on is requeued on the next start with `interrupted_by_restart` on its log,
+   not left stopped. A publish the wait gives up on is different: its microVM is
+   already gone and the host is committing and pushing, and interrupting that
+   leaves a colony `failed` with its pull request unopened — so the update stops
+   there instead. It clears the drain, marks the apply failed and says which
+   colony is still publishing, and the pane asks you to try again once it
+   finishes.
+3. **The release is unpacked beside the running app**, into whichever of the two
    slots — `app-a`, `app-b` — the running version is not using. A failure
-   part-way leaves the running version exactly as it was.
-3. **The `app` symlink is moved with one rename.** There is no moment at which
+   part-way leaves the running version exactly as it was. The installer refuses
+   to stage into a slot a process is still running from (naming the pid), so a
+   hand-run install cannot pull a boot's `msb` out from under it either.
+4. **The `app` symlink is moved with one rename.** There is no moment at which
    it points at half an install.
-4. **The process replaces itself** with the new binary, `<app>/bin/colonizer`,
+5. **The process replaces itself** with the new binary, `<app>/bin/colonizer`,
    started with the same arguments. Before it does, it takes the mothership off
    the [live map](telemetry.md) if that is on and stops the mesh, so the new
    process can take its ports. Colonies are detached microVMs, so each live one
@@ -136,10 +149,17 @@ The next start sweeps it: once colonies have been recovered, any slot that is
 neither the one this process is running from nor mounted by a live colony is
 removed. Nothing accumulates beyond the two slots.
 
-**Take care:** an installer run by hand does not do this. It replaces the app
-directory immediately, which is right when nothing is running and wrong when
-something is. If colonies are running, update from Settings or with `colonizer
-update`.
+**Take care:** an installer run by hand still replaces the app symlink
+immediately and does not wait for a drain, which is right when nothing is
+running and wrong when something is. It will not, though, delete a slot a
+process is executing from: it refuses when the slot it would stage into is in
+use, and keeps a previous slot a running mothership or colony still reads from
+for the next start to sweep. It finds those processes even when they were
+started through a symlink outside the slot (the way `~/.local/bin/colonizer`
+starts the mothership): by each process's real executable — `/proc/<pid>/exe` on
+Linux, `lsof` when it is installed on macOS — as well as by its command line. If
+colonies are running, update from Settings or with `colonizer update`: it drains
+first.
 
 ## When it cannot be applied from here
 
@@ -170,10 +190,38 @@ For a checkout, `git pull && scripts/install.sh --install`. Either way, restart
 directory, so a rebuild leaves them alone and the colony list is read back at
 start — see [Where things live](install.md#where-things-live).
 
+The restart drains too. `systemctl --user restart colonizer` — or any systemd
+stop, or a `kill` on the process — sends SIGTERM, and the mothership then stops
+admitting new boots and waits up to five minutes for the colonies that are
+booting or publishing before it exits — `COLONIZER_DRAIN_TIMEOUT_SECS`, the same
+budget an update uses. (Ctrl-C at a terminal sends SIGINT and does not drain; it
+stops at once.) While it drains on SIGTERM the HTTP API is no longer served: the
+server shuts down with the signal and the drain runs in its place, so the log
+the mothership writes is the only progress. A script that needs to watch a drain
+should poll `GET /api/admin/drain` and only signal once `ready` is true.
+
+The user unit is written with `KillMode=mixed` and `TimeoutStopSec=330` (the
+LaunchAgent's `ExitTimeOut`). `KillMode=mixed` sends SIGTERM to the main process
+alone, never to its children, so nothing tears an `msb`, `git-remote-http` or
+`gh` out from under a colony that is still draining; `TimeoutStopSec=330` — the
+five-minute drain plus slack — bounds how long the main process may take. Once
+the main process has exited, drained or out of time, systemd SIGKILLs whatever is
+left in the cgroup, and that is how the leftover helper children go. Raising
+`COLONIZER_DRAIN_TIMEOUT_SECS` above about 300 s therefore also needs a longer
+`TimeoutStopSec` (and `ExitTimeOut` in the plist), or the service manager kills
+the mothership part-way through its drain; re-write the unit with
+`colonizer login-item enable` after changing it. After the restart, check the
+old service left nothing running:
+
+```sh
+systemctl --user status colonizer              # the CGroup tree should name only the new main process
+systemd-cgls --user-unit colonizer.service     # the same tree, as processes
+```
+
 ## The routes
 
-`GET /api/version` accepts any token with the `read` scope; the other three
-need the owner token (the sign-in link's).
+`GET /api/version` accepts any token with the `read` scope; the rest need the
+owner token (the sign-in link's).
 
 | Route | What it answers |
 | :--- | :--- |
@@ -181,6 +229,7 @@ need the owner token (the sign-in link's).
 | `GET /api/update` | `installed` (the above), plus `enabled` and `blocked_by` (the check's switch and the variable holding it off), `latest`, `available`, `last_checked`, `error`, `can_apply` (`{ok, reason}`), and `apply`, how an update in flight is getting on (`phase`, `version`, `started_at`, `error`, `log`, `colonies`, `backup`) |
 | `PUT /api/update` | `{"enabled": true\|false}` — the check. Answers the same body as `GET`, or `409` while the environment keeps the check off |
 | `POST /api/update/apply` | Install the newer release and restart into it; an optional `{"force": true}` body installs the latest release over a development build or a newer release instead (no body means no force, anything else that is not JSON is a 400) |
+| `GET /api/admin/drain` · `POST /api/admin/drain` | The drain, for a script that updates or restarts on its own. `POST` (no body, or `{"draining": false}` to cancel) starts or cancels it and both answer `{draining, since, in_flight, ready}`: `ready` is what a script polls for before installing or killing the process, and `in_flight` counts the colonies still booting or publishing |
 
 Designed in [#45](https://github.com/Colonizer-dev/harness/issues/45); the
 version stamp is [#110](https://github.com/Colonizer-dev/harness/pull/110), the

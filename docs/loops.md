@@ -45,6 +45,13 @@ working, idle, waiting for an answer (suspended included), or publishing — ski
 at its next slot; a self-paced one 15 minutes later. **Run now** starts a run immediately, and is
 refused (409) while the previous one is live.
 
+**A run that fails for an infrastructure reason is re-run once** (issue #881): a run that ends failed
+with a transient class — a runtime or image hiccup, a timeout, a dropped connection, an HTTP 5xx — is
+launched again within `retry_failed_runs` minutes of the run's start (60 by default, `0` to switch the
+re-run off). The re-run does not count as a run and the next slot does not move, so the schedule is
+untouched; the Loops page and `loop list` show the last run's outcome, with the failure class when it
+failed.
+
 ## What the colony can do
 
 Every run is an ordinary colony (its origin is `loop:<id>`, and colony lists badge it ↻ loop). It
@@ -61,6 +68,18 @@ The Claude Code, Codex, Grok Build and OpenCode agent modules serve these two to
 colonies run on a module without them — Pi, Hermes and ACP today — still runs on its schedule, but
 its brief never mentions the tools, the loop form warns when you pick self-paced, and a self-paced
 one simply runs again every 24 hours: its colonies can neither pace the loop nor stop it.
+
+**Loops that need GitHub.** Triaging issues, fixing CI flakes and writing changelog entries all read
+GitHub, and a colony has no GitHub token. Turn on **Needs GitHub** on a colony loop (the templates
+that need it set it for you) and two things change. First, the loop launches nothing until the
+mothership can read its repository; if it cannot — no token, no access — no colony boots, and the
+loop's note says so and how to fix it. Second, the run gets the inputs it cannot fetch itself, under
+the read-only `/colonizer/github`: `issues.json` (open issues touched since the last run),
+`ci-failures.json` (failed runs on the default branch) and `merged-prs.json` (pull requests merged
+since the last run), each with the `since` timestamp it was narrowed to, plus three tools the
+orchestrator may call — `issue_label`, `issue_comment` and `issue_close_duplicate` — which the
+mothership makes on the loop's own repository. The loop's brief names all of it. A loop without the
+switch behaves exactly as before.
 
 A loop also ends by itself after its **max runs**, when its next run would fall past its **end
 date**, or — at its next slot — when its API token has been revoked.

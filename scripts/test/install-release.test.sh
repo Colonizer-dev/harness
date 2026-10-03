@@ -24,7 +24,10 @@ fi
 scratch=$(mktemp -d)
 mkdir -p "$scratch/tmp"
 export TMPDIR="$scratch/tmp"
-trap 'rm -rf "$scratch"' EXIT
+# A background process started from a slot stands in for a running mothership or a colony's msb; it
+# has to be killed before the scratch dir it runs from is removed.
+bg_pids=
+trap 'stop_bg; rm -rf "$scratch"' EXIT
 
 # The default install path under the fake HOME is what we want to exercise, so an inherited
 # COLONIZER_APP must not move it.
@@ -172,6 +175,57 @@ fresh_home() {
   mkdir -p "$home"
 }
 
+# The same helper the installer uses, lifted out of it verbatim, so the test starts a process the
+# installer will see as running out of a slot. Each helper is one contiguous `name() {` ... `}` block,
+# so awk can lift it out; the count keeps a refactor that breaks that shape from silently testing
+# nothing.
+slot_func=$(awk '/^slot_pids\(\) \{/,/^\}/' "$installer")
+[ "$(printf '%s\n' "$slot_func" | grep -c '() {')" = 1 ] ||
+  { echo "FAIL: expected the slot_pids helper in $installer, got: $(printf '%s\n' "$slot_func" | grep '() {' || true)"; exit 1; }
+eval "$slot_func"
+
+src_sleep=$(command -v sleep || true)
+[ -n "$src_sleep" ] && [ -x "$src_sleep" ] || src_sleep=/bin/sleep
+
+start_in_slot() { # slot
+  mkdir -p "$1/vendor/microsandbox/bin"
+  cp "$src_sleep" "$1/vendor/microsandbox/bin/msb"
+  "$1/vendor/microsandbox/bin/msb" 600 &
+  bg_pids="$bg_pids $!"
+  i=0
+  while [ -z "$(slot_pids "$1")" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$(slot_pids "$1")" ] || bad "could not start a process from $1"
+}
+
+# The same process, but started through a symlink outside the slot — exactly how the mothership runs
+# (`~/.local/bin/colonizer`, or `$dir/app/bin/colonizer` after an update restarts itself). `ps` shows
+# the symlink, not the slot, so only the real-executable check (`/proc/<pid>/exe` on Linux, `lsof` on
+# macOS) finds it; finding it is what makes the installer refuse the slot.
+start_in_slot_via_symlink() { # slot
+  mkdir -p "$scratch/bin" "$1/vendor/microsandbox/bin"
+  cp "$src_sleep" "$1/vendor/microsandbox/bin/msb"
+  ln -sf "$1/vendor/microsandbox/bin/msb" "$scratch/bin/colonizer"
+  "$scratch/bin/colonizer" 600 &
+  bg_pids="$bg_pids $!"
+  i=0
+  while [ -z "$(slot_pids "$1")" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$(slot_pids "$1")" ] || bad "could not start a process from $1 through a symlink"
+}
+
+# Kills and reaps what start_in_slot left running, so a later case does not see the previous case's
+# slot as still in use.
+stop_bg() {
+  for p in $bg_pids; do kill "$p" 2>/dev/null || true; done
+  for p in $bg_pids; do wait "$p" 2>/dev/null || true; done
+  bg_pids=
+}
+
 make_fake_node "$versions"
 fake_release 1 "$versions/v1"
 fake_release 2 "$versions/v2"
@@ -292,5 +346,42 @@ expect_colonizer "restore with app.old behind a dangling app symlink" "colonizer
 expect_no_leftovers "restore with app.old behind a dangling app symlink"
 expect_one_slot "restore with app.old behind a dangling app symlink"
 note "ok: app.old behind a dangling app symlink was put back, and the install finished over it"
+
+# 6. A running process in the slot an install would replace: the installer refuses, naming the slot
+#    and pid(s), and leaves the slot's binary alone — the boot that failed when a restart ran an
+#    installer over the slot its msb was still running from. The process is started through a symlink
+#    outside the slot, the way the mothership itself runs, so this only passes with the
+#    real-executable check and not the command line.
+note "== install refused when the target slot is in use"
+fresh_home
+must_install "$versions/v1" "clean v1 before the in-use target test"
+start_in_slot_via_symlink "$home/.local/share/colonizer/app-b"
+rc=0
+install_from_release "$versions/v2" || rc=$?
+[ "$rc" -ne 0 ] || bad "in-use target slot: expected the installer to refuse app-b in use"
+grep -q "in use by pid(s)" "$log" ||
+  bad "in-use target slot: expected the refusal to name the slot and pid(s); it said: $(cat "$log")"
+[ -f "$home/.local/share/colonizer/app-b/vendor/microsandbox/bin/msb" ] ||
+  bad "in-use target slot: expected the in-use slot's binary to be left untouched"
+expect_colonizer "in-use target slot" "colonizer 1"
+note "ok: an install whose target slot is in use was refused and left it untouched"
+stop_bg
+
+# 7. A running process in the slot an install would remove: the slot is kept, not deleted, and a note
+#    says so. The mothership's own sweep removes it later. Started from the slot directly, so the
+#    command-line match sees it — the other half of the check, next to the symlinked case above.
+note "== install keeps a previous slot still in use"
+fresh_home
+must_install "$versions/v1" "clean v1 before the in-use previous test"
+start_in_slot "$home/.local/share/colonizer/app-a"
+must_install "$versions/v2" "install over an in-use previous slot"
+expect_colonizer "keep in-use previous slot" "colonizer 2"
+grep -q "keeping the previous version at" "$log" ||
+  bad "keep in-use previous slot: expected a note that app-a is kept; it said: $(cat "$log")"
+[ -d "$home/.local/share/colonizer/app-a" ] ||
+  bad "keep in-use previous slot: expected the in-use app-a to be kept"
+expect_symlink_app "keep in-use previous slot"
+expect_no_leftovers "keep in-use previous slot"
+note "ok: an install kept the previous slot a process was still running from"
 
 note "all checks passed"

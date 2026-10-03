@@ -12,7 +12,7 @@ import type { ReactElement } from "react";
 
 import { IconServer } from "../components/icons";
 import { type Tone } from "../components/ui";
-import { fleetHostFacts, timeSinceHeartbeat } from "./fleet";
+import { fleetHostFacts, timeSinceHeartbeat, unreachableNote } from "./fleet";
 import type { FleetHost } from "../types";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -46,6 +46,7 @@ function FleetHostRow({ host }: { host: FleetHost }): ReactElement {
   const tone = HEALTH_TONE[host.health];
   const edge = TONE_VAR[tone];
   const facts = fleetHostFacts(host);
+  const note = unreachableNote(host);
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3.5 py-2 last:border-b-0">
       <span aria-hidden="true" className={`h-[7px] w-[7px] shrink-0 rounded-full ${HEALTH_DOT[host.health]}`} />
@@ -69,6 +70,7 @@ function FleetHostRow({ host }: { host: FleetHost }): ReactElement {
       <span title="when this host last answered a poll" className="ml-auto whitespace-nowrap font-mono text-[11px] text-faint">
         {timeSinceHeartbeat(host.last_heartbeat)}
       </span>
+      {note && <span className="w-full text-[11px] text-err">{note}</span>}
     </div>
   );
 }
