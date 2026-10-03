@@ -286,6 +286,21 @@ pub(crate) enum AgentEvent {
     /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
     /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
     Finding { title: String, body: String, evidence: String },
+    /// A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, §6.12).
+    /// The token never enters a colony, so the guest only proposes: `tool` names the action
+    /// (`issue_label`, `issue_comment`, `issue_close_duplicate`), `issue` is the colony's own
+    /// repository's issue number, and everything else is validated, capped and scoped in
+    /// `loop_github.rs`, which still reads the raw event.
+    GithubAction {
+        tool: String,
+        issue: u64,
+        #[serde(default)]
+        labels: Vec<String>,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        duplicate_of: Option<u64>,
+    },
     /// A self-paced loop's colony names its next run (loops.rs): minutes from now, and why.
     LoopNext {
         delay_minutes: u64,
@@ -515,6 +530,7 @@ mod tests {
             "turn_end",
             "memory_proposal",
             "finding",
+            "github_action",
             "loop_next",
             "loop_stop",
             "path_policy",

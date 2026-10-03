@@ -1178,6 +1178,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
     }
+    // A GitHub-needing loop's colony (issue #778): the read-only context is written into `vm_dir`
+    // (visible at /colonizer/github), and the guest is handed the host-proxied write tools.
+    if crate::loop_github::prepare(app, &s, &vm_dir, &log).await {
+        runner_env.insert("COLONIZER_GITHUB".into(), Value::String("true".into()));
+    }
     // A loop's colony gets loop_stop, and loop_next when the loop is self-paced (loops.rs).
     if let Some(self_paced) = crate::loops::colony_self_paced(app, s.origin.as_deref()).await {
         runner_env.insert("COLONIZER_LOOP".into(), Value::String("true".into()));
