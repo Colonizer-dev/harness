@@ -528,6 +528,19 @@ pub struct Session {
     /// same retry budget instead of starting a new one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boot_attempt_started_at: Option<u64>,
+    /// How the last boot failure was classed (issue #881): `transient_infra` for a blip the colony
+    /// retries on [`Session::boot_retries`] and [`Session::retry_at`], `permanent` for a verdict a
+    /// retry cannot fix. Cleared when a boot finally lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<crate::retry::FailureClass>,
+    /// How many transient boot failures this colony has retried (issue #881). When it reaches the
+    /// retry budget the next failure is permanent. Kept as a record after a successful boot.
+    #[serde(default)]
+    pub boot_retries: u32,
+    /// When a transient boot failure may be tried again (issue #881): the queue holds the colony
+    /// `Queued` until this passes. `None` when no retry is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -615,6 +628,9 @@ impl Default for Session {
             boot_image: None,
             app_slot: None,
             boot_attempt_started_at: None,
+            failure_class: None,
+            boot_retries: 0,
+            retry_at: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
         }

@@ -961,6 +961,9 @@ mod tests {
             boot_cpus: None,
             boot_memory: None,
             boot_image: None,
+            failure_class: None,
+            boot_retries: 0,
+            retry_at: None,
             created_at: now,
             updated_at: now,
         }

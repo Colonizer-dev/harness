@@ -441,6 +441,7 @@ pub fn builtin(now: DateTime<Utc>) -> Loop {
         subagent_model: None,
         autopilot: false,
         max_runs: None,
+        retry_failed_runs: None,
         end_at: None,
         enabled: false,
         next_run_at: None,
@@ -1184,6 +1185,8 @@ async fn record(app: &Shared, report: &RunReport, now: DateTime<Utc>) {
             x.last_run = Some(LastRun {
                 session: String::new(),
                 at: now,
+                retried: false,
+                outcome: None,
             });
             if x.enabled {
                 x.next_run_at = Some(next_run_after(&x.cadence, now));

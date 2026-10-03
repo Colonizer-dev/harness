@@ -133,6 +133,9 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             }
             s.status = SessionStatus::Failed;
             s.error = Some(truncate(&message, 2000));
+            // A refusal by policy is permanent: retrying would be refused the same way (issue #881).
+            s.failure_class = Some(crate::retry::FailureClass::Permanent);
+            s.retry_at = None;
             attention = s.clear_attention();
             true
         })
@@ -192,22 +195,85 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             app.note_cleared_attention(&id, attention).await;
             return;
         }
-        let mut attention = None;
+        // Classified (issue #881): a transient failure with retries left is retried, anything else
+        // fails the colony. The answer is not needed here either way.
+        fail_or_retry_boot(&app, &id, &message).await;
+    } else {
+        // A boot that lands ends the failing streak (issue #881), so the next failure starts fresh.
         app.update_session(&id, |s| {
-            s.status = SessionStatus::Failed;
-            s.error = Some(truncate(&message, 2000));
-            // A warm-up this failed boot was still carrying dies with it; a held answer stays for
-            // a manual resume to deliver.
-            s.prewarm = None;
-            attention = s.clear_attention();
+            s.retry_at = None;
+            s.failure_class = None;
+            s.boot_retries = 0;
         })
         .await;
-        app.note_cleared_attention(&id, attention).await;
-        // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
-        if let Some(s) = app.session(&id).await {
-            crate::claims::spawn_release_if_needed(app.clone(), &s);
-        }
     }
+}
+
+/// Handles a boot that failed with `message` (issue #881): a transient failure with retries left
+/// goes back to `Queued` and answers `true`; every other case fails the colony, classed, and
+/// answers `false` (only then freeing the issue for a retry).
+async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
+    let class = crate::retry::classify(message);
+    if class == crate::retry::FailureClass::TransientInfra && schedule_boot_retry(app, id, message).await {
+        return true;
+    }
+    let mut attention = None;
+    app.update_session(id, |s| {
+        s.status = SessionStatus::Failed;
+        s.error = Some(truncate(message, 2000));
+        // The class of the failure that ended the retries, and no retry left pending.
+        s.failure_class = Some(class);
+        s.retry_at = None;
+        // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
+        // manual resume to deliver.
+        s.prewarm = None;
+        attention = s.clear_attention();
+    })
+    .await;
+    app.note_cleared_attention(id, attention).await;
+    // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
+    if let Some(s) = app.session(id).await {
+        crate::claims::spawn_release_if_needed(app.clone(), &s);
+    }
+    false
+}
+
+/// Puts a colony whose boot failed transiently back in the queue for another attempt (issue #881):
+/// `Queued` with `retry_at` at now plus the next backoff and the attempt counted. Answers `false`
+/// once the budget is spent, so the caller fails the colony for real.
+async fn schedule_boot_retry(app: &Shared, id: &str, message: &str) -> bool {
+    let message = message.to_string();
+    let Some((attempt, delay)) = app
+        .update_session(id, |s| {
+            if s.status != SessionStatus::Starting {
+                return None;
+            }
+            let delay = crate::retry::retry_delay(s.boot_retries)?;
+            let attempt = s.boot_retries + 1;
+            s.status = SessionStatus::Queued;
+            s.error = Some(truncate(&message, 2000));
+            s.failure_class = Some(crate::retry::FailureClass::TransientInfra);
+            s.retry_at = Some(Utc::now() + delay);
+            s.boot_retries = attempt;
+            s.updated_at = Utc::now();
+            Some((attempt, delay))
+        })
+        .await
+        .and_then(|(_, scheduled)| scheduled)
+    else {
+        return false;
+    };
+    app.session_log(
+        id,
+        "warn",
+        format!(
+            "boot attempt {attempt} failed (transient): {message} — retrying in {} min (retry {attempt} of {})",
+            delay.num_minutes(),
+            crate::retry::BOOT_RETRY_DELAYS.len()
+        ),
+    )
+    .await;
+    true
 }
 
 /// Whether a boot that failed after its colony left `Starting` must still reap the microVM: only
@@ -2028,6 +2094,104 @@ mod tests {
             .filter(|e| e["level"] == level)
             .filter_map(|e| e["message"].as_str().map(String::from))
             .collect()
+    }
+
+    /// Put a colony back where a fresh boot attempt starts it, without a claim or a slot.
+    async fn back_to_starting(app: &Shared, id: &str) {
+        app.update_session(id, |s| s.status = SessionStatus::Starting).await;
+    }
+
+    /// A transient microVM failure with retries left does not fail the colony (issue #881): it goes
+    /// back to `Queued` with a future `retry_at` and the attempt counted, and the colony log says so
+    /// — no `Failed` transition, so nothing notifies and no claim is released.
+    #[tokio::test]
+    async fn a_transient_boot_failure_goes_back_to_the_queue() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        assert!(fail_or_retry_boot(&app, "rt", "microVM boot failed: connection refused").await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Queued, "not failed: waiting to try again");
+        assert_eq!(s.boot_retries, 1);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::TransientInfra));
+        assert!(s.retry_at.is_some_and(|at| at > Utc::now()), "the retry is in the future");
+        let warned = said(&app, "rt", "warn").await;
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.contains("retrying in 1 min") && w.contains("retry 1 of 3")),
+            "{warned:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The retry budget is three: each transient failure schedules the next, longer wait, and the
+    /// fourth has none left — the colony fails, still classed transient because that is what it was.
+    #[tokio::test]
+    async fn the_retry_budget_runs_out_and_transient_then_fails() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        let msg = "microVM boot failed: connection refused";
+        for expected in [1u32, 2, 3] {
+            back_to_starting(&app, "rt").await;
+            assert!(
+                fail_or_retry_boot(&app, "rt", msg).await,
+                "retry {expected} is still within budget"
+            );
+            let s = app.session("rt").await.unwrap();
+            assert_eq!(s.boot_retries, expected);
+            assert_eq!(s.status, SessionStatus::Queued);
+        }
+        let waited: Vec<i64> = said(&app, "rt", "warn")
+            .await
+            .iter()
+            .filter_map(|w| w.split("retrying in ").nth(1))
+            .filter_map(|w| w.split(' ').next())
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        assert_eq!(waited, vec![1, 5, 15], "the backoff grows 1, 5, 15 minutes");
+        // The fourth transient failure has no retry left: the colony is failed for real.
+        back_to_starting(&app, "rt").await;
+        assert!(!fail_or_retry_boot(&app, "rt", msg).await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(
+            s.failure_class,
+            Some(crate::retry::FailureClass::TransientInfra),
+            "a blip, not a verdict"
+        );
+        assert!(s.retry_at.is_none(), "no retry is pending");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A permanent failure — bad configuration, a missing credential, a policy refusal — fails the
+    /// colony at once, classed permanent, with no retry scheduled (issue #881).
+    #[tokio::test]
+    async fn a_permanent_boot_failure_fails_the_colony_at_once() {
+        for message in [
+            "invalid sandbox configuration: cpus must be >= 1",
+            "git asked for a GitHub credential and none was available",
+            "resume refused: not authorized (no grant)",
+        ] {
+            let (app, root) = crate::sessions::tests::app_with_colony("perm", SessionStatus::Starting).await;
+            assert!(!fail_or_retry_boot(&app, "perm", message).await, "{message:?}");
+            let s = app.session("perm").await.unwrap();
+            assert_eq!(s.status, SessionStatus::Failed, "{message:?}");
+            assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent), "{message:?}");
+            assert!(s.retry_at.is_none(), "{message:?} schedules no retry");
+            assert_eq!(s.boot_retries, 0, "{message:?} never counted a retry");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// The whole `boot` path on a failure it cannot retry: a fresh boot of a colony with no agent
+    /// installed fails through `boot_inner` and is recorded permanent, never queued for a retry.
+    #[tokio::test]
+    async fn boot_of_a_colony_with_no_agent_module_fails_permanently() {
+        let (app, root) = crate::sessions::tests::app_with_colony("noagent", SessionStatus::Starting).await;
+        boot(app.clone(), "noagent".into(), false, None).await;
+        let s = app.session("noagent").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent));
+        assert!(s.retry_at.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn provider(id: &str, trusted: bool) -> providers::Provider {

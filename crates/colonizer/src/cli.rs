@@ -546,7 +546,8 @@ impl TokenScope {
 
 #[derive(Subcommand, Debug)]
 enum LoopCommand {
-    /// List every loop this token may see: id, name, repository, cadence, state and next run, in your local time.
+    /// List every loop this token may see: id, name, repository, cadence, state, next run and the
+    /// last run's outcome, in your local time.
     List,
     /// Create a loop: a saved prompt on a repository that launches a colony on a schedule
     ///
@@ -587,6 +588,10 @@ enum LoopCommand {
         /// End the loop after this many runs
         #[arg(long)]
         max_runs: Option<u32>,
+        /// Re-run a run that failed for an infrastructure reason within this many minutes of its
+        /// start; 0 switches the re-run off (default 60)
+        #[arg(long, value_name = "MINUTES")]
+        retry_failed_runs: Option<u32>,
         /// Create it paused: nothing runs until `loop start`
         #[arg(long)]
         disabled: bool,
@@ -2010,6 +2015,12 @@ fn limit_note(token: &Value) -> String {
 // Loops: the cockpit's Loops page, driven from a terminal.
 // ---------------------------------------------------------------------------
 
+/// The LAST column of `loop list`: the last run's outcome the server derived (issue #881), or `-`
+/// when the loop has not run.
+fn last_outcome(l: &Value) -> String {
+    l["last_run"]["outcome"].as_str().unwrap_or("-").to_string()
+}
+
 async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
     let json = cli.json;
     client_command(cli, move |machine| async move {
@@ -2046,13 +2057,14 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                         None => "?",
                     };
                     println!(
-                        "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {}",
+                        "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {:<24}  {}",
                         l["id"].as_str().unwrap_or("?"),
                         util::truncate(l["name"].as_str().unwrap_or("?"), 26),
                         scope,
                         describe_cadence(&l["cadence"], offset),
                         state,
-                        next
+                        next,
+                        last_outcome(l)
                     );
                 }
                 Ok(EXIT_OK)
@@ -2069,6 +2081,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 autopilot,
                 no_autopilot,
                 max_runs,
+                retry_failed_runs,
                 disabled,
             } => {
                 let offset = local_offset_minutes();
@@ -2103,6 +2116,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                     // No flag at all: the server's default (on) decides.
                     "autopilot": if autopilot { Some(true) } else if no_autopilot { Some(false) } else { None },
                     "max_runs": max_runs,
+                    "retry_failed_runs": retry_failed_runs,
                     "enabled": if disabled { Some(false) } else { None },
                 });
                 let created = machine
@@ -2447,6 +2461,7 @@ async fn set_loop_enabled(machine: &Machine, id: &str, enabled: bool, json: bool
         "subagent_model": l["subagent_model"],
         "autopilot": l["autopilot"],
         "max_runs": l["max_runs"],
+        "retry_failed_runs": l["retry_failed_runs"],
         "end_at": l["end_at"],
         "enabled": enabled,
     });
@@ -3723,6 +3738,23 @@ mod tests {
         ] {
             assert!(parse_cadence(bad, 0).is_err(), "{bad:?} should not parse");
         }
+    }
+
+    /// `loop list`'s LAST column is the server-derived last-run outcome, `-` when there is none.
+    #[test]
+    fn the_last_outcome_column_reads_the_server_s_word() {
+        assert_eq!(
+            last_outcome(
+                &json!({"last_run": {"session": "s", "at": "2026-09-24T09:00:00Z", "outcome": "failed (transient_infra)"}})
+            ),
+            "failed (transient_infra)"
+        );
+        assert_eq!(
+            last_outcome(&json!({"last_run": {"session": "s", "at": "2026-09-24T09:00:00Z"}})),
+            "-"
+        );
+        assert_eq!(last_outcome(&json!({"last_run": null})), "-");
+        assert_eq!(last_outcome(&json!({})), "-");
     }
 
     /// `loop list` describes a cadence in words with its clock times in the viewer's zone.
