@@ -107,5 +107,5 @@ jobs:
             echo '```'
           } > notes.md
           gh release create "${{ github.ref_name }}" graft-*.tar.gz SHA256SUMS \
-            --repo "${{ github.repository }}" --verify-tag \
+            --latest=false --repo "${{ github.repository }}" --verify-tag \
             --title "graft skillset bundle ${{ github.ref_name }}" --notes-file notes.md

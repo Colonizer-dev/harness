@@ -71,6 +71,9 @@ pub struct Runtime {
     pub(crate) file_lock: Mutex<()>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
+    /// Serialises a GitHub-needing loop's host-proxied writes (loop_github.rs), so the per-colony
+    /// cap holds when two arrive together, as `findings_lock` does for findings.
+    pub(crate) github_lock: Mutex<()>,
     /// Serialises completion-claim verifications (verify.rs): a second claim that lands mid-run
     /// queues behind it and then verifies the newer state, never concurrent with it.
     pub(crate) verify_lock: Mutex<()>,
@@ -235,6 +238,7 @@ impl Runtime {
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
+            github_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             path_policy_warned: Mutex::new(HashSet::new()),
             path_policy_seen: Mutex::new(HashSet::new()),

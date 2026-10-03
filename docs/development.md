@@ -10,6 +10,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd modules/agents/pi && npm test)
 (cd modules/agents/codex && npm test)
 (cd modules/agents/acp && npm test)
+(cd modules/agents/hermes && npm test)
+(cd modules/agents/grok-build && npm test)
 (cd services/telemetry && npm test)             # the live map's receiver
 (cd services/relay && npm test)                 # remote access relay
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests

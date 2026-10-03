@@ -18,7 +18,7 @@ use crate::{
     findings::Finding,
     modules::schema_for,
     sessions::{FixFor, NewSession, Session, automerge_enabled},
-    util::{append_line, short_id, truncate},
+    util::{short_id, truncate},
 };
 use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State};
@@ -275,7 +275,14 @@ pub(crate) async fn emit_chain(app: &Shared, session_id: &str, mut event: Value)
         // browser may have just seen broadcast, or that broadcast and a later line could share a seq.
         rt.last_seq.store(seq, Ordering::SeqCst);
         let line = event.to_string();
-        let err = append_line(&rt.events_path, &line).await.err();
+        // Through the store, so the host chain line lands in `sessions/<id>/events.jsonl` beside the
+        // agentd lines, by the same name a remote backend would answer by.
+        let err = app
+            .store()
+            .append(session_id, "events.jsonl", line.as_bytes())
+            .await
+            .map_err(anyhow::Error::from)
+            .err();
         (Some(seq), line, err)
     };
     if let Some(e) = persisted {
@@ -301,7 +308,12 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let appended = {
         let _guard = rt.findings_lock.lock().await;
         // #761: a finding's title or reason can quote what the agent saw, secrets included.
-        append_line(&path, &crate::redact::redact_line(&line.to_string())).await
+        let entry = line.to_string();
+        let text = crate::redact::redact_line(&entry);
+        app.store()
+            .append(session_id, "findings.jsonl", text.as_bytes())
+            .await
+            .map_err(anyhow::Error::from)
     };
     if let Err(e) = appended {
         // The outcome is real in memory either way; what failed is the colony's record of it, and
@@ -368,6 +380,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             after: None,
             stack: false,
             origin: None,
+            host: None,
             serialize: None,
         }),
     )

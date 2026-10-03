@@ -178,11 +178,11 @@ Nothing is checked off yet, and no gate is cleared. The roadmap is the issue tra
 is the audit's view of it. Since the audit, `.github/workflows/ci.yml` runs on every pull request and
 push to `main`: `cargo test --workspace` (including agentd's no-KVM smoke test), `cargo clippy` with
 warnings denied and `cargo fmt --check`; the Claude Code runner's tests; the web UI's `tsc`, build and
-tests; and the tests of the telemetry receiver, the remote-access relay and the scripts. `supply-chain.yml` adds dependency audits
-and SBOMs. Two limits keep this short of what G4 asks for: CI is not yet a required check on `main` — a
-red run does not block a merge until a maintainer applies the ruleset with
-`scripts/require-ci-checks.mjs` ([#367](https://github.com/Colonizer-dev/harness/issues/367), below) —
-and a real colony is booted in CI since #368, but without a real model or a real GitHub write: the
+tests; the tests of the telemetry receiver, the remote-access relay and the scripts; a macOS compile and
+lint (`rust-macos`); and the UHP conformance check (`conformance`). `supply-chain.yml` adds dependency audits
+and SBOMs. CI gates merges on `main` since
+[#367](https://github.com/Colonizer-dev/harness/issues/367) (below). The limit that keeps this short of
+what G4 asks for: a real colony is booted in CI since #368, but without a real model or a real GitHub write: the
 `colony-e2e` job runs a whole colony — mothership, microVM, agentd and the Claude Code runner against a
 scratch repository and a stub model server — on every pull request, so the negative tests on real
 colonies that G1 asks for are not what it runs.
@@ -213,22 +213,26 @@ responsibility. As above, F05 is not checked off and G2 is not cleared.
 
 ## Required checks, issue #367 (partial G4)
 
-A repository ruleset makes CI gate merges on the default branch: the six jobs that always run on a
-pull request (`rust`, `runner`, `scripts`, `telemetry`, `web`, `colony-report`) become required
-status checks, each pinned to the GitHub Actions app, so a status another app posted under the same
-name does not count. `scripts/require-ci-checks.mjs` prints the ruleset (a dry run, the default) and
+CI gates merges on the default branch. What is live today is the branch protection on `main`, not
+the script's ruleset: it requires the six jobs that always run on a pull request (`rust`, `runner`,
+`scripts`, `telemetry`, `web`, `colony-report`) plus the supply-chain `vulnerabilities` job, each
+pinned to the GitHub Actions app, so a status another app posted under the same name does not
+count, and it applies to administrators too. The script describes the same gate as a repository
+ruleset (`CI required on main`), which has not been applied; the only ruleset on the repository
+blocks force-pushes and deletion of `main`. `scripts/require-ci-checks.mjs` prints the ruleset (a dry run, the default) and
 `--apply` sends it through `gh api`, idempotently; applying it needs a repository admin, which is why
 it is a script and not a pull request. The update replaces the ruleset wholesale, so a rule, ref
 condition or bypass actor added to it by hand in the UI is lost on the next run — change it in the
 script, not in the UI. Not required: `colony-e2e`, on purpose, since a KVM-dependent job can
-flake on a runner difference and a retry is cheaper than a blocked pull request; `relay`, which
-runs on every pull request but is not in the script's list (`REQUIRED_CHECKS` in
-`scripts/require-ci-checks.mjs`);
-the supply-chain jobs, where `vulnerabilities` can
-go red on a newly published advisory with no commit at all (the weekly run is the detection path) and
-an SBOM is evidence, not a gate; and the release jobs, which paths and tags keep away from an
+flake on a runner difference and a retry is cheaper than a blocked pull request; `relay`,
+`rust-macos` and `conformance`, which run on every pull request but are not in the script's list
+(`REQUIRED_CHECKS` in `scripts/require-ci-checks.mjs`); the `sbom` job, which is evidence, not a
+gate; and the release jobs, which paths and tags keep away from an
 ordinary pull request. Two settings travel with it and are flipped by hand in the repository's
 settings: "Allow auto-merge" on, because a colony pull request held for required checks is queued
 with `gh pr merge --squash --auto` and GitHub refuses that queue without it, and no merge queue,
 because no workflow here has a `merge_group` trigger and a queued pull request would never leave it.
-Until a maintainer runs the script, the paragraph above stands: a red run does not block a merge.
+The script keeps `vulnerabilities` out of its list on purpose, because it can go red on a newly
+published advisory with no commit at all (the weekly run is the detection path); the live branch
+protection requires it anyway, so such an advisory blocks every merge until it is fixed
+([#935](https://github.com/Colonizer-dev/harness/issues/935)).

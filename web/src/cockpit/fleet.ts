@@ -39,3 +39,15 @@ export function timeSinceHeartbeat(last_heartbeat: string | null, now?: Date): s
   if (!last_heartbeat) return "never";
   return timeAgo(last_heartbeat, now);
 }
+
+/**
+ * The line a stalled host earns when it went down mid-work (issue #688). An unreachable peer keeps
+ * the last summary it answered with — `slots_in_use` included — so a host last seen running
+ * colonies says how many, and that they are not silently re-run here. Null for a host that is up,
+ * was idle, or was never reached at all; there is nothing to warn about.
+ */
+export function unreachableNote(host: FleetHost): string | null {
+  if (host.health !== "unreachable" || host.slots_in_use <= 0) return null;
+  const n = host.slots_in_use;
+  return `host unreachable · ${n} ${n === 1 ? "colony" : "colonies"} last seen running — not re-run elsewhere`;
+}

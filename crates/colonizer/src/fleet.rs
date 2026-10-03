@@ -17,16 +17,17 @@ use tokio::sync::Mutex;
 /// view is one page load, not a background job, and a wedged peer must not hold the whole list up.
 const PEER_POLL_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HostHealth {
+    #[default]
     Online,
     Unreachable,
 }
 
 /// One row of the fleet view: this host's own numbers, or a peer's, told from `/api/status`'s
 /// `host`, `runtime`, `version` and `queue_depth` fields.
-#[derive(Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq, Default)]
 pub struct HostSummary {
     /// This host's stable `host_id` (see `runtime::host_id`), or — for a peer never yet reached —
     /// the peer's configured base URL, so it still has *some* stable key to be listed under.
@@ -36,6 +37,11 @@ pub struct HostSummary {
     pub platform: String,
     pub os: String,
     pub version: Option<String>,
+    /// Whether the member can boot the colony microVM image, from its reduced status's `host.kvm_ok`
+    /// (issue #688). `None` where there is no `/dev/kvm` (a Mac) or the peer is too old to report it;
+    /// placement reads `Some(false)` as "cannot run colonies" and `None` as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kvm: Option<bool>,
     pub slots_in_use: usize,
     pub slots_ceiling: usize,
     pub queue_depth: usize,
@@ -145,6 +151,7 @@ pub async fn self_summary(app: &Shared) -> HostSummary {
         platform: runtime.platform.to_string(),
         os: runtime.os.name.clone(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        kvm: runtime.kvm.as_ref().map(|kvm| kvm.ok),
         slots_in_use,
         slots_ceiling,
         queue_depth,
@@ -197,6 +204,9 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         .unwrap_or("unknown")
         .to_string();
     let version = body.get("version").and_then(Value::as_str).map(str::to_string);
+    // The reduced status omits `kvm_ok` where there is no `/dev/kvm` to check, so an absent key is
+    // `None` — an unknown verdict — never `false`.
+    let kvm = host.and_then(|host| host.get("kvm_ok")).and_then(Value::as_bool);
     let slots_in_use = host_num("microvms_live");
     let slots_ceiling = host_num("microvms_ceiling");
     let queue_depth = body.get("queue_depth").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -215,6 +225,7 @@ fn summary_from_status_json(base_url: &str, body: &Value) -> Option<HostSummary>
         platform,
         os,
         version,
+        kvm,
         slots_in_use,
         slots_ceiling,
         queue_depth,
@@ -243,6 +254,7 @@ async fn unreachable_summary(app: &Shared, base_url: &str) -> HostSummary {
         platform: String::new(),
         os: String::new(),
         version: None,
+        kvm: None,
         slots_in_use: 0,
         slots_ceiling: 0,
         queue_depth: 0,
@@ -301,6 +313,22 @@ pub async fn list_hosts(app: &Shared) -> Vec<HostSummary> {
     hosts
 }
 
+/// The fleet as placement candidates (issue #688): this member, always local, and the last-known row
+/// of each polled peer from [`FleetCache`] — cached data only, never a fresh poll, so a launch with
+/// no fleet costs one summary and sees this member alone.
+pub async fn placement_candidates(app: &Shared) -> (crate::placement::Candidate, Vec<crate::placement::Candidate>) {
+    let local = crate::placement::Candidate::from_summary(&self_summary(app).await, true);
+    let peers = app
+        .fleet_cache
+        .last_known
+        .lock()
+        .await
+        .values()
+        .map(|summary| crate::placement::Candidate::from_summary(summary, false))
+        .collect();
+    (local, peers)
+}
+
 /// `GET /api/hosts`: `{"hosts": [HostSummary, ...]}`, self first.
 pub async fn list_hosts_handler(State(app): State<Shared>) -> Json<Value> {
     Json(json!({"hosts": list_hosts(&app).await}))
@@ -357,6 +385,7 @@ mod tests {
                 "disk_free_bytes": 123456,
                 "microvms_live": 1,
                 "microvms_ceiling": 4,
+                "kvm_ok": true,
             },
             "runtime": {
                 "platform": "linux-x86_64",
@@ -380,6 +409,7 @@ mod tests {
         assert_eq!(peer.platform, "linux-x86_64");
         assert_eq!(peer.os, "Debian");
         assert_eq!(peer.version.as_deref(), Some("9.9.9"));
+        assert_eq!(peer.kvm, Some(true), "kvm_ok rides the reduced status's host block");
         assert_eq!(peer.slots_in_use, 1);
         assert_eq!(peer.slots_ceiling, 4);
         assert_eq!(peer.queue_depth, 2);
@@ -435,6 +465,7 @@ mod tests {
         assert_eq!(peer.slots_ceiling, 4);
         assert_eq!(peer.queue_depth, 1);
         assert_eq!(peer.disk_free_bytes, Some(777));
+        assert_eq!(peer.kvm, None, "no kvm_ok in the body: the verdict is unknown, not false");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -468,6 +499,7 @@ mod tests {
             platform: "linux-x86_64".into(),
             os: "Debian".into(),
             version: Some("9.9.8".into()),
+            kvm: Some(true),
             slots_in_use: 3,
             slots_ceiling: 4,
             queue_depth: 1,

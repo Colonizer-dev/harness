@@ -1,0 +1,5 @@
+{"type":"summary","summary":"Fix the parser","leafUuid":"abc"}
+{"type":"user","uuid":"u1","parentUuid":null,"sessionId":"sess-1","cwd":"/work/repo","gitBranch":"main","version":"1.2.3","timestamp":"2026-01-02T03:04:05.000Z","message":{"role":"user","content":"fix the off-by-one"}}
+{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"sess-1","timestamp":"2026-01-02T03:04:06.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"Patching."},{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/work/repo/src/p.rs","old_string":"i <= n","new_string":"i < n"}}]}}
+{"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"sess-1","timestamp":"2026-01-02T03:04:07.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"applied"}]}}
+{"type":"assistant","uuid":"a2","parentUuid":"u2","sessionId":"sess-1","timestamp":"2026-01-02T03:04:08.000Z","message":{"role":"assistant","model":"claude-opus-4-8","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":20},"content":[{"type":"text","text":"Done."}]}}
