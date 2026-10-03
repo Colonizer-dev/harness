@@ -745,9 +745,10 @@ fn over_host_disk(bytes: u64, quota_bytes: u64) -> bool {
 }
 
 /// What a colony leaves on the host: its worktree (bind-mounted rw at `/workspace` inside the microVM,
-/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, and the
-/// append-only logs). The microVM's root disk is a separate limit, microsandbox's `--root-disk`. Walked
-/// on the blocking pool: it is plain IO over trees that can be gigabytes.
+/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, the append-only
+/// logs, and — behind the false snapshot gate — `<session dir>/snapshots/`, which the walk counts with
+/// everything else, issue #702). The microVM's root disk is a separate limit, microsandbox's `--root-disk`.
+/// Walked on the blocking pool: it is plain IO over trees that can be gigabytes.
 async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
     let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
     // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
@@ -1104,6 +1105,18 @@ pub async fn resume(
         app.storage_failed("rotate the old event log", &e).await;
         app.session_log(&id, "error", message.clone()).await;
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
+    }
+    // Issue #702: behind this gate a suspended colony comes back from its sealed memory snapshot
+    // (snapshot.rs) instead of the transcript. `resume` decrypts it into a staging file and re-mints
+    // the credentials a restored runtime carries; any failure — missing, expired, corrupt, no key —
+    // falls back to the fresh boot below. The gate is false, so the branch does not run: the pinned
+    // msb cannot restore a `--secret`-carrying sandbox (sandbox.rs has the measurement).
+    if admitted
+        && crate::sandbox::supports_memory_snapshot()
+        && crate::snapshot::resume(&app, &id, &s.sandbox, suspension.as_ref().and_then(|x| x.snapshot.clone())).await
+    {
+        let s = app.session(&id).await.unwrap_or(s);
+        return Ok(Json(s));
     }
     if admitted {
         // A park that kept the microVM (issue #213) but could not resume warm — the link is gone
@@ -1567,6 +1580,17 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
     } else {
         (0, None)
     };
+    // The colony's snapshots go with it (issue #702): best-effort `msb snapshot remove`, then the
+    // sealed directory and the key file — the key lives under the private state rather than the
+    // session dir removed below, so it would otherwise outlive the colony forever.
+    let snapshot_name = s
+        .suspended
+        .as_ref()
+        .and_then(|x| x.snapshot.as_ref())
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    crate::snapshot::remove(&app, &id, snapshot_name.as_deref()).await;
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
