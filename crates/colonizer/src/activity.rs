@@ -73,24 +73,32 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.launch",
     "colony.stop",
     "colony.resume",
+    "colony.keep",
     "colony.delete",
     "colony.publish",
     "colony.catch_up",
     "colony.cleanup",
     "colony.retain",
     "colony.answer",
+    "colony.prewarm",
     "colony.path_policy",
     "chat.colony",
     "chat.issue",
     "colonize.issue",
     "colonize.colony",
+    "decision.shadow",
+    "decision.act",
+    "decision.fallback",
     "publish.merge_train",
     "loop.create",
+    "loop.ts_any",
     "loop.update",
     "loop.pause",
     "loop.resume",
     "loop.delete",
     "loop.run_now",
+    "loop.supply_chain",
+    "loop.docs",
     "redteam.start",
     "redteam.stop",
     "redteam.schedule",
@@ -291,6 +299,10 @@ async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
     let Ok(line) = serde_json::to_string(&entry) else {
         return; // a fixed-shape line cannot fail to serialize
     };
+    // #761: a failure's `detail` or a colony's `title` can quote tool output or an issue, so the
+    // line is redacted field by field before it lands in the History log; a clean line is kept
+    // byte for byte.
+    let line = crate::redact::redact_line(&line).into_owned();
     let live = live_file(&data_dir);
     if tokio::fs::metadata(&live).await.is_ok_and(|m| m.len() >= rotate_bytes)
         && let Err(e) = tokio::fs::rename(&live, rolled_file(&data_dir)).await
@@ -415,6 +427,7 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/sessions", "colony.launch", Target::NewColony),
     rule("POST", "/api/sessions/{id}/stop", "colony.stop", Target::Colony),
     rule("POST", "/api/sessions/{id}/resume", "colony.resume", Target::Colony),
+    rule("POST", "/api/sessions/{id}/keep", "colony.keep", Target::Colony),
     rule("DELETE", "/api/sessions/{id}", "colony.delete", Target::Colony),
     rule("POST", "/api/sessions/{id}/publish", "colony.publish", Target::Colony),
     rule("POST", "/api/sessions/{id}/catch-up", "colony.catch_up", Target::Colony),
@@ -423,9 +436,45 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/chat/{id}/issue", "chat.issue", Target::None),
     rule("POST", "/api/repos/{owner}/{name}/issues", "colonize.issue", Target::NewIssue),
     rule("POST", "/api/loops", "loop.create", Target::NewLoop),
+    rule(
+        "PUT",
+        "/api/ts-any-loop",
+        "loop.update",
+        Target::Fixed(crate::ts_any_loop::NAME, "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/ts-any-loop/run",
+        "loop.run_now",
+        Target::Fixed(crate::ts_any_loop::NAME, "loops"),
+    ),
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
+    rule(
+        "PUT",
+        "/api/supply-chain-loop",
+        "loop.update",
+        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/supply-chain-loop/run",
+        "loop.run_now",
+        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
+    ),
+    rule(
+        "PUT",
+        "/api/merge-train/loop",
+        "loop.update",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
+    rule(
+        "POST",
+        "/api/merge-train/loop/run",
+        "loop.run_now",
+        Target::Fixed("the merge-train loop", "loops"),
+    ),
     rule("POST", "/api/redteam/runs", "redteam.start", Target::NewRun),
     rule(
         "POST",
@@ -461,6 +510,12 @@ const RULES: &[Rule] = &[
     rule(
         "PUT",
         "/api/providers/{id}",
+        "settings.save",
+        Target::Named("provider", "providers"),
+    ),
+    rule(
+        "POST",
+        "/api/providers/{id}/quota-action",
         "settings.save",
         Target::Named("provider", "providers"),
     ),
@@ -601,6 +656,12 @@ const RULES: &[Rule] = &[
         "/api/memory/notes/{id}",
         "memory.note",
         Target::Fixed("removed a memory note", "memory"),
+    ),
+    rule(
+        "POST",
+        "/api/memory/notes/{id}/revoke",
+        "memory.note",
+        Target::Fixed("revoked a memory note", "memory"),
     ),
     rule(
         "POST",
@@ -770,7 +831,7 @@ pub(crate) async fn record_actions(State(app): State<Shared>, req: Request, next
             };
             entry = entry.target(before.name.clone()).section("loops");
             entry.org = owner_of(&before.repo);
-            entry.repo = Some(before.repo.clone());
+            entry.repo = Some(before.repo.clone()).filter(|r| !r.is_empty());
             if rule.kind == "loop.update"
                 && let Some(after) = app.loops.get(&before.id).await
             {
@@ -882,6 +943,14 @@ pub(crate) async fn record_answer(app: &App, colony: &Session, via: Option<auth:
 /// boot path calls it once the runner is up, which is when the answer counts as delivered.
 pub(crate) async fn record_restored(app: &App, colony: &Session) {
     let entry = Entry::new("outcome.restored", "colony").colony(colony);
+    record(app, entry).await;
+}
+
+/// Records a person opening a suspended colony's question, which asks the queue to pre-warm it
+/// (issue #701) — same shape as [`record_answer`], since the request arrives over the same routes.
+pub(crate) async fn record_prewarm(app: &App, colony: &Session, via: Option<auth::Via>) {
+    let mut entry = Entry::new("colony.prewarm", "you").colony(colony);
+    entry.via = via_name(via);
     record(app, entry).await;
 }
 
@@ -1154,6 +1223,29 @@ mod tests {
         let seqs: Vec<u64> = all(&again).iter().map(|e| e.seq).collect();
         assert_eq!(seqs.last(), Some(&41));
         assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
+    }
+
+    /// #761: a credential in a failure's detail is stored as the mark; names and targets that
+    /// merely mention secrets are kept as written.
+    #[tokio::test]
+    async fn a_secret_in_an_activity_line_is_stored_redacted() {
+        let root = root();
+        let app = test_app(&root);
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let mut failed = Entry::new("outcome.failed", "colony");
+        failed.detail = Some(format!("git push: remote rejected https://x:{secret}@github.com/acme/web"));
+        record(&app, failed).await;
+        record(
+            &app,
+            Entry::new("secret.save", "you").target("secret provider-keys:openrouter"),
+        )
+        .await;
+        let text = std::fs::read_to_string(root.join("data").join(FILE)).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        let lines = all(&app);
+        assert!(lines[0].detail.as_deref().unwrap().contains("[REDACTED:"), "{lines:?}");
+        assert_eq!(lines[1].target.as_deref(), Some("secret provider-keys:openrouter"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

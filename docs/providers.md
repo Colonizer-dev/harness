@@ -15,15 +15,19 @@ spend and carry. Every field and route is in
 | :--- | :--- | :--- | :--- |
 | `claude-code` | yes — unrouted models go straight to Anthropic; `<provider>/<model>` rides the gateway's Anthropic Messages route | yes — same route; the gateway translates the openai wire | yes — the `disabled_tools` setting (`COLONIZER_DISABLED_TOOLS`) becomes the SDK session's `disallowedTools` |
 | `acp` | no | no — talks to the agent's own API host (Gemini: `generativelanguage.googleapis.com`, grok: `api.x.ai`) with the colony's own secret; the runner passes model ids to `session/set_model` and reads no model routes | no — ACP names no per-tool switch, so the module declares no `disabled_tools` setting |
-| `codex` | no | no — talks to `api.openai.com` directly with `CODEX_API_KEY` (or `OPENAI_API_KEY`); it refuses every provider prefix but `openai/` and reads no model routes | yes — native names (`shell`, `web_search`, `view_image`) become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, and the runner passes `--strict-config` so a key codex stops recognising fails the turn instead of silently keeping the tool; `apply_patch` (how codex writes files) and MCP tools cannot be turned off |
-| `grok-build` | no | no — talks to `api.x.ai` directly with `XAI_API_KEY`; it refuses every provider prefix but `xai-grok/` and reads no model routes | yes — native tool ids (`run_terminal_cmd`, `read_file`, `write_file`, `search_replace`, `grep`, `list_dir`, `web_fetch`, `Agent`) go to `--disallowed-tools`; `web_search` is always off already |
+| `codex` | no — an `anthropic`-wire route is refused (`CODEX_MODEL_PROVIDER`): codex speaks the OpenAI wire only | yes — a `<provider>/<model>` whose prefix matches a route rides the gateway's OpenAI passthrough (`/v1/responses`) via a codex `model_provider` override; bare ids and `openai/` with no route go straight to `api.openai.com` with `CODEX_API_KEY` | yes — native names (`shell`, `web_search`, `view_image`) become `-c features.shell_tool=false`, `-c web_search="disabled"` and `-c features.view_image=false`, and the runner passes `--strict-config` so a key codex stops recognising fails the turn instead of silently keeping the tool; `apply_patch` (how codex writes files) and MCP tools cannot be turned off |
+| `grok-build` | no — an `anthropic`-wire route is refused (`GROK_MODEL_PROVIDER`): grok speaks the OpenAI wire only | yes — same passthrough, via `GROK_MODELS_BASE_URL` and the colony token as the bearer key; bare ids and `xai-grok/` with no route go straight to `api.x.ai` with `XAI_API_KEY` | yes — native tool ids (`run_terminal_cmd`, `read_file`, `write_file`, `search_replace`, `grep`, `list_dir`, `web_fetch`, `Agent`) go to `--disallowed-tools`; `web_search` is always off already |
 | `hermes` | yes — one config provider per gateway route, `transport: anthropic_messages` | yes — same route; the gateway translates | yes, toolset-granular — the names are Hermes toolsets (`terminal`, `file`, `web`, `browser`, `vision`, `code_execution`, `todo`, `session_search`, `image_gen`, …) added to `agent.disabled_toolsets`; single tools inside a toolset (only `write_file`, say) cannot be turned off |
 | `opencode` | yes — one `@ai-sdk/anthropic` provider per gateway route at `<base_url>/v1` | yes — same route; the gateway translates | yes — native tool ids become `permission: {"*": "allow", <id>: "deny"}` entries in the generated inline config; `edit` covers write/edit/apply_patch (the three share one permission) |
 | `pi` | yes — the runner writes `models.json` from the routes, `api: anthropic-messages` | yes — same; the gateway presents anthropic-messages to every guest | yes — native tool names (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) go to `--exclude-tools` |
 
-`codex` and `grok-build` run against their vendor API from the colony's own secret, so no route
-reaches them yet: no `model_map`, no spend accounting through the gateway, no connection-level tool
-strip.
+`codex` and `grok-build` speak only the OpenAI wire, so a route reaches them when the connection's
+wire is `openai`: the gateway forwards their Responses and Chat Completions requests to the
+connection verbatim and records the usage, so spend accounting and the budgets apply. A connection
+on the `anthropic` wire is refused by both runners, named in the model setting's error. A bare model
+id, or `openai/` / `xai-grok/` with no route configured, still runs against the vendor API from the
+colony's own secret, outside the gateway: no spend accounting through the gateway and no
+connection-level tool strip for those.
 
 ## `model_map` and wire names
 
@@ -33,10 +37,9 @@ is sent verbatim, so a provider that only knows its own branding can be addresse
 name every setting uses. A non-empty `model_map` is authoritative: the connection serves only the
 canonicals it lists, and boot refuses a model that is not among them.
 
-The cockpit's provider form does not show `model_map` or `disabled_tools` yet. Set them with
-`PUT /api/providers/{id}` or by editing `providers.json`; saving the provider from the cockpit keeps
-whatever is there, because a `PUT` that leaves a field out keeps its saved value (an explicit empty
-value clears it).
+Settings → Providers has a **Model map** editor for this (canonical → wire rows), in the form's
+Connection policy group; `PUT /api/providers/{id}` and `providers.json` take it too. A `PUT` that
+leaves a field out keeps its saved value; an explicit empty value clears it.
 
 ## Taking tools away: two levels
 
@@ -64,9 +67,10 @@ with a fix in the message, when any of these holds:
 
 1. the model's `<provider>/` prefix names no configured connection;
 2. the connection's non-empty `model_map` does not list the model;
-3. the connection is unreachable at launch and the route has no `fallback_model`. Before refusing, the
+3. the connection is unreachable at launch and the route has no Claude `fallback_model` (a
+   `<provider>/<model>` fallback only covers quota exhaustion). Before refusing, the
    boot probes the connection again rather than trusting the cached answer, so an outage that ended a
-   moment ago does not block the launch. A connection with a `fallback_model` only gets a warning in
+   moment ago does not block the launch. A connection with a Claude `fallback_model` only gets a warning in
    the colony log: its requests go to that Claude model instead.
 
 Only the connections this colony's model settings name (`model`, `subagent_model`,
@@ -84,9 +88,10 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
 
 ## Plans, quotas and trust
 
-A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers.
-`trusted`, like `model_map` and `disabled_tools`, is not in the cockpit yet: the API accepts it
-(`PUT /api/providers/{id}`) and `providers.json` holds it, but `GET /api/providers` does not return it.
+A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers,
+as are `trusted`, `model_map` and `disabled_tools` (the form's Connection policy group); the API
+(`PUT /api/providers/{id}`) and `providers.json` hold them all, and `GET /api/providers` returns
+them so the form prefills.
 
 - **Which colonies may use it.** A colony's gateway token opens only the connections its model settings
   route to, and only for the models they name: both are recorded at boot, before the token is written,
@@ -108,13 +113,36 @@ A connection carries a few more settings. `pricing` and `quota` are edited in Se
   `quota` probe left on the old origin is refused the same way: move or clear it in the same save.
 - **Quota exhaustion.** When a provider answers `429` or `403` with a message that says the plan ran out
   (not a plain rate limit), the gateway records it as exhausted until the reset the message names, or
-  for 15 minutes when it names none. With a `fallback_model`, the request is retried on that Claude
-  model. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
+  for 15 minutes when it names none. With a Claude `fallback_model`, the request is retried on that
+  Claude model. With a `<provider>/<model>` fallback on another connection of the same wire (anthropic
+  to anthropic, openai to openai), the Mothership retries the request there itself; a cross-wire
+  fallback is refused when you save it. `COLONIZER_QUOTA_FALLBACK=0` turns that failover off for every connection at once. When every
   connection the colonies route to is exhausted, the queue pauses, and a colony whose turn died on the
   plan is stopped with its worktree kept until the provider recovers.
+- **Out-of-quota card.** Colonies blocked on an exhausted connection (every request since their last
+  success answered with the quota error, and no `fallback_model` retry) show on one "Provider out of
+  quota" card per connection — in the inbox's "Needs you" list and at the top of Settings →
+  Providers — with the model, the reset and a countdown. **Switch model** moves those colonies (or,
+  with "this org", their orgs' model settings too) to a healthy model from the picker, which shows
+  each model's failure rate, and restarts them on it. "Every role using this provider" goes further:
+  every model role in the install's agent settings and every org override that points at the
+  connection moves too, after each role is checked (nothing changes if one cannot take the model),
+  and the cockpit lists each setting as "was X → now Y". "Remember" saves the pick as the
+  connection's `fallback_model` — a Claude model, or a model on a same-wire connection — so the next
+  exhaustion retries on it by itself. **Wait until reset**
+  parks them and resumes them at the reset. **Stop** stops them. The API is
+  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
-  and the colony log says why.
+  and the colony log says why. The launch resolves the orchestrator, subagent, background and small
+  models against the task's class first (issue #704): one routed to a connection this gate would
+  refuse is replaced with an eligible model — the orchestrator's, or the module's own `model` — and
+  the substitution is logged and recorded on the colony, so the cockpit shows what it is really
+  running on instead of a colony that 403s every subtask. A model the operator named at launch is
+  resolved the same way. When the eligible model is itself blank — the default setup, where the
+  module names no `model` — the setting is cleared so the task inherits the harness default, recorded
+  as "the orchestrator's model". If no eligible model exists at all the setting is left as it is and
+  the boot warns.
 - **`vetted`** — off by default, and implied by `trusted`. Paths a repository classifies `vetted`
   in `.colonizer/sensitivity.toml` need a connection marked `vetted: true` or better; the looser
   classes (`open`, `standard`, `custom`) run on any connection unless an org's settings raise their

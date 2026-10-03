@@ -258,6 +258,27 @@ pub async fn recover(app: &Shared) {
         // microVM is gone by design, so the orphan branch below would read the suspension as a
         // crash and stop a colony whose answer is still pending.
         if fresh.suspended.is_some() {
+            // A colony that was warming (issue #701) when the harness died has a microVM whose
+            // boot task died with it: give the warm-up up and put the colony back the way the
+            // suspension left it, question open and answerable for the restore pass.
+            if fresh.prewarming() {
+                app.session_log(
+                    &fresh.id,
+                    "info",
+                    "startup: the colony was warming for its answer; giving the warm-up up".into(),
+                )
+                .await;
+                teardown_vm(app, &fresh).await;
+                app.update_session(&fresh.id, |x| {
+                    if !x.prewarming() {
+                        return false;
+                    }
+                    x.status = SessionStatus::WaitingForAnswer;
+                    x.prewarm = None;
+                    true
+                })
+                .await;
+            }
             continue;
         }
         if claimed_boot_after_snapshot(&s, &fresh) {
@@ -724,9 +745,10 @@ fn over_host_disk(bytes: u64, quota_bytes: u64) -> bool {
 }
 
 /// What a colony leaves on the host: its worktree (bind-mounted rw at `/workspace` inside the microVM,
-/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, and the
-/// append-only logs). The microVM's root disk is a separate limit, microsandbox's `--root-disk`. Walked
-/// on the blocking pool: it is plain IO over trees that can be gigabytes.
+/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, the append-only
+/// logs, and — behind the false snapshot gate — `<session dir>/snapshots/`, which the walk counts with
+/// everything else, issue #702). The microVM's root disk is a separate limit, microsandbox's `--root-disk`.
+/// Walked on the blocking pool: it is plain IO over trees that can be gigabytes.
 async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
     let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
     // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
@@ -928,6 +950,14 @@ pub async fn resume(
     if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
+    // Issue #673: a superseded colony does not come back until it is kept — a merge covered its
+    // work, and resuming would redo it. The keep route is the way out.
+    if let Some(superseded) = s.superseded.as_ref().filter(|superseded| !superseded.kept) {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            &crate::supersede::blocked_message(superseded),
+        ));
+    }
     // A parked colony whose park kept its microVM running comes back warm when it can (issue #213):
     // prompted to continue in the machine it never left, no boot, no rotation. `None` here — no kept
     // microVM, no live agent link, the microVM gone from `msb ls`, the discard setting back on, or
@@ -981,9 +1011,13 @@ pub async fn resume(
             let Some(x) = sessions.iter_mut().find(|x| x.id == id) else {
                 return Ok(None);
             };
-            // Re-checked under the lock: the colony must still be resumable when the slot is claimed.
+            // Re-checked under the lock: the colony must still be resumable — and not superseded
+            // unkept (issue #673) — when the slot is claimed.
+            if let Some(superseded) = x.superseded.as_ref().filter(|superseded| !superseded.kept) {
+                return Err(crate::supersede::blocked_message(superseded));
+            }
             if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
-                return Err(RESUME_CONFLICT); // another resume won the race between the handler and the lock
+                return Err(RESUME_CONFLICT.to_string()); // another resume won the race between the handler and the lock
             }
             x.status = if room {
                 SessionStatus::Starting
@@ -994,9 +1028,16 @@ pub async fn resume(
             x.attention = None;
             x.mesh = None;
             x.local_port = None;
+            // The old microVM's preview is closed with its address (previews.rs): a resumed colony
+            // starts with no preview and the owner opens one again.
+            x.preview_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
-            // the boot; any held answer stays on the record, and the boot delivers it.
+            // the boot; any held answer stays on the record, and the boot delivers it. The boot is
+            // told whether it is restoring a suspension (issue #700) before the flag goes. A pending
+            // pre-warm request is subsumed: this resume is the boot it was asking for.
+            x.was_suspended = x.suspended.is_some();
             x.suspended = None;
+            x.prewarm = None;
             // A parked colony stops being parked here (issue #213): the record had its say — the
             // cold path below tears down a microVM the park kept — and the resumed colony is not
             // parked any more.
@@ -1011,7 +1052,7 @@ pub async fn resume(
     let (s, admitted, waiting) = match claimed {
         Ok(Some(claimed)) => claimed,
         Ok(None) => return Err(client_error(StatusCode::NOT_FOUND, "no such session")),
-        Err(message) => return Err(client_error(StatusCode::CONFLICT, message)),
+        Err(message) => return Err(client_error(StatusCode::CONFLICT, &message)),
     };
     app.persist_and_broadcast(&s).await;
     // The colony is ours: only now is the old agent link dropped and the event log rotated.
@@ -1065,6 +1106,18 @@ pub async fn resume(
         app.session_log(&id, "error", message.clone()).await;
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
     }
+    // Issue #702: behind this gate a suspended colony comes back from its sealed memory snapshot
+    // (snapshot.rs) instead of the transcript. `resume` decrypts it into a staging file and re-mints
+    // the credentials a restored runtime carries; any failure — missing, expired, corrupt, no key —
+    // falls back to the fresh boot below. The gate is false, so the branch does not run: the pinned
+    // msb cannot restore a `--secret`-carrying sandbox (sandbox.rs has the measurement).
+    if admitted
+        && crate::sandbox::supports_memory_snapshot()
+        && crate::snapshot::resume(&app, &id, &s.sandbox, suspension.as_ref().and_then(|x| x.snapshot.clone())).await
+    {
+        let s = app.session(&id).await.unwrap_or(s);
+        return Ok(Json(s));
+    }
     if admitted {
         // A park that kept the microVM (issue #213) but could not resume warm — the link is gone
         // after a restart, the discard setting is back on, or no slot was free — hands the machine
@@ -1106,6 +1159,32 @@ pub async fn resume(
         .await;
     }
     Ok(Json(s))
+}
+
+/// `POST /api/sessions/{id}/keep` (issue #673): the operator read the supersession and wants this
+/// colony to run anyway — `superseded.kept` goes true and the queue starts it. The marker itself
+/// stays, so the history still says what covered this work. A colony that is not superseded has
+/// nothing to keep (409); an unknown one is a 404. Stopping the colony instead uses the stop route.
+pub async fn keep(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Session> {
+    let (session, kept) = app
+        .update_session(&id, |x| {
+            x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
+        })
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if !kept {
+        return Err(client_error(
+            StatusCode::CONFLICT,
+            "this colony is not superseded; there is nothing to keep",
+        ));
+    }
+    app.session_log(
+        &id,
+        "info",
+        "kept: this colony will start even though a merged pull request covered its work".into(),
+    )
+    .await;
+    Ok(Json(session))
 }
 
 /// The warm half of resume (issue #213): a parked colony whose park kept its microVM running
@@ -1227,9 +1306,10 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
                 attention = x.clear_attention();
                 // A suspended colony stopped by hand is just stopped (issue #562): its held answer
                 // would be delivered by a resume that is never coming, and the question it was
-                // waiting on is closed for good.
+                // waiting on is closed for good. A pending pre-warm request dies with it too.
                 x.suspended = None;
                 x.pending_answer = None;
+                x.prewarm = None;
                 // A parked colony stopped by hand is just stopped too (issue #213): the park record
                 // describes a state this stop replaces, and keeping it would promise a reset or a
                 // warm resume that is no longer pending.
@@ -1500,6 +1580,17 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
     } else {
         (0, None)
     };
+    // The colony's snapshots go with it (issue #702): best-effort `msb snapshot remove`, then the
+    // sealed directory and the key file — the key lives under the private state rather than the
+    // session dir removed below, so it would otherwise outlive the colony forever.
+    let snapshot_name = s
+        .suspended
+        .as_ref()
+        .and_then(|x| x.snapshot.as_ref())
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    crate::snapshot::remove(&app, &id, snapshot_name.as_deref()).await;
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
@@ -1547,6 +1638,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/sessions/{id}", routing::delete(delete))
         .route("/api/sessions/{id}/resume", routing::post(resume))
+        .route("/api/sessions/{id}/keep", routing::post(keep))
         .route("/api/sessions/{id}/stop", routing::post(stop))
         .route("/api/sessions/{id}/cleanup", routing::post(cleanup))
 }

@@ -89,6 +89,41 @@ Two settings layers sit next to the modules:
   the first time asks instead of being adopted silently. A colony belongs to its repository
   owner's org.
 
+### Providers today, and what is next
+
+| Kind | Providers today | Next |
+| :--- | :--- | :--- |
+| `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
+| `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest | other VMMs `PLANNED` |
+| `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Pi, reaching models only through the provider gateway; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
+| `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
+| `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
+| `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
+| `watchdog` | Nudges colonies that stop making progress, flags the ones that need you | automatic restarts `PLANNED` |
+| `autonomy` | Off, or a judge model that answers a colony's questions when nobody does — choosing only among the options the agent offered | judging its own answers `PLANNED` |
+| `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
+| `loops` | Besides the loops you write, a built-in "TypeScript: remove any" loop that counts the explicit `any` in the TypeScript repositories you opt in, with their own compiler or a token scan and no model, and hands one small batch per repository to a colony that types them properly, then recounts its pull request. Off, with an empty allowlist, until configured ([docs/loops.md](loops.md#typescript-remove-any)) | — |
+| `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](burn-down.md)) | — |
+
+Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
+parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
+notifications. An org is offered the first time the account shows it — you choose which become workspaces;
+a first install adopts the ones it already had ([#176](https://github.com/Colonizer-dev/harness/issues/176)).
+Model providers (DeepSeek, a server on your LAN or tailnet, any Anthropic-compatible endpoint)
+are added in Settings. Colonies reach them through the mothership's provider gateway, which holds the
+keys, queues requests for servers that handle one at a time, allows slow prefill, and falls back to
+Claude when a provider is down or busy.
+
+One thing worth knowing before you point a provider at a model setting: the orchestrator model does
+nearly all of the work. The subagent setting only carries traffic when a colony delegates to a
+subagent, and colonies rarely do — four recent colonies of 413 to 2 095 events spawned 0, 0, 0 and 1
+between them — and the background setting carries only small auxiliary calls. A provider wired to just
+those two is configured correctly and will still look idle. Pi has no subagents, so its single model
+setting carries all of its traffic. To put real traffic on your own hardware,
+point the orchestrator model at it. The full breakdown is in the
+[Claude Code module](../modules/agents/claude-code/README.md).
+
 ### The gateway's audit log
 
 Every authenticated gateway request appends one line to the colony's `gateway.jsonl`: provider, wire,
@@ -104,6 +139,22 @@ serve), `queue_full`,
 else — no keys, tokens, or request or response bodies ever reach it — and upstream requests are
 built from scratch: the colony's own credential headers are dropped at the gateway and only the
 mothership's saved key for the provider is injected.
+
+## What's in the repository
+
+| Path | What it is | Status |
+| :--- | :--- | :--- |
+| [`crates/colonizer`](../crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
+| [`crates/colonizer-agentd`](../crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
+| [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
+| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
+| [`modules/agents/codex`](../modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
+| [`modules/agents/acp`](../modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
+| [`web`](../web) | The UI: colonies, chat on [assistant-ui](https://www.assistant-ui.com), choice cards, [xterm.js](https://xtermjs.org) terminal, settings | `SHIPPING` |
+| [`vendor`](../vendor) | Pinned, sha256-verified microsandbox, Headscale and Tailscale, a DERP map snapshot, and a snapshot of the built-in subagents of the guest Claude Code build (`claude-code-builtins.json`) | `SHIPPING` |
+| [`scripts`](../scripts) | `install.sh`, vendoring, the in-microVM agentd build and, on a Mac, the mesh's tailscaled | `SHIPPING` |
 
 ## How the mothership's code is put together
 
@@ -207,6 +258,18 @@ explicit orchestrator proposals, and a proposal is persisted the moment its even
 colony that ends or dies loses no proposal already made. `MEMORY.md` is written at boot from landed
 notes only.
 
+Memory is pulled, never injected (issue #766). No note text is put into a colony's system prompt or
+first message: one fixed prompt line names the tools, and the agent calls `memory_briefing` (a short,
+sourced summary, optionally on a topic) and `memory_changes` (what was added or revoked since it last
+asked) when it wants memory. A note that reached the store through a mistaken or manipulated review
+therefore reaches an agent only as a tool answer framed as data, with its source beside it, and a
+revoked note is gone from the next answer. Fleet-wide (global) memory is not proposed directly: a
+colony's global proposal is a sighting of a candidate, promoted into the review queue only when
+colonies in two distinct repositories propose it with confidence of at least 0.8. Every note keeps
+the colony, repository and commit it came from (`source.session_id`, `source.repo`, `source.commit`,
+or `source.promoted_from` for a promoted note), so it can be traced and revoked; see
+[protocol §6.2](protocol.md#62-shared-memory-runner--mothership).
+
 ## Session lifecycle
 
 This is the mechanism. What a colony looks like from the operator's side (launching, claims,
@@ -261,20 +324,29 @@ stateDiagram-v2
    Before a completion claim is published, the host verifies it independently: it snapshots
    the colony's work (commits and uncommitted files) without touching the worktree, reads the git state
    itself — commits ahead of base, changed files, whether the paths the PR description names are on the
-   branch — and re-runs the repository's test command in a fresh one-shot microVM over a git archive of
-   the snapshot, never on the host and never from the agent's own logs. The verdict, recorded as a
+   branch — and re-runs the repository's checks in fresh one-shot microVMs over a git archive of the
+   snapshot, never on the host and never from the agent's own logs. With `verify: auto` the checks come
+   from the diff rather than one root declaration: a diff touching Rust files or `Cargo.toml`/`Cargo.lock`
+   runs `cargo test`; every other changed file runs the test script of the nearest ancestor directory
+   with a `package.json`, by that package's own package manager (so `web/**` runs web's own vitest, not
+   the root's); files neither covers fall back to the root Makefile's `test:` target when declared, and
+   are not checked when it is not — a diff with no Rust in it never runs `cargo test`. The checks run
+   sequentially, one microVM each, from the subdirectory they belong to. The verdict, recorded as a
    `verification` host event in the colony's log, is `confirmed`, `contradicted` (the contradictions
-   stated plainly) or `unverifiable`, which is never treated as confirmed. Only a description whose
+   stated plainly), `inconclusive` or `unverifiable`, which is never treated as confirmed. A check that
+   fails is re-run once on the merge-base, in a fresh checkout of the same kind: failing there too is
+   `inconclusive` — not this colony's doing — and autopilot still publishes, with a note in the pull
+   request; only a failure new against the base contradicts the claim, and a base that cannot be run
+   leaves the head failure a contradiction. The last 200 lines of a failing check's output are kept in
+   the colony's `out/verify-<check>.log`, and the failing test names ride the contradiction — and the
+   held colony's attention detail. Only a description whose
    in-repo paths are *all* missing from the branch and the diff contradicts the claim; a missing path
    beside ones that are there — a file deliberately not created, or one for other work — is an
-   advisory, shown with the verdict and in the pull request, and never changes it. The command comes from the
-   `publish` module's `verify` setting — `auto` (the default) reads the repository's own declaration on
-   the base branch (package.json `scripts.test`, run by the repository's own package manager —
-   the `packageManager` field, else the root lockfile: bun, pnpm, yarn or npm, and `npm install &&
-   npm test` without one — else Cargo.toml → `cargo test`; else a Makefile `test:` target →
-   `make test`; a tool the colony image lacks leaves the claim unverifiable), `none` means unverifiable by declaration, and a colony's own `verify`
-   overrides it. Autopilot publishes on `confirmed` and `unverifiable` exactly as before; on
-   `contradicted` it holds the colony the same way an errored turn does. The mesh node is deleted.
+   advisory, shown with the verdict and in the pull request, and never changes it. An explicit `verify`
+   — the `publish` module's setting or the colony's own — still replaces the whole selection, and
+   `none` means unverifiable by declaration. Autopilot publishes on `confirmed`, `inconclusive` and
+   `unverifiable` exactly as before; on `contradicted` it holds the colony the same way an errored
+   turn does. The mesh node is deleted.
 6. **Resume** – a microVM that stops on its own (the sandbox's max session length, or the host restarting)
    leaves the worktree behind. Once a minute the harness checks which sandboxes are still running and marks
    a colony whose VM is gone `stopped`, rather than leaving it looking idle. "Resume" boots a fresh microVM
@@ -309,10 +381,32 @@ Two sandbox module settings drive this, global with no per-org override: `suspen
 reported its session id is suspended; anything else keeps its microVM, said once in the colony log. A suspension
 lasts until answered, stopped or deleted — stopping clears the suspension and any held answer — and the sandbox
 watchdog and restart recovery both leave a suspended colony alone: its microVM is gone by design, not by crash.
+A colony whose open question is an exec-policy `ask` (the question event's `kind` is `exec_policy`, issue #759)
+is never suspended: the tool call that asked is blocked in flight inside a live agent — often a subagent — and a
+resumed transcript cannot pick that call back up, so suspending it killed the agent and the lead only spawned
+another that asked again. The same holds for any question the runner marks `blocking: true` — a subagent's
+`AskUserQuestion` (Claude Code reports the subagent in canUseTool's `agentID`, and the runner also recognises the
+tool_use arriving in a subagent's message), and every ACP `session/request_permission` — since a resumed session
+has no pending call to hand the answer to. The runtime keeps the flag beside the open question and restores it
+from the saved events the same way. The exemption is capped: a blocking question unanswered for
+`BLOCKING_QUESTION_CAP` (two hours, never shorter than the grace) is suspended anyway, with a `warn` log line
+saying the agent that asked is lost and the answer will reach the lead on resume. Nothing else bounds that
+wait — budgets count spend, and a colony blocked on its user spends nothing — so without the cap an unanswered
+question would hold a microVM and a slot indefinitely.
 Suspension also requires the question to still be open in the runtime: the live answer path and the suspension
 claim take the same open-question lock, so an answer and a claim cannot interleave and an answer is never lost
 in between.
 The activity log records `outcome.suspended` on the teardown and `outcome.restored` on the delivery.
+
+The cockpit can also warm a suspended colony up ahead of the answer (issue #701): opening the question calls
+`POST /api/sessions/{id}/prewarm`, which sets a `prewarm` block on the session — `requested_at`, then
+`started_at` once the boot is admitted, then `ready_at` once the VM and the agent link are up. The queue pass
+claims a slot for a warming colony exactly where it puts answered ones — never ahead of a colony that already
+holds an answer, and only after queued launches — while keeping the suspension record, so the answer path is
+unchanged: an answer still persists to `pending_answer` and is delivered as the first `user_message` over the
+live link. If no answer arrives within the sandbox's `prewarm_timeout_minutes` (default 5), the colony goes
+back to suspended and its VM is torn down; a mothership restart mid-warm-up or a failed boot reverts it to
+suspended too, never to failed.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
 microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
@@ -336,6 +430,22 @@ and the transcript directory under the colony's session dir, which already count
 host-disk checks and are deleted with the colony. The same would hold for a snapshot artifact: the natural home
 is `<session dir>/snapshots/`, so it would be counted and cleaned up with the colony, with `msb snapshot remove`
 run before the directory goes away.
+
+The host side of that artifact is built behind the same false gate (issue #702,
+`crates/colonizer/src/snapshot.rs`), waiting only on an `msb` pin that can restore a secret-carrying sandbox. A
+snapshot lives in `<session dir>/snapshots/` and is sealed at rest with ChaCha20-Poly1305 under a per-colony
+random 256-bit key, in 1 MiB chunks so a multi-gigabyte image is never held whole in memory (each chunk's nonce
+is a random prefix plus a counter, its flags and length are authenticated, and a missing final chunk reads as
+truncated). The key is kept under the mothership's private state (`<data dir>/snapshot-keys/<id>`, 0600), never
+in or beside the snapshot directory, so a copy of that directory alone opens nothing; the plaintext image is
+removed once it is sealed, and a restore decrypts into a staging file that is removed afterwards. A snapshot is
+kept only below an 8 GiB resident-memory cap and is dropped after 48 h; past either, or with a missing key, or
+on a corrupt, truncated or unreadable file, the colony falls back to the transcript resume — the fallback is a
+pure decision over those facts. The credential rotation such a restore needs is built: it re-mints the colony's
+gateway token (overwriting the file the gateway validates against per request, so the old one stops working) and
+its tailnet VM key with the old node dropped. But the `msb snapshot restore` call and the delivery of those
+credentials into a live guest are not — the thaw is a stub that always fails, so a restore falls back today —
+and that stub is the one piece left for the gate.
 
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
 written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
@@ -365,7 +475,9 @@ Five `publish` settings drive it (all off/empty by default, shown in the cockpit
 
 A pull request merges only when mergeability is clean, every check is green, it is not a draft, it carries
 no HOLD / do-not-merge / WIP label or title, it passes the identity and attribution guards, and the base
-branch's own CI is green. The merge is a squash with `--match-head-commit` that deletes the branch — never
+branch's own CI is green. A colony another merge superseded (issue #673; see
+[colonies.md](colonies.md#when-a-merge-supersedes-a-colony)) is skipped until it is kept, so the train
+never lands a second copy of work that is already in main. The merge is a squash with `--match-head-commit` that deletes the branch — never
 a force-merge, never `--admin`. A pull request that is behind the base, or conflicted (DIRTY), is left
 to the existing auto-rebase path (`rebase.rs`), which the publish watcher already drives unconditionally
 for exactly those readings. The one case the watcher never sees — a pull request whose head does not
@@ -384,6 +496,14 @@ external-writes kill switch.
 repository — state, base branch and its CI verdict, the last merge, and each open pull request as
 `next`, `waiting_ci`, `needs_rebase`, `waiting`, `skipped` (with the reason) or `merged`. The cockpit shows
 one Merge-train row per repository: next up, waiting on CI, needs rebase, skipped and why.
+
+The **merge-train loop** ([loops.md](loops.md#merge-train), `merge_loop.rs`, issue #754) is the
+careful, scheduled driver for the same train: off by default, hourly, only in opted-in repositories,
+and — unlike the tick — it updates the next candidate after a merge and waits for its fresh CI, caps
+merges per run, spaces them with a cooldown, paces and budgets its GitHub calls and stops on any
+403/429 or secondary rate limit, turns a conflicting mechanical rebase into `needs_redo` (and at
+most one redo colony), and can self-heal a main the train itself turned red. It reuses the train's
+`decide`, guards and merge invocation; a repository it drives is skipped by the tick.
 
 ## Per-colony limits
 
@@ -665,7 +785,7 @@ spawns a hardened child and asserts the `EPERM` classes — no KVM needed.
 `eb59b1ba4184ce70`); `colonizer-agentd --exec-hardened -- sh` in a colony terminal reproduces the
 agent's view for the manual matrix (`unshare -U`, io_uring, `mount`, `cat /proc/kallsyms`, strace
 of agentd), and `scripts/seccomp-evidence.sh -- <workload>` straces a workload and lists any
-denylisted syscall it made. Re-run on a `vendor/claude-code.lock` bump, an `images.lock` digest
+denylisted syscall it made. Re-run on a `crates/colonizer/claude-code.lock` bump, an `images.lock` digest
 change, a microsandbox/libkrunfw bump (`vendor/vendor.lock`), or a runner change under
 `modules/agents/*`.
 

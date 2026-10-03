@@ -119,6 +119,11 @@ pub struct OrgSettings {
     /// refuses to start new colonies for it, while keeping its settings and its existing colonies.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Whether this org's colonies may consult Jev at any decision point (issue #582). `Some(false)`
+    /// turns every point off for the org's colonies — no network call is made — while `None` or
+    /// `Some(true)` follows the module settings, point by point.
+    #[serde(default)]
+    pub jev: Option<bool>,
     #[serde(default)]
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
@@ -127,6 +132,11 @@ pub struct OrgSettings {
     /// module's `repo_max_parallel`; the global and org limits apply as well.
     #[serde(default)]
     pub repo_max_parallel: Option<u64>,
+    /// The repositories of this org (full `owner/name`) whose superseded colonies' pull requests
+    /// Colonizer may close on GitHub when another colony's pull request merges over them (issue
+    /// #673). Empty — the default — marks the colonies superseded but never touches GitHub.
+    #[serde(default)]
+    pub close_superseded_prs: Vec<String>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -176,7 +186,7 @@ pub struct KnownOrg {
 }
 
 impl App {
-    fn orgs_file(&self) -> PathBuf {
+    pub(crate) fn orgs_file(&self) -> PathBuf {
         self.cfg.config_dir.join("orgs.json")
     }
 
@@ -188,7 +198,7 @@ impl App {
         self.all_org_settings().remove(org).unwrap_or_default()
     }
 
-    async fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
+    pub(crate) async fn save_org_settings(&self, all: &BTreeMap<String, OrgSettings>) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
         crate::util::write_atomic(&self.orgs_file(), &serde_json::to_vec_pretty(all)?).await
     }
@@ -463,6 +473,13 @@ pub fn suspend_after(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "suspend_after_minutes").clamp(1, 1440) as i64)
 }
 
+/// How long a pre-warmed colony (issue #701) waits for the answer after its boot before the queue
+/// suspends it again. Same clamp-as-read reasoning as [`suspend_after`].
+pub fn prewarm_timeout(modules: &ModulesConfig) -> chrono::Duration {
+    let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
+    chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "prewarm_timeout_minutes").clamp(1, 1440) as i64)
+}
+
 /// Whether parking a colony (quota exhaustion, an expired hold — issue #213) tears its microVM
 /// down, from the resume module. On by default: the cold resume it buys is the only resume that
 /// works after a restart, and an idle microVM holds real memory. Off, the microVM stays running
@@ -490,6 +507,16 @@ pub fn org_max_parallel(org: &OrgSettings) -> Option<u64> {
 /// An org's own per-repository colony limit, if it sets one; `None` inherits [`global_repo_max_parallel`].
 pub fn repo_max_parallel(org: &OrgSettings) -> Option<u64> {
     org.repo_max_parallel.map(|n| n.max(1))
+}
+
+/// Whether Colonizer may close a superseded colony's pull request in `repo` (issue #673): the
+/// repository is in the org's `close_superseded_prs` list. Compared case-insensitively, the way
+/// GitHub itself reads repository names. Empty — the default — never closes: the colony is only
+/// marked superseded and its pull request is left for a person.
+pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
+    org.close_superseded_prs
+        .iter()
+        .any(|named| named.trim().eq_ignore_ascii_case(repo))
 }
 
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
@@ -705,6 +732,17 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     if settings.repo_max_parallel.is_some_and(|n| !(1..=32).contains(&n)) {
         return Err("per-repository parallel limit must be between 1 and 32".into());
     }
+    // Every entry names a repository of this org, as `owner/name` — the shape the colonies
+    // themselves carry, and what the close step compares against.
+    if let Some(bad) = settings
+        .close_superseded_prs
+        .iter()
+        .find(|repo| !crate::util::valid_repo(repo.trim()))
+    {
+        return Err(format!(
+            "close_superseded_prs entries are repositories like acme/api, and {bad:?} is not one"
+        ));
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -871,6 +909,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("enabled") {
         incoming.enabled = saved.enabled;
     }
+    if !named("jev") {
+        incoming.jev = saved.jev;
+    }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
     } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut()) {
@@ -886,6 +927,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("repo_max_parallel") {
         incoming.repo_max_parallel = saved.repo_max_parallel;
+    }
+    if !named("close_superseded_prs") {
+        incoming.close_superseded_prs = saved.close_superseded_prs.clone();
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1333,6 +1377,32 @@ mod tests {
         assert_eq!(repo_max_parallel(&limit(None)), None);
         let modules = ModulesConfig::default();
         assert_eq!(global_repo_max_parallel(&modules), 3, "the schema default");
+    }
+
+    #[test]
+    fn closing_superseded_pull_requests_is_per_repository_and_never_the_default() {
+        // Empty — the default — never closes: the colonies are only marked.
+        assert!(!closes_superseded_prs(&OrgSettings::default(), "acme/api"));
+        let org = OrgSettings {
+            close_superseded_prs: vec!["acme/api".into(), "acme/web".into()],
+            ..Default::default()
+        };
+        assert!(closes_superseded_prs(&org, "acme/api"));
+        assert!(
+            !closes_superseded_prs(&org, "acme/mobile"),
+            "a repository not on the list keeps its pull requests"
+        );
+        assert!(
+            closes_superseded_prs(&org, "ACME/API"),
+            "GitHub reads repository names case-insensitively"
+        );
+        // The save path validates each entry as a repository.
+        assert!(validate(&org).is_ok());
+        let bad = OrgSettings {
+            close_superseded_prs: vec!["acme/api".into(), "not a repo".into()],
+            ..Default::default()
+        };
+        assert!(validate(&bad).is_err(), "an entry that names no repository is refused");
     }
 
     #[test]

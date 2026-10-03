@@ -7,8 +7,7 @@
 // and three colonies on the same issue read as the same event three times. The log records an
 // outcome once, at the transition, and a person's action once, at the press; the colony list only
 // supplies an outcome for a colony whose transition predates the log, marked as approximate.
-import { dayLabel } from "./feed";
-import { needsYou } from "../notifications";
+import { currentOutcome, dayLabel } from "./feed";
 import type { ActivityEntry, Session } from "../types";
 
 /** How a row is drawn: its icon and colour. */
@@ -89,7 +88,8 @@ export function subjectOf(repo: string | null | undefined, issue: number | null 
 }
 
 function actorOf(entry: ActivityEntry): HistoryActor {
-  if (entry.actor === "colony") return "colony";
+  // The mothership's own housekeeping (the disk-cleanup loop) is not something you did.
+  if (entry.actor === "colony" || entry.actor === "mothership") return "colony";
   return entry.via === "api" ? "api" : "you";
 }
 
@@ -152,6 +152,12 @@ export function sentence(entry: Pick<ActivityEntry, "kind" | "actor" | "target" 
       return `You deleted ${loop}`;
     case "loop.run_now":
       return `You ran ${loop} now`;
+    case "disk_cleanup.run":
+      return "Disk cleanup ran";
+    case "disk_cleanup.attention":
+      return "Disk cleanup could not free enough space";
+    case "loop.docs":
+      return you ? "You changed the Docs & README loop" : `The Docs & README loop checked ${entry.repo ?? entry.org ?? "a repository"}`;
     case "redteam.start":
       return `You started a red-team run on ${subjectOf(entry.repo, null) ?? "a repository"}`;
     case "redteam.stop":
@@ -214,27 +220,6 @@ function fromEntry(entry: ActivityEntry, waitingIds: ReadonlySet<string>): Histo
     detail: entry.detail ?? null,
     approximate: false,
   };
-}
-
-/** The outcome kind a colony is showing now, or null while it is in between. */
-export function currentOutcome(session: Session): string | null {
-  if (needsYou(session) && session.status === "waiting_for_answer") return "outcome.question";
-  switch (session.status) {
-    case "pr_opened":
-      return "outcome.pr_opened";
-    case "merged":
-      return "outcome.merged";
-    case "closed":
-      return "outcome.closed";
-    case "no_changes":
-      return "outcome.no_changes";
-    case "stopped":
-      return "outcome.stopped";
-    case "failed":
-      return "outcome.failed";
-    default:
-      return null;
-  }
 }
 
 /** When a colony's current outcome happened, as best the colony list knows, and whether that is exact. */

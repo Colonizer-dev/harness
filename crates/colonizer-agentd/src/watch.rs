@@ -17,14 +17,10 @@
 
 use std::{path::Path, path::PathBuf, sync::Arc};
 
-use crate::store::EventStore;
-#[cfg(target_os = "linux")]
-use crate::store::log_event;
-#[cfg(target_os = "linux")]
-use std::time::Duration;
+use crate::store::{EventStore, log_event};
 #[cfg(target_os = "linux")]
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ffi::{CString, OsString},
     io,
     os::{
@@ -33,6 +29,7 @@ use std::{
     },
     time::Instant,
 };
+use std::{collections::HashSet, time::Duration};
 
 /// How often the workspace is re-walked, whatever the event stream is doing: the backstop for a
 /// watch that could not be added, a queue overflow, and anything else the event stream missed.
@@ -40,7 +37,6 @@ use std::{
 const RESCAN: Duration = Duration::from_secs(30);
 
 /// The cap on the skip-and-failure keys remembered, so no tree can grow them without end.
-#[cfg(target_os = "linux")]
 const QUIET: usize = 256;
 
 /// One enforcement action from the policy file — `mask-file <path>`, `mask-dir <path/>` or
@@ -58,8 +54,6 @@ enum Kind {
     Protect,
 }
 
-// Only the Linux watcher reads these; macOS dev builds just parse the policy.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl Pattern {
     fn new(kind: Kind, rel: impl Into<String>) -> Self {
         Self { kind, rel: rel.into() }
@@ -215,11 +209,142 @@ pub(crate) fn start(workspace: &Path, policy: &Path, store: Arc<EventStore>) {
     }
 }
 
-/// Off Linux there is no inotify (macOS dev builds of the workspace): the policy is still parsed,
-/// so a broken file shows in tests, but nothing watches.
+/// How often the off-Linux poller re-walks the workspace.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn start(_workspace: &Path, policy: &Path, _store: Arc<EventStore>) {
-    let _ = patterns(&std::fs::read_to_string(policy).unwrap_or_default());
+const POLL: Duration = Duration::from_secs(1);
+
+/// How deep below the workspace the off-Linux poller looks for a nested checkout's `.git`.
+#[cfg(not(target_os = "linux"))]
+const POLL_DEPTH: usize = 8;
+
+/// The most directory entries one off-Linux poll reads, so a huge tree costs a bounded walk.
+#[cfg(not(target_os = "linux"))]
+const POLL_BUDGET: usize = 20_000;
+
+/// Off Linux (macOS dev builds of the workspace) there is no bind mount and no inotify, so nothing
+/// can be enforced — but a nested checkout that appears mid-session must not pass silently. A
+/// thread polls the workspace every [`POLL`], bounded in depth and entries, for directories with
+/// their own `.git`, and emits one warn per policy path found in each that it cannot bind: the
+/// same `cannot apply` line the Linux watcher writes when a mount fails. Each path is reported
+/// once while it exists.
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn start(workspace: &Path, policy: &Path, store: Arc<EventStore>) {
+    let Ok(text) = std::fs::read_to_string(policy) else { return };
+    let patterns = patterns(&text);
+    if patterns.is_empty() {
+        return;
+    }
+    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let poller = Poller {
+        workspace,
+        patterns,
+        store,
+        reported: HashSet::new(),
+        budget_warned: false,
+    };
+    if std::thread::Builder::new()
+        .name("path-policy".into())
+        .spawn(move || poller.run())
+        .is_err()
+    {
+        eprintln!("colonizer-agentd: warning: cannot start the path-policy poller");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct Poller {
+    workspace: PathBuf,
+    patterns: Vec<Pattern>,
+    store: Arc<EventStore>,
+    /// Targets already reported, dropped once they are gone so a re-created one is named again;
+    /// capped at [`QUIET`].
+    reported: HashSet<PathBuf>,
+    budget_warned: bool,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl Poller {
+    fn run(mut self) {
+        loop {
+            self.reported.retain(|target| std::fs::symlink_metadata(target).is_ok());
+            let mut roots = Vec::new();
+            let mut budget = POLL_BUDGET;
+            let workspace = self.workspace.clone();
+            walk(&workspace, 0, &mut budget, &mut roots);
+            if budget == 0 && !self.budget_warned {
+                self.budget_warned = true;
+                let say = format!(
+                    "path policy: the workspace has more than {POLL_BUDGET} entries; nested checkouts past them are not reported"
+                );
+                self.store.append(log_event("warn", say));
+            }
+            for root in roots {
+                self.report(&root);
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+
+    /// One warn per policy path present in `root` in the kind its bind takes, not yet reported.
+    fn report(&mut self, root: &Path) {
+        for pattern in &self.patterns {
+            let target = pattern.target(root);
+            if self.reported.contains(&target) {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&target) else {
+                continue;
+            };
+            let why = if meta.file_type().is_symlink() {
+                "a symlink is never bound"
+            } else if meta.is_dir() != pattern.want_dir() {
+                continue; // a kind the bind would not take — the Linux watcher skips it too
+            } else {
+                "bind mounts need Linux; nothing bound"
+            };
+            if self.reported.len() >= QUIET {
+                return;
+            }
+            let say = format!(
+                "path policy: cannot apply {} `{}`: {why} (nested checkout `{}`)",
+                pattern.verb(),
+                relative(&self.workspace, &target),
+                relative(&self.workspace, root)
+            );
+            self.store.append(log_event("warn", say));
+            self.reported.insert(target);
+        }
+    }
+}
+
+/// Collects every directory strictly below the workspace (depth > 0) that carries a `.git` entry,
+/// never following a symlink, never entering a `.git`, at most [`POLL_DEPTH`] deep and reading at
+/// most `budget` entries in all.
+#[cfg(not(target_os = "linux"))]
+fn walk(dir: &Path, depth: usize, budget: &mut usize, roots: &mut Vec<PathBuf>) {
+    if depth > 0 && std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+        roots.push(dir.to_path_buf());
+    }
+    if depth >= POLL_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let child = entry.path();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) && entry.file_name() != ".git" {
+            walk(&child, depth + 1, budget, roots);
+        }
+    }
+}
+
+/// A workspace-relative spelling of `path`, for the event lines.
+#[cfg(not(target_os = "linux"))]
+fn relative(workspace: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace).unwrap_or(path).to_string_lossy().into_owned()
 }
 
 #[cfg(target_os = "linux")]

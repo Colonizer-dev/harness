@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  attentionCount,
   colonyLabel,
   defaultNotificationPrefs,
   diffEvents,
@@ -26,6 +27,7 @@ import {
   serializeNotificationPrefs,
   snapshotOf,
   tabTitle,
+  unseenFailure,
   type ColonyEvent,
   type EventSwitches,
 } from "./notifications";
@@ -93,6 +95,16 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "waiting_for_answer", suspended }))).toBe(true);
   });
 
+  it("is true while a warm-up boots a suspended colony for its still-open question (issue #701)", () => {
+    const suspended = { at: "2026-09-26T10:00:00Z", snapshot: null, reason: "waiting_for_answer", path: "session_resume" };
+    const warming = { requested_at: "2026-09-26T10:05:00Z", started_at: "2026-09-26T10:05:30Z", ready_at: null };
+    // The status has moved on to booting, so the waiting_for_answer branch no longer reads it.
+    expect(needsYou(session({ status: "starting", suspended, prewarm: warming }))).toBe(true);
+    // Once the answer is held, the boot is no longer yours to act on.
+    const answered = { question_id: "q1", prompt: "ship it?", answered_at: "2026-09-26T10:06:00Z" };
+    expect(needsYou(session({ status: "starting", suspended, pending_answer: answered, prewarm: warming }))).toBe(false);
+  });
+
   it("is true for any attention flag, whatever its reason", () => {
     for (const reason of ["stalled", "waiting_for_answer", "nudges_exhausted", "autopilot_held"] satisfies AttentionReason[]) {
       expect(needsYou(session({ status: "running", attention: { reason, since: "2026-09-18T09:05:00Z", nudges: 1 } }))).toBe(true);
@@ -122,6 +134,64 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "running" }))).toBe(false);
     expect(needsYou(session({ status: "failed" }))).toBe(false);
     expect(needsYou(session({ status: "pr_opened" }))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The parity fixture shared with the mothership
+// ---------------------------------------------------------------------------
+
+// One list of cases both sides run their needs-you rule over — this suite and the Rust test that
+// reads crates/colonizer/tests/fixtures/needs_you.json — so the app badge in a dock and the
+// attention count the mothership attaches to its pushes can never disagree about what "needs you"
+// means (issue #744). Each case's fields are merged onto a complete base session, exactly as each
+// side merges them onto its own.
+interface NeedsYouCase {
+  name: string;
+  session: Partial<Session>;
+  needs_you: boolean;
+}
+
+const parityCases: NeedsYouCase[] = JSON.parse(
+  readFileSync(fileURLToPath(new URL("../../crates/colonizer/tests/fixtures/needs_you.json", import.meta.url)), "utf8"),
+);
+
+describe("the shared needs-you fixture", () => {
+  it("names every case and covers the branches", () => {
+    expect(parityCases.length).toBeGreaterThanOrEqual(12);
+    expect(new Set(parityCases.map((c) => c.name)).size).toBe(parityCases.length);
+    for (const c of parityCases) expect(typeof c.needs_you).toBe("boolean");
+  });
+
+  for (const c of parityCases) {
+    it(`needsYou: ${c.name}`, () => {
+      expect(needsYou({ ...session(), ...c.session })).toBe(c.needs_you);
+    });
+  }
+});
+
+describe("attentionCount", () => {
+  it("counts only the colonies that need a person", () => {
+    expect(
+      attentionCount([session({ id: "a", status: "waiting_for_answer" }), session({ id: "b" }), session({ id: "c", status: "running", attention: stalled() })]),
+    ).toBe(2);
+  });
+
+  it("includes a failure nobody has looked at yet, and drops it once seen", () => {
+    expect(attentionCount([session({ id: "a", status: "failed" }), session({ id: "b", status: "failed", unseen_failure: true })])).toBe(1);
+  });
+});
+
+describe("unseenFailure", () => {
+  it("is a failure nobody has looked at yet — the one state an open resolves", () => {
+    expect(unseenFailure(session({ status: "failed", unseen_failure: true }))).toBe(true);
+  });
+
+  it("is not a seen failure, not another status, and never an open question", () => {
+    expect(unseenFailure(session({ status: "failed" }))).toBe(false);
+    expect(unseenFailure(session({ status: "failed", unseen_failure: false }))).toBe(false);
+    expect(unseenFailure(session({ status: "running", unseen_failure: true }))).toBe(false);
+    expect(unseenFailure(session({ status: "waiting_for_answer" }))).toBe(false);
   });
 });
 

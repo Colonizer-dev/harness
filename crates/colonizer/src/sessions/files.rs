@@ -7,11 +7,7 @@
 //! directories on the way there, `out` itself included, are followed as they are.
 
 use super::*;
-use axum::{
-    extract::Request,
-    http::{HeaderMap, HeaderValue},
-    middleware::Next,
-};
+use axum::http::{HeaderMap, HeaderValue};
 
 /// The largest artifact one read answers with (§7.5's `file_too_large` cap): these answers are
 /// read into memory whole, and agent output past 16 MiB belongs in the repository anyway.
@@ -32,19 +28,27 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}/files", get(artifacts))
         .route("/api/sessions/{id}/files/archive", get(artifacts_archive))
         .route("/api/sessions/{id}/files/{name}/content", get(artifact_content));
+    // A method a route lacks is the envelope too, and version negotiation (§7.1, issue #650)
+    // refuses a version this build does not speak before any handler runs — then stamps
+    // `UHP-Version` on every answer, so no handler can forget it.
+    let not_allowed = crate::uhp::method_not_allowed;
     let uhp = axum::Router::new()
-        .route("/uhp/v1/sessions", get(uhp_sessions))
-        .route("/uhp/v1/sessions/{id}/files", get(artifacts))
-        .route("/uhp/v1/sessions/{id}/files/archive", get(artifacts_archive))
-        .route("/uhp/v1/sessions/{id}/files/{name}/content", get(artifact_content))
-        .route("/uhp/v1/containers/{cid}/files/{fid}/content", get(uhp_container_content))
-        .route_layer(axum::middleware::from_fn(stamp));
+        .route("/uhp/v1/sessions", get(uhp_sessions).fallback(not_allowed))
+        .route("/uhp/v1/sessions/{id}/files", get(artifacts).fallback(not_allowed))
+        .route(
+            "/uhp/v1/sessions/{id}/files/archive",
+            get(artifacts_archive).fallback(not_allowed),
+        )
+        .route(
+            "/uhp/v1/sessions/{id}/files/{name}/content",
+            get(artifact_content).fallback(not_allowed),
+        )
+        .route(
+            "/uhp/v1/containers/{cid}/files/{fid}/content",
+            get(uhp_container_content).fallback(not_allowed),
+        )
+        .route_layer(axum::middleware::from_fn(crate::uhp::negotiate));
     api.merge(uhp)
-}
-
-/// The stamping layer over the `/uhp` aliases (§7.1): `UHP-Version` on every answer.
-async fn stamp(req: Request, next: Next) -> Response {
-    crate::uhp::stamped(next.run(req).await)
 }
 
 /// The container id §7.5 puts in every artifact row: the colony's id in a `cntr_` wrapper.

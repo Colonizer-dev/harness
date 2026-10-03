@@ -16,25 +16,26 @@
 //! repository in their handler, where the body is parsed ([`ScopedToken::covers`]).
 
 use crate::{
-    ApiResult, App, Shared, client_error,
+    client_error,
     sessions::{Session, SessionStatus},
     util::{short_id, valid_repo},
+    ApiResult, App, Shared,
 };
 use axum::{
-    Json,
     extract::{Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::PathBuf;
 
 /// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
 /// trust scope one machine in a fleet holds (issue #686): it reaches only the fleet's own routes,
 /// and nothing below `read` passes any other need. `read` watches, `operate` drives colonies that
-/// exist (answer, stop, resume), `launch` starts colonies.
+/// exist (answer, stop, resume, prewarm), `launch` starts colonies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
@@ -213,7 +214,7 @@ pub struct Registry {
 
 /// SHA-256 of a token, hex. Stored rather than the plaintext, so neither the file nor a leak of it
 /// hands over a working credential.
-fn hash_token(token: &str) -> String {
+pub(crate) fn hash_token(token: &str) -> String {
     crate::util::hex(ring::digest::digest(&ring::digest::SHA256, token.as_bytes()).as_ref())
 }
 
@@ -343,6 +344,17 @@ impl Registry {
         Ok((plaintext, id))
     }
 
+    /// The stored hash of token `id` — what the fleet keeps of a removed member's token, so the
+    /// revoked credential still reads as "removed" rather than unknown.
+    pub(crate) async fn token_hash(&self, id: &str) -> Option<String> {
+        self.tokens
+            .read()
+            .await
+            .iter()
+            .find(|t| t.id == id)
+            .map(|t| t.token_hash.clone())
+    }
+
     /// Removes a token; `None` when no token carries the id. Presentations of the revoked token
     /// stop authenticating at once — the next request finds nothing.
     pub async fn revoke(&self, id: &str) -> Option<TokenMeta> {
@@ -350,6 +362,8 @@ impl Registry {
         let at = tokens.iter().position(|t| t.id == id)?;
         let removed = tokens.remove(at);
         self.save(&tokens).await;
+        // Its open sockets and streams end now, not at its next request (issue #746).
+        crate::auth::Revocation::fire(&format!("token:{id}"));
         Some(removed.meta())
     }
 
@@ -461,15 +475,17 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             Need::Map { owner, name }
         }
         ["api", "tokens", "self"] if get => Need::Bare(Scope::Read),
-        // Colony-scoped: watch at read, drive (answer, stop, resume) at operate.
+        // Colony-scoped: watch at read, drive (answer, stop, resume, prewarm) at operate.
         ["api", "sessions", id] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "question" | "events" | "diff" | "transcript"] if get && !id.is_empty() => Need::Session {
-            id,
-            at_least: Scope::Read,
-        },
+        ["api", "sessions", id, "question" | "events" | "diff" | "commits" | "transcript"] if get && !id.is_empty() => {
+            Need::Session {
+                id,
+                at_least: Scope::Read,
+            }
+        }
         // Artifacts (§7.5, issue #651): a colony's `out/` files read at watch scope, like the
         // colony itself — the listing, the archive and the per-file download are one read.
         ["api", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
@@ -484,15 +500,35 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "answer" | "stop" | "resume"] if post && !id.is_empty() => Need::Session {
+        // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
+        // colony drive, like answering.
+        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm"] if post && !id.is_empty() => {
+            Need::Session {
+                id,
+                at_least: Scope::Operate,
+            }
+        }
+        // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
+        // unseen-failure flag — so watching it is enough, however it arrives.
+        ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
             id,
-            at_least: Scope::Operate,
+            at_least: Scope::Read,
         },
         // The same reads under the UHP names (§7.1, issue #651): the colony list, and the
         // artifacts by session id or by the `cntr_<id>` container wrapper §7.5 puts in every
         // artifact row — the wrapper's colony is what the limits apply to, so an unparseable
         // container reads as an unknown colony (404), never as a forbidden one.
         ["uhp", "v1", "sessions"] if get => Need::Bare(Scope::Read),
+        // The read-side core (§7, issue #650): the same need as the `/api` reads over the same
+        // data. Discovery needs no credential at all — `host_guard` admits it before this runs —
+        // but is listed anyway, so a scoped token is not refused on a public route. The single
+        // colony hides behind its org/repo limits like `/api/sessions/{id}`.
+        ["uhp", "v1", "uhp" | "harnesses" | "models"] if get => Need::Bare(Scope::Read),
+        ["uhp", "v1", "harnesses", id] if get && !id.is_empty() => Need::Bare(Scope::Read),
+        ["uhp", "v1", "sessions", id] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         ["uhp", "v1", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Read,
@@ -511,6 +547,9 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
+        // The built-in TypeScript any loop's settings, last report and trend: a watch. Changing its
+        // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
+        ["api", "ts-any-loop"] if get => Need::Bare(Scope::Read),
         // Loops (issue #627): listing loops and reading a loop's runs is a watch; creating,
         // editing, deleting or running a loop can each start a colony, so they need launch —
         // operate never reaches a loop mutation. Which loops a token may touch, and what its runs
@@ -519,6 +558,10 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
         // The merge train's last tick (issue #671): a watch, like the loops list.
         ["api", "merge-train"] if get => Need::Bare(Scope::Read),
+        // The built-in supply-chain loop's settings and last report: a watch. Changing its
+        // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
+        ["api", "supply-chain-loop"] if get => Need::Bare(Scope::Read),
+        ["api", "merge-train", "loop"] if get => Need::Bare(Scope::Read),
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
         ["api", "loops", id, "run-now"] if post && !id.is_empty() => Need::Launch,
@@ -526,6 +569,20 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
         ["api", "hosts"] if get => Need::Fleet,
         ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
+        // The fleet network policy (issue #690): a member reads the owner's egress floor with its
+        // fleet token. Setting it (`PUT`) stays the owner's — a member may not replace the floor.
+        ["api", "fleet", "policy"] if get => Need::Fleet,
+        // The history push (issue #762): a member uploads its log payloads, then the colony rows
+        // that reference them, onto its own directory on the owner — nothing else of the owner's.
+        ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
+        ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
+        // Dev-server previews (previews.rs): a fleet member reaches an open preview through the
+        // reverse proxy on the owner's mothership, the fleet's shared look at a running colony. The
+        // whole `/api/previews/{id}/…` surface is the fleet scope's, on every method; opening and
+        // closing a preview (`POST`/`DELETE /api/sessions/{id}/preview`) is the owner's, so it is
+        // deliberately not listed here. Which host a member may reach is the handler's, from the
+        // fleet network policy.
+        ["api", "previews", id, ..] if !id.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
@@ -712,8 +769,8 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::SessionStatus;
     use crate::sessions::tests::colony;
+    use crate::sessions::SessionStatus;
     use crate::tests::test_app;
 
     fn root() -> PathBuf {
@@ -844,6 +901,7 @@ mod tests {
             "/api/sessions/abc/question",
             "/api/sessions/abc/events",
             "/api/sessions/abc/diff",
+            "/api/sessions/abc/commits",
             "/api/maps/acme/web",
             "/api/maps/acme/web/files",
             "/api/tokens/self",
@@ -856,11 +914,18 @@ mod tests {
             "/api/sessions/abc/answer",
             "/api/sessions/abc/stop",
             "/api/sessions/abc/resume",
+            // Issue #673: keeping a superseded colony lets it start, so it drives like resume.
+            "/api/sessions/abc/keep",
         ] {
             assert!(
                 matches!(authorize(&app, &read, &post, path).await, Err(Deny::Forbidden(_))),
                 "read {path}"
             );
+            assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
+        }
+        // Marking a colony seen (issue #744) is looking at it, not driving it: read may POST it.
+        for path in ["/api/sessions/abc/seen"] {
+            assert!(authorize(&app, &read, &post, path).await.is_ok(), "read {path}");
             assert!(authorize(&app, &operate, &post, path).await.is_ok(), "operate {path}");
         }
         // Launching needs launch.
@@ -1085,8 +1150,8 @@ mod tests {
     // driven with `oneshot` the way main.rs's auth tests drive theirs.
 
     use axum::{
+        http::{header, Request},
         Router,
-        http::{Request, header},
     };
     use tower::ServiceExt as _;
 
@@ -1494,13 +1559,13 @@ mod tests {
             "the loop records the token: {made}"
         );
         let mine = made["id"].as_str().unwrap().to_string();
-        // The owner still sees every loop.
+        // The owner still sees every loop: the token's, and the built-in disk cleanup.
         let res = router
             .clone()
             .oneshot(send(Method::GET, "/api/loops", owner, None))
             .await
             .unwrap();
-        assert_eq!(body_json(res).await.as_array().unwrap().len(), 1);
+        assert_eq!(body_json(res).await.as_array().unwrap().len(), 2);
 
         // Outside the repo limit: 403, the launch refusal's words. A map loop is refused outright:
         // its runs would launch outside the token's caps and marking.
@@ -1543,6 +1608,11 @@ mod tests {
             (Method::DELETE, "/api/loops/owner_loop".to_string()),
             (Method::POST, "/api/loops/owner_loop/run-now".to_string()),
             (Method::GET, "/api/loops/owner_loop/runs".to_string()),
+            // The built-in disk cleanup is the owner's alone: a token can neither switch it on
+            // (nor its host-level category), run it, preview it, nor read it.
+            (Method::PUT, "/api/loops/disk-cleanup".to_string()),
+            (Method::POST, "/api/loops/disk-cleanup/run-now?dry_run=1".to_string()),
+            (Method::GET, "/api/loops/disk-cleanup/runs".to_string()),
         ] {
             let res = router
                 .clone()

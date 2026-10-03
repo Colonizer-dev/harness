@@ -8,15 +8,16 @@
 // from the upstream user guide in the README.
 
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +29,49 @@ export const MISSING_BINARY = 'GROK_BINARY_MISSING';
 export const VERSION_DRIFT = 'GROK_VERSION_DRIFT';
 export const MODEL_PROVIDER = 'GROK_MODEL_PROVIDER';
 
+// The wires a gateway route can speak (docs/protocol.md §6.5); a missing `wire` means the default.
+const WIRES = new Set(['anthropic', 'openai']);
+const HEADER_NAME = /^[A-Za-z0-9-]+$/;
+
+/** COLONIZER_MODEL_ROUTES → validated routes, with warnings instead of throwing — the same wire
+ * shape the hermes and pi runners parse, validated again here because a module is an independent
+ * directory. `wire` is newer than the routes themselves: a route without one speaks the gateway's
+ * default, anthropic. */
+export function parseRoutes(raw) {
+  let data;
+  try {
+    data = JSON.parse(raw ?? '');
+  } catch {
+    return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] };
+  }
+  if (!Array.isArray(data)) return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: expected a JSON array'] };
+  const routes = [];
+  const warnings = [];
+  data.forEach((entry, i) => {
+    const prefix = typeof entry?.prefix === 'string' ? entry.prefix : '';
+    const baseUrl = typeof entry?.base_url === 'string' ? entry.base_url : '';
+    const wire = entry?.wire ?? 'anthropic';
+    if (!prefix.endsWith('/') || prefix.length < 2 || !/^https?:\/\//.test(baseUrl) || !WIRES.has(wire)) {
+      warnings.push(`ignoring model route ${i}: needs a "<provider>/" prefix, an http(s) base_url and wire anthropic|openai`);
+      return;
+    }
+    const rawHeaders = entry.headers && typeof entry.headers === 'object' && !Array.isArray(entry.headers) ? entry.headers : {};
+    const headers = Object.fromEntries(
+      Object.entries(rawHeaders)
+        .filter(([name, header]) => HEADER_NAME.test(name) && typeof header === 'string')
+        .map(([name, header]) => [name.toLowerCase(), header]),
+    );
+    routes.push({
+      provider: typeof entry.provider === 'string' && entry.provider ? entry.provider : prefix.slice(0, -1),
+      prefix,
+      base_url: baseUrl,
+      headers,
+      wire,
+    });
+  });
+  return { routes, warnings };
+}
+
 /** The pin, read from module.json so the manifest and this preflight cannot drift apart. */
 export function readPin() {
   const pin = JSON.parse(readFileSync(join(here, 'module.json'), 'utf8'))?.requires?.pins?.grok;
@@ -35,9 +79,57 @@ export function readPin() {
   return pin;
 }
 
-/** Where the grok binary is: COLONIZER_GROK_BIN wins, else `grok` on the PATH. */
+/** Where the grok binary is by env alone: COLONIZER_GROK_BIN wins, else `grok` on the PATH. */
 export function grokBin(env) {
   return String(env.COLONIZER_GROK_BIN ?? '').trim() || 'grok';
+}
+
+/** The lock row for this machine: unlike opencode there is no baseline build, so the two guest
+ * architectures map one to one. */
+export function archPlatform({ arch = process.arch } = {}) {
+  if (arch === 'arm64') return 'linux-arm64';
+  if (arch === 'x64') return 'linux-x64';
+  return null;
+}
+
+/** Disk cache for the binary: the colony's /tmp is a small tmpfs, so the ~50–67 MB download and the
+ * decompressed binary (136–163 MB) live under the cache dir instead (os.tmpdir() only when HOME is
+ * unset). */
+export function defaultCacheDir(env = process.env) {
+  const base = env.XDG_CACHE_HOME || (env.HOME ? join(env.HOME, '.cache') : null);
+  return base ? join(base, 'colonizer', 'grok') : join(tmpdir(), 'colonizer-grok');
+}
+
+/** The grok binary: COLONIZER_GROK_BIN, then PATH, then the pinned build for this arch — downloaded
+ * from x.ai as a single gzip'd static ELF, sha256-checked before it is decompressed. The pin is read
+ * back from module.json so the lock and the manifest cannot drift. */
+export async function resolveGrok({ env = process.env, lockText, arch = process.arch, fetchImpl = fetch, cacheDir = defaultCacheDir(env), log = () => {}, version = readPin().version } = {}) {
+  const explicit = String(env.COLONIZER_GROK_BIN ?? '').trim();
+  if (explicit) return explicit;
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'grok'))) return join(dir, 'grok');
+  const platform = archPlatform({ arch });
+  const row = String(lockText ?? '').split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length >= 6 && !c[0].startsWith('#')).map(([, v, p, , sha256, url]) => ({ version: v, platform: p, sha256, url })).find((r) => r.platform === platform && r.version === version);
+  if (!row) throw new Error(`no pinned grok ${version} build for platform ${platform ?? arch}`);
+  const dest = join(cacheDir, row.version, row.platform);
+  const bin = join(dest, 'grok');
+  if (existsSync(bin)) return bin;
+  log({ level: 'info', message: `downloading grok ${row.version} (${row.platform})` });
+  const res = await fetchImpl(row.url);
+  if (!res?.ok) throw new Error(`grok download failed: HTTP ${res?.status ?? 'no response'}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error(`grok ${row.version} (${row.platform}) refused: sha256 mismatch`);
+  const unpacked = gunzipSync(bytes); // one compressed ELF, not a tarball
+  mkdirSync(dest, { recursive: true });
+  const tmp = `${bin}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, unpacked);
+    chmodSync(tmp, 0o755);
+    renameSync(tmp, bin); // atomic: a half-written binary is never visible at `bin`
+  } catch (error) {
+    rmSync(tmp, { force: true }); // a partial 163 MB binary must not sit in the cache
+    throw error;
+  }
+  return bin;
 }
 
 /** The first X.Y.Z in `grok --version`'s output, whatever else surrounds it. */
@@ -76,55 +168,87 @@ export function untrustableWorkspace(cwd, home) {
   return null;
 }
 
-/** The checks that must pass before any grok process is spawned: fail loudly, not on a prompt. */
-export async function preflight({ env, cwd = process.cwd(), spawnFn = spawn, pin = readPin() }) {
-  if (!String(env.XAI_API_KEY ?? '').trim()) {
+/** The checks that must pass before any grok process is spawned: fail loudly, not on a prompt.
+ * Returns `{ problem, bin }` — the resolved binary path (`bin`) is what the turns must later spawn,
+ * so it is resolved here, once, after the cheap env checks and before any download or version run. */
+export async function preflight({ env, cwd = process.cwd(), spawnFn = spawn, pin = readPin(), lockText, log = () => {} } = {}) {
+  // A model routed through the gateway needs no key of its own: the colony token in the route's
+  // headers is the bearer credential (§6.5), so the check only gates direct api.x.ai runs.
+  const routed = resolveModel(env.COLONIZER_MODEL, parseRoutes(env.COLONIZER_MODEL_ROUTES).routes).route;
+  if (!String(env.XAI_API_KEY ?? '').trim() && !routed) {
     return {
-      code: MISSING_CREDENTIAL,
-      message:
-        'XAI_API_KEY is unset or empty, and the colony never runs browser OAuth (grok login). ' +
-        'Add an xAI API key from console.x.ai as a colony secret named XAI_API_KEY for host api.x.ai, ' +
-        'so the mothership injects it into this colony (README, "Credential story").',
+      bin: null,
+      problem: {
+        code: MISSING_CREDENTIAL,
+        message:
+          'XAI_API_KEY is unset or empty, and the colony never runs browser OAuth (grok login). ' +
+          'Add an xAI API key from console.x.ai as a colony secret named XAI_API_KEY for host api.x.ai, ' +
+          'so the mothership injects it into this colony (README, "Credential story").',
+      },
     };
   }
   const untrustable = untrustableWorkspace(cwd, env.HOME);
   if (untrustable) {
     return {
-      code: WORKSPACE_UNTRUSTABLE,
-      message:
-        `the workspace is "${untrustable}", which grok's folder trust auto-trusts instead of gating ` +
-        '(a trust root of the home directory or the filesystem root can never be recorded in ' +
-        'trusted_folders.toml), so project-scope .grok/ config would load in spite of GROK_FOLDER_TRUST=1. ' +
-        'Run the colony from a dedicated worktree instead.',
+      bin: null,
+      problem: {
+        code: WORKSPACE_UNTRUSTABLE,
+        message:
+          `the workspace is "${untrustable}", which grok's folder trust auto-trusts instead of gating ` +
+          '(a trust root of the home directory or the filesystem root can never be recorded in ' +
+          'trusted_folders.toml), so project-scope .grok/ config would load in spite of GROK_FOLDER_TRUST=1. ' +
+          'Run the colony from a dedicated worktree instead.',
+      },
     };
   }
-  const bin = grokBin(env);
+  let bin;
+  try {
+    bin = await resolveGrok({ env, lockText, log, version: pin.version });
+  } catch (error) {
+    return {
+      bin: null,
+      problem: { code: MISSING_BINARY, message: `the pinned grok CLI could not be fetched: ${error?.message ?? error}. Install the pinned version: curl -fsSL ${pin.install} | bash -s ${pin.version}` },
+    };
+  }
   const text = await versionOf(bin, spawnFn);
   if (text === undefined) {
-    return { code: MISSING_BINARY, message: `the grok CLI was not found at "${bin}". Install the pinned version: curl -fsSL ${pin.install} | bash -s ${pin.version}` };
+    return { bin, problem: { code: MISSING_BINARY, message: `the grok CLI was not found at "${bin}". Install the pinned version: curl -fsSL ${pin.install} | bash -s ${pin.version}` } };
   }
   const found = parseVersion(text);
   if (found !== pin.version) {
     return {
-      code: VERSION_DRIFT,
-      message:
-        `grok --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
-        `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: curl -fsSL ${pin.install} | bash -s ${pin.version}`,
+      bin,
+      problem: {
+        code: VERSION_DRIFT,
+        message:
+          `grok --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
+          `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: curl -fsSL ${pin.install} | bash -s ${pin.version}`,
+      },
     };
   }
-  return null;
+  return { bin, problem: null };
 }
 
-/** The `-m` value for a model setting: `xai-grok/<model>` or a bare xAI model id; any other
- * provider prefix is refused by name (gateway routing is a follow-up, README "Credential story"). */
-export function resolveModel(spec) {
+/** The `-m` value for a model setting, plus the gateway route it rides when one applies. A bare
+ * xAI model id, or `xai-grok/<model>` with no `xai-grok/` route configured, goes straight to
+ * api.x.ai as before; a prefix a route carries rides that route through the provider gateway when
+ * its wire is `openai` — the only wire the gateway serves grok's OpenAI base URL on (§6.5). An
+ * anthropic-wire route, or a prefix nobody configured, is refused by name. */
+export function resolveModel(spec, routes = []) {
   const value = String(spec ?? '').trim();
   if (!value) return {};
   const slash = value.indexOf('/');
-  if (slash > 0 && value.slice(0, slash) !== 'xai-grok') {
-    return { error: `${MODEL_PROVIDER}: "${value}" names another provider; this module runs xai-grok/<model> only` };
+  if (slash < 1) return { model: value };
+  const prefix = value.slice(0, slash + 1);
+  const route = routes.find((r) => r.prefix === prefix);
+  if (route) {
+    if (route.wire !== 'openai') {
+      return { error: `${MODEL_PROVIDER}: "${value}" names provider ${route.provider}, whose gateway route speaks the anthropic wire; grok can only ride openai-wire routes (Settings → Model providers)` };
+    }
+    return { model: value.slice(slash + 1), route };
   }
-  return { model: slash > 0 ? value.slice(slash + 1) : value };
+  if (prefix === 'xai-grok/') return { model: value.slice(slash + 1) };
+  return { error: `${MODEL_PROVIDER}: "${value}" names a provider with no gateway route; add it under Settings → Model providers, or use xai-grok/<model>` };
 }
 
 /** Loopback bridge to mcp.mjs: finding_file, memory_propose, loop_next and loop_stop arrive here
@@ -162,7 +286,7 @@ export async function createBridge({ emit, findings = false, setStatus = () => {
         if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
         else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
         else {
-          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
         }
       } else if (req.url === '/loop_next') {
@@ -243,10 +367,20 @@ export function turnArgs({ promptFile, model, sessionId, disabledTools = [] }) {
 }
 
 /** The child's environment. A fresh GROK_HOME is the one nesting lever the docs verify: grok's
- * config, cached OAuth token, skills and MCP definitions all live under it (README "Nesting"). */
-export function childEnv(env, home) {
+ * config, cached OAuth token, skills and MCP definitions all live under it (README "Nesting"). A
+ * routed model moves the model host to the gateway: GROK_MODELS_BASE_URL is the route's OpenAI
+ * passthrough and grok then sends the API key as `Authorization: Bearer` (Vercel AI Gateway docs
+ * for Grok Build), so the key is the colony token from the route's headers and the direct api.x.ai
+ * key comes out of the child env — the placeholder a colony holds must never reach the gateway. */
+export function childEnv(env, home, route = null) {
+  const mapped = { ...env };
+  if (route) {
+    delete mapped.XAI_API_KEY;
+    mapped.GROK_MODELS_BASE_URL = `${route.base_url.replace(/\/+$/, '')}/v1`;
+    if (route.headers['x-colonizer-colony']) mapped.GROK_CODE_XAI_API_KEY = route.headers['x-colonizer-colony'];
+  }
   return {
-    ...env,
+    ...mapped,
     BROWSER: '/bin/false', // belt-and-braces: nothing may open a browser, and this runner never runs grok login
     GROK_HOME: home,
     // The folder-trust gate forced on (env beats a `[folder_trust] enabled` kill-switch in any
@@ -304,7 +438,7 @@ export function mergeUsage(totals, event) {
  * session state and exits 130) and escalates to SIGKILL after a grace period; an interrupt that
  * lands before the spawn (while the prompt file is being written) skips the spawn and ends the
  * turn as interrupted at once. */
-export function startTurn({ prompt, model, sessionId, messageId, env, home, emit, spawnFn = spawn, totals, disabledTools = [] }) {
+export function startTurn({ prompt, model, sessionId, messageId, env, home, bin = grokBin(env), emit, spawnFn = spawn, totals, disabledTools = [], route = null }) {
   let child = null;
   let interrupted = false;
   const done = (async () => {
@@ -338,7 +472,7 @@ export function startTurn({ prompt, model, sessionId, messageId, env, home, emit
     // tool_call/tool_result, so the call ids are remembered only to drop their updates. The
     // colonizer server's other tools (findings, memory, the loop tools) still stream.
     const askCalls = new Set();
-    child = spawnFn(grokBin(env), turnArgs({ promptFile, model, sessionId, disabledTools }), { env: childEnv(env, home), stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawnFn(bin, turnArgs({ promptFile, model, sessionId, disabledTools }), { env: childEnv(env, home, route), stdio: ['ignore', 'pipe', 'pipe'] });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => (stderrTail = (stderrTail + chunk).slice(-2000)));
 
@@ -464,7 +598,11 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
   const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
   setStatus('idle');
-  const problem = await preflight({ env, spawnFn });
+  const { routes, warnings } = parseRoutes(env.COLONIZER_MODEL_ROUTES);
+  for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+  let lockText = '';
+  try { lockText = readFileSync(join(here, 'grok.lock'), 'utf8'); } catch { /* resolveGrok reports the missing pin */ }
+  const { problem, bin } = await preflight({ env, spawnFn, lockText, log: ({ level, message }) => emit({ type: 'log', level, message }) });
   const home = mkdtempSync(join(tmpdir(), 'colonizer-grok-'));
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
@@ -501,7 +639,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
       while (pending.length) {
         const message = pending.shift();
         setStatus('working');
-        const resolved = resolveModel(modelSpec);
+        const resolved = resolveModel(modelSpec, routes);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
@@ -514,7 +652,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           emit({ type: 'model_changed', model: resolved.model, previous: null });
         }
         n += 1;
-        turn = startTurn({ prompt: message.text, model: resolved.model, sessionId, messageId: `msg-${n}`, env, home, emit, spawnFn, totals, disabledTools });
+        turn = startTurn({ prompt: message.text, model: resolved.model, sessionId, messageId: `msg-${n}`, env, home, bin, emit, spawnFn, totals, disabledTools, route: resolved.route ?? null });
         try {
           const result = await turn.done;
           sessionId = result.sessionId ?? sessionId;
@@ -556,7 +694,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
-        const resolved = resolveModel(command.model);
+        const resolved = resolveModel(command.model, routes);
         if (resolved.error) {
           emit({ type: 'log', level: 'error', message: resolved.error });
           break;

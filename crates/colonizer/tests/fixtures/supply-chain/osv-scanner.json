@@ -1,0 +1,56 @@
+{
+  "results": [
+    {
+      "source": {"path": "/tmp/scan/backend/poetry.lock", "type": "lockfile"},
+      "packages": [
+        {
+          "package": {"name": "jinja2", "version": "3.1.2", "ecosystem": "PyPI"},
+          "vulnerabilities": [
+            {
+              "id": "GHSA-h5c8-rqwp-cp95",
+              "summary": "Jinja vulnerable to HTML attribute injection",
+              "aliases": ["CVE-2024-22195", "PYSEC-2024-1"],
+              "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N"}],
+              "affected": [
+                {
+                  "package": {"ecosystem": "PyPI", "name": "jinja2"},
+                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.3"}]}]
+                }
+              ],
+              "database_specific": {"severity": "MODERATE"}
+            },
+            {
+              "id": "PYSEC-2024-1",
+              "summary": "",
+              "aliases": ["CVE-2024-22195", "GHSA-h5c8-rqwp-cp95"],
+              "affected": [
+                {
+                  "package": {"ecosystem": "PyPI", "name": "jinja2"},
+                  "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "3.1.3"}]}]
+                }
+              ]
+            }
+          ],
+          "groups": [{"ids": ["GHSA-h5c8-rqwp-cp95", "PYSEC-2024-1"], "aliases": ["CVE-2024-22195", "GHSA-h5c8-rqwp-cp95", "PYSEC-2024-1"], "max_severity": "5.4"}]
+        },
+        {
+          "package": {"name": "golang.org/x/net", "version": "0.17.0", "ecosystem": "Go"},
+          "vulnerabilities": [
+            {
+              "id": "GO-2024-2687",
+              "summary": "HTTP/2 CONTINUATION flood in net/http",
+              "aliases": ["CVE-2023-45288"],
+              "affected": [
+                {
+                  "package": {"ecosystem": "Go", "name": "golang.org/x/net"},
+                  "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "0.23.0"}]}]
+                }
+              ]
+            }
+          ],
+          "groups": [{"ids": ["GO-2024-2687"], "aliases": ["CVE-2023-45288", "GO-2024-2687"], "max_severity": "7.5"}]
+        }
+      ]
+    }
+  ]
+}

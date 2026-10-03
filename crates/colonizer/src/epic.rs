@@ -119,7 +119,7 @@ pub fn refusal_message(issue: u64, epic: &Epic) -> String {
         };
         message.push_str(&format!(" Launch colonies on its open sub-issues instead: {list}{more}."));
     }
-    message.push_str(" Pass allow_epic to start one on the epic anyway.");
+    message.push_str(" Pass allow_epic (`colonizer launch --allow-epic`) to start one on the epic anyway.");
     message
 }
 
@@ -298,7 +298,7 @@ mod tests {
         assert!(!message.contains("#532 "), "closed sub-issues are not suggested: {message}");
         assert!(message.contains("(and 2 more)"), "{message}");
         assert!(
-            message.ends_with("Pass allow_epic to start one on the epic anyway."),
+            message.ends_with("Pass allow_epic (`colonizer launch --allow-epic`) to start one on the epic anyway."),
             "{message}"
         );
         // Without a sub-issue list, the message still says what to do.

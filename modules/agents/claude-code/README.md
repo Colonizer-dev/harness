@@ -49,7 +49,7 @@ the VM).
 ## Egress
 
 The `egress` declaration in `module.json` comes from a live capture, not from the CLI's documented
-requirements: on 2026-09-28, Claude Code 2.1.280 (the `vendor/claude-code.lock` pin) ran inside a
+requirements: on 2026-09-28, Claude Code 2.1.280 (the `crates/colonizer/claude-code.lock` pin) ran inside a
 colony sandbox behind a logging forward proxy (`HTTPS_PROXY`, HTTP CONNECT), with tcpdump on udp/53
 and socket sampling as backstops for anything bypassing the proxy and a fresh `HOME` per run. The
 scenarios were the runner's own invocation, CLI defaults, no credentials at all, `claude auth login`
@@ -110,10 +110,18 @@ Claude Code sends its full request shape to routed providers, including `thinkin
 
 ## Shared memory
 
-With `COLONIZER_MEMORY_DIR` set, the agent gets two auto-allowed tools from an in-process MCP server
-(`colonizer_memory`): `memory_search` searches `{repo,org,global}/notes/*.md`, and `memory_propose`
-emits a `memory_proposal` event for review on the mothership (with review off, a repo note is stored
-straight away; org and global notes always wait for review). Nothing is written inside the colony.
+With `COLONIZER_MEMORY_DIR` set, the agent gets four auto-allowed tools from an in-process MCP server
+(`colonizer_memory`), and the system prompt gets one fixed line saying they exist. No note text is
+ever put into the prompt (issue #766):
+
+- `memory_briefing(topic?)`: a short, sourced summary from each scope's mounted `notes.json`, one entry
+  per line with its scope, kind and source (colony, repository, commit, reviewed or not).
+- `memory_changes(since?)`: entries added, and entries revoked or removed, since the colony last asked.
+- `memory_search(query)`: snippets from `{repo,org,global}/notes/*.md`.
+- `memory_propose(scope, title, content, kind?, confidence?, tags?)`: emits a `memory_proposal` event
+  for review on the mothership (with review off, a repo note is stored straight away; org notes always
+  wait for review, and a global note is a candidate until colonies in two repositories propose it at
+  confidence 0.8 or more). Nothing is written inside the colony.
 
 ## Exec policy
 
@@ -125,6 +133,23 @@ so a layer can only ever narrow. A `deny` refuses the call with the rule named; 
 colony question (Allow / Deny) that the operator — or the autonomy judge, within its risk ceiling —
 answers. Every decision leaves one `exec policy: <decision> rule=… layer=… command=…` line in the
 harness log.
+
+The question event carries `kind: "exec_policy"` (issue #759). The Bash call that asked is blocked in
+flight until the answer, so the mothership never suspends a colony while such a question waits — a
+suspension would kill the call and the agent that made it. An **Allow** is remembered for the rest
+of the colony's run, keyed on the rule, its layer and the command with its whitespace collapsed:
+the same command is not asked about again, whether the same agent retries it or a subagent spawned
+later runs it. A different command, or the same one under another rule, still asks; a **Deny** is
+never remembered, and a `deny` rule is refused before the memory is consulted. The memory lives
+only in the runner process, never on disk where the agent could write itself an approval, so a
+colony restarted in a fresh microVM asks again. The ACP runner does the same.
+
+A question the runner puts to the colony while a tool call is blocked on the answer inside a live
+agent also carries `blocking: true`: every exec-policy ask, and an `AskUserQuestion` asked by a
+**subagent** — named by canUseTool's `agentID`, or by the tool_use having arrived in a message with a
+`parent_tool_use_id`. The mothership does not suspend such a colony (up to a two-hour cap): the
+subagent is blocked in its Task call, and a resumed lead transcript would get an answer to a question
+it never asked. The lead's own `AskUserQuestion` is unmarked; it resumes cleanly, so it still suspends.
 
 ```json
 { "rules": [ { "id": "no-deploys", "decision": "deny", "reason": "deploys go through CI",

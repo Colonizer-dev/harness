@@ -212,11 +212,12 @@ describe("mock push subscriptions (issue #516)", () => {
     expect(listed).toHaveLength(2);
   });
 
-  it("answers 400 like the server for an incomplete subscription", async () => {
+  it("answers 400 like the server for an incomplete subscription, and defaults a blank label", async () => {
     const api = createMockApi();
     await expect(api.subscribePush(good({ keys: { p256dh: "k", auth: "" } }))).rejects.toThrow("p256dh and auth");
-    await expect(api.subscribePush(good({ label: "  " }))).rejects.toThrow("label");
     await expect(api.subscribePush(good({ endpoint: "not a url" }))).rejects.toThrow("endpoint");
+    // label_of (crates/colonizer/src/push.rs): a blank label becomes the default, not an error.
+    await expect(api.subscribePush(good({ label: "  " }))).resolves.toMatchObject({ label: "This device" });
   });
 
   it("revoking removes exactly that device and leaves the rest", async () => {

@@ -4,14 +4,22 @@
 // Diagnostics go to stderr only.
 
 import { execFile } from 'node:child_process';
-import { closeSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
-import { evaluateExecPolicy, execPolicyLogLine, execPolicyQuestion, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import {
+  EXEC_POLICY_QUESTION_KIND,
+  createExecAllowCache,
+  evaluateExecPolicy,
+  execPolicyLogLine,
+  execPolicyQuestion,
+  execPolicyReason,
+  loadExecPolicy,
+} from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
@@ -49,15 +57,62 @@ export const ENFORCE_PROMPT_APPEND = [
   '- Every other tool you can see — Bash and Read included — belongs to your subagents. Calling one yourself is refused and costs a turn, so hand that work to a subagent instead.',
 ].join('\n');
 
+/** Lockfile -> package manager, in the order trusted when a repo carries several (verify.rs's JS_LOCKFILES). */
+export const JS_LOCKFILES = [
+  ['bun.lock', 'bun'],
+  ['bun.lockb', 'bun'],
+  ['pnpm-lock.yaml', 'pnpm'],
+  ['yarn.lock', 'yarn'],
+  ['package-lock.json', 'npm'],
+  ['npm-shrinkwrap.json', 'npm'],
+];
+
+/** package.json's `packageManager` field (corepack's `name@version`), limited to the managers verify.rs knows. */
+function pinnedManager(packageJson) {
+  let value;
+  try {
+    value = JSON.parse(packageJson).packageManager;
+  } catch {
+    return null; // unreadable/invalid package.json just means the field cannot settle it
+  }
+  if (typeof value !== 'string') return null;
+  const pinned = value.trim();
+  const at = pinned.indexOf('@');
+  if (at < 0) return null; // corepack's form always carries a version; verify.rs's split_once('@') requires one
+  const name = pinned.slice(0, at);
+  return ['npm', 'pnpm', 'yarn', 'bun'].includes(name) ? name : null;
+}
+
+/**
+ * The package manager of the repository checkout `dir`, decided as the done-claim verifier decides it (verify.rs):
+ * package.json's `packageManager` field, else the first lockfile of [`JS_LOCKFILES`], else npm. Returns
+ * `{ name, source }`, or null when there is no package.json — a lockfile alone is not a JavaScript repo, as verify.rs
+ * reads it. Sync and failure-tolerant: never throws.
+ */
+export function packageManager(dir) {
+  const packageJson = readText(join(dir, 'package.json'));
+  if (packageJson === null) return null;
+  const pinned = pinnedManager(packageJson);
+  if (pinned) return { name: pinned, source: 'packageManager' };
+  const lock = JS_LOCKFILES.find(([file]) => existsSync(join(dir, file)));
+  return lock ? { name: lock[1], source: lock[0] } : { name: 'npm', source: 'package.json' };
+}
+
 /**
  * What the colony can and cannot reach, so no model spends a turn discovering it. `image` is the container image the
- * mothership booted (COLONIZER_IMAGE).
+ * mothership booted (COLONIZER_IMAGE); `manager` is [`packageManager`] for the checkout, when one was found.
  */
-export function environmentPrompt(image) {
-  return [
+export function environmentPrompt(image, manager = null) {
+  const bullets = [
     '- This colony has no GitHub access: there is no gh CLI and no GitHub credentials, so the GitHub API and private repositories are out of reach. The issue is already in your brief, and the harness publishes the pull request.',
     `- The colony runs the container image \`${image}\`. Toolchains it does not include (a Rust or Swift toolchain in a Node image, for example) are not installed. Check once with \`command -v\` before relying on one. Install a toolchain only when the task genuinely needs it to build or test; otherwise say in your report what could not be run.`,
-  ].join('\n');
+  ];
+  if (manager) {
+    bullets.push(
+      `- This repository uses ${manager.name} (from \`${manager.source}\`): install and test with \`${manager.name}\` rather than another package manager; done-claim verification runs it the same way.`,
+    );
+  }
+  return bullets.join('\n');
 }
 
 /**
@@ -391,6 +446,18 @@ export function childEnv(env) {
 }
 
 /**
+ * The record name for a background command: a short hash of the text, so rerunning the same job
+ * overwrites its record instead of accumulating them (issue #700).
+ */
+export function backgroundRecordName(command) {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < command.length; i++) {
+    hash = Math.imul(hash ^ command.charCodeAt(i), 0x01000193) >>> 0;
+  }
+  return `bg-${hash.toString(16).padStart(8, '0')}`;
+}
+
+/**
  * SDK options from the environment. Returns warnings instead of logging so stdout stays protocol-only.
  * @param {object} [extras]
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
@@ -436,7 +503,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
     .filter(Boolean);
   const appended = [SYSTEM_PROMPT_APPEND];
   if (waitServer) appended.push(WAIT_PROMPT_APPEND);
-  if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE));
+  if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
@@ -624,6 +691,30 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       },
     ],
   };
+  if (env.COLONIZER_SERVICES_DIR) {
+    // Background Bash calls get a restart:false service record (issue #700), so a resumed boot's
+    // relaunch report can name what the suspension killed. The record carries the command text,
+    // never an env value, and a failed write is one log line — never a blocked tool call.
+    options.hooks = {
+      ...options.hooks,
+      PostToolUse: [{
+        matcher: 'Bash',
+        hooks: [async ({ tool_input }) => {
+          try {
+            const command = tool_input?.command;
+            if (tool_input?.run_in_background && typeof command === 'string' && command.trim()) {
+              const name = backgroundRecordName(command);
+              writeFileSync(join(env.COLONIZER_SERVICES_DIR, `${name}.json`),
+                JSON.stringify({ name, cmd: command, restart: false, source: 'background' }));
+            }
+          } catch (err) {
+            process.stderr.write(`colonizer: recording a background command failed: ${err?.message ?? err}\n`);
+          }
+          return { continue: true };
+        }],
+      }],
+    };
+  }
   if (instructions) {
     // Conditional instructions (issue #473): appended after the gates above — they arrive first at
     // index 0 — and never carrying a permission decision, so they cannot allow or deny anything.
@@ -700,13 +791,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {Function} args.emit      writes one protocol event
  * @param {object} [args.options]   SDK options (canUseTool is added here)
  * @param {object} [args.execPolicy]  the layered exec policy (issue #471); an `ask` becomes a question
+ * @param {object} [args.execAllowCache]  the colony's remembered Allows (issue #759); one per run when absent
  * @param {object} [args.pathPolicy]  the mounted path policy (issue #647), as loadPathPolicy returned; a path-taking
  *   tool call that lands on a masked or protected path emits one `path_policy` event per (access, path)
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
  */
-export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, execAllowCache = createExecAllowCache(), pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -717,6 +809,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   const input = new AsyncQueue();
   const pending = new Map(); // question_id -> { resolve }
   const askIds = new Set(); // tool_use ids of AskUserQuestion calls
+  const subagentAsks = new Set(); // AskUserQuestion tool_use ids seen in a subagent's message
   const toolMessage = new Map(); // tool_use id -> message_id
   const streams = new Map(); // message_id -> Map<block index, { type, id, text, final }>
   const fallbackIndex = new Map(); // message_id -> next index when nothing was streamed
@@ -757,7 +850,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   };
 
   /** Puts one question to the colony and resolves with its answer (null when cancelled or shut down). */
-  const putQuestion = (questionId, questions, { signal }) => {
+  const putQuestion = (questionId, questions, { signal, kind = null, blocking = false }) => {
     const reply = new Promise((resolve) => {
       pending.set(questionId, { resolve });
       if (signal?.aborted) resolve(null);
@@ -768,6 +861,10 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
       question_id: questionId,
       message_id: toolMessage.get(questionId) ?? null,
       risk: riskClass(questions),
+      ...(kind ? { kind } : {}),
+      // A tool call is blocked in flight on this answer inside a live agent (issue #759), so the
+      // mothership must not suspend the colony: a resumed transcript cannot finish the call.
+      ...(blocking ? { blocking: true } : {}),
       questions,
     });
     settleStatus();
@@ -781,7 +878,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     settleStatus();
   };
 
-  const canUseTool = async (toolName, toolInput, { signal, toolUseID } = {}) => {
+  const canUseTool = async (toolName, toolInput, { signal, toolUseID, agentID } = {}) => {
     if (toolName !== ASK_TOOL) {
       // An exec-policy `ask` reaches canUseTool the same way an AskUserQuestion does: the SDK turns
       // the PreToolUse hook's ask decision into a permission request here. The hook has already
@@ -801,7 +898,13 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
 
     const questionId = toolUseID || `question-${askIds.size + 1}`;
     askIds.add(questionId);
-    const answer = await putQuestion(questionId, normalizeQuestions(toolInput), { signal });
+    // A subagent's question blocks its Task call in flight (issue #759): suspending the colony
+    // would kill the subagent, and a resumed lead transcript would get an answer to a question it
+    // never asked. The SDK names the subagent in `agentID`; the tool_use arriving in a subagent's
+    // message says the same when it does not. The lead's own question is left unmarked: its turn
+    // resumes cleanly with the answer as the next message, so suspending it saves a slot.
+    const blocking = Boolean(agentID) || subagentAsks.has(questionId);
+    const answer = await putQuestion(questionId, normalizeQuestions(toolInput), { signal, blocking });
     if (!answer) {
       settleAnswer(questionId, null);
       return { behavior: 'deny', message: 'The question was cancelled before the user answered.' };
@@ -816,13 +919,23 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
    * Raises an exec-policy `ask` as a colony question (the same `question`/`question_answered` pair
    * AskUserQuestion uses, so the cockpit card and the autonomy judge both work unchanged) and
    * resolves true only when the answer is Allow. Any other answer — Deny, a free-text "Other",
-   * a cancellation — leaves the command refused with the policy reason.
+   * a cancellation — leaves the command refused with the policy reason. The question carries
+   * `kind: "exec_policy"` so the mothership keeps the colony running while it waits (issue #759),
+   * and an Allow is remembered for the colony: the same command under the same rule, from this
+   * agent or a subagent spawned after it, runs without asking again.
    */
   const askColony = async (hit, toolInput, { signal, toolUseID }) => {
+    if (execAllowCache.has(hit, toolInput.command)) {
+      process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
+      return true;
+    }
     const questionId = toolUseID || `exec-policy-${pending.size + 1}`;
-    const answer = await putQuestion(questionId, normalizeQuestions(execPolicyQuestion(hit, toolInput.command)), { signal });
+    const questions = normalizeQuestions(execPolicyQuestion(hit, toolInput.command));
+    const answer = await putQuestion(questionId, questions, { signal, kind: EXEC_POLICY_QUESTION_KIND, blocking: true });
     settleAnswer(questionId, answer);
-    return Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
+    const allowed = Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
+    if (allowed) execAllowCache.remember(hit, toolInput.command);
+    return allowed;
   };
 
   const blockSlot = (messageId, index) => {
@@ -925,8 +1038,10 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
             description: input.description ? String(input.description) : null,
           });
         }
-        if (block.name === ASK_TOOL) askIds.add(block.id);
-        else {
+        if (block.name === ASK_TOOL) {
+          askIds.add(block.id);
+          if (parent) subagentAsks.add(block.id);
+        } else {
           jevPendingCalls.set(block.id, { tool: block.name, result: false });
           emit(
             withAgent(

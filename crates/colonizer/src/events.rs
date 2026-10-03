@@ -63,11 +63,14 @@ fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_writ
 /// Issue #328: what autopilot does once a completion claim's verification verdict is in. A
 /// contradicted colony is held for the maintainer exactly as a failed turn is; anything else
 /// publishes as before — an unverifiable claim is not the colony's fault, and holding it would
-/// strand finished work on infra noise.
+/// strand finished work on infra noise, and an inconclusive one failed on the base commit too, so
+/// the failure is not this change's.
 pub(crate) fn verdict_step(verdict: &crate::verify::Verdict) -> Autopilot {
     match verdict {
         crate::verify::Verdict::Contradicted => Autopilot::Hold("the completion claim was contradicted"),
-        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Unverifiable => Autopilot::Publish,
+        crate::verify::Verdict::Confirmed | crate::verify::Verdict::Inconclusive | crate::verify::Verdict::Unverifiable => {
+            Autopilot::Publish
+        }
     }
 }
 
@@ -226,6 +229,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         }
         event["origin"] = json!(origin.as_str());
     }
+    // A credential the agent echoed or a tool printed is redacted field by field before the line is
+    // persisted or broadcast (#761): the disk, an archive and a fleet export only ever see the mark.
+    crate::redact::redact_value(&mut event);
     let (persisted, file_seq, file_line) = {
         let _guard = rt.file_lock.lock().await;
         if seq <= rt.agent_seq.load(Ordering::SeqCst) {
@@ -306,13 +312,28 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // answer would otherwise stall-proof a colony that is only talking to itself. A person's
     // message and the agent working count, as before.
     if is_watchdog_progress(origin, event["type"].as_str().unwrap_or_default()) {
-        {
+        // A denied tool result is not progress (issue #609): the colony is circling a boundary it
+        // cannot cross, so the result neither restarts the stall clock nor spends a nudge, and its
+        // streak is on record for `decide` and the nudge. A successful result ends the streak, and
+        // so does anything that is a real break in the loop — a person's message, a question, a
+        // turn end. While the streak stands even real work — a retried call, a line of text — must
+        // not spend the nudges, or the loop would stall-proof itself: `last` still moves, so the
+        // cockpit's activity stamp stays truthful, and `decide` reads `denied_since` instead.
+        let progress = {
             let mut activity = rt.activity.lock().await;
-            activity.last = Utc::now();
-            activity.nudges = 0;
-            activity.last_nudge = None;
-        }
-        if app.session(id).await.is_some_and(|s| s.attention.is_some()) {
+            let kind = event["type"].as_str().unwrap_or_default();
+            let denied = crate::watchdog::note_denials(&mut activity, kind, &event);
+            if !denied {
+                activity.last = Utc::now();
+            }
+            let looping = activity.denials >= crate::watchdog::HINT_LOOP_DENIALS;
+            if !denied && !looping {
+                activity.nudges = 0;
+                activity.last_nudge = None;
+            }
+            !denied && !looping
+        };
+        if progress && app.session(id).await.is_some_and(|s| s.attention.is_some()) {
             app.update_session(id, |x| x.attention = None).await;
         }
     }
@@ -324,6 +345,10 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     if event["type"] == "tool_call" {
         crate::jev_ladder::note_tool_call(app, id, rt, &event).await;
     }
+    // Jev brief picks (#585): a watched note's guest path in a call's input or a result's output, or
+    // a `Skill` call naming a watched pack, marks the item used. Shadow measurement only, and a
+    // no-op unless the boot picker armed a watch.
+    crate::brief_pick::note_event(app, id, rt, &event).await;
 
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {
@@ -381,6 +406,8 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             question_id,
             questions,
             risk,
+            kind,
+            blocking,
             ..
         } => {
             // The questions travel with the id: autonomous mode answers among the options the
@@ -388,11 +415,20 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             // too — the judge answers only at or below its ceiling — and a question without one,
             // from an older runner, counts as a workspace write.
             let risk = risk.unwrap_or(QuestionRisk::WorkspaceWrite);
+            // Before the question opens, so a suspension tick that sees it open reads its kind too.
+            rt.question_holds_tool_call.store(
+                crate::protocol::question_holds_tool_call(kind.as_deref(), blocking),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            // A new question retires the old one's notification answer tokens (issue #742).
+            app.answer_tokens.revoke(id).await;
             *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
         AgentEvent::QuestionAnswered { .. } => {
             *rt.open_question.lock().await = None;
+            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.answer_tokens.revoke(id).await;
             let mut activity = rt.activity.lock().await;
             activity.question_since = None;
             // The question is resolved either way, so an unanswered-provider streak behind it is over.
@@ -411,8 +447,18 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             content,
             tags,
             origin,
+            kind,
+            confidence,
         } => {
-            memory_proposal(app, id, origin.as_deref(), scope.as_deref(), &title, &content, &tags).await;
+            let proposal = ProposalBody {
+                scope: scope.as_deref(),
+                title: &title,
+                content: &content,
+                tags: &tags,
+                kind: kind.as_deref(),
+                confidence,
+            };
+            memory_proposal_full(app, id, origin.as_deref(), proposal).await;
         }
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
@@ -483,8 +529,27 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                 let errored = is_error;
                 let open_question = rt.open_question.lock().await.is_some();
                 let step = autopilot_step(errored, interrupted, open_question, pr_written);
+                // #761: a description that redaction changed is published only after a person has
+                // looked — the colony had a secret in hand, and the diff is not redacted.
+                let secret_note = (step == Autopilot::Publish)
+                    .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
+                    .flatten();
                 if s.autopilot && s.status.is_live() {
                     match step {
+                        Autopilot::Publish if secret_note.is_some() => {
+                            let note = secret_note.as_deref().unwrap_or_default();
+                            app.session_log(
+                                id,
+                                "warn",
+                                format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
+                            )
+                            .await;
+                            app.update_session(id, |x| {
+                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            })
+                            .await;
+                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
+                        }
                         // Issue #84: the kill-switch holds the publish without flagging the colony.
                         Autopilot::Publish if crate::authority::external_writes_blocked() => {
                             app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
@@ -506,16 +571,42 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
                                 .await
                         }
                         Autopilot::Hold(reason) => {
-                            app.session_log(
-                                id,
-                                "warn",
-                                format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
-                            )
-                            .await;
-                            app.update_session(id, |x| {
-                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                            })
-                            .await;
+                            // The recovery point (issue #586): holding for a person is the rule, and
+                            // when the point is on Jev may answer with a retry or a narrower task
+                            // instead. Off leaves this arm exactly as it was. A colony the gateway
+                            // already flagged as a provider error is that class, not a plain hold.
+                            let failure = if s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some("model_error") {
+                                crate::recovery::Failure::ProviderError
+                            } else {
+                                crate::recovery::Failure::AutopilotHeld
+                            };
+                            let (action, _) = crate::recovery::handle(app, &s, failure, "ask_human", false).await;
+                            // An option with a message talks to the agent instead of holding — the
+                            // message sets the next turn's work, and no attention flag goes up. An
+                            // option without one (`ask_human`, `stop`) holds as it always did.
+                            if let Some(text) = action.agent_message() {
+                                crate::recovery::send_user_message(rt, "recovery", text);
+                                app.session_log(
+                                    id,
+                                    "info",
+                                    format!(
+                                        "autopilot: Jev chose {} instead of holding; sent the agent a message",
+                                        action.as_str()
+                                    ),
+                                )
+                                .await;
+                            } else {
+                                app.session_log(
+                                    id,
+                                    "warn",
+                                    format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
+                                )
+                                .await;
+                                app.update_session(id, |x| {
+                                    x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                                })
+                                .await;
+                            }
                         }
                     }
                 } else if step == Autopilot::Publish && s.status.is_live() {
@@ -576,9 +667,18 @@ async fn park_quota_colony(app: &Shared, id: &str, text: &str, hit: &provider_qu
     .await;
 }
 
-/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
-/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
-/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2).
+/// A proposal's body, as the runner sent it.
+pub(crate) struct ProposalBody<'a> {
+    pub scope: Option<&'a str>,
+    pub title: &'a str,
+    pub content: &'a str,
+    pub tags: &'a [String],
+    pub kind: Option<&'a str>,
+    pub confidence: Option<f64>,
+}
+
+/// A proposal without a kind or confidence, as runners from before issue #766 send it.
+#[cfg(test)]
 pub(crate) async fn memory_proposal(
     app: &Shared,
     id: &str,
@@ -588,6 +688,31 @@ pub(crate) async fn memory_proposal(
     content: &str,
     tags: &[String],
 ) {
+    let body = ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind: None,
+        confidence: None,
+    };
+    memory_proposal_full(app, id, origin, body).await
+}
+
+/// A colony proposed a shared-memory note: queue it for review (or, for a repo note with review off,
+/// store it marked unreviewed). A proposal from anyone but the orchestrator is refused before any
+/// store is touched, so with the `mem0` provider nothing reaches mem0 either (§6.2). A global
+/// proposal is only a sighting of a fleet-wide candidate (issue #766): it is queued for review as a
+/// global note once candidates from enough distinct repositories agree with enough confidence.
+pub(crate) async fn memory_proposal_full(app: &Shared, id: &str, origin: Option<&str>, body: ProposalBody<'_>) {
+    let ProposalBody {
+        scope,
+        title,
+        content,
+        tags,
+        kind,
+        confidence,
+    } = body;
     let Some(s) = app.session(id).await else { return };
     let scope = scope.unwrap_or("repo");
     // Shared memory is read-only from inside a colony (docs/architecture.md, "Shared memory
@@ -620,15 +745,28 @@ pub(crate) async fn memory_proposal(
         .await;
         return;
     }
+    let Some(kind) = memory::parse_kind(kind) else {
+        app.session_log(
+            id,
+            "error",
+            format!("rejected a memory proposal: kind must be one of {}", memory::KINDS.join(", ")),
+        )
+        .await;
+        return;
+    };
+    // Out of range or not a number reads as no confidence at all, which never promotes.
+    let confidence = confidence.filter(|c| c.is_finite()).map(|c| c.clamp(0.0, 1.0));
     let key = match scope {
         "org" => s.org.clone(),
         "repo" => s.repo.clone(),
         _ => String::new(),
     };
-    // Who proposed, shown in the review queue: the session id is the colony id, and `origin` is
-    // always `orchestrator` here — everything else was refused above (absent: that same legacy case).
-    let source = json!({"session_id": s.id, "repo": s.repo, "origin": origin.unwrap_or("orchestrator")});
-    let note = match memory::draft(scope, &key, title, content, tags, source) {
+    // Who proposed, shown in the review queue and kept as the note's provenance (issue #766): the
+    // session id is the colony id, the commit is read host-side, and `origin` is always
+    // `orchestrator` here — everything else was refused above (absent: that same legacy case).
+    let commit = memory::colony_commit(app, &s).await;
+    let source = json!({"session_id": s.id, "repo": s.repo, "commit": commit, "origin": origin.unwrap_or("orchestrator")});
+    let mut note = match memory::draft(scope, &key, title, content, tags, source) {
         Ok(note) => note,
         Err(e) => {
             app.session_log(id, "error", format!("rejected a memory proposal: {e:#}"))
@@ -636,6 +774,12 @@ pub(crate) async fn memory_proposal(
             return;
         }
     };
+    note.kind = kind.to_string();
+    note.confidence = confidence;
+    if scope == "global" {
+        global_sighting(app, id, &s, note, commit).await;
+        return;
+    }
     let (title, scope) = (note.title.clone(), note.scope.clone());
     let review = orgs::memory_requires_review(&modules);
     // Only a repo note can skip review. An org or global note reaches every colony in the org or the
@@ -687,6 +831,59 @@ pub(crate) async fn memory_proposal(
         }
         Err(e) => {
             app.session_log(id, "error", format!("could not store a memory proposal: {e:#}"))
+                .await
+        }
+    }
+}
+
+/// A colony's global proposal (issue #766): recorded as a sighting of its fleet-wide candidate, and
+/// queued for review as a global note only once the candidate clears the bar. Fleet-wide memory is
+/// always reviewed, whatever `require_review` says: it reaches every colony (issue #376).
+async fn global_sighting(app: &Shared, id: &str, s: &Session, note: memory::Note, commit: Option<String>) {
+    let sighting = memory::Sighting {
+        colony: s.id.clone(),
+        repo: s.repo.clone(),
+        commit,
+        confidence: note.confidence.unwrap_or(0.0),
+        seen_at: Utc::now(),
+    };
+    let title = note.title.clone();
+    match app.memory.record_sighting(&note, sighting).await {
+        Ok(Some(global)) => match app.memory.add_proposal(global).await {
+            Ok(proposal) => {
+                app.session_log(
+                    id,
+                    "info",
+                    format!(
+                        "memory: \"{title}\" was seen in {} repositories with enough confidence and is waiting for your review as fleet-wide memory",
+                        memory::PROMOTE_MIN_REPOS
+                    ),
+                )
+                .await;
+                let rt = app.runtimes.lock().await.get(id).cloned();
+                if let Some(rt) = rt {
+                    rt.broadcast(None, json!({"type": "memory_proposed", "proposal": proposal}).to_string());
+                }
+            }
+            Err(e) => {
+                app.session_log(id, "error", format!("could not queue a fleet-wide memory note: {e:#}"))
+                    .await
+            }
+        },
+        Ok(None) => {
+            app.session_log(
+                id,
+                "info",
+                format!(
+                    "memory: \"{title}\" is held as a fleet-wide candidate; it is reviewed for global memory once colonies in {} repositories propose it with confidence of at least {}",
+                    memory::PROMOTE_MIN_REPOS,
+                    memory::PROMOTE_CONFIDENCE
+                ),
+            )
+            .await
+        }
+        Err(e) => {
+            app.session_log(id, "error", format!("could not record a fleet-wide memory candidate: {e:#}"))
                 .await
         }
     }
@@ -801,6 +998,11 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
             crate::authority::GRANT_TTL_SECS,
         )
     };
+    // #761: the finding reached here redacted; one that carried a secret is said out loud.
+    let text = format!("{}\n{}\n{}", finding.title, finding.body, finding.evidence);
+    if let Some(note) = crate::redact::redaction_note("finding-body.md", &text, "filing") {
+        app.session_log(&id, "warn", note).await;
+    }
     let outcome = findings::file(&app, &s, &finding, &dir.join("finding-body.md"), &grant).await;
     let (level, message, entry) = match &outcome {
         Ok(findings::Filed::Issue(url)) => (
@@ -822,7 +1024,7 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
-        let recorded = append_line(&record, &entry.to_string()).await;
+        let recorded = append_line(&record, &crate::redact::redact_line(&entry.to_string())).await;
         if let Err(e) = recorded {
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.
@@ -875,7 +1077,8 @@ mod tests {
     }
 
     /// Issue #328: only a contradicted claim holds — unverifiable is infra noise, not the
-    /// colony's fault, and holding it would strand finished work.
+    /// colony's fault, and holding it would strand finished work; inconclusive failed on the base
+    /// commit too, so it is not this change's failure.
     #[test]
     fn only_a_contradicted_claim_holds_the_publish() {
         assert_eq!(
@@ -883,6 +1086,7 @@ mod tests {
             Autopilot::Hold("the completion claim was contradicted")
         );
         assert_eq!(verdict_step(&crate::verify::Verdict::Confirmed), Autopilot::Publish);
+        assert_eq!(verdict_step(&crate::verify::Verdict::Inconclusive), Autopilot::Publish);
         assert_eq!(verdict_step(&crate::verify::Verdict::Unverifiable), Autopilot::Publish);
     }
 
@@ -922,28 +1126,30 @@ mod tests {
             propose(&app, Some(scope), "Sign commits", "Always sign.").await;
             assert!(app.memory.notes(scope, key).await.unwrap().is_empty(), "{scope}");
         }
-        assert_eq!(app.memory.proposals().await.len(), 2);
+        // The org note queues; the global one is only a sighting of a fleet-wide candidate (#766).
+        assert_eq!(app.memory.proposals().await.len(), 1);
+        assert_eq!(app.memory.candidates().await.len(), 1);
 
         // An absent origin is a runner from before the field existed: read as the orchestrator.
         memory_proposal(&app, "abc", None, None, "Run tests locked", "Use --locked.", &[]).await;
         let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].source["reviewed"], json!(false));
-        assert_eq!(app.memory.proposals().await.len(), 2, "the repo note did not queue");
+        assert_eq!(app.memory.proposals().await.len(), 1, "the repo note did not queue");
 
         // A repo note the store cannot take is queued instead, unmarked: approving it is its review.
         app.modules.write().await.memory.provider = memory::MEM0.into();
         set(&app, "base_url", json!("ftp://nowhere")).await;
         memory_proposal(&app, "abc", Some("orchestrator"), None, "Deploys", "Stage first.", &[]).await;
         let pending = app.memory.proposals().await;
-        assert_eq!(pending.len(), 3);
+        assert_eq!(pending.len(), 2);
         assert!(pending.iter().all(|p| p.note.source["reviewed"].is_null()), "{pending:?}");
 
         app.modules.write().await.memory.provider = "files".into();
         set(&app, "require_review", json!(true)).await;
         propose(&app, Some("repo"), "Commit style", "Keep commits small.").await;
         assert_eq!(app.memory.notes("repo", "acme/repo").await.unwrap().len(), 1);
-        assert_eq!(app.memory.proposals().await.len(), 4);
+        assert_eq!(app.memory.proposals().await.len(), 3);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -983,8 +1189,104 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending[0].note.source,
-            json!({"session_id": "abc", "repo": "acme/repo", "origin": "orchestrator"})
+            json!({"session_id": "abc", "repo": "acme/repo", "commit": null, "origin": "orchestrator"})
         );
+        assert!(
+            app.memory.candidates().await.is_empty(),
+            "no refused proposal left a sighting"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a colony's global proposal is a sighting, and fleet-wide memory needs confidence of
+    /// at least 0.8 in two distinct repositories — then it is queued for review, never stored, even
+    /// with review off. 0.79 anywhere never counts, and one repository at 0.8 is not enough.
+    #[tokio::test]
+    async fn fleet_wide_memory_needs_confidence_in_two_repositories() {
+        let (app, root) = crate::sessions::tests::app_with_colony("a1", SessionStatus::Running).await;
+        for (id, org) in [("a2", "acme"), ("b1", "beta"), ("c1", "gamma")] {
+            let mut s = crate::sessions::tests::colony(org, SessionStatus::Running);
+            s.id = id.into();
+            app.sessions.write().await.push(s);
+        }
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        async fn propose(app: &Shared, id: &str, confidence: f64) {
+            let body = ProposalBody {
+                scope: Some("global"),
+                title: "Pin the toolchain",
+                content: "Pin the Rust toolchain in rust-toolchain.toml.",
+                tags: &[],
+                kind: Some("convention"),
+                confidence: Some(confidence),
+            };
+            memory_proposal_full(app, id, Some("orchestrator"), body).await;
+        }
+        let pending = |app: Shared| async move { app.memory.proposals().await.len() };
+
+        // 0.79 in two repositories: not promoted.
+        propose(&app, "a1", 0.79).await;
+        propose(&app, "b1", 0.79).await;
+        assert_eq!(pending(app.clone()).await, 0, "0.79 is under the bar");
+        // 0.8 in only one repository (two colonies on acme/repo count once): not promoted.
+        propose(&app, "a1", 0.8).await;
+        propose(&app, "a2", 0.9).await;
+        assert_eq!(pending(app.clone()).await, 0, "one repository is not the fleet");
+        // 0.8 in a second repository: queued for review as a global note, with every sighting's provenance.
+        propose(&app, "c1", 0.8).await;
+        let queued = app.memory.proposals().await;
+        assert_eq!(queued.len(), 1);
+        let global = &queued[0].note;
+        assert_eq!((global.scope.as_str(), global.kind.as_str()), ("global", "convention"));
+        let repos: Vec<&str> = global.source["promoted_from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["repo"].as_str().unwrap())
+            .collect();
+        assert_eq!(repos, ["acme/repo", "gamma/repo"]);
+        assert!(
+            app.memory.notes("global", "").await.unwrap().is_empty(),
+            "review is never skipped"
+        );
+        // A third sighting does not queue it again.
+        propose(&app, "b1", 0.95).await;
+        assert_eq!(pending(app.clone()).await, 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #766: a proposal keeps its kind and confidence, an unknown kind is refused, and a repo
+    /// note lands in its own repository's scope only.
+    #[tokio::test]
+    async fn a_proposal_keeps_its_kind_and_stays_in_its_repository() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let mut other = crate::sessions::tests::colony("beta", SessionStatus::Running);
+        other.id = "def".into();
+        app.sessions.write().await.push(other);
+        app.modules
+            .write()
+            .await
+            .memory
+            .settings
+            .insert("require_review".into(), json!(false));
+        let body = |kind| ProposalBody {
+            scope: Some("repo"),
+            title: "Migrations run first",
+            content: "Run migrations before the seed step.",
+            tags: &[],
+            kind: Some(kind),
+            confidence: Some(0.7),
+        };
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("failure")).await;
+        memory_proposal_full(&app, "abc", Some("orchestrator"), body("gossip")).await;
+        let notes = app.memory.notes("repo", "acme/repo").await.unwrap();
+        assert_eq!(notes.len(), 1, "the unknown kind was refused");
+        assert_eq!((notes[0].kind.as_str(), notes[0].confidence), ("failure", Some(0.7)));
+        assert!(app.memory.notes("repo", "beta/repo").await.unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1141,6 +1443,41 @@ mod tests {
             crate::providers::quota_status(&app).await.paused,
             "the account record alone pauses with zero providers"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #761: a secret in `pr.md` is redacted, and autopilot holds the publish for a person with a
+    /// log line naming what was redacted, instead of publishing the redacted text silently.
+    #[tokio::test]
+    async fn a_secret_in_pr_md_holds_autopilot_and_says_what_was_redacted() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        app.update_session("abc", |x| x.autopilot = true).await;
+        // The runtime remembers the description it booted with; the turn below writes a new one.
+        let rt = app.runtime("abc").await;
+        let out = app.session_dir("abc").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let secret = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        std::fs::write(
+            out.join("pr.md"),
+            format!("# Rotate the CI token\n\nThe old one was {secret}.\n"),
+        )
+        .unwrap();
+        let s = app.session("abc").await.unwrap();
+        assert_eq!(
+            github::read_pr_description(&out, &s).1,
+            "The old one was [REDACTED:github_token].",
+            "the text that would be published is redacted"
+        );
+        let end = r#"{"seq":1,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.1,"duration_ms":1.0}"#;
+        handle_agent_event(&app, "abc", &rt, end).await;
+        let attention = app.session("abc").await.unwrap().attention.expect("the colony is flagged");
+        assert_eq!(attention["reason"], "autopilot_held");
+        let log = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(
+            log.contains("autopilot: not publishing, pr.md contained 1 secret (github token), redacted before publishing"),
+            "{log}"
+        );
+        assert!(!log.contains(secret), "{log}");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1304,6 +1641,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A secret echoed into an event line is persisted, broadcast and logged only as its mark (#761),
+    /// and the line on disk is still one valid JSON object.
+    #[tokio::test]
+    async fn a_secret_echoed_into_an_event_is_persisted_only_redacted() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let mut live = rt.events.subscribe();
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let line = json!({"seq": 1, "type": "text", "text": format!("$ echo {token}\n{token}")}).to_string();
+        handle_agent_event(&app, "abc", &rt, &line).await;
+        let stored = std::fs::read_to_string(app.session_dir("abc").join("events.jsonl")).unwrap();
+        assert!(!stored.contains(token), "the token never reaches the disk: {stored}");
+        let event: Value = serde_json::from_str(stored.trim()).expect("still one JSON line");
+        assert_eq!(event["text"], "$ echo [REDACTED:github_token]\n[REDACTED:github_token]");
+        while let Ok(frame) = live.try_recv() {
+            assert!(!frame.json.contains(token), "nor the broadcast: {}", frame.json);
+        }
+        app.session_log(
+            "abc",
+            "error",
+            format!("git push https://x-access-token:{token}@github.com/o/r failed"),
+        )
+        .await;
+        let harness = std::fs::read_to_string(app.session_dir("abc").join("harness.jsonl")).unwrap();
+        assert!(!harness.contains(token), "nor the harness log: {harness}");
+        assert!(harness.contains("[REDACTED:"), "{harness}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// memory_proposal's body `origin` names the proposer (§6.2) and predates the envelope field, so
     /// its lines are never stamped — with the field added or clobbered, the proposal would read as
     /// a non-orchestrator's and be refused.
@@ -1370,6 +1736,105 @@ mod tests {
         );
         assert_eq!(activity.nudges, 1, "so the next tick nudges again");
         drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A denied tool result is not progress (issue #609): it neither restarts the stall clock nor
+    /// spends a nudge, and once the streak reaches the loop threshold the loop's own retried calls
+    /// do not either. A successful result ends the loop and is progress again.
+    #[tokio::test]
+    async fn a_denied_tool_result_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = stalled_since;
+            activity.nudges = 2;
+        }
+        let denied = |seq: u64| {
+            format!(
+                r#"{{"seq":{seq},"type":"tool_result","tool_call_id":"t","output":"blocked","is_error":true,"denial":{{"class":"egress","hint":"denied host example.com"}}}}"#
+            )
+        };
+        handle_agent_event(&app, "abc", &rt, &denied(1)).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.last, stalled_since, "a denial does not restart the stall clock");
+            assert_eq!(activity.nudges, 2, "and does not spend a nudge");
+            assert_eq!(activity.denials, 1);
+            assert_eq!(activity.denied_since, Some(stalled_since), "the loop's clock starts here");
+        }
+        handle_agent_event(&app, "abc", &rt, &denied(2)).await;
+        assert_eq!(rt.activity.lock().await.denials, 2, "two in a row reach the loop threshold");
+        // The loop's own retry is not progress either: it must not spend the nudges back.
+        let retry = r#"{"seq":3,"type":"tool_call","message_id":"m","tool_call_id":"t","name":"Bash","input":{}}"#;
+        handle_agent_event(&app, "abc", &rt, retry).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.nudges, 2, "a retried call in a hint loop does not spend the nudges");
+            assert!(activity.last > stalled_since, "but the activity stamp still moves");
+            assert_eq!(activity.denied_since, Some(stalled_since));
+        }
+        // A successful result ends the loop and is progress again.
+        let ok = r#"{"seq":4,"type":"tool_result","tool_call_id":"t","output":"fine","is_error":false}"#;
+        handle_agent_event(&app, "abc", &rt, ok).await;
+        let activity = rt.activity.lock().await;
+        assert_eq!(activity.denials, 0);
+        assert_eq!(activity.last_denial, None);
+        assert_eq!(activity.nudges, 0, "a success is progress again");
+        drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A person's message, a question and a turn end break a running hint loop (issue #609): they
+    /// count as progress as before, so a maintainer's reply resets the nudges and clears the flag
+    /// rather than leaving the colony to be flagged `nudges_exhausted` right after they intervened.
+    #[tokio::test]
+    async fn a_hint_loop_breaks_on_a_persons_message_or_a_phase_break() {
+        async fn seed(app: &Shared, since: chrono::DateTime<Utc>) {
+            {
+                let rt = app.runtime("abc").await;
+                let mut activity = rt.activity.lock().await;
+                activity.last = since;
+                activity.nudges = 2;
+                activity.denials = 3;
+                activity.denied_since = Some(since);
+                activity.last_denial = Some(("egress".to_string(), "denied host example.com".to_string()));
+            }
+            app.update_session("abc", |x| x.attention = Some(json!({"reason": "stalled", "nudges": 2})))
+                .await;
+        }
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+
+        let message = r#"{"seq":1,"type":"user_message","id":"m1","text":"try X instead"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, message).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a person's word ends the loop");
+            assert_eq!(activity.denied_since, None);
+            assert_eq!(activity.nudges, 0, "and spends the nudges");
+            assert!(activity.last > stalled_since, "and restarts the stall clock");
+        }
+        assert!(app.session("abc").await.unwrap().attention.is_none(), "the flag clears");
+
+        let turn_end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.0,"duration_ms":1.0}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, turn_end).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a turn end ends the loop");
+            assert_eq!(activity.last_denial, None);
+        }
+
+        let question =
+            r#"{"seq":3,"type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}],"risk":"read_only"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, question).await;
+        assert_eq!(rt.activity.lock().await.denials, 0, "a question ends the loop");
         let _ = std::fs::remove_dir_all(root);
     }
 

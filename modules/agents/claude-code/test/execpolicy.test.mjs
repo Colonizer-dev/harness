@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { buildOptions, runAgent } from '../runner.mjs';
 import { AsyncQueue } from '../runner.mjs';
 import {
+  createExecAllowCache,
   defaultPolicy,
   evaluateExecPolicy,
   execPolicyLogLine,
@@ -268,6 +269,84 @@ test('an ask reaches the operator as a colony question, and the answer decides',
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('an Allow is remembered for the colony: a respawned agent is not asked again, another command is, and deny stays deny (#759)', async () => {
+  const dir = workspace();
+  try {
+    const policy = policyIn(dir);
+    // One colony run, three agents in a row: the first asks and is allowed, a respawn runs the
+    // same command (whitespace aside) under a new tool-use id, then another command and a denied one.
+    const calls = [
+      ['toolu_first', 'echo x > /etc/foo'],
+      ['toolu_respawn', 'echo x  >  /etc/foo'],
+      ['toolu_other', 'echo y > /etc/bar'],
+      ['toolu_secret', 'cat ~/.ssh/id_rsa'],
+    ];
+    const turn = async function* (options) {
+      yield { type: 'system', subtype: 'init', session_id: 's1', model: 'fake-model' };
+      const decisions = [];
+      for (const [id, command] of calls) {
+        const decision = await options.canUseTool('Bash', { command }, { signal: new AbortController().signal, toolUseID: id });
+        decisions.push(`${id}:${decision.behavior}`);
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: decisions.join(' '), duration_ms: 1 };
+    };
+    const events = [];
+    const commands = new AsyncQueue();
+    const cache = createExecAllowCache();
+    const run = runAgent({
+      query: fakeQuery(turn),
+      commands,
+      emit: (event) => events.push(event),
+      options: { model: 'fake' },
+      execPolicy: policy,
+      execAllowCache: cache,
+      graceMs: 100,
+    });
+    commands.push({ type: 'user_message', id: 'u1', text: 'go' });
+    // Answer each question as it opens: Allow the first, Deny the other command.
+    const answers = { toolu_first: 'Allow', toolu_other: 'Deny' };
+    const answered = new Set();
+    for (let i = 0; !events.some((event) => event.type === 'turn_end') && i < 400; i++) {
+      for (const question of events.filter((event) => event.type === 'question' && !answered.has(event.question_id))) {
+        answered.add(question.question_id);
+        commands.push({ type: 'answer', question_id: question.question_id, answers: { 'Exec policy': answers[question.question_id] ?? 'Deny' } });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    commands.close();
+    await run;
+
+    const asked = events.filter((event) => event.type === 'question');
+    assert.deepEqual(asked.map((event) => event.question_id), ['toolu_first', 'toolu_other'], 'the respawn was not asked; the other command was');
+    assert.ok(asked.every((event) => event.kind === 'exec_policy'), 'every exec-policy question says so, for the suspend decision');
+    assert.ok(asked.every((event) => event.blocking === true), 'and marks it blocking: its tool call waits in flight');
+    const result = events.find((event) => event.type === 'turn_end').result;
+    assert.equal(result, 'toolu_first:allow toolu_respawn:allow toolu_other:deny toolu_secret:deny');
+    assert.equal(cache.size, 1, 'only the Allow is remembered');
+
+    // Deny stays deny: a second ask of the denied command asks again, and a remembered Allow
+    // cannot soften a deny rule.
+    const denyHit = evaluateExecPolicy(policy, 'echo y > /etc/bar', { cwd: dir });
+    assert.equal(cache.has(denyHit, 'echo y > /etc/bar'), false);
+    const secret = { decision: 'deny', rule: 'secret-paths', layer: 'default' };
+    cache.remember(secret, 'cat ~/.ssh/id_rsa');
+    assert.equal(cache.has(secret, 'cat ~/.ssh/id_rsa'), false, 'a deny is never cached as allowed');
+    // Same command, a different rule: still asks.
+    const firstHit = evaluateExecPolicy(policy, 'echo x > /etc/foo', { cwd: dir });
+    assert.equal(cache.has(firstHit, 'echo x > /etc/foo'), true);
+    assert.equal(cache.has({ ...firstHit, rule: 'another-ask' }, 'echo x > /etc/foo'), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a fresh colony run starts with an empty allow memory', () => {
+  const first = createExecAllowCache();
+  const hit = { decision: 'ask', rule: 'writes-outside-repo', layer: 'default' };
+  first.remember(hit, 'echo x > /etc/foo');
+  assert.equal(createExecAllowCache().has(hit, 'echo x > /etc/foo'), false, 'no approval leaks across colonies');
 });
 
 /** A minimal fake SDK `query`, in the shape fake-sdk.test.mjs uses. */

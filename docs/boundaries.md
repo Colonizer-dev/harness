@@ -15,7 +15,7 @@ turns out to be guidance is a finding.
 | Read-only mounts: bare repository, agent binary, plugins and the rest mount `ro`; only the worktree and `/harness/out` are writable | declared in `crates/colonizer/src/boot.rs` (`read_only: true`), passed as `-v …` in `crates/colonizer/src/sandbox.rs:57,113` |
 | Placeholder credentials: secret values stay in msb's host process; the guest env holds a placeholder, swapped on TLS to the hosts the secret names — and never otherwise | `crates/colonizer/src/sandbox.rs:57-61`; host-side storage in `crates/colonizer/src/secrets.rs` |
 | Egress network rules: the sandbox `egress` setting picks `open` (the default: the `public` profile) or `allowlist` (no profile allow, only what the harness and the operator name), plus port-scoped `allow@host:tcp:` rules for the harness's own ports; a fixed deny set (network-internal destinations, cloud metadata) comes first and no setting can reopen it; the default deny closes every other host-loopback port | `crates/colonizer/src/sandbox.rs:68-76`, rules compiled in `crates/colonizer/src/egress.rs` and assembled in `crates/colonizer/src/boot.rs` (`colony_network`); the whole policy in [sandbox-network.md](sandbox-network.md) |
-| Per-agent egress declaration: every `module.json` declares the hosts its agent may reach (`egress`), and every `secrets[].hosts` entry must be covered by that union | parsed in `crates/colonizer/src/modules.rs`, walked over `modules/agents/*/module.json` by a test. The declaration does not yet feed the fence: `allowlist` mode takes its hosts from the operator's `egress_allow` list, not from the agent module — **planned** |
+| Per-agent egress declaration: every `module.json` declares the hosts its agent may reach (`egress`), and every `secrets[].hosts` entry must be covered by that union; in `allowlist` mode the running module's `api`, `auth` and `extra` hosts join the colony's allow list (`telemetry` excluded — an operator lists those in `egress_allow` themselves), while the always-blocked deny set and the operator's `egress_block` still compile ahead of every allow | parsed in `crates/colonizer/src/modules.rs`, folded into the policy by `crates/colonizer/src/egress.rs` (`resolve`), walked over `modules/agents/*/module.json` by a test; [sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares) |
 | Mesh ACLs: Headscale allows `harness@ → vms@:*` and nothing else, so colonies cannot reach each other; VM keys are single-use pre-auth keys, nodes deleted at session end | `crates/colonizer/src/mesh.rs:299-301`; keys at `crates/colonizer/src/mesh.rs:331-362` |
 | Publish treats colony output as untrusted: `.git` rewritten from the value recorded before the VM ran, nested `.git` stripped, `pr.md` a regular file; own-prefix branch only, no force-push | `crates/colonizer/src/github.rs:1920-2002` (`publish`, `restore_gitfile`, `strip_nested_git`); the commit/push/PR gates in `crates/colonizer/src/publish.rs`, grants in `crates/colonizer/src/authority.rs` |
 | Auth: per-colony tokens at the provider gateway, the per-install token on every cockpit `/api` route | `crates/colonizer/src/gateway.rs`, `crates/colonizer/src/auth.rs` |
@@ -29,7 +29,7 @@ turns out to be guidance is a finding.
 | System-prompt text: rules for questions, limits, memory, findings and delegation, appended at startup | `modules/agents/claude-code/runner.mjs:24` (`SYSTEM_PROMPT_APPEND`), assembled at `runner.mjs:429-471` |
 | Skill packs: vendored skills and tool servers, switched on per org | [skill-packs.md](skill-packs.md). The read-only mount is a boundary; the `SKILL.md` text is guidance |
 | Denial hints: `classifyDenial(text)` → `{class, hint}` (`egress`, `read_only`, `tool_disabled`); on an errored tool result the runner adds `denial: {class, hint}` to the `tool_result` event, and a `PostToolUseFailure` hook repeats the hint to the agent as `additionalContext` — mid-turn, bound to the failed call, so it costs no extra turn — at most once per class per session. `is_error` and content are unchanged, the hook returns no decision, and a strip test proves the events are identical without the layer apart from `denial` | `modules/agents/claude-code/denials.mjs`, hook in `modules/agents/claude-code/runner.mjs:571-592` |
-| Watchdog nudges: `decide()` nudges a colony with no progress and flags it after `max_nudges`; gateway traffic counts as progress | `crates/colonizer/src/watchdog.rs` (`decide`, `nudge_text`); the busy check is `gateway.colony_busy`, called at `watchdog.rs:159` |
+| Watchdog nudges: `decide()` nudges a colony with no progress and flags it after `max_nudges`; gateway traffic counts as progress. A hint loop — consecutive denied tool results — is nudged with a message naming the denied boundary | `crates/colonizer/src/watchdog.rs` (`decide`, `nudge_text`, `hint_loop_text`); the busy check is `gateway.colony_busy`, called at `watchdog.rs:240` |
 | Autonomy judge: answers a colony's question when nobody does, choosing only among the options the agent offered, capped by risk class | `crates/colonizer/src/autonomy.rs` |
 | Choice-card re-ask: a turn that ends on a plain-text question is held open and the agent asks again as a card | `modules/agents/claude-code/runner.mjs` (turn handling) |
 
@@ -45,16 +45,19 @@ turns out to be guidance is a finding.
 The audit record and the watchdog key on the same split: a guidance gap is work on the hints; a
 crossed boundary is a stop.
 
-## Watchdog signatures (planned)
+## Watchdog signatures
 
-Coordinating the three signatures below is **not implemented yet**; the watchdog today is
-`decide()` in `crates/colonizer/src/watchdog.rs` over its activity feed, and only its stall path
-exists. The proposal, so the denial layer has something to feed:
+The watchdog (`decide()` in `crates/colonizer/src/watchdog.rs`) keys on two signatures:
 
-- **Hint-loop** — consecutive errored `tool_result` events carrying `denial`, with no successful
-  non-denied tool result in between, counts as *not progress*: take the existing nudge path, and
-  say what was denied in the nudge.
+- **Hint-loop** — consecutive errored `tool_result` events carrying a `denial`, with no successful
+  (non-errored) tool result in between, count as *not progress*: from two in a row the watchdog
+  nudges on the clock of the progress that preceded the loop, not on the loop's own churn, and the
+  nudge names what was denied (`hint_loop_text`, the class and the hint). The loop's retried calls
+  and text cannot spend the nudges back, so the existing `max_nudges` → `nudges_exhausted` path
+  still ends it. A successful result ends the loop, and so does anything that is a real break in it —
+  a person's message, a question, a turn end — which count as progress as before.
 - **Genuine stall** — no events at all: the existing nudge-then-flag behaviour, unchanged.
-- **Control-defeat** — a boundary signal, such as an audit, publish-rewrite or sandbox event
-  showing a control was bypassed: stop the colony and flag it at once, without waiting for
-  `max_nudges`.
+
+**Control-defeat is not built.** Stopping a colony at once on a boundary event that shows a control
+was bypassed needs such an event to reach the mothership; none does today (an audit record, a
+publish rewrite or a sandbox event is not on the wire), so there is nothing for the watchdog to read.

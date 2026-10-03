@@ -39,15 +39,15 @@ const MERGEABILITY_POLL_GAP: Duration = Duration::from_secs(3);
 /// The publish module's merge-train settings, as read for one tick. Defaults everywhere: the train
 /// is off unless the operator switched it on.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct TrainSettings {
+pub(crate) struct TrainSettings {
     default_on: bool,
     overrides: String,
     deny_orgs: String,
-    authors: String,
-    forbid: String,
+    pub(crate) authors: String,
+    pub(crate) forbid: String,
 }
 
-async fn train_settings(app: &App) -> TrainSettings {
+pub(crate) async fn train_settings(app: &App) -> TrainSettings {
     let modules = app.modules.read().await.clone();
     let schema = crate::modules::schema_for("publish", &modules.publish.provider, &app.agents);
     let read = |key: &str| crate::config::setting_str(&modules.publish, &schema, key);
@@ -63,7 +63,7 @@ async fn train_settings(app: &App) -> TrainSettings {
 /// Whether the train may merge in a repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-enum TrainState {
+pub(crate) enum TrainState {
     On,
     Off,
     Denied,
@@ -72,7 +72,7 @@ enum TrainState {
 /// The denylist beats everything, a repository override beats an owner override, either beats the
 /// install-wide switch, and a malformed entry reads as absent (validation refuses it at save time;
 /// a hand-edited modules.json just drops it).
-fn effective_state(settings: &TrainSettings, repo: &str) -> TrainState {
+pub(crate) fn effective_state(settings: &TrainSettings, repo: &str) -> TrainState {
     let repo = repo.to_ascii_lowercase();
     let (owner, _) = repo.split_once('/').unwrap_or((repo.as_str(), ""));
     if parse_list(&settings.deny_orgs).iter().any(|o| o.eq_ignore_ascii_case(owner)) {
@@ -224,37 +224,37 @@ static TRAIN: LazyLock<Mutex<Train>> = LazyLock::new(|| Mutex::new(Train::defaul
 
 /// Everything [`decide`] reads about one pull request.
 #[derive(Clone, Debug, PartialEq)]
-struct PrFacts {
-    info: PrInfo,
-    commits: Vec<PrCommit>,
+pub(crate) struct PrFacts {
+    pub(crate) info: PrInfo,
+    pub(crate) commits: Vec<PrCommit>,
     /// Commits the base tip has that the pull request does not, counted on GitHub; `None` when
     /// that could not be read, which fails closed — nothing merges unverified.
-    behind_base: Option<u64>,
+    pub(crate) behind_base: Option<u64>,
     /// Whether the pull request already targets the repository's default branch: a stacked child
     /// still based on its parent's open branch waits for the watcher's retarget.
-    base_is_default: bool,
+    pub(crate) base_is_default: bool,
 }
 
 /// The author and attribution guards for one tick. An empty allowed list refuses everything; an
 /// unreadable mothership identity holds the repository instead of building one.
 #[derive(Clone, Debug, Default, PartialEq)]
-struct Guards {
-    allowed_authors: Vec<String>,
-    forbidden: Vec<String>,
+pub(crate) struct Guards {
+    pub(crate) allowed_authors: Vec<String>,
+    pub(crate) forbidden: Vec<String>,
 }
 
 /// Why a pull request must be brought up to date before it can merge, and who does it: behind and
 /// conflicted readings are the watcher's auto-rebase path's (it already acts on them); the train
 /// triggers that same path itself only for a CLEAN pull request that is behind by commits.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NeedsRebase {
-    detail: String,
+pub(crate) struct NeedsRebase {
+    pub(crate) detail: String,
     auto_rebase: bool,
 }
 
 /// What the train does with one candidate this tick.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Decision {
+pub(crate) enum Decision {
     Merge,
     WaitingCi,
     NeedsRebase(NeedsRebase),
@@ -284,6 +284,10 @@ impl Decision {
         }
     }
 }
+
+/// The reason [`decide`] gives a pull request whose own checks failed; the merge-train loop
+/// (`merge_loop.rs`) tells a red pull request from any other skip by it.
+pub(crate) const CHECKS_FAILING: &str = "the pull request's checks are failing";
 
 /// The title prefixes and labels that hold a pull request out of the train, case-insensitively.
 const HOLD_MARKERS: &[&str] = &["wip", "hold", "dnm", "do-not-merge", "do not merge"];
@@ -344,7 +348,7 @@ fn forbidden_message<'a>(commits: &'a [PrCommit], forbidden: &'a [String]) -> Op
 
 /// Decides what the train does with one pull request this tick. Pure, so the whole table is
 /// tested; the caller has already read everything this needs.
-fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
+pub(crate) fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
     let info = &facts.info;
     if info.state != PrState::Open {
         return Decision::Waiting("the pull request is no longer open".to_string());
@@ -391,7 +395,7 @@ fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
             match facts.behind_base {
                 Some(0) => match info.ci {
                     CiState::Pending => Decision::WaitingCi,
-                    CiState::Failure => Decision::Skipped("the pull request's checks are failing".to_string()),
+                    CiState::Failure => Decision::Skipped(CHECKS_FAILING.to_string()),
                     CiState::Success => Decision::Merge,
                     // The train's guarantee is green CI; a pull request nobody checks is not green.
                     CiState::NoChecks => Decision::Skipped("no checks ran on this pull request".to_string()),
@@ -413,7 +417,7 @@ fn decide(facts: &PrFacts, guards: &Guards) -> Decision {
 /// The `gh pr merge` invocation for one merge: squash, pinned to the exact head the train read, so
 /// a push landing between the read and the merge cannot ride through, and `--delete-branch` only
 /// when nothing is stacked on the branch.
-fn merge_args(pr_url: &str, head_oid: &str, delete_branch: bool) -> Vec<String> {
+pub(crate) fn merge_args(pr_url: &str, head_oid: &str, delete_branch: bool) -> Vec<String> {
     let mut args = vec![
         "pr".to_string(),
         "merge".to_string(),
@@ -428,10 +432,20 @@ fn merge_args(pr_url: &str, head_oid: &str, delete_branch: bool) -> Vec<String> 
     args
 }
 
+/// Why the train leaves this colony's pull request alone (issue #673): another colony's merge
+/// superseded it and the operator has not kept it. `None` for everything the train may consider.
+fn superseded_hold(s: &Session) -> Option<String> {
+    let superseded = s.superseded.as_ref().filter(|_| crate::supersede::blocks_start(s))?;
+    Some(format!(
+        "superseded by {}; Keep the colony to put it back in the train",
+        superseded.pr_url
+    ))
+}
+
 /// Whether another open colony sits on this one's branch: a colony stacked on it (`parent`), or any
 /// open pull request targeting the branch in the same repository. Its branch is then kept on merge,
 /// so the child's pull request is not closed under it.
-fn has_stacked_child(sessions: &[Session], s: &Session) -> bool {
+pub(crate) fn has_stacked_child(sessions: &[Session], s: &Session) -> bool {
     sessions.iter().any(|c| {
         c.id != s.id
             && c.repo == s.repo
@@ -506,9 +520,23 @@ async fn tick_once(app: &Shared) {
         },
         forbidden: parse_list(&settings.forbid),
     };
+    // A repository the merge-train loop (issue #754) drives is its alone: two drivers would each
+    // merge on their own reading, which is exactly the burst the loop exists to avoid.
+    let looped = crate::merge_loop::load(&app.cfg.config_dir).await.settings;
     for (repo, group) in by_repo {
         let state = effective_state(&settings, repo);
-        if state != TrainState::On {
+        if crate::merge_loop::drives(&looped, repo) {
+            hold(
+                app,
+                repo,
+                &group,
+                state,
+                PrStatus::Skipped,
+                "the merge-train loop drives this repository (Loops → Merge train)",
+                true,
+            )
+            .await;
+        } else if state != TrainState::On {
             let reason = if state == TrainState::Denied {
                 "the merge train never merges in this org"
             } else {
@@ -535,7 +563,7 @@ async fn tick_once(app: &Shared) {
 /// The identities the train treats as its own when no authors are configured: the login the
 /// mothership publishes as (`gh`'s viewer) and the noreply email every publish commit is written
 /// with. `None` when that identity could not be read — the caller holds rather than merges.
-async fn default_authors(app: &App) -> Option<Vec<String>> {
+pub(crate) async fn default_authors(app: &App) -> Option<Vec<String>> {
     let v = github::viewer(app).await.ok()?;
     let login = v["login"].as_str()?.to_ascii_lowercase();
     let mut out = vec![login.clone()];
@@ -633,6 +661,10 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
     let mut first: Option<String> = None;
     for s in &ordered {
         let reading = read_pr(app, s, &base).await;
+        // Issue #765: the train reads each head too; a moved one re-points the colony's links.
+        if let Ok(f) = &reading {
+            crate::commit_links::head_seen(app, &s.id, f.info.head_ref_oid.as_deref());
+        }
         let (title, decision) = match &reading {
             Ok(f) => {
                 let title = if f.info.title.trim().is_empty() {
@@ -642,7 +674,12 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
                 };
                 // Only the head of the train is `next`: a later mergeable one waits its turn, since
                 // the first merge moves the base out from under it.
-                let mut decision = decide(f, guards);
+                // Issue #673: a merge already covered this colony's work — the train must not
+                // squash a second copy of it in. Held until the operator keeps it.
+                let mut decision = match superseded_hold(s) {
+                    Some(reason) => Decision::Skipped(reason),
+                    None => decide(f, guards),
+                };
                 if decision == Decision::Merge {
                     if let Some(first) = first.clone() {
                         decision = Decision::Waiting(format!(
@@ -682,16 +719,21 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
         } else if authority::external_writes_blocked() {
             say(PrStatus::Waiting, publish::BLOCKED.to_string());
         } else {
-            // Fresh sessions: another colony may have been stacked on this one since the tick began.
+            // Fresh sessions: another colony may have been stacked on this one since the tick began,
+            // or (issue #673) a merge seen since the snapshot may have superseded it.
             let fresh = app.sessions.read().await.clone();
             let url = s.pr_url.clone().unwrap_or_default();
-            let args = merge_args(&url, &head, !has_stacked_child(&fresh, s));
-            match crate::util::exec_within(MERGE_TIMEOUT, &mut app.gh(args)).await {
-                Ok(_) => {
-                    say(PrStatus::Merged, "squash-merged by the merge train".to_string());
-                    merged = Some((url, s.clone()));
+            if let Some(reason) = fresh.iter().find(|x| x.id == s.id).and_then(superseded_hold) {
+                say(PrStatus::Skipped, reason);
+            } else {
+                let args = merge_args(&url, &head, !has_stacked_child(&fresh, s));
+                match crate::util::exec_within(MERGE_TIMEOUT, &mut app.gh(args)).await {
+                    Ok(_) => {
+                        say(PrStatus::Merged, "squash-merged by the merge train".to_string());
+                        merged = Some((url, s.clone()));
+                    }
+                    Err(e) => say(PrStatus::Waiting, format!("the merge failed: {e:#}")),
                 }
-                Err(e) => say(PrStatus::Waiting, format!("the merge failed: {e:#}")),
             }
         }
     }
@@ -731,7 +773,7 @@ async fn train_repo(app: &Shared, repo: &str, group: &[&Session], guards: &Guard
 /// Everything [`decide`] needs about one candidate: the widened `pr_info`, the commits for the
 /// guards, and the behind count — only worth its own request when GitHub itself reports nothing
 /// wrong, since BEHIND and CONFLICTING decide the branch already.
-async fn read_pr(app: &App, s: &Session, default_branch: &str) -> Result<PrFacts, String> {
+pub(crate) async fn read_pr(app: &App, s: &Session, default_branch: &str) -> Result<PrFacts, String> {
     let url = s.pr_url.as_deref().unwrap_or_default();
     let info = github::pr_info(app, url)
         .await
@@ -1229,5 +1271,27 @@ mod tests {
         assert_eq!(behind_from_compare(Some(&json!({"behind_by": 0}))), Some(0));
         assert_eq!(behind_from_compare(Some(&json!({}))), None);
         assert_eq!(behind_from_compare(None), None);
+    }
+
+    /// Issue #673: a superseded colony's pull request is held out of the train until it is kept —
+    /// the merge that superseded it already landed the work.
+    #[test]
+    fn a_superseded_colony_is_held_out_of_the_train_until_kept() {
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::PrOpened);
+        s.pr_url = Some("https://github.com/acme/widget/pull/12".into());
+        assert_eq!(superseded_hold(&s), None, "never superseded, the train may consider it");
+        s.superseded = Some(crate::supersede::Supersession {
+            by: "merged".into(),
+            pr_url: "https://github.com/acme/widget/pull/9".into(),
+            pr: Some(9),
+            title: "Fix the leak".into(),
+            reason: crate::supersede::OverlapReason::Files,
+            at: Utc::now(),
+            kept: false,
+        });
+        let reason = superseded_hold(&s).expect("an unkept supersession holds it");
+        assert!(reason.contains("pull/9") && reason.contains("Keep"), "{reason}");
+        s.superseded.as_mut().unwrap().kept = true;
+        assert_eq!(superseded_hold(&s), None, "kept: back in the train");
     }
 }

@@ -36,6 +36,26 @@ impl App {
         self.cfg.data_dir.join("jev_ladder.jsonl")
     }
 
+    /// Every Jev brief-pick measurement (#585), one JSON line each: what a colony's boot offered and
+    /// picked, and the notes and packs it was later seen to use. Kept in the data dir like the other
+    /// Jev ledgers, for the bench-wide report (`scripts/bench.mjs brief`).
+    pub(crate) fn brief_picks_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("brief_picks.jsonl")
+    }
+
+    /// Every verification's focused-first measurement (#584), one JSON line each, kept in the data
+    /// dir like the ladder ledger so the speed-up can be judged across colonies.
+    pub(crate) fn jev_focus_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("jev_focus.jsonl")
+    }
+
+    /// Every Jev decision point's ask (issue #582), one JSON line each: what the point asked, the
+    /// pick or why there was none, and what the harness did with it. In the data dir like the routing
+    /// ledger, so it outlives per-colony cleanup and spans every point, not just routing.
+    pub(crate) fn decisions_file(&self) -> PathBuf {
+        self.cfg.data_dir.join("decisions.jsonl")
+    }
+
     pub fn session_dir(&self, id: &str) -> PathBuf {
         self.cfg.data_dir.join("sessions").join(id)
     }
@@ -54,6 +74,7 @@ impl App {
             // against the day it happened, so it survives the cleanup or delete that forgets the
             // colony itself.
             let was_terminal = session.status.is_terminal();
+            let was_failed = session.status == SessionStatus::Failed;
             let before = session.clone();
             let result = f(session);
             if session_contents_equal(&before, session) {
@@ -65,6 +86,11 @@ impl App {
                 return Some((session, result));
             }
             let returned = !was_terminal && session.status.is_terminal();
+            // A move into `Failed` from a non-failed status marks the failure unseen (issue #744);
+            // updates inside `failed` — a longer message, the reclaim — are not new failures.
+            if !was_failed && session.status == SessionStatus::Failed {
+                session.unseen_failure = true;
+            }
             session.updated_at = Utc::now();
             (session.clone(), (returned, before.status), result)
         };
@@ -177,6 +203,8 @@ impl App {
 
     /// [`App::session_log`] with the `origin` the line is stamped with (docs/protocol.md §3).
     pub(crate) async fn session_log_as(&self, origin: Origin, id: &str, level: &str, message: String) {
+        // #761: a message quoting a command line, an error body or a URL can carry a credential.
+        let message = crate::redact::redact_text(&message).into_owned();
         let entry =
             json!({"type": "harness_log", "origin": origin.as_str(), "level": level, "message": message, "ts": Utc::now()});
         let rt = self.runtime(id).await;
@@ -323,6 +351,33 @@ mod tests {
         app.update_session("def", |s| s.status = SessionStatus::Merged).await;
         assert_eq!(ledger(&app).len(), 1, "a colony that skipped routing gets no actual row");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #744: the crossing into `Failed` marks the failure unseen — that is what the app
+    /// badge counts until `POST /api/sessions/{id}/seen` clears it. Later updates inside
+    /// `failed` are not new failures, and a terminal move that is not a failure marks nothing.
+    #[tokio::test]
+    async fn moving_into_failed_marks_the_failure_unseen() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        assert!(!app.session("abc").await.unwrap().unseen_failure);
+        app.update_session("abc", |s| s.status = SessionStatus::Failed).await.unwrap();
+        assert!(app.session("abc").await.unwrap().unseen_failure, "the crossing is unseen");
+        app.update_session("abc", |s| s.unseen_failure = false).await.unwrap();
+        app.update_session("abc", |s| s.error = Some("a longer message".into()))
+            .await
+            .unwrap();
+        assert!(
+            !app.session("abc").await.unwrap().unseen_failure,
+            "a later update inside `failed` is not a new failure"
+        );
+        let (other, other_root) = app_with_colony("def", SessionStatus::Running).await;
+        other
+            .update_session("def", |s| s.status = SessionStatus::Stopped)
+            .await
+            .unwrap();
+        assert!(!other.session("def").await.unwrap().unseen_failure, "stopping is not failing");
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(other_root);
     }
 
     #[tokio::test]

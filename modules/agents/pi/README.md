@@ -59,14 +59,28 @@ Pi's own startup network (model-catalog refresh, version check, telemetry) is sw
 gateway. `COLONIZER_MODEL_ROUTES` carries the colony's gateway token and is removed from Pi's
 environment, so it never reaches the model's own shell commands.
 
+## Shared memory
+
+With `COLONIZER_MEMORY_DIR` mounted, the runner loads `memory-extension.mjs` by explicit path
+(`--extension`; `--no-extensions` only stops discovery), and the extension registers three Pi
+tools (issue #766): `memory_briefing` (a short, sourced summary, optionally on a topic),
+`memory_changes` (entries added, and entries revoked or removed, since the colony last asked) and
+`memory_search`. They read the mounted `notes.json` and note files and frame their answer as data to
+verify, so a revoked note is gone from the next answer. Memory is pulled, never injected: the
+system prompt gains one fixed line naming the tools (a second `--append-system-prompt`), and no
+note text. The logic is `memory.mjs` (a copy of the claude-code module's) and `memory-mcp.mjs` (a
+copy of the ACP module's), both kept byte-identical by `test/memory.test.mjs`, which also drives
+the real Pi against a stand-in model endpoint to check the tools reach the model and the prompt
+carries no note. `COLONIZER_DISABLED_TOOLS` can exclude them like any other Pi tool.
+
 ## What does not apply from the Claude Code module
 
 Pi has no subagents, so `subagent_model`, `background_model` and `delegate` have no counterpart, and
 neither does model tier routing (`route_per_task` with `model_low`/`model_high`): the `model` setting
 is the only model. Pi has no way to ask a question — `answer` commands warn, and the appended system
-prompt tells the model to choose and say so — and none of the in-process MCP tools exist: shared
-memory (`memory_search`/`memory_propose`), the findings tool and `wait`. Briefs that name them ask
-for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
+prompt tells the model to choose and say so — and of the in-process MCP tools only shared memory's
+read tools exist (below): `memory_propose`, the findings tool and `wait` do not. Briefs that name
+them ask for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
 not applied either: the harness refuses to launch a Pi colony while one is set (the install's
 `exec_policy` setting, or a repo `.colonizer/exec-policy.json`).
 

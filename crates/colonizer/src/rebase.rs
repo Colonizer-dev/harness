@@ -126,10 +126,10 @@ pub async fn touched_files(worktree: &Path, base_ref: &str) -> Vec<String> {
 }
 
 /// Runs `git` in a worktree with a short deadline: trimmed non-empty output lines, or `None` when
-/// git failed, timed out, or said nothing.
+/// git failed, timed out, or said nothing. The clean host default — no credential, clean config.
 async fn git_lines(worktree: &Path, args: &[&str]) -> Option<Vec<String>> {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.current_dir(worktree).args(crate::github::HOST_GIT_NO_EXEC).args(args);
+    let mut cmd = crate::github::git_clean();
+    cmd.current_dir(worktree).args(args);
     let out = crate::util::exec_within(Duration::from_secs(10), &mut cmd).await.ok()?;
     let lines: Vec<String> = out
         .lines()

@@ -2,8 +2,15 @@
 import { ApiError, type Api, type SocketLike } from "./api";
 import { canPublish } from "./components/ui";
 import { isTerminal } from "./notifications";
+import { defaultPushPrefs, mergePushPrefs } from "./push";
 import { OFF_CENTRE_ENTRY_MAP } from "./cockpit/mapFixtures";
+import { mockDocsLoop } from "./cockpit/docsLoopMock";
+import { defaultMergeLoopSettings } from "./cockpit/mergeLoop";
 import type {
+  SupplyChainLoop,
+  SupplyChainReport,
+  MergeLoopReport,
+  MergeLoopView,
   ActivityEntry,
   ApiTokenMeta,
   ArchiveEntry,
@@ -32,6 +39,11 @@ import type {
   FleetMember,
   FleetMembership,
   FleetPending,
+  FleetSyncPreview,
+  FleetSyncStatus,
+  FleetHistoryEntry,
+  FleetHistoryPage,
+  FleetHistoryTotals,
   FleetRole,
   FindingRecord,
   HarnessStatus,
@@ -57,6 +69,7 @@ import type {
   Question,
   RedTeamRun,
   RedTeamSchedule,
+  DiskCleanupReport,
   Loop,
   NewLoop,
   NewRedTeamSchedule,
@@ -71,12 +84,15 @@ import type {
   SpendTokens,
   StartRedTeamRunRequest,
   TelemetryStatus,
+  TsAnyLoop,
+  TsAnyReport,
   UpdateStatus,
   UsageStatus,
   LoginItemStatus,
   PushSubscriptionSummary,
   RemotePairing,
   RemoteStatus,
+  Phones,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1372,10 +1388,22 @@ export const DEMO_MAP: ArchMap = {
 export function createMockApi(): Api {
   const sessions = new Map<string, MockSession>();
   // Web push (issue #516): one device is already enrolled, so Settings has a row to show and
-  // revoke, and the VAPID key has the shape of a real base64url uncompressed P-256 point.
+  // revoke, and the VAPID key has the shape of a real base64url uncompressed P-256 point. It was
+  // last seen 42 minutes ago and quiet at night, so the per-device prefs editor (#743) has
+  // something to show on open.
   const MOCK_PUSH_KEY = "BB5fVboJOnLBVPursGoy1AZA5DXhRqSdoaBnAGjI8NeR1PuBgnN3Vx6rbF5pvoxqTOhaLHQwxrRLmZgA2pHcg0k";
+  // label_of (crates/colonizer/src/push.rs): trimmed, capped, "This device" when blank — the same
+  // rule for a new subscription and a PATCHed one.
+  const pushLabel = (label: string) => (label.trim() ? label.trim().slice(0, 60) : "This device");
   const pushSubs: PushSubscriptionSummary[] = [
-    { id: "push_iphone01", label: "iPhone · Safari", created_at: Math.floor(Date.now() / 1000) - 86_400 * 2, endpoint_host: "fcm.googleapis.com" },
+    {
+      id: "push_iphone01",
+      label: "iPhone · Safari",
+      created_at: Math.floor(Date.now() / 1000) - 86_400 * 2,
+      endpoint_host: "fcm.googleapis.com",
+      last_seen: Math.floor(Date.now() / 1000) - 60 * 42,
+      prefs: { ...defaultPushPrefs(), scope: ["acme"], quiet: { start: 1320, end: 480 }, questions_break_quiet: true, tz: "Europe/Berlin", utc_offset: 120 },
+    },
   ];
   // Remote access (issue #535): the switch starts off, like a fresh install's. Enabling mints the
   // host and a live tunnel; a reset changes the host, like the server's fresh identity. Install
@@ -1384,6 +1412,7 @@ export function createMockApi(): Api {
   // and unbinding (or a reset) clears the owner (#599).
   const remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
   let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
+  const phoneState: Phones = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
   let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
   const remotePairingState: RemotePairing = {
     owner: null,
@@ -1411,9 +1440,44 @@ export function createMockApi(): Api {
   let fleetPending: FleetPending[] = [
     { id: "pen_seed1", name: "rfc-annex", url: "http://10.0.0.6:7878", confirm_code: "512849", expires_at: new Date(Date.now() + 11 * 60_000).toISOString(), status: "pending" },
   ];
-  let fleetMembers: FleetMember[] = [{ id: "mem_seed1", name: "studio-2", url: "http://10.0.0.5:7878", joined_at: ago(3 * 1440) }];
+  // Issue #764: the seeded member shows a degraded badge, so the demo has something to point at.
+  let fleetMembers: FleetMember[] = [
+    {
+      id: "mem_seed1",
+      name: "studio-2",
+      url: "http://10.0.0.5:7878",
+      joined_at: ago(3 * 1440),
+      health: { state: "degraded", code: "no_heartbeat", reason: "No heartbeat for 12 min", hint: "the machine may be asleep" },
+    },
+  ];
   let fleetMembership: FleetMembership | null = null;
   let fleetJoining: FleetJoining | null = null;
+  // Issue #762: what the members synced, as the owner's history view reads it. One entry comes
+  // from a member that was since removed, so the demo shows the "removed" marker too.
+  const fleetHistoryRow = (n: number, member: [string, string, boolean], repo: string, status: "merged" | "pr_opened" | "failed", cost: number | null): FleetHistoryEntry => {
+    const host = member[1];
+    const id = `${host}:session-${n}`;
+    return {
+      key: `${member[0]}/${id}`, member_id: member[0], member_name: member[1], member_removed: member[2], id, received_at: ago(n * 700),
+      record: {
+        id, origin_host: host, original_id: `session-${n}`, repo, org: repo.split("/")[0], issue: 100 + n, issue_title: `Synced colony ${n}`, status,
+        branch: `colonizer/issue-${100 + n}`, pr_url: status === "failed" ? null : `https://github.com/${repo}/pull/${n}`,
+        merged_at: status === "merged" ? ago(n * 720) : null, summary: `Finished on ${host}.`, error: status === "failed" ? "tests failed" : null,
+        cost_usd: cost, agent: "claude", created_at: ago(n * 760), updated_at: ago(n * 720),
+      },
+      payloads: [{ name: "events.jsonl", sha256: "0".repeat(63) + String(n % 10), bytes: 2048 * n }],
+    };
+  };
+  const fleetHistoryRows: FleetHistoryEntry[] = [
+    fleetHistoryRow(1, ["mem_seed1", "studio-2", false], "acme/web", "merged", 1.25),
+    fleetHistoryRow(2, ["mem_seed1", "studio-2", false], "acme/api", "pr_opened", 0.8),
+    fleetHistoryRow(3, ["mem_gone", "old-laptop", true], "acme/web", "merged", null),
+    fleetHistoryRow(4, ["mem_seed1", "studio-2", false], "acme/web", "failed", 0.3),
+  ];
+  const fleetTotals = (rows: FleetHistoryEntry[]): FleetHistoryTotals => {
+    const costs = rows.map((r) => r.record.cost_usd).filter((c): c is number => c != null);
+    return { colonies: rows.length, merged: rows.filter((r) => r.record.status === "merged").length, cost_usd: costs.length ? costs.reduce((a, b) => a + b, 0) : null };
+  };
   const fleetRole = (): FleetRole => (fleetMembership ? "member" : fleetMembers.length > 0 ? "owner" : "none");
   const mockInviteCode = () => Array.from({ length: 16 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join(""); // 80 bits
   // Architecture maps (GET/POST /api/maps): the main repository is already drawn; any other one can
@@ -1525,6 +1589,8 @@ export function createMockApi(): Api {
   const stuck = new MockSession({
     ...baseSession("stuck2468", "acme/webshop", 43, "Add dark mode to the order confirmation email"),
     status: "failed",
+    // A failure nobody has opened yet (issue #744): the badge counts it until the colony is opened.
+    unseen_failure: true,
     mesh: null,
     parent: "stall5678",
     base: "colonizer/issue-43-stall5678",
@@ -1695,7 +1761,8 @@ export function createMockApi(): Api {
 
   // The rest of the lifecycle: a launch waiting for a slot, and a PR that was merged or closed.
   // The queued one is stacked on the failed colony above it, so the queue reads as waiting for the
-  // parent colony rather than for a parallelism slot.
+  // parent colony rather than for a parallelism slot — and it is superseded (issue #673), so the
+  // hold banner has something to hold.
   const queued = new MockSession({
     ...baseSession("queue1357", "acme/webshop", 51, "Rate-limit the checkout API"),
     status: "queued",
@@ -1703,6 +1770,16 @@ export function createMockApi(): Api {
     parent: "stuck2468",
     queued_behind: "stuck2468",
     base: "colonizer/issue-43-stuck2468",
+    supply_chain: { package: "lodash", advisory: "ghsa-7fm4-wx8h-p9q3" },
+    superseded: {
+      by: "merge_w1",
+      pr_url: "https://github.com/acme/webshop/pull/71",
+      pr: 71,
+      title: "Retry failed webhooks with backoff",
+      reason: "files",
+      at: ago(1500), // shortly after pull/71 merged (a day ago, in the overview seeds below)
+      kept: false,
+    },
     created_at: ago(2),
   });
   queued.session.updated_at = ago(2);
@@ -1822,6 +1899,8 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["deepseek-flash", "deepseek-v4-pro"],
       preset: "deepseek",
+      // Vetted for restricted-sensitivity work, so the Trusted switch shows on (#472).
+      trusted: true,
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
       // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
@@ -1844,6 +1923,7 @@ export function createMockApi(): Api {
       has_key: false,
       models: ["ds4-flash"],
       preset: "local",
+      trusted: false,
       timeout_secs: 900,
       max_concurrent: 1,
       queue_timeout_secs: null,
@@ -1873,6 +1953,7 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["qwen3-coder"],
       preset: "custom",
+      trusted: false,
       ...DEFAULT_LIMITS,
       max_concurrent: 4,
       in_flight: 0,
@@ -1904,6 +1985,7 @@ export function createMockApi(): Api {
       agent: { model: "strix/ds4-flash", subagent_model: "deepseek/deepseek-flash", background_model: null },
       max_parallel: 2,
       stack: "rust",
+      close_superseded_prs: ["acme/webshop"],
       memory: { enabled: true, deja: true },
       watchdog: { enabled: null, stall_minutes: 10, max_nudges: null },
     },
@@ -2217,8 +2299,103 @@ export function createMockApi(): Api {
     { session: "demo1234", title: "Free-shipping threshold shows the cart subtotal", state: "rejected", reason: "does not reproduce on the staging sandbox", ts: ago(60 * 24 * 2) },
   ];
 
+  // The built-in supply-chain loop: off, with an empty allowlist, and one sample report so the
+  // demo has something to show.
+  const supplySample: SupplyChainReport = {
+    id: "scr_demo01",
+    started_at: ago(60 * 5),
+    finished_at: ago(60 * 5 - 2),
+    dry_run: true,
+    trigger: "manual",
+    blocked: false,
+    repos: [
+      {
+        repo: "acme/webshop",
+        sha: "4f2c9a1",
+        scanners: ["npm audit", "built-in OSV lookup"],
+        findings: [
+          { ecosystem: "npm", package: "lodash.template", version: null, kind: "vulnerability", severity: "critical", id: "GHSA-35jh-r3h4-6jhm", title: "Command Injection in lodash.template (affects <=4.5.0)", fixed: null, fix_available: false, major_bump: false, url: "https://github.com/advisories/GHSA-35jh-r3h4-6jhm", lockfile: "package-lock.json", scanner: "npm audit" },
+          { ecosystem: "npm", package: "vite", version: null, kind: "vulnerability", severity: "high", id: "GHSA-xxxx-yyyy-zzzz", title: "vite server.fs.deny bypass (affects >=5.0.0 <5.4.12)", fixed: "5.4.12", fix_available: true, major_bump: false, url: null, lockfile: "package-lock.json", scanner: "npm audit" },
+          { ecosystem: "npm", package: "semver", version: "7.5.1", kind: "vulnerability", severity: "moderate", id: "GHSA-c2qf-rxjj-qqgw", title: "semver vulnerable to Regular Expression Denial of Service", fixed: "7.5.2", fix_available: true, major_bump: false, url: null, lockfile: "package-lock.json", scanner: "npm audit" },
+        ],
+        notes: ["no host scanner for Cargo.lock: checked with the built-in OSV lookup; install cargo-audit (cargo install --locked cargo-audit) or osv-scanner for a fuller check"],
+        missing: [],
+        error: null,
+      },
+    ],
+    counts: { critical: 1, high: 1, moderate: 1 },
+    dispatched: [{ repo: "acme/webshop", ecosystem: "npm", session: null, title: "Supply chain: fix 2 npm findings (high at worst)", findings: 2, worst: "high" }],
+    skipped: [{ repo: "acme/webshop", ecosystem: null, reason: "not dispatched: 1 with no fixed version", findings: 1 }],
+    attention: [{ repo: "acme/webshop", ecosystem: "npm", package: "lodash.template", version: null, id: "GHSA-35jh-r3h4-6jhm", severity: "critical", reason: "critical GHSA-35jh-r3h4-6jhm: no fixed version is published, so no colony can bump past it; replace the package, patch it, or accept the risk" }],
+    note: null,
+  };
+  let supplyLoop: SupplyChainLoop = {
+    name: "Dependencies & supply chain",
+    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 6, minute: 17 }, max_per_repo: 1, max_per_run: 3, cooldown_hours: 12, min_severity: "moderate", outdated: false, builtin: true, autopilot: true },
+    next_run_at: null,
+    running: false,
+    scanners: { "cargo-audit": false, "cargo-deny": false, "npm audit": true, "osv-scanner": false },
+    blocked: false,
+    last_report: supplySample,
+    history: [],
+    attention: [],
+  };
   const redSchedules: RedTeamSchedule[] = [];
-  const loopList: Loop[] = [];
+  // The built-in disk cleanup (disk_cleanup.rs): every install has it, off until switched on.
+  const loopList: Loop[] = [
+    {
+      id: "disk-cleanup",
+      name: "Disk cleanup",
+      org: "",
+      repo: "",
+      prompt: "",
+      cadence: { every: "interval", minutes: 60 },
+      kind: "disk_cleanup",
+      tz_offset_minutes: 0,
+      model: null,
+      subagent_model: null,
+      autopilot: false,
+      max_runs: null,
+      end_at: null,
+      enabled: false,
+      next_run_at: null,
+      runs: 0,
+      last_run: null,
+      last_note: null,
+      ended_reason: null,
+      created_at: now(),
+      disk_cleanup: {
+        settings: { trigger_free_pct: 15, build_output: true, stopped_after_days: 7, worktrees: true, microvms: true, archives: false, archive_keep_days: 30, archive_max_gb: null, host_paths: false, extra_paths: [], host_min_age_days: 3 },
+        history: [],
+        attention: null,
+        previewed_at: null,
+      },
+    },
+  ];
+  const cleanupReport = (dryRun: boolean): DiskCleanupReport => ({
+    at: now(),
+    dry_run: dryRun,
+    trigger: "manual",
+    bytes: 3_435_973_837,
+    categories: [
+      {
+        category: "build_output",
+        enabled: true,
+        items: [
+          { path: "/var/lib/colonizer/worktrees/acme/webshop/old98765/target", bytes: 2_899_102_924, colony: "old98765" },
+          { path: "/var/lib/colonizer/worktrees/acme/design-system/merge5678/node_modules", bytes: 536_870_913, colony: "merge5678" },
+        ],
+        count: 2,
+        bytes: 3_435_973_837,
+        held: [{ path: "/var/lib/colonizer/worktrees/acme/api/stop4321", reason: "unpushed-commits" }],
+      },
+      { category: "worktrees", enabled: true, items: [], count: 0, bytes: 0 },
+      { category: "microvms", enabled: true, items: [], count: 0, bytes: 0, note: "microVM images are kept: msb has no prune that can tell which images a colony still needs" },
+      { category: "archives", enabled: false, items: [], count: 0, bytes: 0 },
+      { category: "host_paths", enabled: false, items: [], count: 0, bytes: 0 },
+    ],
+  });
+  let mergeLoop: MergeLoopView = { settings: defaultMergeLoopSettings(), next_run_at: null, running: false, writes_blocked: true, repos: {}, last_report: null, history: [] };
   const loopOf = (body: NewLoop, id: string, created: string, runs = 0): Loop => ({
     id,
     name: body.name,
@@ -2241,6 +2418,60 @@ export function createMockApi(): Api {
     ended_reason: null,
     created_at: created,
   });
+
+  // The built-in TypeScript any loop: off, with an empty allowlist, and one sample report and a
+  // short history so the demo has a trend to draw.
+  const tsAnySample: TsAnyReport = {
+    id: "tsa_demo01",
+    started_at: ago(60 * 7),
+    finished_at: ago(60 * 7 - 1),
+    dry_run: true,
+    trigger: "manual",
+    blocked: false,
+    repos: [
+      {
+        repo: "acme/webshop",
+        sha: "4f2c9a1",
+        typescript: true,
+        method: "token_scan",
+        method_note: "token scan: node_modules/typescript is absent and offline installs are off",
+        ts_version: null,
+        total: 57,
+        implicit: null,
+        as_casts: 12,
+        suppressions: 3,
+        ts_files: 214,
+        forms: { annotation: 31, as: 12, array: 6, record: 5, type_argument: 3 },
+        modules: [
+          { module: "src/api", explicit: 24, files: 5 },
+          { module: "src/checkout", explicit: 17, files: 4 },
+          { module: "src/lib", explicit: 9, files: 3 },
+        ],
+        files: [{ path: "src/api/client.ts", module: "src/api", explicit: 11, implicit: null, as_casts: 2, suppressions: 0 }],
+        previous: [61, 64],
+        notes: [],
+        error: null,
+      },
+    ],
+    total: 57,
+    dispatched: [{ repo: "acme/webshop", module: "src/api", session: null, title: "TypeScript: remove any in src/api (20 of 24)", occurrences: 20, module_total: 24 }],
+    skipped: [],
+    checks: [],
+    attention: [],
+    note: null,
+  };
+  let tsAnyLoop: TsAnyLoop = {
+    name: "TypeScript: remove any",
+    settings: { enabled: false, allow: [], cadence: { every: "daily", hour: 7, minute: 43 }, batch_cap: 20, max_per_run: 3, cooldown_hours: 20, implicit: false, offline_install: true, autopilot: true },
+    next_run_at: null,
+    running: false,
+    node: true,
+    blocked: false,
+    last_report: tsAnySample,
+    history: [64, 61, 57].reverse().map((total, i) => ({ id: `tsa_h${i}`, at: ago(60 * 24 * i + 60 * 7), trigger: "schedule", total, totals: { "acme/webshop": total }, dispatched: 1, skipped: 0, flagged: 0, summary: `1 TypeScript repository: ${total} explicit any` })),
+    attention: [],
+    trend: {},
+  };
   /** The first time `cadence` fires after `from`, in UTC — the server's rule, month-end clamp included. */
   const nextRun = (cadence: RedTeamCadence, from: Date): string => {
     const at = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d, cadence.hour, cadence.minute));
@@ -2274,6 +2505,7 @@ export function createMockApi(): Api {
       model: body.model ?? null,
       subagent_model: body.subagent_model ?? null,
       autofix: body.autofix ?? false,
+      preset: body.preset ?? "general",
       cadence: body.cadence,
       enabled: body.enabled ?? true,
       next_run_at: nextRun(body.cadence, new Date()),
@@ -2596,8 +2828,8 @@ export function createMockApi(): Api {
     pushSubscriptions: () => later(() => [...pushSubs].sort((a, b) => b.created_at - a.created_at)),
     subscribePush: async (body) => {
       await sleep(300);
-      // The server answers 400 with a message for anything short of a full subscription plus a
-      // label; the endpoint host is all the list ever shows of it.
+      // The server answers 400 with a message for anything short of a full subscription; a blank
+      // label becomes the default, and the endpoint host is all the list ever shows of it.
       const endpoint = (() => {
         try {
           return new URL(body?.endpoint ?? "").host;
@@ -2605,10 +2837,17 @@ export function createMockApi(): Api {
           return null;
         }
       })();
-      if (!body || !endpoint || !body.keys?.p256dh || !body.keys?.auth || !body.label?.trim()) {
-        throw new ApiError("the subscription needs an endpoint, its p256dh and auth keys, and a label", 400);
+      if (!body || !endpoint || !body.keys?.p256dh || !body.keys?.auth) {
+        throw new ApiError("the subscription needs an endpoint and its p256dh and auth keys", 400);
       }
-      const row: PushSubscriptionSummary = { id: `push_${mockId()}`, label: body.label.trim(), created_at: Math.floor(Date.now() / 1000), endpoint_host: endpoint };
+      const row: PushSubscriptionSummary = {
+        id: `push_${mockId()}`,
+        label: pushLabel(body.label),
+        created_at: Math.floor(Date.now() / 1000),
+        endpoint_host: endpoint,
+        last_seen: null,
+        prefs: defaultPushPrefs(),
+      };
       pushSubs.push(row);
       return clone(row);
     },
@@ -2616,6 +2855,50 @@ export function createMockApi(): Api {
       await sleep(200);
       const at = pushSubs.findIndex((row) => row.id === id);
       if (at >= 0) pushSubs.splice(at, 1);
+    },
+    updatePushSubscription: async (id, body) => {
+      await sleep(200);
+      const row = pushSubs.find((candidate) => candidate.id === id);
+      if (!row) throw new ApiError("no such subscription", 404);
+      if (body.prefs !== undefined) {
+        // Mirrors Prefs::validate (crates/colonizer/src/push.rs): the prefs arrive wholesale and
+        // are checked as a whole before any is kept.
+        const { events, scope, quiet, utc_offset, tz } = body.prefs;
+        const bad = (why: string) => new ApiError(why, 400);
+        if (events && Object.keys(events).some((event) => !(event in defaultPushPrefs().events))) throw bad("unknown event in prefs");
+        if (scope && (scope.length > 50 || scope.some((entry) => !entry || entry.length > 200 || /\s/.test(entry) || entry.split("/").length > 2))) {
+          throw bad("a scope entry is an org or an org/repo: 1..=200 characters, no whitespace, one slash at most");
+        }
+        if (
+          quiet &&
+          (!Number.isInteger(quiet.start) || !Number.isInteger(quiet.end) || quiet.start === quiet.end || quiet.start < 0 || quiet.end < 0 || quiet.start > 1439 || quiet.end > 1439)
+        ) {
+          throw bad("quiet hours are two different minutes since midnight, 0..1440");
+        }
+        if (typeof utc_offset === "number" && Math.abs(utc_offset) > 840) throw bad("the utc offset is more than 840 minutes");
+        if (typeof tz === "string" && tz.length > 64) throw bad("the timezone name is more than 64 characters");
+        row.prefs = mergePushPrefs(body.prefs);
+      }
+      if (body.label !== undefined) row.label = pushLabel(body.label);
+      return clone(row);
+    },
+    testPushSubscription: async (id) => {
+      await sleep(250);
+      if (!pushSubs.some((candidate) => candidate.id === id)) throw new ApiError("no such device", 404);
+      return { sent: true };
+    },
+    pushPresence: async (body) => {
+      // The endpoint arrives whole; the list only keeps its host, so match on that like the server.
+      const host = (() => {
+        try {
+          return new URL(body?.endpoint ?? "").host;
+        } catch {
+          return null;
+        }
+      })();
+      const row = pushSubs.find((candidate) => candidate.endpoint_host === host);
+      if (!row) throw new ApiError("this endpoint is not subscribed", 404);
+      row.last_seen = Math.floor(Date.now() / 1000);
     },
     remote: () => later(() => remoteState),
     setRemote: async (enabled) => {
@@ -2670,6 +2953,41 @@ export function createMockApi(): Api {
       remotePairingState.owner = null;
       remotePairingState.pending = [];
       logActivity({ kind: "remote.unpair", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+    },
+    // Add your phone (issue #746): a fresh invite each call; the relay origin tracks the remote
+    // switch, and the lan origin is plain http so the insecure-origin warning has a real case. The
+    // mock has no phone to scan with, so a minted invite shows up as one phone waiting for a code
+    // ("123 456"), which confirming turns into a paired phone.
+    phones: () => later(() => clone(phoneState)),
+    phoneInvite: async () => {
+      await sleep(250);
+      phoneState.pending = [{ id: `ph_${mockId()}`, label: "iPhone", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
+      return clone({
+        code: `${mockId()}${mockId()}`,
+        expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+        ttl_secs: 300,
+        origins: [
+          remoteState.enabled
+            ? { kind: "relay" as const, url: `https://${remoteHost}`, reachable: true, secure: true, note: null }
+            : { kind: "lan" as const, url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" },
+        ],
+      });
+    },
+    confirmPhone: async (code) => {
+      await sleep(250);
+      const waiting = phoneState.pending[0];
+      if (!waiting || code.replace(/\D/g, "") !== "123456") throw new ApiError("no phone is waiting with that code: it is wrong, expired or already used", 404);
+      phoneState.pending = [];
+      phoneState.devices.push({ id: `dev_${mockId()}`, label: waiting.label, paired_at: now() });
+      return { label: waiting.label };
+    },
+    rejectPhone: async (id) => {
+      await sleep(150);
+      phoneState.pending = phoneState.pending.filter((p) => p.id !== id);
+    },
+    revokePhone: async (id) => {
+      await sleep(150);
+      phoneState.devices = phoneState.devices.filter((d) => d.id !== id);
     },
     tokens: () => later(() => apiTokens.map(clone)),
     createToken: async (body) => {
@@ -2743,7 +3061,13 @@ export function createMockApi(): Api {
       const at = fleetPending.findIndex((row) => row.id === id);
       if (at < 0) throw new ApiError("no such pending request", 404);
       const [row] = fleetPending.splice(at, 1);
-      const member: FleetMember = { id: row.id, name: row.name, url: row.url, joined_at: now() };
+      const member: FleetMember = {
+        id: row.id,
+        name: row.name,
+        url: row.url,
+        joined_at: now(),
+        health: { state: "unknown", code: "not_checked", reason: "Not checked yet", hint: "open the cockpit or wait for the next poll" },
+      };
       fleetMembers.push(member);
       return { member: clone(member) };
     },
@@ -2775,7 +3099,7 @@ export function createMockApi(): Api {
       if (Date.now() - Date.parse(fleetJoining.started_at) > 6000) {
         // The simulated owner has approved: the pairing completes and the fleet token arrives on
         // the joining side, where nothing here reads it.
-        fleetMembership = { owner_url: fleetJoining.owner_url, member_id: `mem_${mockId()}`, joined_at: now() };
+        fleetMembership = { owner_url: fleetJoining.owner_url, member_id: `mem_${mockId()}`, joined_at: now(), history_sync: false };
         fleetJoining = null;
         return { status: "joined" as const };
       }
@@ -2789,6 +3113,79 @@ export function createMockApi(): Api {
       await sleep(250);
       if (!fleetMembership) throw new ApiError("not a member of any fleet", 409);
       fleetMembership = null;
+    },
+    fleetSyncPreview: async (): Promise<FleetSyncPreview> => {
+      await sleep(200);
+      if (!fleetMembership) throw new ApiError("this mothership has not joined a fleet", 409);
+      return {
+        owner_url: fleetMembership.owner_url,
+        colonies: 42,
+        payloads: 118,
+        payload_bytes: 37 * 1024 ** 2,
+        omitted_payloads: 0,
+        row_bytes: 96 * 1024,
+        total_bytes: 37 * 1024 ** 2 + 96 * 1024,
+        pending_colonies: fleetMembership.history_sync ? 0 : 42,
+        pending_bytes: fleetMembership.history_sync ? 0 : 37 * 1024 ** 2 + 96 * 1024,
+        includes: "each finished colony's record and its event, harness and gateway logs",
+        excludes: "running colonies, transcripts, stats, settings, secrets and tokens",
+      };
+    },
+    setFleetHistorySync: async (enabled): Promise<FleetSyncStatus> => {
+      await sleep(200);
+      if (!fleetMembership) throw new ApiError("this mothership has not joined a fleet", 409);
+      fleetMembership = { ...fleetMembership, history_sync: enabled };
+      return {
+        member: true,
+        consent: enabled,
+        enabled,
+        status: enabled ? "synced" : "consent_required",
+        detail: null,
+        acknowledged: enabled ? 42 : 0,
+        retired: [],
+        last_drain_at: enabled ? now() : null,
+        last_synced_at: enabled ? now() : null,
+        next_attempt_at: null,
+      };
+    },
+    fleetHistory: async (q = {}): Promise<FleetHistoryPage> => {
+      await sleep(200);
+      const day = (v: string | undefined, end: boolean) => (v ? Date.parse(v.length === 10 ? `${v}T${end ? "23:59:59.999" : "00:00:00"}Z` : v) : null);
+      const since = day(q.since, false);
+      const until = day(q.until, true);
+      const hits = fleetHistoryRows.filter((r) => {
+        const at = Date.parse(r.record.updated_at);
+        return (!q.member || r.member_id === q.member) && (!q.repo || r.record.repo === q.repo) && (!q.status || r.record.status === q.status) &&
+          (since == null || at >= since) && (until == null || at <= until);
+      });
+      const start = q.cursor ? hits.findIndex((r) => r.key === q.cursor) + 1 : 0;
+      if (q.cursor && start === 0) throw new ApiError("`cursor` names no entry in this list", 400);
+      const end = Math.min(start + (q.limit ?? 20), hits.length);
+      const members = [...new Map(fleetHistoryRows.map((r) => [r.member_id, { id: r.member_id, name: r.member_name, removed: r.member_removed }])).values()];
+      return clone({
+        colonies: hits.slice(start, end),
+        next_cursor: end < hits.length ? hits[end - 1].key : null,
+        stats: {
+          total: fleetTotals(hits),
+          members: members.map((m) => ({ member_id: m.id, name: m.name, removed: m.removed, ...fleetTotals(hits.filter((r) => r.member_id === m.id)) })).filter((m) => m.colonies > 0),
+          repos: [...new Set(hits.map((r) => r.record.repo))].sort().map((repo) => ({ repo, ...fleetTotals(hits.filter((r) => r.record.repo === repo)) })),
+        },
+        members,
+        repos: [...new Set(fleetHistoryRows.map((r) => r.record.repo))].sort(),
+        retention_days: 90,
+      });
+    },
+    fleetHistoryEntry: async (member, rowId) => {
+      await sleep(150);
+      const row = fleetHistoryRows.find((r) => r.member_id === member && r.id === rowId);
+      if (!row) throw new ApiError("no such fleet history entry", 404);
+      return clone({ ...row, logs: row.payloads.map((p) => ({ ...p, omitted: false, stored: true })) });
+    },
+    fleetHistoryLog: async (member, rowId, name) => {
+      await sleep(150);
+      const row = fleetHistoryRows.find((r) => r.member_id === member && r.id === rowId);
+      if (!row || !row.payloads.some((p) => p.name === name)) throw new ApiError("this colony has no such stored log", 404);
+      return `{"type":"status","status":"running"}\n{"type":"status","status":"${row.record.status}"}\n`;
     },
     setUsage: async (enabled) => {
       await sleep(250);
@@ -2825,6 +3222,31 @@ export function createMockApi(): Api {
         200,
       ),
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
+    sessionCommits: () => later(() => ({ commits: [] })),
+    sessionDiff: (id) =>
+      later(() => {
+        const s = sessions.get(id)?.session;
+        // No pull request, no card to fill: an empty answer, where the real route would 409 with no worktree.
+        if (!s?.pr_url) return { id, repo: s?.repo ?? "", base: s?.base ?? null, files: [], added: 0, removed: 0, diff: "", truncated: false };
+        const files = [
+          { path: "web/src/cockpit/Inspector.tsx", added: 41, removed: 6 },
+          { path: "web/src/api.ts", added: 8, removed: 0 },
+          { path: "web/src/types.ts", added: 12, removed: 1 },
+          { path: "web/src/cockpit/Inspector.test.tsx", added: 55, removed: 2 },
+          { path: "docs/gaps.md", added: 1, removed: 1 },
+          { path: "changelog.d/611.added.md", added: 4, removed: 0 },
+        ];
+        return {
+          id,
+          repo: s.repo,
+          base: s.base,
+          files,
+          added: files.reduce((n, f) => n + f.added, 0),
+          removed: files.reduce((n, f) => n + f.removed, 0),
+          diff: "",
+          truncated: false,
+        };
+      }),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) =>
@@ -2858,6 +3280,7 @@ export function createMockApi(): Api {
       // means the session fell back to the publish module's setting and reports none of its own.
       autofix: body.autofix,
       automerge: body.automerge,
+      supply_chain: body.supply_chain ?? null,
       parent: after?.id ?? null,
       base: after?.branch ?? "main",
     },
@@ -2878,6 +3301,8 @@ export function createMockApi(): Api {
       colonyActivity("colony.resume", s.session);
       return clone(s.session);
     },
+    // Mock colonies never suspend, so there is nothing to warm (#701).
+    prewarmSession: async () => {},
     publishSession: async (id) => {
       const s = find(id);
       if (!canPublish(s.session)) throw new ApiError("this colony cannot be published", 409);
@@ -2913,6 +3338,21 @@ export function createMockApi(): Api {
       logActivity({ kind: "outcome.stopped", actor: "you", via: "cockpit", org: s.session.org, repo: s.session.repo, issue: s.session.issue, colony: s.session.id, title: s.session.issue_title });
       s.log("microVM stopped and removed; the worktree was kept");
       return { ...clone(s.session), result: "stopped" };
+    },
+    keepSession: async (id) => {
+      await sleep(200);
+      const s = find(id);
+      const superseded = s.session.superseded;
+      // Like the server: 409 for a colony that is not superseded (or was kept already).
+      if (!superseded || superseded.kept) throw new ApiError("this colony is not superseded; there is nothing to keep", 409);
+      s.patch({ superseded: { ...superseded, kept: true } });
+      s.log("kept: this colony will start even though a merged pull request covered its work");
+      return clone(s.session);
+    },
+    // The colony was looked at (issue #744): it leaves the badge, like on the server.
+    seenSession: async (id) => {
+      await sleep(120);
+      find(id).patch({ unseen_failure: false });
     },
     deleteSession: async (id, opts) => {
       const s = find(id);
@@ -2994,6 +3434,8 @@ export function createMockApi(): Api {
       worktrees_bytes: 3_221_225_472,
       repos_bytes: 1_073_741_824,
       sessions_bytes: 268_435_456,
+      // The two seeded archive bundles (issue #496), under <data_dir>/archive.
+      archive_bytes: 5_242_880 + 2_621_440,
       // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
       microsandbox_bytes: 2_147_483_648,
     },
@@ -3194,6 +3636,10 @@ export function createMockApi(): Api {
         : body.quota.url.trim()
           ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim() }
           : null,
+    // Omitted keeps the saved mark; the model map and disabled tools follow the same convention.
+    trusted: body.trusted ?? existing?.trusted ?? false,
+    model_map: body.model_map ?? existing?.model_map ?? {},
+    disabled_tools: body.disabled_tools ?? existing?.disabled_tools ?? [],
     in_flight: existing?.in_flight ?? 0,
     queued: existing?.queued ?? 0,
     usage: existing?.usage ?? zeroUsage(),
@@ -3209,6 +3655,12 @@ export function createMockApi(): Api {
       if (index < 0) throw new ApiError("no such provider", 404);
       providers.splice(index, 1);
       return { ok: true };
+    },
+    // The mock never runs a provider dry, so it has no out-of-quota cards to answer (issue #767).
+    attention: async () => ({ quota_cards: [] }),
+    quotaAction: async (provider, body) => {
+      if (!providers.some((p) => p.id === provider)) throw new ApiError("no such provider", 404);
+      return { action: body.action, provider, colonies: [], failed: [] };
     },
     providerHealth: async (id) => {
       const provider = providers.find((p) => p.id === id);
@@ -3782,6 +4234,8 @@ export function createMockApi(): Api {
     model: body.model ?? null,
     subagent_model: body.subagent_model ?? null,
     schedule_id: null,
+    preset: body.preset ?? "general",
+    prescan: null,
       };
       redRuns.unshift(run);
       return clone(run);
@@ -3789,6 +4243,36 @@ export function createMockApi(): Api {
     loops: () => later(() => loopList.map(clone)),
     // The mock has no train driving anything; an empty answer keeps the cockpit block hidden.
     mergeTrain: () => later(() => ({ repos: [] })),
+    supplyChainLoop: () => later(() => clone(supplyLoop)),
+    saveSupplyChainLoop: async (settings) => {
+      await sleep(150);
+      if (settings.cadence.every === "interval" && settings.cadence.minutes < 60) throw new ApiError("the supply-chain loop runs at most hourly", 400);
+      const active = settings.enabled && settings.allow.length > 0;
+      supplyLoop = { ...supplyLoop, settings: clone(settings), next_run_at: active ? new Date(Date.now() + 6 * 3_600_000).toISOString() : null };
+      return clone(supplyLoop);
+    },
+    runSupplyChainLoop: async (body) => {
+      await sleep(400);
+      const report: SupplyChainReport = { ...supplySample, id: `scr_${Math.random().toString(16).slice(2, 8)}`, dry_run: body.dry_run, trigger: "manual", started_at: now(), finished_at: now() };
+      // The mock never starts colonies: a real run says what it would have started, like a dry run.
+      report.dispatched = report.dispatched.map((d) => ({ ...d, session: null }));
+      if (!body.dry_run) supplyLoop = { ...supplyLoop, last_report: report, attention: report.attention };
+      return clone(report);
+      },
+    // The merge-train loop (issue #754): off, like a fresh install; a dry run reports nothing to do.
+    mergeLoop: () => later(() => clone(mergeLoop)),
+    saveMergeLoop: async (settings) => {
+      await sleep(150);
+      mergeLoop = { ...mergeLoop, settings: clone(settings), next_run_at: settings.enabled ? new Date(Date.now() + 60 * 60_000).toISOString() : null };
+      return clone(mergeLoop);
+    },
+    runMergeLoop: async (dryRun) => {
+      await sleep(300);
+      const at = now();
+      const report: MergeLoopReport = { started_at: at, finished_at: at, dry_run: true, forced_dry_run: !dryRun, stopped: null, api_calls: 0, summary: "dry run: would merge 0 · would update 0 · red 0 · would dispatch redo 0 · skipped 0", lines: [], repos: [] };
+      mergeLoop = { ...mergeLoop, last_report: report, history: [report, ...mergeLoop.history] };
+      return { started: false, report: clone(report) };
+    },
     createLoop: async (body) => {
       await sleep(200);
       const l = loopOf(body, `loop_${Math.random().toString(16).slice(2, 8)}`, now());
@@ -3799,6 +4283,18 @@ export function createMockApi(): Api {
       await sleep(150);
       const at = loopList.findIndex((l) => l.id === id);
       if (at < 0) throw new ApiError("no such loop", 404);
+      if (loopList[at].kind === "disk_cleanup") {
+        const was = loopList[at];
+        const enabled = body.enabled ?? was.enabled;
+        loopList[at] = {
+          ...was,
+          cadence: body.cadence,
+          enabled,
+          next_run_at: enabled ? new Date(Date.now() + (body.cadence.every === "interval" ? body.cadence.minutes : 60) * 60_000).toISOString() : null,
+          disk_cleanup: { ...was.disk_cleanup!, settings: body.disk_cleanup ?? was.disk_cleanup!.settings },
+        };
+        return clone(loopList[at]);
+      }
       loopList[at] = { ...loopOf(body, id, loopList[at].created_at, loopList[at].runs), last_run: loopList[at].last_run };
       return clone(loopList[at]);
     },
@@ -3813,7 +4309,36 @@ export function createMockApi(): Api {
       if (!l) throw new ApiError("no such loop", 404);
       throw new ApiError("the mock mothership does not launch colonies from loops", 409);
     },
+    runDiskCleanup: async (id, dryRun) => {
+      await sleep(300);
+      const l = loopList.find((x) => x.id === id);
+      if (!l?.disk_cleanup) throw new ApiError("no such loop", 404);
+      const report = cleanupReport(dryRun);
+      if (dryRun) l.disk_cleanup.previewed_at = report.at;
+      else {
+        l.runs += 1;
+        l.disk_cleanup.history.unshift(report);
+      }
+      return clone(report);
+    },
+    tsAnyLoop: () => later(() => clone(tsAnyLoop)),
+    saveTsAnyLoop: async (settings) => {
+      await sleep(150);
+      if (settings.cadence.every === "interval" && settings.cadence.minutes < 60) throw new ApiError("the TypeScript any loop runs at most hourly", 400);
+      const active = settings.enabled && settings.allow.length > 0;
+      tsAnyLoop = { ...tsAnyLoop, settings: clone(settings), next_run_at: active ? new Date(Date.now() + 6 * 3_600_000).toISOString() : null };
+      return clone(tsAnyLoop);
+    },
+    runTsAnyLoop: async (body) => {
+      await sleep(400);
+      const report: TsAnyReport = { ...tsAnySample, id: `tsa_${Math.random().toString(16).slice(2, 8)}`, dry_run: body.dry_run, trigger: "manual", started_at: now(), finished_at: now() };
+      // The mock never starts colonies: a real run says what it would have started, like a dry run.
+      report.dispatched = report.dispatched.map((d) => ({ ...d, session: null }));
+      if (!body.dry_run) tsAnyLoop = { ...tsAnyLoop, last_report: report };
+      return clone(report);
+    },
     loopRuns: (id) => later(() => [...sessions.values()].map((s) => s.session).filter((s) => s.origin === `loop:${id}`).map(clone)),
+    ...mockDocsLoop(now),
     redTeamSchedules: () => later(() => redSchedules.map(clone)),
     createRedTeamSchedule: async (body) => {
       await sleep(250);
@@ -3897,7 +4422,7 @@ export function createMockApi(): Api {
 const mockKeychain = { available: true, backend: "macOS Keychain", reason: null, checked_at: new Date().toISOString() };
 const mockSecrets: import("./types").SecretRow[] = [
   { id: "github-token", label: "GitHub token", group: "connections", used_by: "Issues, pushes and pull requests", icon: "github", location: "file", env: null, env_set: false, updated_at: "2026-09-20T10:00:00Z", editable: true, colonies: { kind: "none", hosts: [] } },
-  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "keychain", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
+  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "file", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: false, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
   { id: "api-token", label: "Cockpit API token", group: "connections", used_by: "The cockpit sign-in and the colonizer CLI", icon: "key", location: "file", env: null, env_set: false, updated_at: null, editable: false, colonies: { kind: "none", hosts: [] } },
   { id: "provider-keys:zai", label: "Z.AI", group: "providers", used_by: "Models routed to zai", icon: "plug", location: "file", env: null, env_set: false, updated_at: "2026-09-17T04:00:00Z", editable: true, colonies: { kind: "gateway", hosts: [] } },
   { id: "provider-keys:bailian", label: "Alibaba Bailian", group: "providers", used_by: "Models routed to bailian", icon: "plug", location: "unset", env: null, env_set: false, updated_at: null, editable: true, colonies: { kind: "gateway", hosts: [] } },

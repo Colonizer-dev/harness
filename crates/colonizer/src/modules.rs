@@ -4,6 +4,7 @@
 use crate::{
     ApiResult, App, Shared, client_error,
     config::{ModuleChoice, Settings},
+    sandbox::Secret,
 };
 use axum::{
     Json,
@@ -41,6 +42,9 @@ pub struct AgentModule {
     pub dir: PathBuf,
     pub entry: Vec<String>,
     pub needs_claude: bool,
+    /// The module's declared secrets for a [`VENDOR_KEYS`] host: what a stored vendor key is pushed
+    /// into the colony under (issue #629).
+    pub vendor_secrets: Vec<DeclaredSecret>,
     pub schema: Value,
     /// The manifest's `requires` declaration; third-party modules may omit the section.
     pub requires: Requires,
@@ -78,7 +82,9 @@ pub struct Pin {
 
 /// The fixed network hosts an agent module's runner needs, declared under `egress` in `module.json`
 /// as four optional arrays of bare hostnames (a leading `*.` wildcard allowed): the vendor's API,
-/// login and telemetry hosts, and everything else fixed. The #304 allowlist is this plus the task's.
+/// login and telemetry hosts, and everything else fixed. A colony in `allowlist` mode adds `api`,
+/// `auth` and `extra` to its allow list (#601); `telemetry` is never added — an operator who wants
+/// a telemetry host lists it in `egress_allow` themselves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Egress {
     pub api: Vec<String>,
@@ -147,6 +153,56 @@ fn parse_egress(manifest: &Value) -> Result<Option<Egress>, String> {
     }))
 }
 
+/// One entry of a manifest's `secrets` section, as it names it: the env vars the runner reads the
+/// key from and the hosts each is good for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeclaredSecret {
+    pub env: Vec<String>,
+    pub hosts: Vec<String>,
+}
+
+/// The vendors whose key a module's runner may need on the wire itself (issue #629), by the host a
+/// manifest declares: the gateway provider id whose stored key applies, and the mothership env to
+/// fall back to when it has none. Keyed by host rather than module id, so a third-party module that
+/// declares the same host gets the same push.
+pub(crate) const VENDOR_KEYS: &[(&str, &str, &str)] = &[
+    ("api.openai.com", "openai", "OPENAI_API_KEY"),
+    ("api.x.ai", "xai-grok", "XAI_API_KEY"),
+];
+
+/// The secrets a module's colonies boot with for the gateway's vendor keys (issue #629): the stored
+/// gateway key of the provider each declared host maps to, else the mothership env named for it,
+/// under the module's own env names and hosts. Nothing configured means no secret — never a boot
+/// failure. `stored` and `env` are injected lookups so the unit test needs no process state, and
+/// `taken` holds env names a colony secret already grants, which keep the operator's own value.
+pub fn vendor_boot_secrets(
+    module: &AgentModule,
+    stored: &dyn Fn(&str) -> Option<String>,
+    env: &dyn Fn(&str) -> Option<String>,
+    taken: &[String],
+) -> Vec<Secret> {
+    let mut out = Vec::new();
+    for (host, provider, fallback) in VENDOR_KEYS {
+        let Some(declared) = module.vendor_secrets.iter().find(|s| s.hosts.iter().any(|h| h == host)) else {
+            continue;
+        };
+        let Some(value) = stored(provider).or_else(|| env(fallback).filter(|v| !v.trim().is_empty())) else {
+            continue;
+        };
+        for name in &declared.env {
+            if taken.contains(name) {
+                continue;
+            }
+            out.push(Secret {
+                env: name.clone(),
+                value: value.clone(),
+                hosts: declared.hosts.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// A bare hostname: labels of letters, digits and hyphens, none empty or hyphen-led; no scheme,
 /// port or path, and exactly one leading `*.` wildcard allowed.
 fn is_bare_hostname(host: &str) -> bool {
@@ -208,10 +264,10 @@ fn parse_requires(manifest: &Value) -> Result<Requires, String> {
     })
 }
 
-/// The Claude Code build the harness stages as `bin/claude-guest`, pinned in vendor/claude-code.lock
+/// The Claude Code build the harness stages as `bin/claude-guest`, pinned in crates/colonizer/claude-code.lock
 /// (same six columns as images.lock: name, version, platform, kind, sha256, url). Compiled in, so
 /// the pin always matches the harness that was built.
-const CLAUDE_LOCK: &str = include_str!("../../../vendor/claude-code.lock");
+const CLAUDE_LOCK: &str = include_str!("../claude-code.lock");
 
 /// The version the lock pins the Claude Code guest build to: its `agent` rows, whose version is the
 /// same on both platforms. `None` when the lock names no build, which only a hand-edited tree causes.
@@ -234,7 +290,7 @@ pub struct StagedBinary {
     pub version: Option<String>,
 }
 
-/// What the harness stages, read off the config: `claude`, at the version vendor/claude-code.lock
+/// What the harness stages, read off the config: `claude`, at the version crates/colonizer/claude-code.lock
 /// pins when the vendored guest build is present.
 pub fn harness_staged_binaries(cfg: &crate::config::Settings) -> Vec<StagedBinary> {
     vec![StagedBinary {
@@ -343,6 +399,7 @@ impl AgentModule {
             dir: PathBuf::new(),
             entry: Vec::new(),
             needs_claude: false,
+            vendor_secrets: Vec::new(),
             schema: json!({}),
             requires: Requires::default(),
             egress: None,
@@ -376,6 +433,11 @@ impl AgentModule {
         self
     }
 
+    pub(crate) fn vendor_secrets(mut self, vendor_secrets: Vec<DeclaredSecret>) -> Self {
+        self.vendor_secrets = vendor_secrets;
+        self
+    }
+
     pub(crate) fn schema(mut self, schema: Value) -> Self {
         self.schema = schema;
         self
@@ -383,6 +445,11 @@ impl AgentModule {
 
     pub(crate) fn requires(mut self, requires: Requires) -> Self {
         self.requires = requires;
+        self
+    }
+
+    pub(crate) fn egress(mut self, egress: Option<Egress>) -> Self {
+        self.egress = egress;
         self
     }
 
@@ -473,6 +540,7 @@ fn read_agent(path: &FsPath) -> Result<AgentModule, String> {
         description: manifest["description"].as_str().unwrap_or_default().to_string(),
         entry: entry_cmd,
         needs_claude: requires.binaries.iter().any(|binary| binary == "claude") || secrets.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+        vendor_secrets: vendor_secrets(&manifest),
         schema: normalize_schema(&manifest["settings"]),
         dir: path.parent().map(FsPath::to_path_buf).unwrap_or_default(),
         requires,
@@ -491,6 +559,36 @@ fn normalize_schema(value: &Value) -> Value {
     } else {
         json!({"type": "object", "properties": {}})
     }
+}
+
+/// The manifest's `secrets` entries that name a [`VENDOR_KEYS`] host — the ones a stored vendor key
+/// is pushed under (issue #629). Anything else a module declares for its own hosts is not the
+/// gateway's to fill.
+fn vendor_secrets(manifest: &Value) -> Vec<DeclaredSecret> {
+    let strings = |value: &Value| {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+    manifest["secrets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|secret| DeclaredSecret {
+            env: strings(&secret["env"]),
+            hosts: strings(&secret["hosts"]),
+        })
+        .filter(|secret| {
+            secret
+                .hosts
+                .iter()
+                .any(|host| VENDOR_KEYS.iter().any(|(known, _, _)| known == host))
+        })
+        .collect()
 }
 
 pub struct Provider {
@@ -560,6 +658,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "description": "When a colony has asked you something and you have not answered within the grace period below, its microVM is torn down to free the slot: the worktree and the agent's session transcript are kept, and answering the question re-boots the colony and continues the conversation where it left off. The question stays open and answerable the whole time. Only agents that can resume their session (Claude Code today) are suspended; anything else keeps running."},
                 "suspend_after_minutes": {"type": "integer", "title": "Suspend waiting colonies after (minutes)", "minimum": 1, "maximum": 1440, "default": 10,
                     "description": "How long a colony keeps its microVM after asking you something before the suspension above stops it. Minimum 1."},
+                "prewarm_timeout_minutes": {"type": "integer", "title": "Pre-warm timeout (minutes)", "minimum": 1, "maximum": 1440, "default": 5,
+                    "description": "When you open a suspended colony's question, the colony is booted for you so the answer lands in a running VM. If no answer arrives within this many minutes of the boot, the colony is suspended again and the slot freed. Minimum 1."},
                 "budget_usd": {"type": "number", "title": "Budget per colony (USD)", "minimum": 0, "default": 0,
                     "description": "Dollars one colony may spend on models in total, Claude and every routed provider together. 0, the default, means unlimited: there is no figure that suits every deployment. Providers need pricing set for their routed tokens to count toward it — a provider without pricing, such as a prepaid token plan, costs nothing here, so hold it to the token budget below instead. When a colony passes the budget its next routed request is refused and the colony is stopped on the host with its worktree kept; raise the budget and press Resume to continue."},
                 "budget_tokens": {"type": "integer", "title": "Token budget per colony", "minimum": 0, "default": 0,
@@ -622,6 +722,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             json!({"type": "object", "properties": {
                 "autopilot": {"type": "boolean", "title": "Open the PR automatically", "description": "Default for new colonies: when the agent finishes cleanly and has written its PR description, push its colonizer/ branch and open the pull request. Can be switched off per colony at launch.", "default": true},
                 "verify": {"type": "string", "title": "Verify completion claims", "description": "Default for new colonies: when an agent finishes cleanly and has written its PR description, the mothership verifies the claim before autopilot publishes — it checks the described files are on the branch and runs the repository's test command in a fresh sandbox. `auto` (the default) resolves the command from package.json, Cargo.toml or a Makefile on the base branch; `none` records the claim as unverifiable without checking; any other string is the test command itself. Can be overridden per colony at launch.", "default": "auto"},
+                "verify_focus": {"type": "string", "title": "Focused checks first", "enum": ["off", "shadow", "act"], "description": "When a diff owes more than one check, the check owning most of the changed files can run first. `shadow` (the default) runs the checks as before and only records, in the data dir's jev_focus.jsonl and the colony's log, which check would have gone first and whether it would have caught the failure sooner; `act` runs it first and stops at its failure; `off` records nothing. A confirmed verdict always needs every check to pass.", "default": "shadow"},
                 "draft": {"type": "boolean", "title": "Open as draft", "default": false},
                 "file_findings": {"type": "boolean", "title": "File validated findings as issues", "description": "When a colony notices a problem outside its task, its orchestrator has it confirmed and files it as an issue on the same repository, labelled colonizer-finding. Open issues with the same title are not filed again, and one colony files at most five.", "default": true},
                 "autofix": {"type": "boolean", "title": "Autofix validated findings", "description": "When a colony files a validated finding, spawn a fix colony for it: a fresh colony whose pull request is reviewed by an independent session before anything merges. Can be switched off per colony at launch.", "default": false},
@@ -801,11 +902,11 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
 
 #[derive(Deserialize)]
 pub struct UpdateModule {
-    provider: String,
+    pub(crate) provider: String,
     #[serde(default = "yes")]
-    enabled: bool,
+    pub(crate) enabled: bool,
     #[serde(default)]
-    settings: Map<String, Value>,
+    pub(crate) settings: Map<String, Value>,
 }
 
 fn yes() -> bool {
@@ -878,7 +979,7 @@ fn check_plugin_dirs(cfg: &Settings, schema: &Value, settings: &Map<String, Valu
 /// Keeps known keys (plus anything already stored) and checks types, enums and ranges. An unknown
 /// key is refused naming it and what the provider does take, never dropped: a setting the operator
 /// sent and lost to a typo would otherwise read as the default silently (#326).
-fn validate_settings(
+pub(crate) fn validate_settings(
     provider: &str,
     schema: &Value,
     input: &Map<String, Value>,
@@ -1083,6 +1184,114 @@ mod tests {
         write(r#"{"id": "x", "entry": ["node", "runner.mjs"]}"#);
         assert!(!read_agent(&path).unwrap().loop_tools);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn manifests_that_declare_a_vendor_host_expose_its_secret_for_the_boot_push() {
+        // The runner-wire agents (issue #629) each name one vendor host in their manifest's
+        // `secrets`: that declaration is the whole trigger for pushing a gateway key, so
+        // discovery must distil exactly the vendor-facing entries from whatever else the
+        // manifest grants. An agent without a vendor host stays empty.
+        const CODEX: &str = include_str!("../../../modules/agents/codex/module.json");
+        const GROK: &str = include_str!("../../../modules/agents/grok-build/module.json");
+        const PI: &str = include_str!("../../../modules/agents/pi/module.json");
+        let root = std::env::temp_dir().join(format!("colonizer-vendor-manifests-{}", crate::util::short_id()));
+        for (dir, manifest) in [("codex", CODEX), ("grok-build", GROK), ("pi", PI)] {
+            let dir = root.join("modules/agents").join(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("module.json"), manifest).unwrap();
+            std::fs::write(dir.join("runner.mjs"), "// test fixture").unwrap();
+        }
+        let (modules, problems) = discover_agents(Some(&root));
+        assert!(problems.is_empty(), "{problems:?}");
+        let secrets = |id: &str| {
+            modules
+                .iter()
+                .find(|m| m.id == id)
+                .expect("the manifest is discovered")
+                .vendor_secrets
+                .clone()
+        };
+        assert_eq!(
+            secrets("codex"),
+            vec![DeclaredSecret {
+                env: vec!["CODEX_API_KEY".into()],
+                hosts: vec!["api.openai.com".into()],
+            }],
+            "{:?}",
+            secrets("codex")
+        );
+        assert_eq!(
+            secrets("grok-build"),
+            vec![DeclaredSecret {
+                env: vec!["XAI_API_KEY".into()],
+                hosts: vec!["api.x.ai".into()],
+            }],
+            "{:?}",
+            secrets("grok-build")
+        );
+        assert!(secrets("pi").is_empty(), "pi declares no vendor host");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_vendor_key_is_resolved_stored_first_then_env_and_never_over_a_taken_env() {
+        // `Secret` carries a key value and so has no `Debug`; the push is compared as plain rows.
+        fn rows(secrets: &[Secret]) -> Vec<(&str, &str, Vec<&str>)> {
+            secrets
+                .iter()
+                .map(|s| (s.env.as_str(), s.value.as_str(), s.hosts.iter().map(String::as_str).collect()))
+                .collect()
+        }
+
+        // Plain `fn` items, not closures: a closure literal fixes its argument's lifetime, which the
+        // higher-ranked `Fn(&str)` the lookups are declared with needs.
+        fn stored_openai(id: &str) -> Option<String> {
+            (id == "openai").then(|| "sk-test-stored".to_string())
+        }
+        fn stored_none(_: &str) -> Option<String> {
+            None
+        }
+        fn env_xai_blank(name: &str) -> Option<String> {
+            (name == "XAI_API_KEY").then(|| "  ".to_string())
+        }
+        fn env_xai(name: &str) -> Option<String> {
+            (name == "XAI_API_KEY").then(|| "sk-test-env".to_string())
+        }
+        fn env_none(_: &str) -> Option<String> {
+            None
+        }
+
+        // The push order the colony sees: a stored gateway key wins over the mothership's own env,
+        // a blank or missing stored key falls back to that env, and nothing configured means no
+        // secret — never a boot failure. An env name a colony secret already grants is skipped, so
+        // the operator's own value keeps precedence without a duplicate flag.
+        // The push reads only the manifest's declarations, not the module's id or entry.
+        let module = AgentModule::test("codex").vendor_secrets(vec![
+            DeclaredSecret {
+                env: vec!["CODEX_API_KEY".into()],
+                hosts: vec!["api.openai.com".into()],
+            },
+            DeclaredSecret {
+                env: vec!["XAI_API_KEY".into()],
+                hosts: vec!["api.x.ai".into()],
+            },
+        ]);
+        assert_eq!(
+            rows(&vendor_boot_secrets(&module, &stored_openai, &env_xai_blank, &[])),
+            vec![("CODEX_API_KEY", "sk-test-stored", vec!["api.openai.com"])],
+        );
+
+        // No stored openai key and a blank XAI env: the env fallback only fires on a value.
+        assert_eq!(
+            rows(&vendor_boot_secrets(&module, &stored_none, &env_xai, &[])),
+            vec![("XAI_API_KEY", "sk-test-env", vec!["api.x.ai"])],
+        );
+
+        // Nothing configured anywhere, or the env name taken by a colony secret: silence.
+        assert!(vendor_boot_secrets(&module, &stored_none, &env_none, &[]).is_empty());
+        let taken = ["CODEX_API_KEY".to_string()];
+        assert!(vendor_boot_secrets(&module, &stored_openai, &env_none, &taken).is_empty());
     }
 
     #[test]
@@ -1616,14 +1825,15 @@ mod tests {
         assert_eq!(pin.version, "1.0.34");
         assert_eq!(pin.install.as_deref(), Some("https://x.ai/cli/install.sh"));
         // acp pins a package name that is not a required binary: carried as declared, matched to
-        // no binary by the preflight.
+        // no binary by the preflight. The gemini preset's CLI is fetched by the runner, so the
+        // fetched marker must list it and the preflight must leave it alone.
         const ACP: &str = include_str!("../../../modules/agents/acp/module.json");
         let acp: Value = serde_json::from_str(ACP).unwrap();
         let requires = parse_requires(&acp).unwrap();
         assert_eq!(requires.binaries, ["gemini"]);
         assert_eq!(requires.pins.keys().next().map(String::as_str), Some("@google/gemini-cli"));
         assert!(!requires.pins.contains_key("gemini"), "{:?}", requires.pins);
-        assert!(requires.fetched_by_runner.is_empty());
+        assert_eq!(requires.fetched_by_runner, ["gemini"]);
         // opencode fetches its own binary at runtime, so the preflight must leave it alone.
         const OPENCODE: &str = include_str!("../../../modules/agents/opencode/module.json");
         let opencode: Value = serde_json::from_str(OPENCODE).unwrap();

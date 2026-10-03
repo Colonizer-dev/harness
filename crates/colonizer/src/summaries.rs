@@ -85,7 +85,10 @@ pub fn clean(answer: &str) -> Option<String> {
     while text.ends_with('.') {
         text.pop();
     }
-    let text = text.trim().to_string();
+    // #761: the summary is model output kept in sessions.json and shown on every colony card, so a
+    // credential the model lifted out of an issue is redacted — before the clamp, which could
+    // otherwise cut a token short of the shape the redactor knows.
+    let text = crate::redact::redact_text(text.trim()).into_owned();
     if text.is_empty() {
         return None;
     }
@@ -174,6 +177,16 @@ async fn settings(app: &Shared) -> (bool, Option<Route>) {
     let has_api_key = app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some());
     let candidates: Vec<&str> = candidates.iter().map(String::as_str).collect();
     (true, choose(&summary_model, &candidates, &ids, has_anthropic, has_api_key))
+}
+
+/// Whether a plain Claude model can write summaries on this install: through an Anthropic provider
+/// or a real API key, never the subscription login (see [`choose`]). A switch that would move
+/// `summary_model` onto Claude checks it first (issue #767).
+pub(crate) fn claude_summaries_possible(app: &Shared) -> bool {
+    let has_anthropic = app.providers().iter().any(|p| {
+        crate::providers::split_url(&p.base_url).is_some_and(|(_, host, _, _)| host.eq_ignore_ascii_case(crate::CLAUDE_API_HOST))
+    });
+    has_anthropic || app.claude_cred().is_some_and(|c| api_key_of(&c.value).is_some())
 }
 
 /// The cheap model the install would write summaries with, whether or not summaries are switched
@@ -533,6 +546,11 @@ mod tests {
             Some("Add retries to the gateway")
         );
         assert_eq!(clean("   "), None);
+        // #761: a credential in the model's answer is stored as the mark.
+        assert_eq!(
+            clean("Rotate ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5 in CI").as_deref(),
+            Some("Rotate [REDACTED:github_token] in CI")
+        );
         let long = "word ".repeat(60);
         let out = clean(&long).unwrap();
         assert!(out.chars().count() <= SUMMARY_LIMIT);

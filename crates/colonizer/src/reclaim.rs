@@ -171,7 +171,7 @@ pub fn microsandbox_home() -> Option<PathBuf> {
 
 /// A colony whose work is safely on the remote: a pushed terminal state, or
 /// `NoChanges`, where publish found nothing to push so no unique work exists.
-fn pushed_terminal(s: &Session) -> bool {
+pub(crate) fn pushed_terminal(s: &Session) -> bool {
     matches!(
         s.status,
         SessionStatus::PrOpened | SessionStatus::Merged | SessionStatus::Closed
@@ -215,7 +215,7 @@ impl SweepReport {
 }
 
 /// Reclaim candidates oldest-pushed-first, so a low-disk sweep takes the stalest colonies first.
-fn sweep_candidates(sessions: &[Session], now: DateTime<Utc>, retention_secs: u64) -> Vec<Session> {
+pub(crate) fn sweep_candidates(sessions: &[Session], now: DateTime<Utc>, retention_secs: u64) -> Vec<Session> {
     let mut out: Vec<Session> = sessions
         .iter()
         .filter(|s| reclaim_due(s, now, retention_secs))
@@ -240,20 +240,8 @@ pub async fn sweep_once(app: &Shared, cfg: &ReclaimConfig) -> SweepReport {
     let retention = if low_disk { 0 } else { cfg.retention_secs }; // low disk reclaims regardless of the window
     for s in sweep_candidates(&sessions, Utc::now(), retention) {
         let id = s.id.clone();
-        match lifecycle::cleanup_one(app, &id).await {
-            Ok(s) => {
-                // Manual cleanup leaves the VM to the operator, but the automatic path must not leak one.
-                if let Err(e) = app.execution.remove(&s.sandbox).await {
-                    app.session_log(
-                        &id,
-                        "warn",
-                        format!("automatically reclaimed, but the microVM could not be confirmed removed: {e:#}"),
-                    )
-                    .await;
-                }
-                app.session_log(&id, "info", "automatically reclaimed: its pull request holds the work, so the worktree was removed and the colony is now unresumable".into()).await;
-                report.reclaimed.push(id);
-            }
+        match reclaim_one(app, &id).await {
+            Ok(()) => report.reclaimed.push(id),
             Err(e) => report.failed.push(format!("{id}: {e:#}")),
         }
     }
@@ -262,6 +250,30 @@ pub async fn sweep_once(app: &Shared, cfg: &ReclaimConfig) -> SweepReport {
     report.orphans_held = held;
     report.orphans_removed.extend(sweep_orphan_vms(app).await);
     report
+}
+
+/// Reclaims one colony the way the automatic tick does: its worktree removed through
+/// [`lifecycle::cleanup_one`], its microVM removed too, and the colony's log told why. Shared with
+/// the disk-cleanup loop (disk_cleanup.rs), which reclaims the same candidates on its own cadence.
+pub(crate) async fn reclaim_one(app: &Shared, id: &str) -> anyhow::Result<()> {
+    let s = lifecycle::cleanup_one(app, id).await?;
+    // Manual cleanup leaves the VM to the operator, but the automatic path must not leak one.
+    if let Err(e) = app.execution.remove(&s.sandbox).await {
+        app.session_log(
+            id,
+            "warn",
+            format!("automatically reclaimed, but the microVM could not be confirmed removed: {e:#}"),
+        )
+        .await;
+    }
+    app.session_log(
+        id,
+        "info",
+        "automatically reclaimed: its pull request holds the work, so the worktree was removed and the colony is now unresumable"
+            .into(),
+    )
+    .await;
+    Ok(())
 }
 
 enum OrphanVerdict {
@@ -282,23 +294,38 @@ async fn classify_orphan(wt: &Path, retention_secs: u64) -> OrphanVerdict {
     if age_secs < retention_secs {
         return OrphanVerdict::Skip;
     }
-    let mut cmd = tokio::process::Command::new("git");
+    match work_held(wt, true).await {
+        Some(reason) => OrphanVerdict::Held(reason.into()),
+        None => OrphanVerdict::Reclaimable,
+    }
+}
+
+/// Why a git worktree must be left alone, or `None` when it holds nothing that exists only here:
+/// `dirty` (uncommitted or untracked changes — ignored files do not count), `unpushed-commits` (with
+/// `need_pushed`, commits no remote-tracking ref has), `unreadable-git` when git cannot say. Shared
+/// by the orphan sweep and the disk-cleanup loop.
+pub(crate) async fn work_held(wt: &Path, need_pushed: bool) -> Option<&'static str> {
+    // The clean host default: the orphan's worktree is colony content, so no credential and no
+    // config a repository could hang code on (`status` can run content filters).
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C").arg(wt).args(["status", "--porcelain"]);
     match exec(&mut cmd).await {
         Ok(out) if out.trim().is_empty() => {}
-        Ok(_) => return OrphanVerdict::Held("dirty".into()),
-        Err(_) => return OrphanVerdict::Held("unreadable-git".into()),
+        Ok(_) => return Some("dirty"),
+        Err(_) => return Some("unreadable-git"),
     }
-    let mut cmd = tokio::process::Command::new("git");
+    if !need_pushed {
+        return None;
+    }
+    let mut cmd = crate::github::git_clean();
     cmd.arg("-C")
         .arg(wt)
         .args(["rev-list", "--count", "HEAD", "--not", "--remotes"]);
     match exec(&mut cmd).await {
-        Ok(out) if out.trim().parse::<u64>().unwrap_or(1) == 0 => {}
-        Ok(_) => return OrphanVerdict::Held("unpushed-commits".into()),
-        Err(_) => return OrphanVerdict::Held("unreadable-git".into()),
+        Ok(out) if out.trim().parse::<u64>().unwrap_or(1) == 0 => None,
+        Ok(_) => Some("unpushed-commits"),
+        Err(_) => Some("unreadable-git"),
     }
-    OrphanVerdict::Reclaimable
 }
 
 /// Label for `GET /api/storage` orphans: young `Skip` orphans are `"pending"`
@@ -377,21 +404,30 @@ async fn sweep_orphan_worktrees(app: &Shared, retention_secs: u64) -> (Vec<Strin
 /// session and which is not running. A VM with a matching session is never
 /// touched here, even if stopped — the watchdogs own those.
 async fn sweep_orphan_vms(app: &Shared) -> Vec<String> {
-    let mut removed = Vec::new();
-    let Ok(all) = sandbox::all(&app.cfg.msb).await else {
-        return removed;
+    let Ok(orphans) = orphan_vms(app).await else {
+        return Vec::new();
     };
+    for name in &orphans {
+        sandbox::remove(&app.cfg.msb, name).await;
+    }
+    orphans
+}
+
+/// The orphan microVMs [`sweep_orphan_vms`] removes, without removing them: an error when `msb`
+/// cannot list its sandboxes. Shared with the disk-cleanup loop's preview.
+pub(crate) async fn orphan_vms(app: &Shared) -> anyhow::Result<Vec<String>> {
+    let all = sandbox::all(&app.cfg.msb).await?;
     let running = sandbox::running(&app.cfg.msb).await.unwrap_or_default();
     let ids: HashSet<String> = app.sessions.read().await.iter().map(|s| s.id.clone()).collect();
-    for name in all {
-        let Some(id) = name.strip_prefix("colonizer-") else { continue };
-        if ids.contains(id) || running.contains(&name) {
-            continue;
-        }
-        sandbox::remove(&app.cfg.msb, &name).await;
-        removed.push(name);
-    }
-    removed
+    let mut out: Vec<String> = all
+        .into_iter()
+        .filter(|name| {
+            name.strip_prefix("colonizer-")
+                .is_some_and(|id| !ids.contains(id) && !running.contains(name))
+        })
+        .collect();
+    out.sort();
+    Ok(out)
 }
 
 /// The 5-minute auto-reclaim tick; missed ticks are skipped, never piled up.
@@ -401,6 +437,8 @@ pub async fn run(app: Shared) {
     loop {
         tick.tick().await;
         let report = sweep_once(&app, &ReclaimConfig::load(&app).await).await;
+        // The owner's ingested fleet history (#762) ages out on the same tick, on its own window.
+        crate::fleet_history::prune_tick(&app).await;
         if !report.is_empty() {
             eprintln!(
                 "reclaim: reclaimed {}, failed {}, orphans removed {}, held {}",
@@ -460,23 +498,25 @@ async fn storage_now(app: &Shared) -> Json<Value> {
     let now = Utc::now();
     let sessions = app.sessions.read().await.clone();
     let data_dir = app.cfg.data_dir.clone();
+    let archive_dir = crate::archive::archive_root(&app);
     let msb_home = microsandbox_home();
     let paths: Vec<(PathBuf, PathBuf)> = sessions
         .iter()
         .map(|s| (PathBuf::from(&s.worktree), app.session_dir(&s.id)))
         .collect();
-    let (wt_total, repos_total, sess_total, sizes, msb_bytes) = tokio::task::spawn_blocking(move || {
+    let (wt_total, repos_total, sess_total, archive_total, sizes, msb_bytes) = tokio::task::spawn_blocking(move || {
         let sizes: Vec<u64> = paths.iter().map(|(wt, dir)| dir_size(wt) + dir_size(dir)).collect();
         (
             dir_size(&data_dir.join("worktrees")),
             dir_size(&data_dir.join("repos")),
             dir_size(&data_dir.join("sessions")),
+            dir_size(&archive_dir),
             sizes,
             msb_home.filter(|p| p.is_dir()).map(|p| dir_size(&p)),
         )
     })
     .await
-    .unwrap_or((0, 0, 0, Vec::new(), None));
+    .unwrap_or((0, 0, 0, 0, Vec::new(), None));
     let mut reclaimable = Vec::new();
     let mut unpushed = Vec::new();
     for (s, bytes) in sessions.iter().zip(sizes.into_iter().chain(std::iter::repeat(0))) {
@@ -513,7 +553,7 @@ async fn storage_now(app: &Shared) -> Json<Value> {
         "free_bytes": free,
         "admission_paused": verdict.admission_paused,
         "totals": {"worktrees_bytes": wt_total, "repos_bytes": repos_total, "sessions_bytes": sess_total,
-            "microsandbox_bytes": msb_bytes},
+            "archive_bytes": archive_total, "microsandbox_bytes": msb_bytes},
         "reclaimable": reclaimable, "unpushed": unpushed, "orphans": orphans,
     }))
 }
@@ -750,6 +790,18 @@ mod tests {
             warn_free_bytes: 0,
         };
         assert!(sweep_once(&app, &off).await.is_empty(), "disabled means nothing happens");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn the_storage_totals_count_the_log_archive() {
+        let (app, root) = app_with_colony("arch1", SessionStatus::Stopped).await;
+        // Bundles live under the canonical archive root, `<data_dir>/archive`.
+        let dir = crate::archive::archive_root(&app).join("acme/webshop/2026/10");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("arch1.tar.zst"), vec![0u8; 4096]).unwrap();
+        let Json(value) = storage_now(&app).await;
+        assert_eq!(value["totals"]["archive_bytes"], 4096, "{value}");
         let _ = std::fs::remove_dir_all(root);
     }
 }

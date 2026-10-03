@@ -5,6 +5,8 @@
 // mothership is not running, shows the mothership's web pushes and opens the colony they name when
 // tapped, and never touches writes, sign-in or any other /api call (see sw-routes.js).
 importScripts("/sw-routes.js");
+// The offline outbox (issue #746): answers and messages queued while a colony's socket is down.
+importScripts("/sw-outbox.js");
 
 // Bumped whenever the routing or the caches change: the activate step drops every other cache.
 const VERSION = "v4";
@@ -148,20 +150,82 @@ self.addEventListener("fetch", (event) => {
   // "network": not handled, so the browser does exactly what it would without a worker.
 });
 
-// --- Web push (issue #516) --------------------------------------------------------------------
+// --- Web push (issue #516, #744) ---------------------------------------------------------------
+
+/** Closes every notification carrying one tag, where the browser offers the filtered lookup. */
+async function closeTagged(tag) {
+  if (!self.registration.getNotifications) return;
+  for (const notification of await self.registration.getNotifications({ tag })) notification.close();
+}
+
+/** The app badge to the attention count the mothership pushes, cleared at zero. Absent on a browser
+ *  without the Badging API, and any refusal is swallowed — the notifications are the record. */
+async function applyBadge(count) {
+  if (count == null) return;
+  try {
+    if (count > 0) {
+      if (self.navigator.setAppBadge) await self.navigator.setAppBadge(count);
+    } else if (self.navigator.clearAppBadge) {
+      await self.navigator.clearAppBadge();
+    }
+  } catch {
+    /* no badge here; the colony notifications still show */
+  }
+}
+
+/** The one summary standing in for several colony notifications, replaced in place and closed again
+ *  once a single colony notification says it all. */
+async function applySummary(count) {
+  if (count == null) return;
+  try {
+    const summary = self.colonizerSummary(count);
+    if (summary) {
+      await self.registration.showNotification(summary.title, {
+        tag: summary.tag,
+        data: { url: summary.url },
+        icon: "/icons/icon-192.png",
+        badge: "/icons/mark.svg",
+        silent: true,
+      });
+    } else {
+      await closeTagged("summary");
+    }
+  } catch {
+    /* the summary is decoration; the colony notifications carry the news */
+  }
+}
+
+/** The silent "seen elsewhere" push (issue #744): drop that colony's notification here too, then
+ *  follow the badge and the summary down. */
+async function resolveColony(colony, badge) {
+  if (colony) await closeTagged(`colony-${colony}`);
+  await applyBadge(badge);
+  await applySummary(badge);
+}
 
 /** Shows one push, whatever arrived: a payload the mothership malformed still shows generically. */
 async function showPush(raw) {
   const payload = self.colonizerPushPayload(raw);
+  if (payload.resolved) return resolveColony(payload.colony, payload.badge);
+  // A question push answers from the notification itself (issue #742): one button per choice where
+  // the platform shows buttons at all — Notification.maxActions is 0 or undefined on iOS, Safari
+  // and Firefox, so there the tap opens the cockpit — and free text only where the platform can
+  // deliver it, which NotificationEvent.reply is the one honest signal for.
+  const maxActions = (self.Notification && self.Notification.maxActions) || 0;
+  const supportsReply = typeof NotificationEvent === "function" && "reply" in NotificationEvent.prototype;
   await self.registration.showNotification(payload.title, {
     body: payload.body,
     tag: payload.tag || undefined,
-    data: { url: payload.url },
+    actions: self.colonizerNotificationActions(payload.answer, maxActions, supportsReply),
+    data: { url: payload.url, colony: payload.colony, answer: payload.answer || undefined },
     icon: "/icons/icon-192.png",
     badge: "/icons/mark.svg",
-    // The in-app sound channel stays the only thing that beeps (notifications.ts).
-    silent: true,
+    // Silent unless the mothership said otherwise — a question may sound (issue #743); the in-app
+    // channel stays the only other thing that beeps (notifications.ts).
+    silent: payload.silent,
   });
+  await applyBadge(payload.badge);
+  await applySummary(payload.badge);
 }
 
 self.addEventListener("push", (event) => {
@@ -195,5 +259,39 @@ async function openFromNotification(url) {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const url = self.colonizerSafeUrl(event.notification.data && event.notification.data.url);
-  event.waitUntil(openFromNotification(url).catch(() => undefined));
+  event.waitUntil(
+    (async () => {
+      // A question's buttons answer straight from the notification: the endpoint authenticates by
+      // the one-time token in the notification's data alone, so no stored credentials leave the
+      // worker. Anything the button cannot do — no token, a stale or used one, a network miss —
+      // opens the colony, and every step below, clients.openWindow included, stays inside this
+      // click's waitUntil.
+      const answer = event.notification.data && event.notification.data.answer;
+      const action = event.action || "";
+      const raw = action.startsWith("choice:") ? action.slice("choice:".length) : "";
+      const choice = /^\d+$/.test(raw) ? (answer && answer.choices ? answer.choices[Number(raw)] : "") : "";
+      const other = action === "other" && typeof event.reply === "string" ? event.reply.trim() : "";
+      if (answer && answer.token && (choice || other)) {
+        try {
+          const response = await fetch("/api/push/answer", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(choice ? { token: answer.token, choice } : { token: answer.token, other }),
+          });
+          if (!response.ok) throw new Error(`status ${response.status}`);
+          await self.registration.showNotification(`Answered: ${(choice || other).slice(0, 80)}`, {
+            tag: event.notification.tag || undefined,
+            data: { url },
+            icon: "/icons/icon-192.png",
+            badge: "/icons/mark.svg",
+            silent: true,
+          });
+          return;
+        } catch {
+          // The cockpit is the reliable way to answer: fall through and open it.
+        }
+      }
+      await openFromNotification(url).catch(() => undefined);
+    })(),
+  );
 });

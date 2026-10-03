@@ -19,7 +19,7 @@
 use crate::{
     ApiResult, Shared, client_error,
     config::{ModulesConfig, setting_str},
-    modules::schema_for,
+    modules::{AgentModule, schema_for},
     orgs::OrgSettings,
 };
 use axum::{
@@ -63,8 +63,9 @@ pub struct EgressPolicy {
     pub block: Vec<String>,
 }
 
-/// Where each part of a resolved policy came from, for the record and the fleet view: `"global"`
-/// or `"org"`, the lists naming every level that contributed entries.
+/// Where each part of a resolved policy came from, for the record and the fleet view: `mode` names
+/// the `"global"` or `"org"` level whose mode won, and each list names every level that contributed
+/// entries — `"global"`, `"org"` or, to `allow` only, `"module"`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sources {
     pub mode: String,
@@ -74,11 +75,27 @@ pub struct Sources {
     pub block: Vec<String>,
 }
 
+/// The agent module that fed the allow list (#601), and the entries it contributed: which module,
+/// and the `api`, `auth` and `extra` hosts it declared that were not already allowed. `telemetry`
+/// is never here — it stays out of the fence (see [`resolve`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModuleAllow {
+    /// The module id, matching a row of `GET /api/modules`.
+    pub agent: String,
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
 /// The resolved policy plus where it came from — what [`resolve`] hands a boot.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolved {
     pub policy: EgressPolicy,
     pub sources: Sources,
+    /// The running module's contribution, when one widened the allow list.
+    pub module: Option<ModuleAllow>,
+    /// What the fleet floor (#690) refused to let this colony loosen, each named for the record.
+    /// Empty everywhere but a member whose local policy tried to widen past its owner's floor.
+    pub fleet_refused: Vec<String>,
 }
 
 /// Destinations every colony is denied, whatever the mode and whoever configured what. Emitted as
@@ -333,8 +350,9 @@ pub(crate) fn compile(policy: &EgressPolicy, infra: &[String]) -> Compiled {
 /// The policy one org's colonies boot with: the org's mode when it set one, else the sandbox
 /// module's; the allow and block lists are the union of both levels, because an org can add to a
 /// fence but never subtract from one. Entries saved by neither level's validation (hand-edited
-/// files) are dropped here; what is left compiles into the boot's rules.
-pub fn resolve(modules: &ModulesConfig, org: &OrgSettings) -> Resolved {
+/// files) are dropped here; what is left compiles into the boot's rules. The running agent module
+/// joins in `allowlist` mode (#601): see [`ModuleAllow`].
+pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentModule>) -> Resolved {
     let schema = schema_for("sandbox", &modules.sandbox.provider, &[]);
     let global = |key: &str| setting_str(&modules.sandbox, &schema, key);
     let global_mode = EgressMode::parse(&global("egress")).unwrap_or_default();
@@ -373,13 +391,49 @@ pub fn resolve(modules: &ModulesConfig, org: &OrgSettings) -> Resolved {
     if org_block.as_ref().is_some_and(|l| !l.is_empty()) {
         sources.block.push("org".to_string());
     }
+    let mode = org_mode.unwrap_or(global_mode);
+    let mut policy = EgressPolicy {
+        mode,
+        allow: union(global_allow, org_allow),
+        block: union(global_block, org_block),
+    };
+    // In `allowlist` mode the running module's declared hosts join the operator's, so the agent
+    // reaches the vendor's API, login and other fixed hosts without the operator restating what
+    // the module already names. `open` mode is untouched: the `public` profile covers them. The
+    // module's `telemetry` hosts stay out — there is no opt-in concept for them, so an operator
+    // who wants them lists them in `egress_allow` themselves. A host is lowercased (the manifest
+    // permits uppercase, the rule grammar does not) and validated through the same parser an
+    // operator entry goes through, so it compiles identically; one that does not parse (a
+    // single-label name, which the grammar reads as a group keyword) is dropped, and as with a
+    // hand-edited operator list that can only narrow reach, never widen it. A host `egress_allow`
+    // already carries is neither repeated nor counted as the module's.
+    let module = agent.filter(|_| mode == EgressMode::Allowlist).and_then(|agent| {
+        let declared = agent.egress.as_ref()?;
+        let mut allow = Vec::new();
+        for host in declared.api.iter().chain(&declared.auth).chain(&declared.extra) {
+            let host = host.to_ascii_lowercase();
+            if parse_entry(&host).is_err() || policy.allow.contains(&host) || allow.contains(&host) {
+                continue;
+            }
+            allow.push(host);
+        }
+        if allow.is_empty() {
+            return None;
+        }
+        policy.allow.extend(allow.iter().cloned());
+        Some(ModuleAllow {
+            agent: agent.id.clone(),
+            allow,
+        })
+    });
+    if module.is_some() {
+        sources.allow.push("module".to_string());
+    }
     Resolved {
-        policy: EgressPolicy {
-            mode: org_mode.unwrap_or(global_mode),
-            allow: union(global_allow, org_allow),
-            block: union(global_block, org_block),
-        },
+        policy,
         sources,
+        module,
+        fleet_refused: Vec::new(),
     }
 }
 
@@ -404,6 +458,14 @@ pub struct Record {
     #[serde(default)]
     pub block: Vec<String>,
     pub sources: Sources,
+    /// The agent module's contribution to the allow list (#601), when one widened it; omitted in
+    /// `open` mode and for a module that declared no host of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module: Option<ModuleAllow>,
+    /// What the fleet floor (#690) refused to let this colony loosen, each named. Omitted when the
+    /// colony is not a member under a floor, or its local policy loosened nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_refused: Vec<String>,
     /// The deny rules every colony carries, whatever the configuration said.
     pub always_blocked: Vec<String>,
     /// The `--net-rule` tokens, in evaluation order.
@@ -419,6 +481,8 @@ pub(crate) fn record(resolved: &Resolved, compiled: &Compiled, applied_at: u64) 
         allow: resolved.policy.allow.clone(),
         block: resolved.policy.block.clone(),
         sources: resolved.sources.clone(),
+        module: resolved.module.clone(),
+        fleet_refused: resolved.fleet_refused.clone(),
         always_blocked: ALWAYS_BLOCKED.iter().map(|t| format!("deny@{t}")).collect(),
         rules: compiled.rules.clone(),
         profiles: compiled.profiles.clone(),
@@ -636,7 +700,7 @@ mod tests {
             .sandbox
             .settings
             .insert("egress_block".into(), serde_json::json!("10.0.0.0/8"));
-        let resolved = resolve(&global_only, &OrgSettings::default());
+        let resolved = resolve(&global_only, &OrgSettings::default(), None);
         assert_eq!(resolved.policy.mode, EgressMode::Open);
         assert_eq!(resolved.policy.block, vec!["10.0.0.0/8"]);
         assert_eq!(resolved.sources.mode, "global");
@@ -662,6 +726,7 @@ mod tests {
                 Some(vec!["registry.npmjs.org:443"]),
                 Some(vec!["240.0.0.0/4"]),
             ),
+            None,
         );
         assert_eq!(resolved.policy.mode, EgressMode::Allowlist);
         assert_eq!(resolved.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
@@ -670,11 +735,11 @@ mod tests {
         assert_eq!(resolved.sources.allow, vec!["global", "org"]);
         assert_eq!(resolved.sources.block, vec!["global", "org"]);
         // An org cannot drop a global block: the union stands, whatever the org omits.
-        let resolved = resolve(&org_side, &org(Some("allowlist"), Some(vec!["deb.debian.org"]), None));
+        let resolved = resolve(&org_side, &org(Some("allowlist"), Some(vec!["deb.debian.org"]), None), None);
         assert_eq!(resolved.policy.block, vec!["10.0.0.0/8"]);
         assert_eq!(resolved.sources.block, vec!["global"]);
         // A blank org mode is inherit, like an unset one.
-        let resolved = resolve(&org_side, &org(Some("  "), None, None));
+        let resolved = resolve(&org_side, &org(Some("  "), None, None), None);
         assert_eq!(resolved.policy.mode, EgressMode::Open);
         assert_eq!(resolved.sources.mode, "global");
         // A hand-edited module file carrying an unparseable entry loses the entry, not the boot.
@@ -684,8 +749,130 @@ mod tests {
             .settings
             .insert("egress_allow".into(), serde_json::json!("not a host"));
         assert_eq!(
-            resolve(&hand_edited, &OrgSettings::default()).policy.allow,
+            resolve(&hand_edited, &OrgSettings::default(), None).policy.allow,
             Vec::<String>::new()
+        );
+    }
+
+    /// #601: what the running module declares feeds the allow list. Its `api`, `auth` and `extra`
+    /// hosts join the operator's in `allowlist` mode, `telemetry` never does, and the record names
+    /// the module and exactly the entries it added. Two modules, so the test pins whose hosts
+    /// landed in whose fence.
+    #[test]
+    fn a_module_declares_the_hosts_its_allowlist_colony_reaches() {
+        fn module(id: &str, api: &[&str], auth: &[&str], telemetry: &[&str], extra: &[&str]) -> AgentModule {
+            let list = |hosts: &[&str]| hosts.iter().map(|s| s.to_string()).collect();
+            AgentModule::test(id).egress(Some(crate::modules::Egress {
+                api: list(api),
+                auth: list(auth),
+                telemetry: list(telemetry),
+                extra: list(extra),
+            }))
+        }
+        let claude = module(
+            "claude-code",
+            &["api.anthropic.com"],
+            &["platform.claude.com"],
+            &["*.sentry.io", "http-intake.logs.us5.datadoghq.com"],
+            &["api.typesafe.ai"],
+        );
+        // Uppercase in the manifest is permitted; the rule grammar requires lowercase, so the
+        // merge lowercases rather than dropping the host.
+        let opencode = module("opencode", &[], &[], &[], &["registry.npmjs.org", "Models.DEV"]);
+        // The operator's list; a module that later declares `deb.debian.org` adds nothing new, and
+        // the port-scoped `registry.npmjs.org:443` is a different entry from a module's bare
+        // `registry.npmjs.org`.
+        let mut sandbox = ModulesConfig::default().sandbox;
+        sandbox.settings.insert("egress".into(), serde_json::json!("allowlist"));
+        sandbox.settings.insert(
+            "egress_allow".into(),
+            serde_json::json!("deb.debian.org, registry.npmjs.org:443"),
+        );
+        let modules = ModulesConfig {
+            sandbox,
+            ..ModulesConfig::default()
+        };
+        let org = OrgSettings::default();
+
+        let booted = resolve(&modules, &org, Some(&claude));
+        assert_eq!(
+            booted.policy.allow,
+            vec![
+                "deb.debian.org",
+                "registry.npmjs.org:443",
+                "api.anthropic.com",
+                "platform.claude.com",
+                "api.typesafe.ai",
+            ]
+        );
+        assert_eq!(booted.sources.allow, vec!["global", "module"]);
+        assert_eq!(
+            booted.module,
+            Some(ModuleAllow {
+                agent: "claude-code".into(),
+                allow: vec![
+                    "api.anthropic.com".into(),
+                    "platform.claude.com".into(),
+                    "api.typesafe.ai".into(),
+                ],
+            })
+        );
+        // Telemetry is not on the fence, whichever module declares it.
+        assert!(
+            !booted
+                .policy
+                .allow
+                .iter()
+                .any(|e| e.contains("sentry") || e.contains("datadoghq")),
+            "telemetry must stay out: {:?}",
+            booted.policy.allow
+        );
+
+        let booted = resolve(&modules, &org, Some(&opencode));
+        assert_eq!(
+            booted.policy.allow,
+            vec!["deb.debian.org", "registry.npmjs.org:443", "registry.npmjs.org", "models.dev"]
+        );
+        assert_eq!(booted.module.as_ref().unwrap().agent, "opencode");
+        // The declared hosts compile into real rules, after the operator's — a module's word
+        // cannot precede the deny set any more than the operator's can.
+        let compiled = compile(&booted.policy, &[]);
+        assert_eq!(compiled.rules.last().unwrap(), "allow@models.dev");
+        assert!(compiled.rules.contains(&"allow@registry.npmjs.org".to_string()));
+        // The record a boot files carries the same contribution, so `GET /api/sessions/{id}/egress`
+        // can say which module widened the fence and with what.
+        let recorded = serde_json::to_value(record(&booted, &compiled, 0)).unwrap();
+        assert_eq!(recorded["module"]["agent"], "opencode");
+        assert_eq!(
+            recorded["module"]["allow"],
+            serde_json::json!(["registry.npmjs.org", "models.dev"])
+        );
+
+        // `open` mode is untouched: the `public` profile already covers every declared host, so no
+        // merge happens and the record names no module.
+        let mut open = modules.clone();
+        open.sandbox.settings.insert("egress".into(), serde_json::json!("open"));
+        let booted = resolve(&open, &org, Some(&claude));
+        assert_eq!(booted.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
+        assert_eq!(booted.sources.allow, vec!["global"]);
+        assert_eq!(booted.module, None);
+        // A record with no contribution omits the field rather than writing an empty one.
+        let recorded = serde_json::to_value(record(&booted, &compile(&booted.policy, &[]), 0)).unwrap();
+        assert!(recorded.get("module").is_none(), "{recorded}");
+
+        // A module that declares nothing fixed (hermes, pi) adds nothing: no `module` source, no
+        // record entry, no empty-list noise.
+        let booted = resolve(&modules, &org, Some(&module("hermes", &[], &[], &["*.sentry.io"], &[])));
+        assert_eq!(booted.module, None);
+        assert_eq!(booted.sources.allow, vec!["global"]);
+        // A module whose every host the operator already listed adds nothing of its own.
+        let booted = resolve(&modules, &org, Some(&module("acp", &["deb.debian.org"], &[], &[], &[])));
+        assert_eq!(booted.module, None);
+        assert_eq!(booted.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
+        // No module at all (a boot before one was picked) leaves the operator's word alone.
+        assert_eq!(
+            resolve(&modules, &org, None).policy.allow,
+            vec!["deb.debian.org", "registry.npmjs.org:443"]
         );
     }
 

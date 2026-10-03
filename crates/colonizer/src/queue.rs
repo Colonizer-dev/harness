@@ -7,7 +7,7 @@
 use crate::{Shared, orgs, provider_quota, providers, restack, spend, stack::Stacked};
 use axum::extract::{Path, State};
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -48,6 +48,14 @@ pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
 /// real now (`Parked`, issue #213) — the reason string is what keeps [`resume_quota_parked`] from
 /// requeueing these: it only matches its own reason.
 pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
+
+/// How long a question that holds a tool call in flight (issue #759) keeps its colony's microVM
+/// before the colony is suspended anyway. Such a question is exempt from the ordinary grace, since
+/// suspending it loses the agent that asked; without a ceiling, a question nobody answers would hold
+/// a microVM and a parallel slot for ever. Nothing else bounds that wait: budgets count spend, and
+/// a colony blocked on its user spends nothing. Two hours is generous for a human and still frees
+/// the slot the same day; never shorter than the ordinary grace.
+pub(crate) const BLOCKING_QUESTION_CAP: chrono::Duration = chrono::Duration::minutes(120);
 
 /// Whether this colony's autopilot hold has outlasted its slot (issue #217).
 ///
@@ -100,6 +108,19 @@ pub(crate) async fn with_slot<T>(
     claim(&mut guard, room)
 }
 
+/// When the queue loop last came round, as Unix seconds; 0 until its first tick. A wedged tick
+/// (a `start_queued` that never returns) leaves it to age, which is what member health reads as
+/// "colony runner not ticking" (issue #764).
+static LAST_TICK: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// Seconds since the queue loop last ticked, or `None` before its first tick.
+pub fn last_tick_age_s() -> Option<i64> {
+    match LAST_TICK.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        at => Some((chrono::Utc::now().timestamp() - at).max(0)),
+    }
+}
+
 /// Starts queued colonies as slots free up, oldest first. A colony whose org or repository is at its own
 /// limit doesn't hold up the ones behind it, and neither does one waiting for the branch of the colony it
 /// is stacked on.
@@ -108,6 +129,7 @@ pub async fn run_queue(app: Shared) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
+        LAST_TICK.store(chrono::Utc::now().timestamp(), std::sync::atomic::Ordering::Relaxed);
         start_queued(&app).await;
     }
 }
@@ -140,6 +162,12 @@ enum Gate {
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
+    // Issue #673: a colony a merge superseded stays put — held, not retired — until the operator
+    // keeps it. Ahead of the resume fast-path below, which would otherwise admit a resumed-queued
+    // colony the marker must hold; looked past this tick like any other wait.
+    if crate::supersede::blocks_start(s) {
+        return Gate::Hold;
+    }
     // A colony with a kept worktree came from Resume, and resuming reuses the base it recorded at
     // its first boot: `boot_inner` never consults its parent again, because the branch already
     // exists on top of that base. The parent rule below is for fresh boots only — applied to a
@@ -195,6 +223,9 @@ fn claim_queued(s: &mut Session, room: bool) -> Option<Claim> {
         // onto a worktree that no longer exists, and `can_resume` would never take it back afterwards.
         s.status = SessionStatus::Failed;
         s.error = Some("cleaned up while it was waiting in the queue, so there is no worktree left to start on".into());
+        // Written under the list lock, not through `update_session`, so the unseen mark it would
+        // set at this crossing is set here (issue #744).
+        s.unseen_failure = true;
         let cleared = s.clear_attention();
         s.updated_at = Utc::now();
         let mut message = String::from("was cleaned up while it waited in the queue, so it can never start");
@@ -269,6 +300,7 @@ fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
     }
     s.status = SessionStatus::Failed;
     s.error = Some(reason.to_string());
+    s.unseen_failure = true; // as above: this crossing bypasses `update_session` (issue #744)
     let cleared = s.clear_attention();
     s.updated_at = Utc::now();
     let mut message = format!("can never start: {reason}");
@@ -364,7 +396,7 @@ pub(crate) async fn start_queued(app: &Shared) {
             let (org_limit, repo_limit) = limits(&s.org);
             !paused && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
         }) else {
-            return;
+            break;
         };
         // A waiter the gate called ready is checked against the forge before its promotion: the holder's
         // PR may have merged, or the claim may have moved to someone else, and the check is a gh call, so
@@ -407,7 +439,7 @@ pub(crate) async fn start_queued(app: &Shared) {
         )
         .await;
         match claimed {
-            None => return,
+            None => break,
             Some(Claim::Retire(retired, message)) => {
                 // A queued colony that can never start crosses straight into its terminal state
                 // outside `update_session` (the claim writes the record directly), so the journal
@@ -450,6 +482,12 @@ pub(crate) async fn start_queued(app: &Shared) {
                 tokio::spawn(boot(app.clone(), next.id.clone(), resume, grant));
             }
         }
+    }
+    // Last call on the tick, after everything holding an answer — the restores and the fresh
+    // launches above — has had its say: a pre-warm request (issue #701) boots a suspended colony's
+    // question with whatever slots are left, never ahead of a colony that already holds an answer.
+    if !paused {
+        prewarm_requested(app, &modules).await;
     }
 }
 
@@ -548,6 +586,7 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         if now - since < grace {
             continue;
         }
+        let cap = BLOCKING_QUESTION_CAP.max(grace);
         let lifecycle = app.session_lock(&id).await;
         let _lifecycle = lifecycle.lock().await;
         // The answer gate (issue #562): the open question's lock, held across the claim below. The
@@ -561,13 +600,33 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_some() || open_question.is_none() {
             continue;
         }
-        // How the colony comes back. Today's sandbox has no memory snapshot (the seam in
-        // `sandbox::supports_memory_snapshot`), so the path is always the fallback: the agent
-        // resumes its own session transcript in a fresh microVM.
-        let path = if crate::sandbox::supports_memory_snapshot() {
-            "memory_snapshot"
+        // A question that holds a tool call (issue #759) — an exec-policy `ask`, a subagent's
+        // AskUserQuestion, an ACP permission request — is not the lead waiting between turns: its
+        // tool call is blocked in flight on the answer, inside a live agent. Tearing the microVM
+        // down kills that call and the agent that made it, and a resumed transcript cannot pick it
+        // back up, so the lead only spawns another agent that asks again, or the answer reaches
+        // nobody. Such a colony keeps its microVM (and its slot) until the question is answered, or
+        // until [`BLOCKING_QUESTION_CAP`], past which it is suspended anyway and the log says what
+        // that costs. Read under the gate: the flag is set before the question opens and cleared
+        // with its answer.
+        let blocking = rt.question_holds_tool_call.load(std::sync::atomic::Ordering::SeqCst);
+        if blocking && now - since < cap {
+            continue;
+        }
+        // How the colony comes back. The memory-snapshot store (issue #702) freezes the running
+        // VM's memory while the colony waits; it sits behind `sandbox::supports_memory_snapshot`,
+        // which is false because the pinned msb cannot restore a `--secret`-carrying sandbox (that
+        // function has the measurement). So today the path is always the fallback — the agent
+        // resumes its own session transcript in a fresh microVM — and `capture` seals the VM's
+        // memory under a fresh per-colony key only when the gate turns on. Any capture failure is
+        // the same fallback.
+        let (path, snapshot) = if crate::sandbox::supports_memory_snapshot() {
+            match crate::snapshot::capture(app, &id, &s.sandbox).await {
+                Some(meta) => (crate::snapshot::MEMORY_SNAPSHOT, serde_json::to_value(&meta).ok()),
+                None => (SESSION_RESUME, None),
+            }
         } else {
-            SESSION_RESUME
+            (SESSION_RESUME, None)
         };
         let claimed = app
             .update_session(&id, |x| {
@@ -576,7 +635,7 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
                 }
                 x.suspended = Some(Suspension {
                     at: Utc::now(),
-                    snapshot: None,
+                    snapshot: snapshot.clone(),
                     reason: WAITING_FOR_ANSWER.into(),
                     path: path.into(),
                 });
@@ -591,16 +650,21 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         // Claimed: the answer path can no longer forward into this runtime — it reads suspended
         // under the gate and holds instead — so the link may go.
         drop(open_question);
-        let minutes = grace.num_minutes();
-        app.session_log(
-            &id,
-            "info",
+        let minutes = if blocking { cap.num_minutes() } else { grace.num_minutes() };
+        let message = if blocking {
+            format!(
+                "no answer for {minutes} min to a question a tool call is blocked on; suspending anyway, \
+                 so the colony stops holding a microVM and a slot — the agent that asked is lost with the \
+                 microVM, the question stays answerable, and the answer reaches the lead agent when the \
+                 colony resumes"
+            )
+        } else {
             format!(
                 "no answer for {minutes} min; suspending — the microVM is removed, the worktree and the \
                  agent's session transcript are kept, and the question stays answerable"
-            ),
-        )
-        .await;
+            )
+        };
+        app.session_log(&id, if blocking { "warn" } else { "info" }, message).await;
         let mut entry = crate::activity::Entry::new("outcome.suspended", "colony").colony(&s);
         entry.detail = Some(format!(
             "waiting {minutes} min for an answer; the worktree and the agent's session are kept"
@@ -632,6 +696,8 @@ fn answered_ahead(sessions: &[Session], s: &Session) -> usize {
             other.suspended.is_some()
                 && other.pending_answer.is_some()
                 && other.status == SessionStatus::WaitingForAnswer
+                // Issue #673: a superseded colony that is not kept is out of the line altogether.
+                && !crate::supersede::blocks_start(other)
                 && (restore_key(other), other.id.as_str()) < key
         })
         .count()
@@ -651,6 +717,11 @@ pub(crate) fn restore_line_note(
     repo_limit: u64,
     paused: bool,
 ) -> String {
+    // Issue #673: the restore pass skips a colony a merge superseded until it is kept, so the note
+    // must not promise a resume — it says what the colony is waiting on instead.
+    if crate::supersede::blocks_start(s) {
+        return "a merged pull request superseded this colony, so it waits until it is kept".into();
+    }
     let ahead = answered_ahead(sessions, s);
     let room = has_room(sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit);
     match (ahead, room, paused) {
@@ -663,6 +734,54 @@ pub(crate) fn restore_line_note(
             if n == 1 { "y is" } else { "ies are" }
         ),
     }
+}
+
+/// The clears every claim that boots a colony makes: the last boot's phases would read as this
+/// one's under `starting`, and stale mesh and connection state would outlive the microVM they name.
+fn claimed_for_boot(x: &mut Session) {
+    x.error = None;
+    x.attention = None;
+    x.mesh = None;
+    x.local_port = None;
+    // A boot gets a fresh microVM, so the old one's preview port is gone (previews.rs).
+    x.preview_port = None;
+    x.boot_timing = None;
+    x.updated_at = Utc::now();
+}
+
+/// The colony is claimed and about to boot: retire its old agent link and move the stale event log
+/// aside, with the log's own file lock held across the rename (`rotate_events` has the why). A
+/// rotation failure runs the given revert — putting the colony back under the claim's own
+/// re-checks — logs, and answers `false`, ending the caller's tick: a retry every 5 s would only
+/// churn on a storage problem.
+async fn retire_and_rotate(app: &Shared, id: &str, revert: impl FnOnce(&mut Session), kept: &str) -> bool {
+    let runtime = app.runtimes.lock().await.remove(id);
+    if let Some(rt) = &runtime {
+        rt.stop.send_replace(true);
+        rt.retired.send_replace(true);
+    }
+    let rotated = {
+        let _file_lock = match runtime.as_ref() {
+            Some(rt) => Some(rt.file_lock.lock().await),
+            None => None,
+        };
+        rotate_events(&app.session_dir(id))
+    };
+    if let Err(e) = rotated {
+        let e = anyhow::Error::from(e);
+        if let Some((x, ())) = app.update_session(id, revert).await {
+            app.persist_and_broadcast(&x).await;
+        }
+        app.storage_failed("rotate the old event log", &e).await;
+        app.session_log(
+            id,
+            "error",
+            format!("could not move the old event log aside ({e}); the colony stays suspended and its {kept}"),
+        )
+        .await;
+        return false;
+    }
+    true
 }
 
 /// Restores suspended colonies that hold an undelivered answer, ahead of the fresh launches in the
@@ -680,6 +799,8 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
             .await
             .iter()
             .filter(|s| s.suspended.is_some() && s.pending_answer.is_some() && s.status == SessionStatus::WaitingForAnswer)
+            // Issue #673: a merge covered this colony's work — the answer can wait until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
             .map(|s| (restore_key(s), s.id.clone()))
             .collect()
     };
@@ -700,7 +821,12 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
         let lifecycle = app.session_lock(&id).await;
         let _lifecycle = lifecycle.lock().await;
         let Some(s) = app.session(&id).await else { continue };
-        if s.status != SessionStatus::WaitingForAnswer || s.suspended.is_none() || s.pending_answer.is_none() {
+        // Issue #673 re-checked under the lifecycle lock: a merge seen since the snapshot holds it.
+        if s.status != SessionStatus::WaitingForAnswer
+            || s.suspended.is_none()
+            || s.pending_answer.is_none()
+            || crate::supersede::blocks_start(&s)
+        {
             continue;
         }
         let suspension = s.suspended.clone();
@@ -717,55 +843,24 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
                     return None;
                 }
                 x.status = SessionStatus::Starting;
+                // Told to the boot for session.json's `restore` (issue #700) before the flag goes.
+                x.was_suspended = x.suspended.is_some();
                 x.suspended = None;
-                x.error = None;
-                x.attention = None;
-                x.mesh = None;
-                x.local_port = None;
-                // The last boot's phases would read as this one's under `starting`.
-                x.boot_timing = None;
-                x.updated_at = Utc::now();
+                // A pre-warm request on top of a held answer is stale: this boot delivers the
+                // answer, so there is nothing left to warm.
+                x.prewarm = None;
+                claimed_for_boot(x);
                 Some(x.clone())
             },
         )
         .await;
         let Some(s) = claimed else { continue };
         app.persist_and_broadcast(&s).await;
-        // The colony is ours: drop the old agent link and rotate the event log, exactly as the
-        // resume handler does, with the log's own file lock held across the rename.
-        let runtime = app.runtimes.lock().await.remove(&id);
-        if let Some(rt) = &runtime {
-            rt.stop.send_replace(true);
-            rt.retired.send_replace(true);
-        }
-        let dir = app.session_dir(&id);
-        let rotated = {
-            let _file_lock = match runtime.as_ref() {
-                Some(rt) => Some(rt.file_lock.lock().await),
-                None => None,
-            };
-            rotate_events(&dir)
+        let reverted = |x: &mut Session| {
+            x.status = SessionStatus::WaitingForAnswer;
+            x.suspended = suspension.clone();
         };
-        if let Err(e) = rotated {
-            // Put the colony back as the suspension left it, answer included, and stop this tick:
-            // a rotation failure is a storage problem, and a retry every 5 s would only churn.
-            let e = anyhow::Error::from(e);
-            if let Some((x, ())) = app
-                .update_session(&id, |x| {
-                    x.status = SessionStatus::WaitingForAnswer;
-                    x.suspended = suspension.clone();
-                })
-                .await
-            {
-                app.persist_and_broadcast(&x).await;
-            }
-            app.storage_failed("rotate the old event log", &e).await;
-            app.session_log(
-                &id,
-                "error",
-                format!("could not move the old event log aside ({e}); the colony stays suspended and its answer kept"),
-            )
-            .await;
+        if !retire_and_rotate(app, &id, reverted, "answer kept").await {
             break;
         }
         app.session_log(
@@ -780,6 +875,310 @@ pub(crate) async fn restore_suspended(app: &Shared, modules: &crate::config::Mod
         let grant = resume.then(|| crate::lifecycle::mint_resume_grant(&s, "harness"));
         tokio::spawn(boot(app.clone(), id, resume, grant));
     }
+}
+
+/// Boots suspended colonies whose question someone has opened (issue #701), after the restores and
+/// the fresh launches on the same tick: the answer then lands in an already-running VM instead of
+/// costing a second boot. A request that has waited for a slot past the pre-warm timeout is dropped
+/// rather than booted — whoever opened the question has stopped looking. Each boot goes through the
+/// same admission the restores answer to; the claim stamps `started_at` but keeps the suspension,
+/// because the colony is not back yet — it is warming, and the suspension is what answers to the
+/// question until an answer lands ([`deliver_prewarmed`]) or the timeout gives up
+/// ([`prewarm_expire`]). The link drop and the event-log rotation are this pass's, like the
+/// restore's: the fresh microVM's agentd numbers events from 1, and a stale log would swallow them.
+pub(crate) async fn prewarm_requested(app: &Shared, modules: &crate::config::ModulesConfig) {
+    let timeout = orgs::prewarm_timeout(modules);
+    let now = Utc::now();
+    let mut candidates: Vec<(DateTime<Utc>, String)> = {
+        app.sessions
+            .read()
+            .await
+            .iter()
+            .filter(|s| {
+                s.status == SessionStatus::WaitingForAnswer
+                    && s.suspended.is_some()
+                    && s.pending_answer.is_none()
+                    && s.prewarm.as_ref().is_some_and(|p| p.started_at.is_none())
+                    // Issue #673: a merge covered this colony's work — like the restore pass, no
+                    // warm-up until it is kept.
+                    && !crate::supersede::blocks_start(s)
+            })
+            .map(|s| (s.prewarm.as_ref().map(|p| p.requested_at).unwrap_or(now), s.id.clone()))
+            .collect()
+    };
+    // Oldest request first: whoever has been looking longest warms first.
+    candidates.sort();
+    let max_parallel = orgs::global_max_parallel(modules) as usize;
+    for (requested_at, id) in candidates {
+        if now - requested_at >= timeout {
+            // Stale: the question was opened and left. A cheap claim — no boot, no lifecycle lock.
+            app.update_session(&id, |x| {
+                if x.prewarm.as_ref().is_some_and(|p| p.started_at.is_none()) {
+                    x.prewarm = None;
+                }
+            })
+            .await;
+            continue;
+        }
+        let Some(s) = app.session(&id).await else { continue };
+        let settings = app.org_settings(&s.org);
+        let (org_limit, repo_limit) = (orgs::org_max_parallel(&settings), repo_limit(modules, &settings));
+        // The snapshot decides whether to try; the claim re-checks under the lock, as in the
+        // restore pass above.
+        {
+            let sessions = app.sessions.read().await;
+            if !has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit) {
+                continue;
+            }
+        }
+        let lifecycle = app.session_lock(&id).await;
+        let _lifecycle = lifecycle.lock().await;
+        let Some(s) = app.session(&id).await else { continue };
+        if s.status != SessionStatus::WaitingForAnswer
+            || s.suspended.is_none()
+            || s.pending_answer.is_some()
+            || s.prewarm.as_ref().is_none_or(|p| p.started_at.is_some())
+            || crate::supersede::blocks_start(&s)
+        {
+            continue;
+        }
+        // The question the fresh transcript has to carry, read off the old runtime before it
+        // retires. `runtime` (get-or-create), not the map: after a restart nothing may have
+        // materialized it yet, and the load replays the log the question was asked in.
+        let old = app.runtime(&id).await;
+        let question = old.open_question.lock().await.clone();
+        let question_since = old.activity.lock().await.question_since;
+        let claimed = with_slot(
+            &app.sessions,
+            &s.org,
+            &s.repo,
+            max_parallel,
+            org_limit,
+            repo_limit,
+            |sessions, room| {
+                let x = sessions.iter_mut().find(|x| x.id == id)?;
+                if !room
+                    || x.status != SessionStatus::WaitingForAnswer
+                    || x.suspended.is_none()
+                    || x.pending_answer.is_some()
+                    || x.prewarm.as_ref().is_none_or(|p| p.started_at.is_some())
+                    || crate::supersede::blocks_start(x)
+                {
+                    return None;
+                }
+                x.status = SessionStatus::Starting;
+                if let Some(p) = x.prewarm.as_mut() {
+                    p.started_at = Some(Utc::now());
+                }
+                // The warm-up boot restores a suspension (issue #700): session.json's `restore`
+                // says so, though the suspension itself stays until an answer lands.
+                x.was_suspended = x.suspended.is_some();
+                claimed_for_boot(x);
+                Some(x.clone())
+            },
+        )
+        .await;
+        let Some(s) = claimed else { continue };
+        app.persist_and_broadcast(&s).await;
+        let reverted = |x: &mut Session| {
+            x.status = SessionStatus::WaitingForAnswer;
+            x.prewarm = None;
+        };
+        if !retire_and_rotate(app, &id, reverted, "question open").await {
+            break;
+        }
+        // The fresh runtime is loaded before the question is re-emitted, so its replay sees an
+        // empty log: the question line is a host line and must not consume the rank of the
+        // runner's first event in the reconnect cursor (`agent_seq` loads from the file, and only
+        // agentd lines may move it). The runtime remembers the question before the line lands, so
+        // an HTTP answer never meets the gap, and the graces that count from when it was asked
+        // keep counting.
+        let fresh = app.runtime(&id).await;
+        if let Some((question_id, questions, risk)) = &question {
+            *fresh.open_question.lock().await = Some((question_id.clone(), questions.clone(), *risk));
+            crate::validation::emit_chain(
+                app,
+                &id,
+                json!({
+                    "type": "question",
+                    "question_id": question_id,
+                    "questions": questions,
+                    "risk": risk.as_str(),
+                }),
+            )
+            .await;
+        }
+        fresh.activity.lock().await.question_since = question_since;
+        app.session_log(
+            &id,
+            "info",
+            "question opened; booting a fresh microVM so the answer lands in an already-running colony".into(),
+        )
+        .await;
+        let resume = s.git_admin_dir.is_some();
+        // Issue #98: the warm-up boots a kept worktree — the same authorized effect as any other
+        // resume, so it carries its own fresh grant into `boot`.
+        let grant = resume.then(|| crate::lifecycle::mint_resume_grant(&s, "harness"));
+        tokio::spawn(boot(app.clone(), id, resume, grant));
+    }
+}
+
+/// Holds a warming colony open for its answer (issue #701), on the boot task: an answer that lands
+/// is delivered at once ([`deliver_prewarmed`]); a request gone — delivered elsewhere, stopped,
+/// expired — ends the wait quietly; and the timeout hands the colony back to its suspension
+/// ([`prewarm_expire`]). The boot returns through here instead of finishing a normal launch.
+pub(crate) async fn prewarm_wait(app: &Shared, id: &str) {
+    let timeout = orgs::prewarm_timeout(&app.modules.read().await.clone());
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let Some(s) = app.session(id).await else { return };
+        if !s.prewarming() {
+            return;
+        }
+        if s.pending_answer.is_some() {
+            deliver_prewarmed(app, id).await;
+            return;
+        }
+        // The timeout counts from when the colony was actually up (`ready_at`), falling back to the
+        // claim. A lost race with an answer landing in the same second is retried on the next tick.
+        let warmed_at = s.prewarm.as_ref().and_then(|p| p.ready_at.or(p.started_at));
+        if warmed_at.is_some_and(|at| Utc::now() - at >= timeout) && prewarm_expire(app, id).await {
+            return;
+        }
+    }
+}
+
+/// Delivers an answer that landed while the colony was warming (issue #701): the runner gets it as
+/// its first user message and the colony comes out of suspension for good. The lifecycle lock is
+/// held across the send and the claim, and [`prewarm_expire`] holds the same lock across its own
+/// claim and teardown — so a timeout and an answer arriving together fully order, and exactly one
+/// of the two acts.
+pub(crate) async fn deliver_prewarmed(app: &Shared, id: &str) {
+    let lifecycle = app.session_lock(id).await;
+    let _lifecycle = lifecycle.lock().await;
+    let Some(s) = app.session(id).await else { return };
+    let Some(prompt) = s
+        .pending_answer
+        .as_ref()
+        .filter(|_| s.prewarming())
+        .map(|pa| pa.prompt.clone())
+    else {
+        return;
+    };
+    // Sent before the claim: the runner is already mid-turn by the time the record says delivered.
+    // A send that fails — the link task is gone — must not spend the answer: the warm-up is given
+    // up and the answer stays held for the restore pass, which boots a runner to take it.
+    let sent = match app.runtimes.lock().await.get(id).cloned() {
+        Some(rt) => rt
+            .commands
+            .send(json!({"type": "user_message", "id": "initial", "text": prompt}))
+            .is_ok(),
+        None => false,
+    };
+    if !sent {
+        if let Some((x, true)) = app
+            .update_session(id, |x| {
+                if !x.prewarming() {
+                    return false;
+                }
+                x.status = SessionStatus::WaitingForAnswer;
+                x.prewarm = None;
+                true
+            })
+            .await
+        {
+            app.persist_and_broadcast(&x).await;
+        }
+        return;
+    }
+    if let Some((s, true)) = app
+        .update_session(id, |x| {
+            if !x.prewarming() || x.pending_answer.is_none() {
+                return false;
+            }
+            x.pending_answer = None;
+            x.suspended = None;
+            x.prewarm = None;
+            x.error = None;
+            true
+        })
+        .await
+    {
+        app.persist_and_broadcast(&s).await;
+        app.session_log(
+            id,
+            "info",
+            "held answer delivered: the agent resumes its session with it".into(),
+        )
+        .await;
+        crate::activity::record_restored(app, &s).await;
+    }
+}
+
+/// Gives a warming colony up once its timeout passes with no answer (issue #701): the colony goes
+/// back to exactly what the suspension left — question open and answerable, the next answer
+/// restoring it like any suspended colony's — and then the microVM is torn down, freeing the slot.
+/// The claim comes first, the stop handler's order: `hold_answer` reads the record without this
+/// lock, so an answer landing during the (slow) teardown finds a properly suspended colony to hold
+/// on, not one still warming. Returns whether the expiry landed.
+pub(crate) async fn prewarm_expire(app: &Shared, id: &str) -> bool {
+    let lifecycle = app.session_lock(id).await;
+    let _lifecycle = lifecycle.lock().await;
+    let Some((s, true)) = app
+        .update_session(id, |x| {
+            if !x.prewarming() || x.pending_answer.is_some() {
+                return false;
+            }
+            x.status = SessionStatus::WaitingForAnswer;
+            x.prewarm = None;
+            true
+        })
+        .await
+    else {
+        return false;
+    };
+    let minutes = orgs::prewarm_timeout(&app.modules.read().await.clone()).num_minutes();
+    app.session_log(
+        id,
+        "info",
+        format!(
+            "no answer in {minutes} min; suspending again — the microVM is removed, the worktree and the \
+             agent's session transcript are kept, and the question stays answerable"
+        ),
+    )
+    .await;
+    teardown_vm(app, &s).await;
+    true
+}
+
+/// The resume scheduler's verdict for one colony at `now` (unix seconds): quota-parked, with a
+/// worktree to resume into, and due — its provider recovered, or the reset a card's "wait" scheduled
+/// it for has come ([`crate::quota_cards::park_due`]). The provider is the one the flag names (a
+/// card's wait records it), else the one the park's error names; with neither, any exhaustion
+/// anywhere holds it. Pure over `exhausted`, so the schedule is tested with a fake clock.
+pub(crate) fn quota_resume_due(
+    s: &Session,
+    provider_ids: &[String],
+    exhausted: &dyn Fn(&str) -> bool,
+    any_exhausted: bool,
+    now: i64,
+) -> bool {
+    let Some(attention) = s
+        .attention
+        .as_ref()
+        .filter(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
+    else {
+        return false;
+    };
+    if s.cleaned_up || s.git_admin_dir.is_none() {
+        return false;
+    }
+    let provider = crate::quota_cards::flagged_provider(s, provider_ids);
+    let out = match provider.as_deref() {
+        Some(pid) => exhausted(pid),
+        None => any_exhausted,
+    };
+    crate::quota_cards::park_due(attention, out, now)
 }
 
 /// Quota-parked colonies whose provider is no longer exhausted rejoin the queue as `Queued` — the
@@ -800,22 +1199,16 @@ pub(crate) async fn resume_quota_parked(app: &Shared) {
         let sessions = app.sessions.read().await;
         let ids: Vec<String> = app.providers().iter().map(|p| p.id.clone()).collect();
         let any_exhausted = !app.gateway.quota_exhausted().is_empty();
-        let recovered = |s: &Session| {
-            s.attention
-                .as_ref()
-                .is_some_and(|a| a["reason"].as_str() == Some(provider_quota::QUOTA_EXHAUSTED_REASON))
-                && !s.cleaned_up
-                && s.git_admin_dir.is_some()
-                && match provider_quota::mentioned_provider(s.error.as_deref().unwrap_or_default(), &ids, &[]) {
-                    Some(pid) => !app.gateway.is_quota_exhausted(&pid),
-                    None => !any_exhausted,
-                }
-        };
+        let now = Utc::now().timestamp();
+        let recovered = |s: &Session| quota_resume_due(s, &ids, &|pid| app.gateway.is_quota_exhausted(pid), any_exhausted, now);
         let mut cold: Vec<String> = Vec::new();
         let mut kept: Vec<String> = Vec::new();
         for s in sessions
             .iter()
             .filter(|s| matches!(s.status, SessionStatus::Stopped | SessionStatus::Parked) && recovered(s))
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            .filter(|s| !crate::supersede::blocks_start(s))
         {
             // A kept-VM park takes the resume route; everything else is a plain requeue.
             if s.parked.as_ref().is_some_and(|p| p.vm_kept) {
@@ -1276,6 +1669,10 @@ mod tests {
         assert!(matches!(claim, Some(Claim::Retire(..))), "retired, not started");
         assert_eq!(queued.status, SessionStatus::Failed, "out of the queue for good");
         assert_eq!(queued.error.as_deref(), Some(reason.as_str()));
+        assert!(
+            queued.unseen_failure,
+            "the badge counts the retirement until someone looks (#744)"
+        );
         // A colony claimed in the meantime is left alone.
         let mut starting = colony("acme", SessionStatus::Starting);
         assert!(claim_refused(&mut starting, &reason).is_none());
@@ -1871,6 +2268,12 @@ mod tests {
         asked(&app, "past-grace", 20).await;
         asked(&app, "within-grace", 1).await;
         asked(&app, "no-timestamp", 20).await;
+        // An exec-policy ask (issue #759) waited just as long, but its tool call is in flight.
+        asked(&app, "exec-policy", 20).await;
+        app.runtime("exec-policy")
+            .await
+            .question_holds_tool_call
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         app.runtime("no-timestamp").await.activity.lock().await.question_since = None;
         app.sessions
             .write()
@@ -1902,7 +2305,7 @@ mod tests {
             "the status is untouched, so the question stays answerable"
         );
         assert!(!suspended.holds_slot(), "the slot is back");
-        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent"] {
+        for id in ["within-grace", "no-timestamp", "no-session-id", "other-agent", "exec-policy"] {
             assert!(by_id(id).suspended.is_none(), "{id} must keep its microVM and its slot");
         }
         drop(sessions);
@@ -1949,8 +2352,85 @@ mod tests {
             by_id("other-agent").suspended.is_none(),
             "the agent cannot resume, never suspended"
         );
+        assert!(
+            by_id("exec-policy").suspended.is_none(),
+            "an exec-policy ask holds a tool call in flight: not suspended within the cap, however short the grace"
+        );
         assert!(by_id("past-grace").suspended.is_some(), "already suspended, left as it is");
         drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #759, the follow-up: a subagent's AskUserQuestion blocks the subagent's tool call just
+    /// as an exec-policy ask does, and the runner says so with `blocking: true`. Fed through the live
+    /// event path, such a colony keeps its microVM past the grace, while the lead's own question —
+    /// its turn ended, a resume delivers the answer — is still suspended. Past the cap every
+    /// question is suspended, blocking or not, so no colony holds a slot for ever.
+    #[tokio::test]
+    async fn a_question_a_tool_call_is_blocked_on_keeps_its_colony_until_the_cap() {
+        async fn asked(app: &Shared, id: &str, question: &str, minutes_ago: i64) {
+            app.sessions.write().await.push(waiting_colony(id, "claude-code", Some("s1")));
+            std::fs::create_dir_all(app.session_dir(id)).unwrap();
+            let rt = app.runtime(id).await;
+            crate::events::handle_agent_event(app, id, &rt, question).await;
+            assert!(rt.open_question.lock().await.is_some(), "{id}: the question is open");
+            rt.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(minutes_ago));
+        }
+        const SUBAGENT: &str =
+            r#"{"seq":1,"type":"question","question_id":"toolu_sub","blocking":true,"risk":"read_only","questions":[]}"#;
+        const LEAD: &str = r#"{"seq":1,"type":"question","question_id":"toolu_lead","risk":"read_only","questions":[]}"#;
+        const EXEC: &str =
+            r#"{"seq":1,"type":"question","question_id":"toolu_bash","kind":"exec_policy","blocking":true,"questions":[]}"#;
+
+        let root = std::env::temp_dir().join(format!("colonizer-suspend-blocking-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app_with_agents(
+            &root,
+            vec![agent_module("claude-code", Some("/root/.claude/projects"))],
+            |_| {},
+        );
+        let modules = app.modules.read().await.clone();
+        let cap = BLOCKING_QUESTION_CAP.num_minutes();
+        asked(&app, "subagent", SUBAGENT, 20).await;
+        asked(&app, "subagent-near-cap", SUBAGENT, cap - 1).await;
+        asked(&app, "exec-policy", EXEC, 20).await;
+        asked(&app, "lead", LEAD, 20).await;
+        asked(&app, "subagent-past-cap", SUBAGENT, cap + 1).await;
+        asked(&app, "exec-policy-past-cap", EXEC, cap + 1).await;
+
+        suspend_waiting_colonies(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        for id in ["subagent", "subagent-near-cap", "exec-policy"] {
+            assert!(
+                by_id(id).suspended.is_none(),
+                "{id}: a tool call is blocked on the question, so the colony keeps its microVM within the cap"
+            );
+        }
+        assert!(
+            by_id("lead").suspended.is_some(),
+            "the lead's own question past the grace is still suspended: that saving stays"
+        );
+        for id in ["subagent-past-cap", "exec-policy-past-cap"] {
+            let s = by_id(id);
+            assert!(s.suspended.is_some(), "{id}: past the cap it is suspended anyway");
+            assert_eq!(
+                s.status,
+                SessionStatus::WaitingForAnswer,
+                "{id}: the question stays answerable"
+            );
+        }
+        drop(sessions);
+        let log = std::fs::read_to_string(&app.runtime("subagent-past-cap").await.logs_path).unwrap();
+        assert!(
+            log.contains("suspending anyway") && log.contains("the agent that asked is lost"),
+            "the capped suspension says what it costs: {log}"
+        );
+        let log = std::fs::read_to_string(&app.runtime("lead").await.logs_path).unwrap();
+        assert!(
+            !log.contains("suspending anyway"),
+            "the ordinary suspension keeps its own line: {log}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -2024,6 +2504,269 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The suspension record as the suspend pass writes it for a waiting colony.
+    fn suspended_now() -> Suspension {
+        Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        }
+    }
+
+    /// A suspended waiting colony carrying a warm-up request (issue #701). `started_at: None` is
+    /// the request still waiting for a slot; `Some` is the pass's claim — status `Starting`,
+    /// `ready_at` alongside.
+    fn warming_colony(id: &str, requested_at: DateTime<Utc>, started_at: Option<DateTime<Utc>>) -> Session {
+        let mut s = waiting_colony(id, "claude-code", Some("s1"));
+        s.suspended = Some(suspended_now());
+        s.prewarm = Some(Prewarm {
+            requested_at,
+            started_at,
+            ready_at: started_at,
+        });
+        if started_at.is_some() {
+            s.status = SessionStatus::Starting;
+        }
+        s
+    }
+
+    /// Issue #701: opening a suspended colony's question pre-warms it. The pass claims the last
+    /// slot through the same admission every start answers to — keeping the suspension on the
+    /// record until the answer lands — and the question moves to the fresh runtime. A warm-up that
+    /// already holds an answer is left to its own boot (no second one), and the delivery: the
+    /// answer goes down the fresh link as the runner's first user message, and the colony comes
+    /// out of suspension for good. (Colonies are warmed by hand where a real microVM would be.)
+    #[tokio::test]
+    async fn a_prewarm_request_boots_once_and_the_answer_lands_in_the_running_vm() {
+        let root = std::env::temp_dir().join(format!("colonizer-prewarm-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        *app.sessions.write().await = vec![warming_colony("warming", Utc::now(), None)];
+        std::fs::create_dir_all(app.session_dir("warming")).unwrap();
+        let rt = app.runtime("warming").await;
+        *rt.open_question.lock().await = Some(("q1".into(), Vec::new(), crate::protocol::QuestionRisk::ReadOnly));
+        rt.activity.lock().await.question_since = Some(Utc::now());
+        drop(rt);
+
+        prewarm_requested(&app, &modules).await;
+        {
+            let sessions = app.sessions.read().await;
+            let s = sessions.iter().find(|s| s.id == "warming").unwrap();
+            assert_eq!(s.status, SessionStatus::Starting, "claimed for the warm-up boot");
+            assert!(s.prewarming(), "the claim stamped started_at");
+            assert!(
+                s.suspended.is_some(),
+                "still the suspension's charge: the question is what answers"
+            );
+            assert!(s.holds_slot(), "the warm-up holds its slot again");
+        }
+        // The fresh runtime remembers the question, so the graces and the answer paths survive the
+        // rotation, and the re-emitted line is what a restart replays it open from.
+        let question = app.runtime("warming").await.open_question.lock().await.clone();
+        assert_eq!(question.as_ref().map(|(id, ..)| id.as_str()), Some("q1"));
+
+        // The delivery half runs on a colony warmed by hand — the pass's own boot cannot run a
+        // real microVM here. The state below is the one a warm-up with a landed answer is in:
+        // claimed, up, still suspended, answer held.
+        let mut delivered = warming_colony("delivered", Utc::now(), Some(Utc::now()));
+        delivered.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
+        });
+        app.sessions.write().await.push(delivered);
+        std::fs::create_dir_all(app.session_dir("delivered")).unwrap();
+
+        // No second boot: the restore pass leaves an answered warm-up alone — its own boot is the
+        // one the answer rides.
+        restore_suspended(&app, &modules).await;
+        let s = app.session("delivered").await.unwrap();
+        assert_eq!(
+            s.status,
+            SessionStatus::Starting,
+            "no second boot: the warm-up is the boot this answer rides"
+        );
+        assert!(
+            s.pending_answer.is_some() && s.suspended.is_some() && s.prewarming(),
+            "the delivery is the warm-up's own wait, not the restore's"
+        );
+
+        // The runtime the delivery sends through — the pass materializes it for its own boots.
+        drop(app.runtime("delivered").await);
+        deliver_prewarmed(&app, "delivered").await;
+        let mut rx = app
+            .runtime("delivered")
+            .await
+            .commands_rx
+            .lock()
+            .await
+            .take()
+            .expect("the command channel");
+        let sent = rx.try_recv().expect("the answer was sent down the link");
+        assert_eq!(sent["type"], "user_message", "the runner gets the answer as a user message");
+        assert_eq!(sent["id"], "initial", "the same shape the boot's initial prompt takes");
+        assert!(sent["text"].as_str().unwrap().contains("hello.txt"));
+        let s = app.session("delivered").await.unwrap();
+        assert!(s.pending_answer.is_none() && s.suspended.is_none() && s.prewarm.is_none());
+        assert!(s.holds_slot(), "live again, and holding its slot the ordinary way");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #701: a warm-up that gets no answer gives the slot back. Past the timeout the colony
+    /// is suspended again — question still open and answerable — and the slot it freed is visible
+    /// to the queue's admission at once, with an answer landing after the expiry still restored
+    /// (the claim-first expiry leaves a properly suspended colony behind). A request that never
+    /// got a slot expires too: opened and left alone, it is dropped instead of booting a colony
+    /// nobody is looking at.
+    #[tokio::test]
+    async fn a_prewarm_with_no_answer_times_out_and_frees_the_slot() {
+        let root = std::env::temp_dir().join(format!("colonizer-prewarm-timeout-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        // Warmed by hand (as the pass's claim leaves the record), so the pass's own boot task —
+        // which cannot run a real microVM here — is not part of this test.
+        let warming = warming_colony("warming", Utc::now(), Some(Utc::now() - chrono::Duration::minutes(10)));
+        *app.sessions.write().await = vec![warming];
+        std::fs::create_dir_all(app.session_dir("warming")).unwrap();
+        assert!(app.session("warming").await.unwrap().holds_slot(), "warming, slot held");
+        // A queued launch is waiting for exactly this slot.
+        let mut queued = colony("acme", SessionStatus::Queued);
+        queued.id = "queued".into();
+        app.sessions.write().await.push(queued);
+
+        assert!(prewarm_expire(&app, "warming").await, "the expiry landed");
+        let s = app.session("warming").await.unwrap();
+        assert_eq!(s.status, SessionStatus::WaitingForAnswer, "back to what the suspension left");
+        assert!(s.suspended.is_some() && s.prewarm.is_none(), "suspended again, request spent");
+        assert!(!s.holds_slot(), "the slot is back");
+        {
+            let sessions = app.sessions.read().await;
+            assert!(
+                has_room(
+                    &sessions,
+                    "acme",
+                    "acme/repo",
+                    orgs::global_max_parallel(&modules) as usize,
+                    None,
+                    repo_limit(&modules, &app.org_settings("acme")),
+                ),
+                "the queue can admit the launch it was waiting to"
+            );
+        }
+        assert!(
+            !prewarm_expire(&app, "warming").await,
+            "an expired colony is not expired twice"
+        );
+        // An answer landing on the expired colony — held as `hold_answer` holds one on a suspended
+        // colony — is not lost to the torn-down warm-up: the restore pass is the boot it rides.
+        let held = PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Which file name?\nA: hello.txt".into(),
+            answered_at: Some(Utc::now()),
+        };
+        app.update_session("warming", |x| x.pending_answer = Some(held)).await;
+        restore_suspended(&app, &modules).await;
+        let s = app.session("warming").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Starting, "the held answer got its boot back");
+        assert!(
+            s.suspended.is_none() && s.pending_answer.is_some() && !s.prewarming(),
+            "restored, not delivered into the dead warm-up link"
+        );
+        let _ = std::fs::remove_dir_all(root);
+
+        // A request that waited for a slot past the timeout is dropped, not served: the pass
+        // clears it and leaves the colony as the suspension left it.
+        let root = std::env::temp_dir().join(format!("colonizer-prewarm-stale-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        let modules = app.modules.read().await.clone();
+        *app.sessions.write().await = vec![warming_colony("stale", Utc::now() - chrono::Duration::minutes(10), None)];
+        std::fs::create_dir_all(app.session_dir("stale")).unwrap();
+        prewarm_requested(&app, &modules).await;
+        let s = app.session("stale").await.unwrap();
+        assert!(
+            s.status == SessionStatus::WaitingForAnswer && s.suspended.is_some(),
+            "never claimed: the request was stale"
+        );
+        assert!(
+            s.prewarm.is_none(),
+            "the spent request is off the record, so re-opening the question starts fresh"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #701: a pre-warm request never takes a slot ahead of a colony that already holds an
+    /// answer — with the answers' restore and the warm-up racing for the same slots, the answers go
+    /// first — and of two warm-up requests themselves, the older one is the one served.
+    #[tokio::test]
+    async fn a_prewarm_request_waits_behind_every_held_answer_and_serves_the_oldest_first() {
+        let root = std::env::temp_dir().join(format!("colonizer-prewarm-order-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(2));
+        let modules = app.modules.read().await.clone();
+
+        let requested =
+            |id: &str, minutes_ago: i64| warming_colony(id, Utc::now() - chrono::Duration::minutes(minutes_ago), None);
+        let mut answered = requested("answered", 3);
+        answered.prewarm = None;
+        answered.pending_answer = Some(PendingAnswer {
+            question_id: "q1".into(),
+            prompt: "Q: Ship it?\nA: yes".into(),
+            answered_at: Some(Utc::now()),
+        });
+        // (Four and one minute ago: five would read as past the default pre-warm timeout and be
+        // dropped as stale, which is the pass's own rule.)
+        *app.sessions.write().await = vec![answered, requested("older", 4), requested("newer", 1)];
+        for id in ["answered", "older", "newer"] {
+            std::fs::create_dir_all(app.session_dir(id)).unwrap();
+        }
+
+        restore_suspended(&app, &modules).await;
+        prewarm_requested(&app, &modules).await;
+        let sessions = app.sessions.read().await;
+        let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(by_id("answered").status, SessionStatus::Starting, "the answers went first");
+        let served = by_id("older");
+        assert_eq!(
+            served.status,
+            SessionStatus::Starting,
+            "the older request is the one the last slot went to"
+        );
+        assert!(served.prewarming() && served.suspended.is_some(), "warming, still suspended");
+        let waiting = by_id("newer");
+        assert!(
+            waiting.status == SessionStatus::WaitingForAnswer
+                && waiting.suspended.is_some()
+                && waiting.prewarm.as_ref().is_some_and(|p| p.started_at.is_none()),
+            "no room left: the newer request keeps waiting for a later tick"
+        );
+        drop(sessions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Issue #667: the restore line runs in answer order, not suspension order. A was suspended
     /// first but answered last; with one slot free it is B, the earlier answer, that comes back,
     /// and A keeps its suspension and its answer for a later tick.
@@ -2084,6 +2827,97 @@ mod tests {
         assert!(
             kept.suspended.is_some() && kept.pending_answer.is_some() && kept.status == SessionStatus::WaitingForAnswer,
             "stays suspended with its answer, one step back in the line"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #673 meets the restore line (#667): an answered suspension a merge superseded is out
+    /// of the line until it is kept — the slot goes to the later answer instead, the held colony
+    /// keeps its suspension and its answer, nobody counts it as ahead of them, and its own note
+    /// says it waits for a Keep rather than promising a resume.
+    #[tokio::test]
+    async fn a_superseded_answered_suspension_is_held_out_of_the_restore_line_until_kept() {
+        let root = std::env::temp_dir().join(format!("colonizer-restore-supersede-{}", crate::util::short_id()));
+        write_providers(&root, &["bailian"]);
+        let app = crate::tests::test_app(&root);
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("max_parallel".into(), json!(1));
+        let modules = app.modules.read().await.clone();
+
+        let answered = |id: &str, answered_at: DateTime<Utc>| {
+            let mut s = waiting_colony(id, "claude-code", Some("s1"));
+            s.suspended = Some(Suspension {
+                at: Utc::now() - chrono::Duration::minutes(10),
+                snapshot: None,
+                reason: WAITING_FOR_ANSWER.into(),
+                path: SESSION_RESUME.into(),
+            });
+            s.pending_answer = Some(PendingAnswer {
+                question_id: "q1".into(),
+                prompt: "Q: Ship it?\nA: yes".into(),
+                answered_at: Some(answered_at),
+            });
+            s
+        };
+        let mut held = answered("held", Utc::now() - chrono::Duration::minutes(5));
+        held.superseded = Some(crate::supersede::Supersession {
+            by: "merged".into(),
+            pr_url: "https://github.com/acme/repo/pull/9".into(),
+            pr: Some(9),
+            title: "Fix the login".into(),
+            reason: crate::supersede::OverlapReason::Issue,
+            at: Utc::now(),
+            kept: false,
+        });
+        let later = answered("later", Utc::now() - chrono::Duration::minutes(1));
+
+        // The note, before anything moves: the held one waits for a Keep, and the later answer
+        // does not count it as ahead.
+        let snapshot = vec![held.clone(), later.clone()];
+        assert!(
+            restore_line_note(&snapshot, &held, 1, None, 1, false).contains("waits until it is kept"),
+            "the held colony's note promises no resume"
+        );
+        assert_eq!(
+            restore_line_note(&snapshot, &later, 1, None, 1, false),
+            "a slot is free, so it resumes on the next queue tick",
+            "a held colony stands in nobody's way"
+        );
+
+        *app.sessions.write().await = snapshot;
+        std::fs::create_dir_all(app.session_dir("held")).unwrap();
+        std::fs::create_dir_all(app.session_dir("later")).unwrap();
+        restore_suspended(&app, &modules).await;
+        {
+            let sessions = app.sessions.read().await;
+            let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+            assert_eq!(
+                by_id("later").status,
+                SessionStatus::Starting,
+                "the slot went past the held colony"
+            );
+            let h = by_id("held");
+            assert!(
+                h.suspended.is_some() && h.pending_answer.is_some() && h.status == SessionStatus::WaitingForAnswer,
+                "the held colony keeps its suspension and its answer"
+            );
+        }
+
+        // Kept, it is back in the line: with the slot freed, the next pass restores it.
+        app.update_session("later", |x| x.status = SessionStatus::Stopped).await;
+        app.update_session("held", |x| {
+            x.superseded.as_mut().is_some_and(crate::supersede::Supersession::mark_kept)
+        })
+        .await;
+        restore_suspended(&app, &modules).await;
+        assert_eq!(
+            app.session("held").await.unwrap().status,
+            SessionStatus::Starting,
+            "kept: restored like any answered suspension"
         );
         let _ = std::fs::remove_dir_all(root);
     }

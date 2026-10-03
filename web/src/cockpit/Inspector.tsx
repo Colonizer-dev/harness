@@ -3,7 +3,7 @@
 //
 // Everything here comes from the colony list and /api/status, plus live findings from hunter runs.
 // There is deliberately no other per-colony event history: the mothership keeps none for the browser, and a made-up one would read as fact.
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useId, useState, type ReactElement } from "react";
 
 import { AntAvatar } from "../components/AntAvatar";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "../components/AskUserCard";
@@ -14,12 +14,14 @@ import { claimWaitPosition } from "../api";
 import { useBehind } from "../behind";
 import { useApi } from "../context";
 import { needsYou } from "../notifications";
+import { PR_FILES_SHOWN, prFileRows, useSessionDiff } from "../sessionDiff";
 import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { formatCost } from "../spend";
 import type { StreamState, SubagentView } from "../sessionStream";
 import { parentOf } from "../stack";
-import type { FindingRecord, HarnessStatus, Question, Session, UpdateStatus } from "../types";
+import type { CommitLink, FindingRecord, HarnessStatus, Question, Session, SessionDiffFile, UpdateStatus } from "../types";
 import { bootMedians, bootView } from "./bootTiming";
+import { CommitLinks } from "./CommitLinks";
 import { chains, type FindingChain } from "./findings";
 
 const TONE_VAR: Record<Tone, string> = {
@@ -93,6 +95,39 @@ const STAGE: Record<string, string> = {
   pushed: "pushed",
   pr_opened: "opened",
 };
+
+/** The files behind a pull request card: path and +added/-removed, folded after a few (issue #611). */
+function PrFiles({ files }: { files: SessionDiffFile[] }): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const listId = useId();
+  const { shown, hidden } = prFileRows(files, expanded);
+  return (
+    <div className="flex flex-col gap-1">
+      <div id={listId} className="flex flex-col gap-1">
+        {shown.map((file) => (
+          <div key={file.path} className="flex items-baseline gap-2 font-mono text-[11px]">
+            <span className="min-w-0 flex-1 truncate text-muted" title={file.path}>
+              {file.path}
+            </span>
+            <span className="shrink-0 tabular-nums text-ok">+{file.added}</span>
+            <span className="shrink-0 tabular-nums text-err">-{file.removed}</span>
+          </div>
+        ))}
+      </div>
+      {files.length > PR_FILES_SHOWN && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          aria-controls={listId}
+          className="cursor-pointer self-start text-[11.5px] font-semibold text-accent hover:underline"
+        >
+          {expanded ? "show fewer" : `+${hidden} more`}
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Findings, folded from the colony's ledger (see findings.ts)
@@ -337,6 +372,8 @@ export function Inspector({
   const { behind } = useBehind(session);
   // Why the colony is not progressing, polled from the single-session route (issue #230).
   const { diagnosis, recentEvents } = useSessionDiagnosis(session);
+  // The changed files for the pull request card (issue #611): fetched once per colony, then cached.
+  const diffFiles = useSessionDiff(session);
   const [findings, setFindings] = useState<FindingChain[]>([]);
   useEffect(() => {
     if (!session) return;
@@ -353,6 +390,25 @@ export function Inspector({
       active = false;
     };
   }, [api, session?.id]);
+
+  // The colony's commits (issue #765), a separate call like the findings: none recorded, or an
+  // error, reads as an empty list.
+  const [commits, setCommits] = useState<CommitLink[]>([]);
+  useEffect(() => {
+    if (!session) return;
+    let active = true;
+    api.sessionCommits(session.id).then(
+      (body) => {
+        if (active) setCommits(body.commits);
+      },
+      () => {
+        if (active) setCommits([]);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, session?.id, session?.updated_at]);
 
   // Only rows the mothership actually reported: an absent fact is left out rather than guessed at.
   const connections: { label: string; dot: string; section: SectionId }[] = [];
@@ -604,8 +660,9 @@ export function Inspector({
               </div>
 
               {session.pr_url && (
-                // What came back. The prototype lists per-file +/- counts; the API reports no diff
-                // stats, so this carries the address and the branch it came from instead of inventing them.
+                // What came back: the per-file +/- counts from GET /api/sessions/{id}/diff (issue
+                // #611), loaded with the card, then the branch and the address. The counts appear
+                // once fetched; the branch and link render regardless.
                 <div className="flex flex-col gap-1.5 border-y border-border px-0 py-3">
                   <div className="flex items-center justify-between gap-2.5">
                     <span className="text-[12.5px] font-medium text-ok">Pull request</span>
@@ -623,6 +680,7 @@ export function Inspector({
                     {session.base && typeof behind === "number" && behind > 0 ? ` · behind by ${behind}` : ""}
                     {session.base && behind === 0 ? " · up to date" : ""}
                   </div>
+                  {diffFiles && diffFiles.length > 0 && <PrFiles key={session.id} files={diffFiles} />}
                   <a
                     href={session.pr_url}
                     target="_blank"
@@ -703,6 +761,10 @@ export function Inspector({
                   </div>
                 </Section>
               )}
+
+              <Section title="COMMITS">
+                <CommitLinks commits={commits} />
+              </Section>
 
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">

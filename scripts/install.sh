@@ -78,7 +78,7 @@ fi
 # fetches the guest agent against claude-code.lock and the guest runtime against node.lock) and at --pull-image time (the image digest in
 # images.lock), so a release has to carry its pins to stay reproducible.
 mkdir -p "$dist"
-install -m 644 "$root/vendor/claude-code.lock" "$dist/claude-code.lock"
+install -m 644 "$root/crates/colonizer/claude-code.lock" "$dist/claude-code.lock"
 install -m 644 "$root/vendor/node.lock" "$dist/node.lock"
 install -m 644 "$root/crates/colonizer/images.lock" "$dist/images.lock"
 

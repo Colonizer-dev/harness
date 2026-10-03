@@ -1,6 +1,7 @@
 // Shared fixtures for the cockpit's static-markup tests: one running colony, one working
 // settler, one map-refreshing loop, each tweakable per test.
-import type { Loop, Session } from "../types";
+import type { DiskCleanupReport, Loop, Session } from "../types";
+import { DEFAULT_DISK_CLEANUP_SETTINGS } from "./diskCleanup";
 import type { SubagentView } from "../sessionStream";
 
 export function session(overrides: Partial<Session> = {}): Session {
@@ -74,3 +75,47 @@ export function settlerView(overrides: Partial<SubagentView> = {}): SubagentView
     ...overrides,
   };
 }
+
+/** The built-in disk-cleanup loop as a fresh install has it: off, hourly, default settings. */
+export const CLEANUP_LOOP: Loop = {
+  id: "disk-cleanup",
+  name: "Disk cleanup",
+  org: "",
+  repo: "",
+  prompt: "",
+  cadence: { every: "interval", minutes: 60 },
+  kind: "disk_cleanup",
+  tz_offset_minutes: 0,
+  model: null,
+  subagent_model: null,
+  autopilot: false,
+  max_runs: null,
+  end_at: null,
+  enabled: false,
+  next_run_at: null,
+  runs: 0,
+  last_run: null,
+  last_note: null,
+  ended_reason: null,
+  created_at: "2026-09-30T00:00:00Z",
+  disk_cleanup: { settings: { ...DEFAULT_DISK_CLEANUP_SETTINGS }, history: [], attention: null, previewed_at: null },
+};
+
+/** A dry run that would free 3G and keeps one colony with unpushed commits. */
+export const PREVIEW: DiskCleanupReport = {
+  at: "2026-09-30T10:00:00Z",
+  dry_run: true,
+  trigger: "manual",
+  bytes: 3 * 1024 ** 3,
+  categories: [
+    {
+      category: "build_output",
+      enabled: true,
+      items: [{ path: "/data/worktrees/acme/web/abc/target", bytes: 3 * 1024 ** 3, colony: "abc" }],
+      count: 1,
+      bytes: 3 * 1024 ** 3,
+      held: [{ path: "/data/worktrees/acme/web/def", reason: "unpushed-commits" }],
+    },
+    { category: "host_paths", enabled: false, items: [], count: 0, bytes: 0 },
+  ],
+};

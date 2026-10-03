@@ -37,21 +37,36 @@ export function isTerminal(status: SessionStatus): boolean {
 }
 
 /**
- * The one definition of "needs a person": flagged by the watchdog or autopilot, or sat on an open
- * question. Terminal colonies never need anyone, even with a stale attention flag: the flag is
- * cleared by the next agent event and there is no next event once the run is over. Deliberately
- * not `!isLive`: `waiting_for_answer` is live and must stay true, and non-terminal non-live
- * statuses (`queued`, `publishing`) keep their attention behaviour. The sidebar's rank-0 group,
- * the tab-title count, the favicon dot and the strip all read this, so none of them can disagree
- * about who is waiting.
+ * A failure nobody has looked at yet (issue #744): the one state that opening or watching the
+ * colony resolves. The mothership clears the flag — and pushes "resolved" to every other device —
+ * when POST /api/sessions/{id}/seen fires, so nothing else (an open question, a stall) may.
+ */
+export function unseenFailure(session: Pick<Session, "status" | "unseen_failure">): boolean {
+  return session.status === "failed" && session.unseen_failure === true;
+}
+
+/**
+ * The one definition of "needs a person": flagged by the watchdog or autopilot, sat on an open
+ * question, or failed without anyone having looked at it yet (issue #744). Terminal colonies never
+ * need anyone, even with a stale attention flag: the flag is cleared by the next agent event and
+ * there is no next event once the run is over — a failure is the one exception, and only while it
+ * is unseen. Deliberately not `!isLive`: `waiting_for_answer` is live and must stay true, and
+ * non-terminal non-live statuses (`queued`, `publishing`) keep their attention behaviour. The
+ * sidebar's rank-0 group, the tab-title count, the favicon dot, the strip, the app badge and the
+ * mothership's attention count all read this, so none of them can disagree about who is waiting.
  */
 export function needsYou(session: Session): boolean {
+  // A fresh failure is exactly the thing a person must go and look at; the seen route (issue #744)
+  // clears the flag, and until it does the terminal rule below must not silence the colony.
+  if (unseenFailure(session)) return true;
   if (isTerminal(session.status)) return false;
   if (session.status === "waiting_for_answer") {
     // One that answered while suspended (issue #667) is not waiting on a person any more — its
     // answer is stored and it is queued for a parallelism slot. Nothing here is left to do.
     return !isAnsweredWaiting(session);
   }
+  // A warm-up (issue #701) is the still-open question being booted on your behalf.
+  if (session.prewarm && !session.pending_answer) return true;
   if (!session.attention) return false;
   // A provider error on a colony that is still working is not yours to act on yet: its next
   // request may succeed (the gateway then lifts the flag). It needs you once the turn has stopped.
@@ -63,6 +78,15 @@ export function needsYou(session: Session): boolean {
 /** `(2) Colonizer` while colonies wait; at zero, exactly the title index.html ships with. */
 export function tabTitle(count: number): string {
   return count > 0 ? `(${count}) Colonizer` : "Colonizer";
+}
+
+/**
+ * The number the app badge and the tab title count: how many colonies need a person right now.
+ * This is also the count the mothership pushes alongside each notification, so the dock figure and
+ * the phone's agree by construction (issue #744).
+ */
+export function attentionCount(sessions: Session[]): number {
+  return sessions.filter(needsYou).length;
 }
 
 // The favicon lives in index.html as an inline SVG data URL — the outpost hexagon in the brand
@@ -261,6 +285,21 @@ export function applyFavicon(waiting: boolean): void {
   const href = faviconHref(waiting);
   if (link.getAttribute("href") === href) return;
   link.href = href;
+}
+
+/**
+ * The app badge (dock icon, home-screen) on the same count the tab title carries (issue #744).
+ * Feature-detected and never throwing: browsers without the Badging API, and any badge a browser
+ * refuses, leave nothing behind — the title and favicon still say it.
+ */
+export function applyAppBadge(count: number): void {
+  const nav = navigator as Navigator & { setAppBadge?: (count?: number) => Promise<void>; clearAppBadge?: () => Promise<void> };
+  try {
+    if (count > 0) void nav.setAppBadge?.(count)?.catch(() => undefined);
+    else void nav.clearAppBadge?.()?.catch(() => undefined);
+  } catch {
+    /* no Badging API here, or the call was refused outright */
+  }
 }
 
 /** A two-note WebAudio blip — no audio asset, no dependency. Any failure (no device, blocked context) is silence, which the strip and title already cover. */

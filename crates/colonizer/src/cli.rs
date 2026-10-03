@@ -11,7 +11,7 @@
 use crate::{Settings, auth, util};
 use anyhow::{Context as _, Result};
 use chrono::{DateTime, FixedOffset};
-use clap::{ArgAction, CommandFactory as _, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{Read as _, Write as _};
@@ -36,6 +36,10 @@ pub const EXIT_NOT_FOUND: i32 = 4;
 pub const EXIT_CONFLICT: i32 = 5;
 /// 429: a scoped token's launch cap — its concurrency limit or daily budget — refused the launch.
 pub const EXIT_CAP: i32 = 6;
+/// `pr --wait` followed the pull request's checks and they failed.
+pub const EXIT_CHECKS_FAILED: i32 = 7;
+/// `pr --wait --timeout` ran out of time before the checks settled.
+pub const EXIT_TIMEOUT: i32 = 8;
 
 /// The port a `--host` that names no port of its own gets: the mothership's default bind.
 const DEFAULT_PORT: u16 = 7878;
@@ -79,10 +83,14 @@ Exit codes:
   4  not found: no such colony, loop or token (404)
   5  conflict (409), or `ask`/`answer` on a colony that is not asking anything
   6  a launch cap was refused (429)
+  7  `pr --wait` followed the checks and they failed
+  8  `pr --wait --timeout` ran out of time before the checks settled
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`update`, `open`, `login-item`, `telemetry`) read them; the client commands take --host and --token-file.";
+(`open`, `login-item`, `telemetry`) read them. The client commands take --host and --token-file,
+and so does `update` — a thin client of a running mothership; the other local commands refuse
+them (and --json), which only the client commands use.";
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -136,6 +144,15 @@ enum Command {
         /// Keep autopilot off: the finished work waits for you to open the pull request, even where the install default is on
         #[arg(long, conflicts_with = "autopilot")]
         no_autopilot: bool,
+        /// Start a colony on an issue another colony already holds, which would otherwise be refused (409)
+        #[arg(long)]
+        allow_duplicate: bool,
+        /// Wait for an issue another colony holds instead of being refused: the colony queues behind the holder and starts when the issue is its own
+        #[arg(long)]
+        queue_behind_holder: bool,
+        /// Start a colony on an epic — an issue with sub-issues, an `epic` label, or a title marking one — which would otherwise be refused (409)
+        #[arg(long)]
+        allow_epic: bool,
         /// The task, when the issue alone does not say it (the issue body is read either way)
         task: Option<String>,
     },
@@ -177,8 +194,17 @@ enum Command {
     Stop { id: String },
     /// Start a stopped colony again, picking up its worktree where it was left
     Resume { id: String },
-    /// Print a colony's pull request URL and state
-    Pr { id: String },
+    /// Print a colony's pull request URL and state, or --wait for its checks to settle
+    Pr {
+        id: String,
+        /// Follow the pull request's checks until they settle, re-reading the colony, instead of
+        /// printing the state once; exits 7 when they fail, 8 when a --timeout runs out
+        #[arg(long)]
+        wait: bool,
+        /// Give up after this long (`--wait` only): `90`, `90s`, `30m`, `2h`. No timeout by default
+        #[arg(long, requires = "wait", value_name = "DURATION", value_parser = parse_duration)]
+        timeout: Option<Duration>,
+    },
     /// Print a repository's architecture map as a text outline, or search it with --find
     Map {
         /// The repository the map was drawn from, as owner/repo
@@ -200,6 +226,12 @@ enum Command {
     Loop {
         #[command(subcommand)]
         command: LoopCommand,
+    },
+    /// Start and list red-team runs: hunters that find and report bugs, or security defects with
+    /// `--preset security`
+    Redteam {
+        #[command(subcommand)]
+        command: RedteamCommand,
     },
     /// Manage the mothership's scoped API tokens (the owner token only)
     Token {
@@ -235,6 +267,21 @@ enum FleetCommand {
         #[arg(long)]
         preview: bool,
     },
+    /// Push this member's colony history to its fleet's owner: preview it, consent, drain now, or show where it stands
+    Sync {
+        /// Show the push's status, and send nothing
+        #[arg(long, conflicts_with_all = ["preview", "enable", "disable"])]
+        status: bool,
+        /// Show what the push would send (colonies, logs, bytes), and send nothing
+        #[arg(long, conflicts_with_all = ["enable", "disable"])]
+        preview: bool,
+        /// Consent to pushing this machine's history to the owner (prints the preview first)
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        /// Withdraw that consent: nothing more is sent
+        #[arg(long)]
+        disable: bool,
+    },
     /// Preview a fleet bundle, then import it into this machine's data dir
     Import {
         /// The .tar.zst bundle to import
@@ -244,6 +291,167 @@ enum FleetCommand {
         #[arg(long)]
         preview: bool,
     },
+}
+
+/// The `redteam` subcommands.
+#[derive(Subcommand, Debug)]
+enum RedteamCommand {
+    /// Start a run against one repository. It arms by default and launches as soon as no colony
+    /// is live; --now starts it immediately or fails with exit 5 while colonies are live
+    Start {
+        /// The repository to raid, as owner/repo
+        #[arg(value_name = "OWNER/REPO")]
+        repo: String,
+        /// general (bug hunt) or security (security focus areas, a deterministic pre-scan and an
+        /// operator checklist)
+        #[arg(long, value_enum, default_value_t = RedteamPreset::General)]
+        preset: RedteamPreset,
+        /// Hunters in the swarm, 1 to 8 (default 3)
+        #[arg(long, value_name = "N")]
+        hunters: Option<usize>,
+        /// Run the hunters' orchestrator on this model
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Run the hunters' subagents on this model
+        #[arg(long, value_name = "MODEL")]
+        subagent_model: Option<String>,
+        /// Let hunters fix what they find (off: they only report, and never open or merge anything)
+        #[arg(long)]
+        autofix: bool,
+        /// Start now instead of arming; refused while any colony is live
+        #[arg(long)]
+        now: bool,
+    },
+    /// List red-team runs, newest first
+    List,
+}
+
+/// A red-team preset, as `--preset` spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum RedteamPreset {
+    General,
+    Security,
+}
+
+impl RedteamPreset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Security => "security",
+        }
+    }
+}
+
+/// The `POST /api/sessions` body `colonizer launch` sends. `autopilot` is `Some` only when a flag
+/// chose one, so the publish module's setting decides otherwise; the claim and epic overrides
+/// travel as booleans, each off by default, the same fields the cockpit and the API take.
+#[allow(clippy::too_many_arguments)]
+fn launch_body(
+    repo: &str,
+    issue: Option<u64>,
+    task: Option<String>,
+    autopilot: Option<bool>,
+    model: Option<String>,
+    subagent_model: Option<String>,
+    allow_duplicate: bool,
+    queue_behind_holder: bool,
+    allow_epic: bool,
+) -> Value {
+    json!({
+        "repo": repo,
+        "issue": issue,
+        "instructions": task.unwrap_or_default(),
+        "autopilot": autopilot,
+        "model_override": model,
+        "subagent_model_override": subagent_model,
+        "allow_duplicate": allow_duplicate,
+        "queue_behind_holder": queue_behind_holder,
+        "allow_epic": allow_epic,
+    })
+}
+
+/// The `POST /api/redteam/runs` body `redteam start` sends.
+fn redteam_start_body(
+    repo: &str,
+    preset: RedteamPreset,
+    hunters: Option<usize>,
+    model: Option<String>,
+    subagent_model: Option<String>,
+    autofix: bool,
+    now: bool,
+) -> Value {
+    json!({
+        "repo": repo,
+        "preset": preset.as_str(),
+        "swarm_size": hunters,
+        "model": model,
+        "subagent_model": subagent_model,
+        "autofix": autofix,
+        "arm": !now,
+    })
+}
+
+async fn redteam_command(cli: &Cli, command: RedteamCommand) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        match command {
+            RedteamCommand::Start {
+                repo,
+                preset,
+                hunters,
+                model,
+                subagent_model,
+                autofix,
+                now,
+            } => {
+                let body = redteam_start_body(&repo, preset, hunters, model, subagent_model, autofix, now);
+                let run = machine
+                    .post("/api/redteam/runs", Some(&body))
+                    .await?
+                    .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+                if json {
+                    println!("{}", pretty(&run)?);
+                } else {
+                    println!(
+                        "red-team run {} on {} ({} preset, {})",
+                        run["id"].as_str().unwrap_or("?"),
+                        run["repo"].as_str().unwrap_or("?"),
+                        run["preset"].as_str().unwrap_or("general"),
+                        run["state"].as_str().unwrap_or("?")
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+            RedteamCommand::List => {
+                let runs = machine.get("/api/redteam/runs").await?;
+                if json {
+                    println!("{}", pretty(&runs)?);
+                    return Ok(EXIT_OK);
+                }
+                let rows = runs.as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    eprintln!("no red-team runs");
+                    return Ok(EXIT_OK);
+                }
+                for r in &rows {
+                    let c = &r["counts"];
+                    let leads = r["prescan"]["leads"].as_array().map(Vec::len);
+                    println!(
+                        "{:<12}  {:<28}  {:<8}  {:<8}  {} found, {} validated{}",
+                        r["id"].as_str().unwrap_or("?"),
+                        util::truncate(r["repo"].as_str().unwrap_or("?"), 28),
+                        r["preset"].as_str().unwrap_or("general"),
+                        r["state"].as_str().unwrap_or("?"),
+                        c["found"].as_u64().unwrap_or(0),
+                        c["validated"].as_u64().unwrap_or(0),
+                        leads.map(|n| format!(", {n} pre-scan leads")).unwrap_or_default()
+                    );
+                }
+                Ok(EXIT_OK)
+            }
+        }
+    })
+    .await
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -372,13 +580,101 @@ enum LoopCommand {
         disabled: bool,
     },
     /// Start the loop's next run now, whatever its schedule; while a run is live this is a conflict (exit 5)
-    Run { id: String },
-    /// Pause a loop: its settings are kept, and nothing runs until `loop start`
+    Run {
+        id: String,
+        /// The built-in disk-cleanup loop only: list what a run would remove, with sizes, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Pause a loop: its settings are kept, and nothing runs until `loop start` (alias: disable)
+    #[command(alias = "disable")]
     Stop { id: String },
-    /// Enable a paused or ended loop again; the next run is booked from its cadence
+    /// Enable a paused or ended loop again; the next run is booked from its cadence (alias: enable).
+    /// `colonizer loop enable disk-cleanup` switches on the built-in disk cleanup
+    #[command(alias = "enable")]
     Start { id: String },
     /// Delete a loop. Its past colonies stay.
     Delete { id: String },
+    /// The built-in merge-train loop (issue #754): off by default, hourly, and only in the
+    /// repositories you opt in. `show` prints its settings and last report
+    #[command(name = "merge-train")]
+    MergeTrain {
+        #[command(subcommand)]
+        command: MergeTrainCommand,
+    },
+}
+
+/// `colonizer loop merge-train …`: each edit reads the settings, changes one thing and saves them
+/// back — the same full replace the cockpit's form sends.
+#[derive(Subcommand, Debug)]
+enum MergeTrainCommand {
+    /// Settings, the next run, paused repositories and the last run's report
+    Show,
+    /// Switch the loop on (it runs at its cadence; nothing merges until a repository is opted in)
+    On,
+    /// Switch the loop off
+    Off,
+    /// Opt a repository (owner/repo) or a whole org (owner) in
+    Allow {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Take a repository or org off the allowlist and the never list
+    Disallow {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Never merge in this repository or org (an upstream-review-only fork, say), whatever the allowlist says
+    Never {
+        #[arg(value_name = "OWNER[/REPO]")]
+        target: String,
+    },
+    /// Hold a colony's pull request out of the loop
+    Hold { session: String },
+    /// Release a held colony
+    Unhold { session: String },
+    /// Change the loop's limits and switches; only the flags given change
+    Set {
+        /// Run every N minutes (15 to 10080)
+        #[arg(long, value_name = "MINUTES")]
+        every: Option<u32>,
+        /// Merges per repository per run
+        #[arg(long)]
+        max_merges: Option<u32>,
+        /// A per-repository cap, as owner/repo=N (repeatable)
+        #[arg(long, value_name = "OWNER/REPO=N")]
+        repo_cap: Vec<String>,
+        /// The least seconds between two merges in one repository
+        #[arg(long)]
+        cooldown_secs: Option<u64>,
+        /// Minutes to wait for an updated pull request's CI
+        #[arg(long)]
+        ci_wait_minutes: Option<u64>,
+        /// Known-flaky check names, comma-separated (a trailing * matches a prefix)
+        #[arg(long, value_name = "NAMES")]
+        flaky: Option<String>,
+        /// Re-run main's failed jobs once, then send a fix colony, when main goes red after the train's merge
+        #[arg(long, value_enum)]
+        self_heal: Option<Toggle>,
+        /// With self-heal: revert the train's own last merge instead of sending a fix colony
+        #[arg(long, value_enum)]
+        revert_on_red: Option<Toggle>,
+        /// Dispatch one redo colony for a pull request whose mechanical rebase conflicted
+        #[arg(long, value_enum)]
+        redo: Option<Toggle>,
+    },
+    /// Run it now in the background, or with --dry-run list what it would merge, update, rebase and skip
+    Run {
+        /// Read everything, write nothing, and print the report
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum Toggle {
+    On,
+    Off,
 }
 
 /// What a loop's runs do, as `--kind` spells it.
@@ -466,11 +762,7 @@ impl Machine {
     /// Builds the client from the global flags, resolving the host and the token the way every
     /// client command does.
     pub(crate) fn from_cli(cli: &Cli) -> Result<Self> {
-        let host = match &cli.host {
-            // The flag's parser already normalized it to `host:port`.
-            Some(host) => host.clone(),
-            None => Settings::from_env()?.bind,
-        };
+        let host = resolve_host(cli)?;
         Ok(Self {
             base: format!("http://{host}"),
             token: resolve_token(cli)?,
@@ -611,14 +903,59 @@ fn parse_host(host: &str) -> Result<String, String> {
     }
 }
 
-/// The token a client command proves itself with: the environment first, so a shell (or a CI job)
-/// can hold it without touching disk; then the file the operator named; then the local install's
-/// own token, read without creating it — the CLI is a client here, not the mint (the mothership
-/// writes that file on its first start).
+/// `--timeout` as a duration: a bare number is seconds, `s`/`sec`/`seconds` says so, and the
+/// minutes, hours and days spellings are `loop create`'s ([`split_duration`]: `30m`, `2h`, `1d`,
+/// any case). Zero, a count past `u64`, a time of day (`@`) and any other spelling are refused: a
+/// wait that ends when it starts is a typo, not a plan.
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    let refuse = || format!("--timeout takes a number of seconds, or s/m/h/d after it (got \"{text}\")");
+    let text = text.trim();
+    if text.contains('@') {
+        return Err(refuse());
+    }
+    let secs = match split_duration(text) {
+        Some((count, unit)) => {
+            let unit_secs = match unit {
+                'm' => 60,
+                'h' => 3600,
+                _ => 86_400,
+            };
+            count.checked_mul(unit_secs)
+        }
+        None => {
+            let digits = text.chars().take_while(char::is_ascii_digit).count();
+            match text[digits..].trim().to_lowercase().as_str() {
+                "" | "s" | "sec" | "secs" | "second" | "seconds" => text[..digits].parse::<u64>().ok(),
+                _ => None,
+            }
+        }
+    };
+    secs.filter(|secs| *secs > 0).map(Duration::from_secs).ok_or_else(refuse)
+}
+
+/// The mothership the client half dials: `--host` when given (its parser already normalized it to
+/// `host:port`), else the local mothership's bind from the environment.
+fn resolve_host(cli: &Cli) -> Result<String> {
+    match &cli.host {
+        Some(host) => Ok(host.clone()),
+        None => Ok(Settings::from_env()?.bind),
+    }
+}
+
+/// `COLONIZER_TOKEN`, trimmed and non-empty, when it is set: the one token source that outranks any
+/// file, because a shell (or a CI job) can hold it without touching disk.
+fn env_token() -> Option<String> {
+    std::env::var("COLONIZER_TOKEN")
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+/// The token a client command proves itself with: the environment first; then the file the operator
+/// named; then the local install's own token, read without creating it — the CLI is a client here,
+/// not the mint (the mothership writes that file on its first start).
 fn resolve_token(cli: &Cli) -> Result<String> {
-    if let Some(token) = std::env::var("COLONIZER_TOKEN").ok().map(|t| t.trim().to_string())
-        && !token.is_empty()
-    {
+    if let Some(token) = env_token() {
         return Ok(token);
     }
     if let Some(path) = &cli.token_file {
@@ -637,6 +974,19 @@ fn resolve_token(cli: &Cli) -> Result<String> {
             path.display()
         )
     })
+}
+
+/// The token `update` proves itself with. An explicit source — `COLONIZER_TOKEN` or `--token-file`
+/// — wins, read exactly as a client command reads it; with neither, it is the local install's own
+/// token, *created* on a first run. `update` asks the mothership to replace itself, so unlike the
+/// strictly-read client commands it may mint the token a fresh install has not written yet, and
+/// plain `colonizer update` keeps reading the same file it always did.
+fn update_token(cli: &Cli) -> Result<String> {
+    if env_token().is_some() || cli.token_file.is_some() {
+        return resolve_token(cli);
+    }
+    let cfg = Settings::from_env()?;
+    auth::load_or_create(&cfg.config_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -801,10 +1151,97 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 // Running the commands.
 // ---------------------------------------------------------------------------
 
+/// The local commands and the client global flags each refuses. They run against this machine, so
+/// a flag that names a mothership (`--host`, `--token-file`) or asks for JSON means nothing to
+/// them. `update` is the one exception: it is a thin client of a running mothership, so it keeps
+/// `--host` and `--token-file` and refuses only `--json`, which it has no rendering for.
+const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
+    ("update", &["json"]),
+    ("open", &["host", "token_file", "json"]),
+    ("login-item", &["host", "token_file", "json"]),
+    ("telemetry", &["host", "token_file", "json"]),
+    ("version", &["host", "token_file", "json"]),
+    ("completions", &["host", "token_file", "json"]),
+    ("man", &["host", "token_file", "json"]),
+];
+
+/// [`Cli::command`], plus a hidden arg for each client global flag a local command refuses.
+///
+/// clap does not propagate a global argument to a subcommand that already declares the same id
+/// (`Command::_propagate_global_args`), so the hidden arg keeps `--host`, `--token-file` and
+/// `--json` out of that command's `--help` — while clap still parses them, which is what
+/// [`refuse_local_global_flags`] then turns into a usage error.
+fn cli_command() -> clap::Command {
+    let mut command = Cli::command();
+    for (name, refused) in LOCAL_COMMANDS {
+        command = command.mut_subcommand(*name, |sub| sub.args(refused.iter().map(|flag| refused_flag(flag))));
+    }
+    command
+}
+
+/// The hidden stand-in for one client global flag on a local command: the same id, so clap's global
+/// propagation skips it, and the same spelling, so the operator's flag still parses — and is
+/// refused.
+fn refused_flag(id: &str) -> clap::Arg {
+    let arg = clap::Arg::new(id.to_string()).long(id.replace('_', "-")).hide(true);
+    if id == "json" {
+        arg.action(ArgAction::SetTrue)
+    } else {
+        arg.value_name("VALUE")
+    }
+}
+
+/// Refuses a client global flag on a local command, exit 2, saying the flag is not for it. Reads
+/// the flag from whichever side of the subcommand it was given: clap keeps a pre-subcommand flag in
+/// the top-level matches and a post-subcommand one in the subcommand's.
+fn refuse_local_global_flags(command: &mut clap::Command, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+    let Some((name, sub)) = matches.subcommand() else {
+        return Ok(());
+    };
+    let Some((_, refused)) = LOCAL_COMMANDS.iter().find(|(local, _)| *local == name) else {
+        return Ok(());
+    };
+    let given = |flag: &str| {
+        matches.value_source(flag) == Some(clap::parser::ValueSource::CommandLine)
+            || sub.value_source(flag) == Some(clap::parser::ValueSource::CommandLine)
+    };
+    match refused.iter().copied().find(|flag| given(flag)) {
+        Some(flag) => Err(command.error(clap::error::ErrorKind::UnknownArgument, local_flag_refusal(name, flag))),
+        None => Ok(()),
+    }
+}
+
+/// Why a local command refuses a client global flag, in one line. `open` gets the extra note that
+/// it is local on purpose — it always prints and opens this machine's own link.
+fn local_flag_refusal(name: &str, flag: &str) -> String {
+    let flag = format!("--{}", flag.replace('_', "-"));
+    if name == "open" && flag != "--json" {
+        return format!(
+            "{flag} only applies to the client commands, not `colonizer open`: open is local on \
+             purpose and always uses this machine's link"
+        );
+    }
+    format!("{flag} only applies to the client commands, not `colonizer {name}`")
+}
+
+/// Parses the command line the way clap does, then refuses a client global flag on a local command
+/// that cannot use it ([`refuse_local_global_flags`]). [`parse`] and the tests both go through
+/// here, so what the binary does and what the tests check cannot drift apart.
+fn try_parse_from<I, T>(args: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut command = cli_command();
+    let mut matches = command.try_get_matches_from_mut(args)?;
+    refuse_local_global_flags(&mut command, &matches)?;
+    Cli::from_arg_matches_mut(&mut matches)
+}
+
 /// Parses the command line the way clap does: usage errors exit [`EXIT_USAGE`], `--help` and
 /// `--version` print and exit [`EXIT_OK`] — neither ever starts a mothership.
 pub fn parse() -> Cli {
-    Cli::try_parse().unwrap_or_else(|e| {
+    try_parse_from(std::env::args_os()).unwrap_or_else(|e| {
         debug_assert_eq!(e.exit_code(), if e.use_stderr() { EXIT_USAGE } else { EXIT_OK });
         let _ = e.print();
         std::process::exit(e.exit_code());
@@ -831,6 +1268,14 @@ fn await_local(result: Result<()>) -> i32 {
     }
 }
 
+/// `update`: resolve the mothership it should ask (this one unless `--host` names another) and the
+/// token to ask with, then hand the work over.
+async fn update_command(cli: &Cli, force: bool) -> Result<()> {
+    let host = resolve_host(cli)?;
+    let token = update_token(cli)?;
+    crate::update::command(force, &host, &token).await
+}
+
 async fn dispatch(cli: &Cli, command: Command) -> i32 {
     match command {
         Command::Version => {
@@ -839,7 +1284,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             println!("{}", crate::version::build().line());
             EXIT_OK
         }
-        Command::Update { force } => await_local(crate::update::command(force).await),
+        Command::Update { force } => await_local(update_command(cli, force).await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
             let cfg = match Settings::from_env() {
@@ -868,13 +1313,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             // The generator writes straight through and panics on a failed write of its own, so
             // the script is buffered: a closed pipe (a `| head`) ends the copy, not the process.
             let mut script = Vec::new();
-            clap_complete::generate(shell, &mut Cli::command(), "colonizer", &mut script);
+            clap_complete::generate(shell, &mut cli_command(), "colonizer", &mut script);
             let _ = std::io::stdout().write_all(&script);
             EXIT_OK
         }
         Command::Man => {
             // EPIPE (a `| head`) is not an error here; the page was read as far as it was read.
-            let _ = clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout().lock());
+            let _ = clap_mangen::Man::new(cli_command()).render(&mut std::io::stdout().lock());
             EXIT_OK
         }
         Command::Mcp { scope } => match Machine::from_cli(cli) {
@@ -897,19 +1342,32 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             subagent_model,
             autopilot,
             no_autopilot,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
             task,
         } => {
             let json = cli.json;
             client_command(cli, move |machine| async move {
-                let body = json!({
-                    "repo": repo,
-                    "issue": issue,
-                    "instructions": task.unwrap_or_default(),
-                    // No flag at all: the publish module's autopilot setting decides, server-side.
-                    "autopilot": if autopilot { Some(true) } else if no_autopilot { Some(false) } else { None },
-                    "model_override": model,
-                    "subagent_model_override": subagent_model,
-                });
+                // No flag at all: the publish module's autopilot setting decides, server-side.
+                let autopilot = if autopilot {
+                    Some(true)
+                } else if no_autopilot {
+                    Some(false)
+                } else {
+                    None
+                };
+                let body = launch_body(
+                    &repo,
+                    issue,
+                    task,
+                    autopilot,
+                    model,
+                    subagent_model,
+                    allow_duplicate,
+                    queue_behind_holder,
+                    allow_epic,
+                );
                 // A person is launching, so `origin` stays unset: the field marks machine
                 // launchers (the burn-down scheduler, red-team hunters), not this command.
                 let Some(session) = machine.post("/api/sessions", Some(&body)).await? else {
@@ -1131,34 +1589,14 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             })
             .await
         }
-        Command::Pr { id } => {
+        Command::Pr { id, wait, timeout } => {
             let json = cli.json;
             client_command(cli, move |machine| async move {
+                if wait {
+                    return wait_pr(&machine, &id, json, timeout, PR_WAIT_POLL).await;
+                }
                 let detail = machine.get(&format!("/api/sessions/{id}")).await?;
-                if json {
-                    println!(
-                        "{}",
-                        pretty(&json!({
-                            "id": id,
-                            "pr_url": detail["pr_url"],
-                            "status": detail["status"],
-                            "ci_state": detail["ci_state"],
-                            "merged_at": detail["merged_at"],
-                        }))?
-                    );
-                    return Ok(EXIT_OK);
-                }
-                match detail["pr_url"].as_str() {
-                    Some(url) => {
-                        let state = detail["status"].as_str().unwrap_or("unknown");
-                        let ci = detail["ci_state"]
-                            .as_str()
-                            .map(|c| format!(", checks {c}"))
-                            .unwrap_or_default();
-                        println!("{url} ({state}{ci})");
-                    }
-                    None => println!("no pull request yet"),
-                }
+                print_pr(&id, &detail, json)?;
                 Ok(EXIT_OK)
             })
             .await
@@ -1199,9 +1637,115 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             .await
         }
         Command::Loop { command } => loop_command(cli, command).await,
+        Command::Redteam { command } => redteam_command(cli, command).await,
         Command::Token { command } => token_command(cli, command).await,
+        Command::Fleet {
+            command:
+                FleetCommand::Sync {
+                    status,
+                    preview,
+                    enable,
+                    disable,
+                },
+        } => {
+            let action = match (status, preview, enable, disable) {
+                (true, ..) => SyncAction::Status,
+                (_, true, ..) => SyncAction::Preview,
+                (_, _, true, _) => SyncAction::Consent(true),
+                (_, _, _, true) => SyncAction::Consent(false),
+                _ => SyncAction::Drain,
+            };
+            fleet_sync_command(cli, action).await
+        }
         Command::Fleet { command } => fleet_command(cli, command),
     }
+}
+
+/// What `fleet sync` was asked to do.
+#[derive(Clone, Copy)]
+enum SyncAction {
+    Drain,
+    Status,
+    Preview,
+    Consent(bool),
+}
+
+/// Prints `fleet sync --preview`'s answer for a person.
+fn print_sync_preview(preview: &Value) {
+    let mib = |key: &str| preview[key].as_u64().unwrap_or(0) as f64 / (1024.0 * 1024.0);
+    println!(
+        "{} finished colonies, {} log files, {:.1} MiB in all would go to {}",
+        preview["colonies"].as_u64().unwrap_or(0),
+        preview["payloads"].as_u64().unwrap_or(0),
+        mib("total_bytes"),
+        preview["owner_url"].as_str().unwrap_or("the owner"),
+    );
+    println!(
+        "not yet sent: {} colonies, {:.1} MiB",
+        preview["pending_colonies"].as_u64().unwrap_or(0),
+        mib("pending_bytes")
+    );
+    if let Some(what) = preview["includes"].as_str() {
+        println!("includes: {what}");
+    }
+    if let Some(what) = preview["excludes"].as_str() {
+        println!("never sent: {what}");
+    }
+}
+
+/// `fleet sync`: the running mothership's history push to its fleet's owner (issue #762) —
+/// preview what it would send, consent or withdraw, drain now, or show where it stands.
+async fn fleet_sync_command(cli: &Cli, action: SyncAction) -> i32 {
+    let json = cli.json;
+    client_command(cli, move |machine| async move {
+        let answer = match action {
+            SyncAction::Status => machine.get("/api/fleet/sync").await?,
+            SyncAction::Preview => machine.get("/api/fleet/sync/preview").await?,
+            SyncAction::Consent(enabled) => {
+                if enabled && !json {
+                    print_sync_preview(&machine.get("/api/fleet/sync/preview").await?);
+                }
+                let body = json!({ "enabled": enabled });
+                machine
+                    .post("/api/fleet/sync/consent", Some(&body))
+                    .await?
+                    .unwrap_or(Value::Null)
+            }
+            SyncAction::Drain => machine.post("/api/fleet/sync", None).await?.unwrap_or(Value::Null),
+        };
+        if json {
+            println!("{}", pretty(&answer)?);
+            return Ok(EXIT_OK);
+        }
+        let status = answer["status"].as_str().unwrap_or("?");
+        match action {
+            SyncAction::Preview => print_sync_preview(&answer),
+            SyncAction::Status | SyncAction::Consent(_) => println!(
+                "{status}: history sync {}; {} rows acknowledged, {} retired",
+                if answer["consent"].as_bool() == Some(true) {
+                    "on"
+                } else {
+                    "off"
+                },
+                answer["acknowledged"].as_u64().unwrap_or(0),
+                answer["retired"].as_array().map_or(0, Vec::len)
+            ),
+            SyncAction::Drain => println!(
+                "{status}: sent {} rows and {} payloads; {} pending, {} retired",
+                answer["sent"].as_u64().unwrap_or(0),
+                answer["payloads"].as_u64().unwrap_or(0),
+                answer["pending"].as_u64().unwrap_or(0),
+                answer["retired"].as_array().map_or(0, Vec::len)
+            ),
+        }
+        if !matches!(action, SyncAction::Preview)
+            && let Some(detail) = answer["detail"].as_str()
+        {
+            eprintln!("{detail}");
+        }
+        Ok(EXIT_OK)
+    })
+    .await
 }
 
 /// `fleet export` and `fleet import` run on this machine's own data dir (`Settings::from_env`),
@@ -1230,6 +1774,7 @@ fn fleet_command(cli: &Cli, command: FleetCommand) -> i32 {
             crate::fleet_export::cli_export(&cfg, cli.json, out, cats, preview)
         }
         FleetCommand::Import { file, preview } => crate::fleet_export::cli_import(&cfg, &file, preview, cli.json),
+        FleetCommand::Sync { .. } => unreachable!("`fleet sync` talks to the mothership: fleet_sync_command"),
     };
     match result {
         Ok(code) => code,
@@ -1261,6 +1806,102 @@ where
             e.exit_code()
         }
     }
+}
+
+/// How often `pr --wait` re-reads the colony. The mothership re-checks GitHub itself about once a
+/// minute while checks run, so reading it faster buys nothing.
+const PR_WAIT_POLL: Duration = Duration::from_secs(15);
+
+/// The `pr` answer, human or `--json`: the URL with the colony's state and checks, or the words
+/// that there is no pull request yet.
+fn print_pr(id: &str, detail: &Value, json: bool) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            pretty(&json!({
+                "id": id,
+                "pr_url": detail["pr_url"],
+                "status": detail["status"],
+                "ci_state": detail["ci_state"],
+                "merged_at": detail["merged_at"],
+            }))?
+        );
+        return Ok(());
+    }
+    match detail["pr_url"].as_str() {
+        Some(url) => {
+            let state = detail["status"].as_str().unwrap_or("unknown");
+            let ci = detail["ci_state"]
+                .as_str()
+                .map(|c| format!(", checks {c}"))
+                .unwrap_or_default();
+            println!("{url} ({state}{ci})");
+        }
+        None => println!("no pull request yet"),
+    }
+    Ok(())
+}
+
+/// The body of `pr --wait`: re-read the colony until its checks settle — 0 on success or when
+/// there is nothing to wait for (`no_checks`), 7 when they fail — or until the colony ends without
+/// putting a verdict in front of us (1: no pull request, or one merged or closed untested).
+/// `timeout` ends the wait with 8 instead, and `interval` is a parameter only so the tests can
+/// wait in milliseconds.
+async fn wait_pr(machine: &Machine, id: &str, json: bool, timeout: Option<Duration>, interval: Duration) -> Result<i32, Fail> {
+    // When to stop, and the value to name when saying so.
+    // A timeout too long to land on the clock (`--timeout 5000000000000000h`) is no deadline at all.
+    let give_up = timeout.and_then(|t| tokio::time::Instant::now().checked_add(t).map(|at| (at, t)));
+    loop {
+        let detail = machine.get(&format!("/api/sessions/{id}")).await?;
+        let checks = detail["ci_state"].as_str().unwrap_or("unknown");
+        let status = detail["status"].as_str().unwrap_or("unknown");
+        match detail["pr_url"].as_str() {
+            // A settled verdict — or none to wait for — is the ending the wait was for.
+            Some(_) if matches!(checks, "success" | "failure" | "no_checks") => {
+                print_pr(id, &detail, json)?;
+                return Ok(if checks == "failure" { EXIT_CHECKS_FAILED } else { EXIT_OK });
+            }
+            // The work is out and the verdict never came: the pull request moved on under us.
+            Some(_) if matches!(status, "merged" | "closed") => {
+                eprintln!("the pull request was {status} before its checks settled");
+                return Ok(EXIT_ERROR);
+            }
+            // Still no pull request: a parked colony is paused, not over, but nothing will
+            // publish until someone resumes it, so waiting would hang regardless.
+            None if status == "parked" => {
+                eprintln!("colony {id} is parked; nothing will publish until it is resumed");
+                return Ok(EXIT_ERROR);
+            }
+            None if !pr_still_coming(status) => {
+                eprintln!("colony {id} ended without opening a pull request (status {status})");
+                return Ok(EXIT_ERROR);
+            }
+            _ => {}
+        }
+        let now = tokio::time::Instant::now();
+        if let Some((deadline, after)) = give_up
+            && now >= deadline
+        {
+            eprintln!("colony {id}: checks still {checks} after {after:?}; gave up waiting");
+            return Ok(EXIT_TIMEOUT);
+        }
+        // Sleep to the next poll, but never past the deadline: a short --timeout must not sit out a
+        // whole poll interval just to notice it is over.
+        let wake = match give_up {
+            Some((deadline, _)) => (now + interval).min(deadline),
+            None => now + interval,
+        };
+        tokio::time::sleep(wake - now).await;
+    }
+}
+
+/// Whether a colony with no pull request yet may still open one — the statuses a `--wait` keeps
+/// waiting through. The refused set is `SessionStatus::is_terminal`'s spellings plus `parked`.
+fn pr_still_coming(status: &str) -> bool {
+    !matches!(
+        status,
+        "pr_opened" | "merged" | "closed" | "no_changes" | "stopped" | "failed" | "parked"
+    )
 }
 
 async fn token_command(cli: &Cli, command: TokenCommand) -> i32 {
@@ -1378,11 +2019,17 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                         .as_str()
                         .map(|iso| local_stamp(iso, offset))
                         .unwrap_or_else(|| "—".into());
+                    // The built-in disk cleanup runs on this host, not on a repository.
+                    let scope = match l["repo"].as_str() {
+                        Some("") if l["kind"] == json!("disk_cleanup") => "(this host)",
+                        Some(repo) => repo,
+                        None => "?",
+                    };
                     println!(
                         "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {}",
                         l["id"].as_str().unwrap_or("?"),
                         util::truncate(l["name"].as_str().unwrap_or("?"), 26),
-                        l["repo"].as_str().unwrap_or("?"),
+                        scope,
                         describe_cadence(&l["cadence"], offset),
                         state,
                         next
@@ -1458,13 +2105,20 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 }
                 Ok(EXIT_OK)
             }
-            LoopCommand::Run { id } => {
+            LoopCommand::Run { id, dry_run } => {
+                let path = if dry_run {
+                    format!("/api/loops/{id}/run-now?dry_run=1")
+                } else {
+                    format!("/api/loops/{id}/run-now")
+                };
                 let session = machine
-                    .post(&format!("/api/loops/{id}/run-now"), None)
+                    .post(&path, None)
                     .await?
                     .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
                 if json {
                     println!("{}", pretty(&session)?);
+                } else if session["categories"].is_array() {
+                    print_cleanup_report(&session);
                 } else {
                     println!(
                         "colony {} started for loop {id} ({})",
@@ -1474,6 +2128,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 }
                 Ok(EXIT_OK)
             }
+            LoopCommand::MergeTrain { command } => merge_train_command(&machine, command, json).await,
             LoopCommand::Stop { id } => set_loop_enabled(&machine, &id, false, json).await,
             LoopCommand::Start { id } => set_loop_enabled(&machine, &id, true, json).await,
             LoopCommand::Delete { id } => {
@@ -1488,6 +2143,262 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
         }
     })
     .await
+}
+
+/// A disk-cleanup run (or dry run) for a person: one line per category with what went or would
+/// go, then the paths, then anything held back and why.
+fn print_cleanup_report(report: &Value) {
+    let dry = report["dry_run"] == json!(true);
+    let size = |v: &Value| v.as_u64().map(util::format_disk_size).unwrap_or_else(|| "?".into());
+    println!("{} {}", if dry { "would free" } else { "freed" }, size(&report["bytes"]));
+    for c in report["categories"].as_array().cloned().unwrap_or_default() {
+        let name = c["category"].as_str().unwrap_or("?").replace('_', " ");
+        if c["enabled"] != json!(true) {
+            println!("  {name}: off");
+            continue;
+        }
+        println!(
+            "  {name}: {} item(s), {}",
+            c["count"].as_u64().unwrap_or(0),
+            size(&c["bytes"])
+        );
+        for item in c["items"].as_array().cloned().unwrap_or_default() {
+            println!("    {}  {}", size(&item["bytes"]), item["path"].as_str().unwrap_or("?"));
+        }
+        for held in c["held"].as_array().cloned().unwrap_or_default() {
+            println!(
+                "    kept  {} ({})",
+                held["path"].as_str().unwrap_or("?"),
+                held["reason"].as_str().unwrap_or("?")
+            );
+        }
+        if let Some(note) = c["note"].as_str() {
+            println!("    note: {note}");
+        }
+    }
+    if let Some(attention) = report["attention"].as_str() {
+        println!("{attention}");
+    }
+}
+
+const MERGE_LOOP: &str = "/api/merge-train/loop";
+
+/// Applies one `merge-train` edit to the settings the server holds. Pure, for the tests.
+fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<(), String> {
+    let list = |settings: &mut Value, key: &str| -> Vec<String> {
+        settings[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    };
+    let norm = |t: &str| t.trim().to_ascii_lowercase();
+    match command {
+        MergeTrainCommand::On => settings["enabled"] = json!(true),
+        MergeTrainCommand::Off => settings["enabled"] = json!(false),
+        MergeTrainCommand::Allow { target } => {
+            let mut allow = list(settings, "allow");
+            if !allow.contains(&norm(target)) {
+                allow.push(norm(target));
+            }
+            let never: Vec<String> = list(settings, "never").into_iter().filter(|t| *t != norm(target)).collect();
+            settings["allow"] = json!(allow);
+            settings["never"] = json!(never);
+        }
+        MergeTrainCommand::Disallow { target } => {
+            for key in ["allow", "never"] {
+                let kept: Vec<String> = list(settings, key).into_iter().filter(|t| *t != norm(target)).collect();
+                settings[key] = json!(kept);
+            }
+        }
+        MergeTrainCommand::Never { target } => {
+            let mut never = list(settings, "never");
+            if !never.contains(&norm(target)) {
+                never.push(norm(target));
+            }
+            settings["never"] = json!(never);
+        }
+        MergeTrainCommand::Hold { session } => {
+            let mut held = list(settings, "held");
+            if !held.contains(session) {
+                held.push(session.clone());
+            }
+            settings["held"] = json!(held);
+        }
+        MergeTrainCommand::Unhold { session } => {
+            let held: Vec<String> = list(settings, "held").into_iter().filter(|h| h != session).collect();
+            settings["held"] = json!(held);
+        }
+        MergeTrainCommand::Set {
+            every,
+            max_merges,
+            repo_cap,
+            cooldown_secs,
+            ci_wait_minutes,
+            flaky,
+            self_heal,
+            revert_on_red,
+            redo,
+        } => {
+            if let Some(minutes) = every {
+                settings["cadence"] = json!({"every": "interval", "minutes": minutes});
+            }
+            if let Some(n) = max_merges {
+                settings["max_merges"] = json!(n);
+            }
+            for entry in repo_cap {
+                let (repo, n) = entry
+                    .split_once('=')
+                    .ok_or_else(|| format!("--repo-cap {entry:?} is not owner/repo=N"))?;
+                let n: u32 = n
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("--repo-cap {entry:?}: N is not a number"))?;
+                if !settings["repo_max_merges"].is_object() {
+                    settings["repo_max_merges"] = json!({});
+                }
+                settings["repo_max_merges"][norm(repo)] = json!(n);
+            }
+            if let Some(secs) = cooldown_secs {
+                settings["cooldown_secs"] = json!(secs);
+            }
+            if let Some(minutes) = ci_wait_minutes {
+                settings["ci_wait_minutes"] = json!(minutes);
+            }
+            if let Some(names) = flaky {
+                let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
+                settings["flaky_checks"] = json!(names);
+            }
+            for (key, toggle) in [
+                ("self_heal", self_heal),
+                ("revert_on_red", revert_on_red),
+                ("redo_on_conflict", redo),
+            ] {
+                if let Some(t) = toggle {
+                    settings[key] = json!(*t == Toggle::On);
+                }
+            }
+        }
+        MergeTrainCommand::Show | MergeTrainCommand::Run { .. } => {}
+    }
+    Ok(())
+}
+
+/// The loop's state in lines: its switch, where it merges, its limits, and the last report.
+fn describe_merge_loop(view: &Value) -> Vec<String> {
+    let s = &view["settings"];
+    let names = |key: &str| {
+        let list: Vec<&str> = s[key]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(", ")
+        }
+    };
+    let on = |key: &str| if s[key] == json!(true) { "on" } else { "off" };
+    let mut out = vec![
+        format!(
+            "merge-train loop: {}{}",
+            if s["enabled"] == json!(true) { "on" } else { "off" },
+            view["next_run_at"]
+                .as_str()
+                .map(|at| format!(", next run {}", local_stamp(at, local_offset_minutes())))
+                .unwrap_or_default()
+        ),
+        format!("  cadence: {}", describe_cadence(&s["cadence"], local_offset_minutes())),
+        format!("  opted in: {}", names("allow")),
+        format!("  never: {}", names("never")),
+        format!(
+            "  per run: at most {} merges per repository, {}s between merges, {} min wait for CI",
+            s["max_merges"], s["cooldown_secs"], s["ci_wait_minutes"]
+        ),
+        format!("  known-flaky checks: {}", names("flaky_checks")),
+        format!(
+            "  self-heal: {}, revert on red: {}, redo colonies: {}",
+            on("self_heal"),
+            on("revert_on_red"),
+            on("redo_on_conflict")
+        ),
+    ];
+    if view["writes_blocked"] == json!(true) {
+        out.push("  external writes are blocked: every run is a dry run".to_string());
+    }
+    if let Some(repos) = view["repos"].as_object() {
+        for (repo, mem) in repos {
+            if let Some(why) = mem["paused"].as_str() {
+                out.push(format!("  paused in {repo}: {why}"));
+            }
+        }
+    }
+    if let Some(lines) = view["last_report"]["lines"].as_array() {
+        out.push(format!(
+            "last run{}:",
+            view["last_report"]["finished_at"]
+                .as_str()
+                .map(|at| format!(" ({})", local_stamp(at, local_offset_minutes())))
+                .unwrap_or_default()
+        ));
+        out.extend(lines.iter().filter_map(Value::as_str).map(|l| format!("  {l}")));
+    }
+    out
+}
+
+async fn merge_train_command(machine: &Machine, command: MergeTrainCommand, json: bool) -> Result<i32, Fail> {
+    match &command {
+        MergeTrainCommand::Show => {
+            let view = machine.get(MERGE_LOOP).await?;
+            if json {
+                println!("{}", pretty(&view)?);
+            } else {
+                for line in describe_merge_loop(&view) {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+        MergeTrainCommand::Run { dry_run } => {
+            let path = if *dry_run {
+                format!("{MERGE_LOOP}/run?dry_run=true")
+            } else {
+                format!("{MERGE_LOOP}/run")
+            };
+            let answer = machine
+                .post(&path, None)
+                .await?
+                .ok_or_else(|| Fail::Transport(anyhow::anyhow!("the mothership answered no body")))?;
+            if json {
+                println!("{}", pretty(&answer)?);
+            } else if answer["started"] == json!(true) {
+                println!("merge-train loop run started; `colonizer loop merge-train show` prints its report when it is done");
+            } else {
+                for line in answer["report"]["lines"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+        edit => {
+            let view = machine.get(MERGE_LOOP).await?;
+            let mut settings = view["settings"].clone();
+            edit_merge_loop(&mut settings, edit).map_err(|e| Fail::Transport(anyhow::anyhow!(e)))?;
+            let saved = machine.put(MERGE_LOOP, &settings).await?;
+            if json {
+                println!("{}", pretty(&saved)?);
+            } else {
+                for line in describe_merge_loop(&saved).into_iter().take(7) {
+                    println!("{line}");
+                }
+            }
+            Ok(EXIT_OK)
+        }
+    }
 }
 
 /// `loop stop`/`loop start`: the loop's own fields PUT back with `enabled` flipped — the exact edit
@@ -2003,7 +2914,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("colonizer").chain(args.iter().copied()))
+        try_parse_from(std::iter::once("colonizer").chain(args.iter().copied()))
     }
 
     /// The documented commands all still parse, and the global flags reach them from either side.
@@ -2034,6 +2945,8 @@ mod tests {
             &["stop", "abc123"][..],
             &["resume", "abc123"][..],
             &["pr", "abc123"][..],
+            &["pr", "abc123", "--wait"][..],
+            &["pr", "abc123", "--wait", "--timeout", "30m"][..],
             &["map", "acme/app"][..],
             &["map", "acme/app", "--find", "login"][..],
             &["loop", "list"][..],
@@ -2063,6 +2976,27 @@ mod tests {
             &["loop", "stop", "loop_x1"][..],
             &["loop", "start", "loop_x1"][..],
             &["loop", "delete", "loop_x1"][..],
+            &["loop", "merge-train", "show"][..],
+            &["loop", "merge-train", "on"][..],
+            &["loop", "merge-train", "allow", "acme/app"][..],
+            &["loop", "merge-train", "never", "acme/upstream-fork"][..],
+            &["loop", "merge-train", "hold", "abc123"][..],
+            &[
+                "loop",
+                "merge-train",
+                "set",
+                "--every",
+                "120",
+                "--max-merges",
+                "2",
+                "--repo-cap",
+                "acme/app=1",
+                "--flaky",
+                "e2e*,lint",
+                "--self-heal",
+                "on",
+            ][..],
+            &["loop", "merge-train", "run", "--dry-run"][..],
             &["mcp"][..],
             &["mcp", "--scope", "launch"][..],
             &["token", "list"][..],
@@ -2082,12 +3016,110 @@ mod tests {
                 "5",
             ][..],
             &["token", "revoke", "tok_x"][..],
+            &["redteam", "list"][..],
+            &["redteam", "start", "acme/app"][..],
+            &[
+                "redteam",
+                "start",
+                "acme/app",
+                "--preset",
+                "security",
+                "--hunters",
+                "8",
+                "--now",
+            ][..],
         ] {
             assert!(parse(args).is_ok(), "{args:?} should parse");
         }
         // The global flags work on both sides of the subcommand.
         for args in [&["--json", "list"][..], &["list", "--json"][..]] {
             assert!(parse(args).unwrap().json, "{args:?} should carry --json");
+        }
+    }
+
+    /// The rendered `--help` of a subcommand, through the same parse the binary uses.
+    fn help_for(command: &str) -> String {
+        let err = parse(&[command, "--help"]).unwrap_err();
+        assert!(
+            matches!(err.kind(), ErrorKind::DisplayHelp),
+            "{command} --help should display"
+        );
+        err.to_string()
+    }
+
+    /// The client-only global flags are refused on the local commands that cannot use them, with
+    /// exit 2, whether the flag came before or after the subcommand.
+    #[test]
+    fn the_client_flags_are_refused_on_local_commands() {
+        for args in [
+            &["--host", "other-box", "open"][..],
+            &["open", "--host", "other-box"][..],
+            &["open", "--token-file", "/tmp/token"][..],
+            &["version", "--json"][..],
+            &["--json", "telemetry", "show"][..],
+            &["login-item", "enable", "--host", "h:1"][..],
+            &["completions", "bash", "--token-file", "/tmp/token"][..],
+            &["man", "--host", "h:1"][..],
+            &["update", "--json"][..],
+        ] {
+            let err = parse(args).unwrap_err();
+            assert_eq!(err.exit_code(), EXIT_USAGE, "{args:?} should be a usage error");
+            assert_eq!(err.kind(), ErrorKind::UnknownArgument, "{args:?}");
+            assert!(
+                err.to_string().contains("only applies to the client commands"),
+                "{args:?}: {err}"
+            );
+        }
+    }
+
+    /// The `open` refusal says why it ignores the flag: it is local on purpose.
+    #[test]
+    fn open_says_it_is_local_on_purpose() {
+        let err = parse(&["--host", "other-box", "open"]).unwrap_err();
+        assert!(err.to_string().contains("local on purpose"), "{err}");
+    }
+
+    /// The flags still reach the commands that can use them, from either side — and `update --host`
+    /// carries the address it will dial.
+    #[test]
+    fn the_client_flags_still_work_where_they_apply() {
+        for args in [
+            &["--host", "mothership:1", "list"][..],
+            &["list", "--host", "mothership:1"][..],
+            &["update", "--host", "h:1"][..],
+            &["--host", "h:1", "update"][..],
+        ] {
+            assert!(parse(args).is_ok(), "{args:?} should parse");
+        }
+        let cli = parse(&["update", "--host", "h:1"]).unwrap();
+        assert_eq!(cli.host.as_deref(), Some("h:1"), "update should carry --host");
+        assert!(!cli.json);
+        // --token-file is honoured there too; --host without a port gets the default one.
+        let cli = parse(&["update", "--token-file", "/tmp/token"]).unwrap();
+        assert_eq!(cli.token_file.as_deref(), Some(std::path::Path::new("/tmp/token")));
+        let cli = parse(&["update", "--host", "other-box"]).unwrap();
+        assert_eq!(cli.host.as_deref(), Some("other-box:7878"));
+    }
+
+    /// A local command's `--help` does not advertise the flags it refuses; `update` keeps the two
+    /// host flags and hides only `--json`, and a client command still advertises all three.
+    #[test]
+    fn local_help_hides_the_client_flags() {
+        for command in ["open", "login-item", "telemetry", "version", "completions", "man"] {
+            let help = help_for(command);
+            for flag in ["--host", "--token-file", "--json"] {
+                assert!(!help.contains(flag), "`{command} --help` should not list {flag}:\n{help}");
+            }
+        }
+        let update = help_for("update");
+        assert!(update.contains("--host") && update.contains("--token-file"), "{update}");
+        assert!(
+            !update.contains("--json"),
+            "`update --help` should not list --json:\n{update}"
+        );
+        let list = help_for("list");
+        for flag in ["--host", "--token-file", "--json"] {
+            assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
     }
 
@@ -2115,6 +3147,7 @@ mod tests {
             autopilot,
             no_autopilot,
             task,
+            ..
         } = cli.command.unwrap()
         else {
             panic!("launch did not parse");
@@ -2129,6 +3162,137 @@ mod tests {
         assert!(no_autopilot);
         // The two autopilot flags refuse to combine: the answer would depend on their order.
         assert!(parse(&["launch", "owner/repo", "--autopilot", "--no-autopilot"]).is_err());
+    }
+
+    /// The claim and epic overrides arrive as the API body wants them, off unless a flag asked.
+    #[test]
+    fn a_launch_with_the_claim_and_epic_overrides_sends_them_in_the_body() {
+        let cli = parse(&[
+            "launch",
+            "owner/repo",
+            "--allow-duplicate",
+            "--queue-behind-holder",
+            "--allow-epic",
+        ])
+        .unwrap();
+        let Command::Launch {
+            repo,
+            issue,
+            task,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+            ..
+        } = cli.command.unwrap()
+        else {
+            panic!("launch did not parse");
+        };
+        assert!(allow_duplicate && queue_behind_holder && allow_epic);
+        let body = launch_body(
+            &repo,
+            issue,
+            task,
+            None,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+        );
+        assert_eq!(body["allow_duplicate"], json!(true));
+        assert_eq!(body["queue_behind_holder"], json!(true));
+        assert_eq!(body["allow_epic"], json!(true));
+        // Set: the body deserializes into the server's request type with the overrides on.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(body.clone()).expect("the launch body deserializes into NewSession");
+        assert!(parsed.allow_duplicate && parsed.queue_behind_holder && parsed.allow_epic);
+
+        // No flags: the body still carries the fields, each off, and the server's defaults decide.
+        let plain = parse(&["launch", "owner/repo"]).unwrap();
+        let Command::Launch {
+            repo,
+            issue,
+            task,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+            ..
+        } = plain.command.unwrap()
+        else {
+            panic!("launch did not parse");
+        };
+        let body = launch_body(
+            &repo,
+            issue,
+            task,
+            None,
+            model,
+            subagent_model,
+            allow_duplicate,
+            queue_behind_holder,
+            allow_epic,
+        );
+        assert_eq!(body["allow_duplicate"], json!(false));
+        assert_eq!(body["queue_behind_holder"], json!(false));
+        assert_eq!(body["allow_epic"], json!(false));
+        // Omitted: the body still deserializes into the server's request type, each override off.
+        let parsed: crate::sessions::NewSession =
+            serde_json::from_value(body).expect("a plain launch body deserializes into NewSession");
+        assert!(!parsed.allow_duplicate && !parsed.queue_behind_holder && !parsed.allow_epic);
+    }
+
+    /// `redteam start` sends the preset and the rest as the API wants them: armed unless --now,
+    /// general unless named, and an unknown preset is a usage error.
+    #[test]
+    fn redteam_start_sends_the_preset_field() {
+        let cli = parse(&[
+            "redteam",
+            "start",
+            "acme/app",
+            "--preset",
+            "security",
+            "--hunters",
+            "4",
+            "--autofix",
+        ])
+        .unwrap();
+        let Some(Command::Redteam {
+            command:
+                RedteamCommand::Start {
+                    repo,
+                    preset,
+                    hunters,
+                    model,
+                    subagent_model,
+                    autofix,
+                    now,
+                },
+        }) = cli.command
+        else {
+            panic!("redteam start did not parse");
+        };
+        let body = redteam_start_body(&repo, preset, hunters, model, subagent_model, autofix, now);
+        assert_eq!(body["repo"], json!("acme/app"));
+        assert_eq!(body["preset"], json!("security"));
+        assert_eq!(body["swarm_size"], json!(4));
+        assert_eq!(body["autofix"], json!(true));
+        assert_eq!(body["arm"], json!(true), "a CLI start arms unless --now");
+        let plain = parse(&["redteam", "start", "acme/app", "--now"]).unwrap();
+        let Some(Command::Redteam {
+            command: RedteamCommand::Start { preset, now, .. },
+        }) = plain.command
+        else {
+            panic!("redteam start did not parse");
+        };
+        assert_eq!(preset, RedteamPreset::General, "general is the default preset");
+        let body = redteam_start_body("acme/app", preset, None, None, None, false, now);
+        assert_eq!(body["preset"], json!("general"));
+        assert_eq!(body["arm"], json!(false));
+        assert!(parse(&["redteam", "start", "acme/app", "--preset", "offensive"]).is_err());
     }
 
     /// An argument nobody planned for is a usage error (exit 2), not a silently started server —
@@ -2165,7 +3329,52 @@ mod tests {
             assert_eq!(err.exit_code(), EXIT_OK);
         }
         // The command structure itself is internally consistent (every subcommand reachable).
-        Cli::command().debug_assert();
+        cli_command().debug_assert();
+    }
+
+    /// `--timeout` belongs to `--wait` (a one-shot `pr` has nothing to time out), takes a duration,
+    /// and refuses a zero or unspellable one: every such argument is a usage error (2).
+    #[test]
+    fn a_pr_timeout_without_a_wait_or_a_bad_duration_is_a_usage_error() {
+        let err = parse(&["pr", "abc123", "--timeout", "30m"]).unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_USAGE, "--timeout needs --wait");
+        for (good, secs) in [
+            ("90", 90),
+            ("90s", 90),
+            ("30m", 1800),
+            ("2h", 7200),
+            // The unit spellings `loop create` reads for a cadence read the same here.
+            ("2H", 7200),
+            ("45min", 2700),
+            ("1d", 86_400),
+            ("10 seconds", 10),
+        ] {
+            let cli = parse(&["pr", "abc123", "--wait", "--timeout", good]).unwrap();
+            let Command::Pr { timeout, .. } = cli.command.unwrap() else {
+                panic!("pr did not parse");
+            };
+            assert_eq!(timeout, Some(Duration::from_secs(secs)), "{good} should parse as a --timeout");
+        }
+        for bad in [
+            "",
+            "0",
+            "0m",
+            "0s",
+            "soon",
+            "m",
+            "1h30m",
+            "99999999999999999999h",
+            "999999999999999999d",
+            "14d@03:00",
+            "daily@09:00",
+            "-5",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad:?} should be refused");
+            assert!(
+                parse(&["pr", "abc123", "--wait", "--timeout", bad]).is_err(),
+                "{bad:?} should not parse"
+            );
+        }
     }
 
     /// The exit codes a script reads are the ones `--help` documents.
@@ -2574,5 +3783,308 @@ mod tests {
 
         let err = set_loop_enabled(&machine, "loop_z", false, false).await.unwrap_err();
         assert_eq!(err.exit_code(), EXIT_NOT_FOUND, "an unknown loop reads as not-found");
+    }
+
+    /// A stub mothership whose one colony reads as `reading(n)` — `n` counts the polls so far — on
+    /// a loopback port. Returns the client and the read counter, so a test can tell looping from a
+    /// single answer.
+    async fn scripted_pr(
+        reading: impl Fn(usize) -> Value + Clone + Send + Sync + 'static,
+    ) -> (Machine, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{Json, Router, routing::get};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let seen = hits.clone();
+        let app = Router::new().route(
+            "/api/sessions/abc",
+            get(move || {
+                let reading = reading.clone();
+                let seen = seen.clone();
+                async move {
+                    let n = seen.fetch_add(1, Ordering::SeqCst);
+                    Json(reading(n))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (Machine::for_tests(format!("http://{addr}"), "col".into()), hits)
+    }
+
+    /// `pr --wait` follows a pending first reading to a settled one instead of ending on it:
+    /// success reads as 0 (after really looping), failure as 7.
+    #[tokio::test]
+    async fn pr_wait_follows_pending_checks_until_they_settle() {
+        use std::sync::atomic::Ordering;
+
+        let (machine, hits) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "success" }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_OK);
+        assert!(
+            hits.load(Ordering::SeqCst) >= 2,
+            "a pending reading must loop, not end the wait"
+        );
+
+        let (machine, _) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "failure" }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_CHECKS_FAILED);
+    }
+
+    /// Out of time is its own ending: a colony whose checks stay pending reads as 8, and a short
+    /// timeout cuts the wait short instead of sitting out the whole poll interval.
+    #[tokio::test]
+    async fn pr_wait_times_out_while_checks_stay_pending() {
+        use std::sync::atomic::Ordering;
+
+        let (machine, hits) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "pending",
+            })
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let code = wait_pr(
+            &machine,
+            "abc",
+            false,
+            Some(Duration::from_millis(40)),
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, EXIT_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(2), "the deadline cuts the wait short");
+        assert!(hits.load(Ordering::SeqCst) >= 1, "at least one reading before giving up");
+    }
+
+    /// A colony that ends without opening a pull request has nothing to wait for: 1, not 0.
+    #[tokio::test]
+    async fn pr_wait_refuses_a_colony_that_ends_without_a_pull_request() {
+        let (machine, _) = scripted_pr(|_| json!({"id": "abc", "status": "no_changes"})).await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_ERROR);
+    }
+
+    /// A pull request that was merged or closed before its checks settled, and a parked colony
+    /// (paused, but publishing nothing), both mean no verdict is coming: 1.
+    #[tokio::test]
+    async fn pr_wait_refuses_a_pull_request_that_never_got_a_verdict() {
+        use axum::{Json, Router, routing::get};
+
+        let app = Router::new()
+            .route(
+                "/api/sessions/merged",
+                get(|| async {
+                    Json(json!({
+                        "id": "merged",
+                        "status": "merged",
+                        "pr_url": "https://github.com/acme/app/pull/9",
+                        "ci_state": "pending",
+                    }))
+                }),
+            )
+            .route(
+                "/api/sessions/parked",
+                get(|| async { Json(json!({"id": "parked", "status": "parked"})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let machine = Machine::for_tests(format!("http://{addr}"), "col".into());
+        let code = wait_pr(&machine, "merged", false, None, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_ERROR);
+        let code = wait_pr(&machine, "parked", false, None, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_ERROR);
+    }
+
+    /// The merge train (#720) merges a pull request as soon as its own reading of the checks is
+    /// green, so a `--wait` can first see the colony already `merged`. A settled verdict still wins
+    /// over the status: merged with checks green is 0, and a pull request closed after its checks
+    /// failed is 7, not the "moved on untested" 1.
+    #[tokio::test]
+    async fn pr_wait_reads_a_verdict_even_after_the_merge_train_moved_the_pull_request() {
+        let (machine, _) = scripted_pr(|n| {
+            json!({
+                "id": "abc",
+                "status": (if n == 0 { "pr_opened" } else { "merged" }),
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": (if n == 0 { "pending" } else { "success" }),
+                "merged_at": (if n == 0 { Value::Null } else { json!("2026-09-29T10:00:00Z") }),
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_OK, "merged by the train with checks green");
+
+        let (machine, _) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "closed",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "failure",
+            })
+        })
+        .await;
+        let code = wait_pr(&machine, "abc", false, None, Duration::from_millis(5)).await.unwrap();
+        assert_eq!(code, EXIT_CHECKS_FAILED, "a failed verdict is reported even on a closed PR");
+    }
+
+    /// A colony still on its way to a pull request is waited through; one that has settled
+    /// without one is not. The refused spellings are exactly the terminal statuses plus `parked`,
+    /// checked against the model so a new status cannot slip past either list.
+    #[test]
+    fn pr_still_coming_matches_the_session_model() {
+        use crate::sessions::SessionStatus::*;
+        for status in [
+            Queued,
+            Starting,
+            Running,
+            WaitingForAnswer,
+            Idle,
+            Publishing,
+            PrOpened,
+            Merged,
+            Closed,
+            NoChanges,
+            Parked,
+            Stopped,
+            Failed,
+        ] {
+            assert_eq!(
+                pr_still_coming(status.as_str()),
+                !(status.is_terminal() || status == Parked),
+                "{}",
+                status.as_str()
+            );
+        }
+    }
+
+    /// A `--timeout` too long for the clock waits without a deadline instead of panicking on the
+    /// instant arithmetic; the first settled reading still ends it.
+    #[tokio::test]
+    async fn pr_wait_with_an_overlong_timeout_does_not_panic() {
+        let (machine, _) = scripted_pr(|_| {
+            json!({
+                "id": "abc",
+                "status": "pr_opened",
+                "pr_url": "https://github.com/acme/app/pull/9",
+                "ci_state": "no_checks",
+            })
+        })
+        .await;
+        let huge = parse_duration("5000000000000000h").unwrap();
+        let code = wait_pr(&machine, "abc", false, Some(huge), Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert_eq!(code, EXIT_OK, "no checks is nothing to wait for");
+    }
+
+    /// `loop merge-train …` edits change one thing in the settings it read back, and `show`
+    /// prints the switch, the opted-in repositories and the last report.
+    #[test]
+    fn merge_train_edits_change_only_what_they_name() {
+        let mut s = json!({"enabled": false, "allow": ["acme/web"], "never": [], "held": [], "max_merges": 4});
+        edit_merge_loop(&mut s, &MergeTrainCommand::On).unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Allow {
+                target: "Acme/App".into(),
+            },
+        )
+        .unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Never {
+                target: "acme/fork".into(),
+            },
+        )
+        .unwrap();
+        edit_merge_loop(&mut s, &MergeTrainCommand::Hold { session: "abc".into() }).unwrap();
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Set {
+                every: Some(120),
+                max_merges: Some(2),
+                repo_cap: vec!["acme/web=1".into()],
+                cooldown_secs: None,
+                ci_wait_minutes: None,
+                flaky: Some("e2e*, lint".into()),
+                self_heal: Some(Toggle::On),
+                revert_on_red: None,
+                redo: Some(Toggle::Off),
+            },
+        )
+        .unwrap();
+        assert_eq!(s["enabled"], json!(true));
+        assert_eq!(s["allow"], json!(["acme/web", "acme/app"]));
+        assert_eq!(s["never"], json!(["acme/fork"]));
+        assert_eq!(s["held"], json!(["abc"]));
+        assert_eq!(s["cadence"], json!({"every": "interval", "minutes": 120}));
+        assert_eq!(s["repo_max_merges"], json!({"acme/web": 1}));
+        assert_eq!(s["flaky_checks"], json!(["e2e*", "lint"]));
+        assert_eq!(
+            (s["self_heal"].clone(), s["redo_on_conflict"].clone()),
+            (json!(true), json!(false))
+        );
+        assert!(s.get("revert_on_red").is_none(), "an untouched flag stays as it was");
+        edit_merge_loop(
+            &mut s,
+            &MergeTrainCommand::Disallow {
+                target: "acme/app".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(s["allow"], json!(["acme/web"]));
+        let bad = MergeTrainCommand::Set {
+            every: None,
+            max_merges: None,
+            repo_cap: vec!["acme/web".into()],
+            cooldown_secs: None,
+            ci_wait_minutes: None,
+            flaky: None,
+            self_heal: None,
+            revert_on_red: None,
+            redo: None,
+        };
+        assert!(edit_merge_loop(&mut s, &bad).is_err());
+
+        let view = json!({
+            "settings": s, "next_run_at": null, "writes_blocked": true,
+            "repos": {"acme/web": {"paused": "main went red after the train merged #3"}},
+            "last_report": {"lines": ["merged 1 · updated (CI running) 0 · red 0 · redo dispatched 0 · skipped 0"]},
+        });
+        let text = describe_merge_loop(&view).join("\n");
+        assert!(text.contains("merge-train loop: on"), "{text}");
+        assert!(text.contains("opted in: acme/web"), "{text}");
+        assert!(text.contains("never: acme/fork"), "{text}");
+        assert!(text.contains("every run is a dry run"), "{text}");
+        assert!(text.contains("paused in acme/web"), "{text}");
+        assert!(text.contains("merged 1"), "{text}");
     }
 }

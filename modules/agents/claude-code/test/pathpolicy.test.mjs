@@ -2,7 +2,7 @@
 // is the part a stub cannot stand in for.
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { after, before, describe, it } from 'node:test';
 import { join } from 'node:path';
@@ -81,7 +81,7 @@ describe('resolveUnderWorkspace', () => {
   let workspace;
 
   before(() => {
-    workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-ws-'));
+    workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-ws-')));
     mkdirSync(join(workspace, 'sub'));
     writeFileSync(join(workspace, '.env'), 'SECRET=1\n');
     writeFileSync(join(workspace, 'sub', 'note.md'), 'hi\n');
@@ -112,6 +112,41 @@ describe('resolveUnderWorkspace', () => {
   });
 });
 
+describe('resolveUnderWorkspace through dangling symlinks', () => {
+  let workspace;
+  let outside;
+
+  before(() => {
+    workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-dangle-'));
+    outside = mkdtempSync(join(tmpdir(), 'pathpolicy-outside-'));
+    mkdirSync(join(workspace, '.claude'));
+    symlinkSync(join(outside, 'outside.txt'), join(workspace, 'escape'));
+    symlinkSync('../../elsewhere.txt', join(workspace, '.claude', 'rel-escape'));
+    symlinkSync('.claude/new.json', join(workspace, 'alias'));
+    symlinkSync('loop-b', join(workspace, 'loop-a'));
+    symlinkSync('loop-a', join(workspace, 'loop-b'));
+  });
+
+  after(() => {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it('null for a dangling link that points out of the workspace', () => {
+    assert.equal(resolveUnderWorkspace(workspace, 'escape'), null);
+    assert.equal(resolveUnderWorkspace(workspace, '.claude/rel-escape'), null);
+  });
+
+  it('names the target of a dangling link that stays inside, not the link', () => {
+    assert.equal(resolveUnderWorkspace(workspace, 'alias'), '.claude/new.json');
+  });
+
+  it('null for a symlink loop', () => {
+    assert.equal(resolveUnderWorkspace(workspace, 'loop-a'), null);
+    assert.equal(resolveUnderWorkspace(workspace, 'loop-a/x'), null);
+  });
+});
+
 describe('matchPathPolicy', () => {
   const policy = parsePathPolicy(BIND_LIST);
 
@@ -132,7 +167,7 @@ describe('evaluatePathPolicy', () => {
   let workspace;
 
   before(() => {
-    workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-eval-'));
+    workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-eval-')));
     mkdirSync(join(workspace, '.git'), { recursive: true });
     mkdirSync(join(workspace, '.vscode'), { recursive: true });
     mkdirSync(join(workspace, '.claude'), { recursive: true });
@@ -190,7 +225,7 @@ describe('evaluatePathPolicy', () => {
   });
 
   it('sees a masked target through an alias: the report names the resolved path', () => {
-    const workspace = mkdtempSync(join(tmpdir(), 'pathpolicy-eval-'));
+    const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'pathpolicy-eval-')));
     try {
       writeFileSync(join(workspace, '.env'), 'SECRET=1\n');
       symlinkSync('.env', join(workspace, 'secrets.env'));

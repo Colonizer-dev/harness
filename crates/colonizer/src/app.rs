@@ -115,6 +115,9 @@ pub struct App {
     /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
     /// `gh` or a disk walk: see [`cached_answer`].
     pub answer_cache: AnswerCache,
+    /// One-shot answer tokens carried by question pushes (issue #742, answer_tokens.rs), in
+    /// memory only: a restart drops them and old notifications answer 401.
+    pub answer_tokens: crate::answer_tokens::Registry,
     /// Scoped API tokens handed to CLIs and automations (issue #508, api_tokens.rs), saved to
     /// `<config_dir>/api-tokens.json`; `host_guard` checks a Bearer against them when it is not
     /// the owner token.
@@ -159,6 +162,9 @@ pub struct App {
     /// every outbound proactive action against it, so the operator's attention is one bounded rate.
     pub ledger: crate::ledger::LedgerStore,
     pub login: crate::claude_login::LoginManager,
+    /// The built-in disk-cleanup loop's in-memory half (disk_cleanup.rs): one run at a time, and
+    /// the scan cache that keeps an hourly run with nothing to clean nearly free.
+    pub disk_cleanup: crate::disk_cleanup::Runtime,
     /// Scheduled colonies (loops.rs), saved to `<config_dir>/loops.json`.
     pub loops: crate::loops::LoopStore,
     pub memory: crate::memory::MemoryStore,
@@ -174,6 +180,9 @@ pub struct App {
     pub orgs_failed_at: Mutex<Option<std::time::Instant>>,
     /// When the user's GitHub orgs were last fetched.
     pub orgs_refreshed: Mutex<Option<std::time::Instant>>,
+    /// Phones paired through Settings → Add your phone (phone.rs, issue #746): the open invites and
+    /// pairings in memory, the paired phones in `<config_dir>/phones.json`.
+    pub phones: crate::phone::PhoneStore,
     /// Boot-time provider probe results, keyed on provider id + base URL
     /// (`crate::gateway::probe_cache_key`) so repointing a provider never serves the old endpoint's
     /// answer. Both reachable and unreachable answers are kept for [`crate::gateway::PROVIDER_PROBE_TTL`];
@@ -191,8 +200,14 @@ pub struct App {
     pub runtime_cache: Mutex<Option<crate::runtime::Cached>>,
     /// The `GET /api/stream` push hub: one shared broadcast diff task for all open tabs.
     pub stream: crate::stream::Hub,
+    /// The built-in "Dependencies & supply chain" loop (supply_chain_loop.rs): its settings,
+    /// reports and dispatch records, saved to `<config_dir>/supply-chain-loop.json`.
+    pub supply_chain: crate::supply_chain_loop::Store,
     /// The live map on colonizer.dev, off until the user switches it on.
     pub telemetry: crate::telemetry::Telemetry,
+    /// The built-in "TypeScript: remove any" loop (ts_any_loop.rs): its settings, reports, trend
+    /// and batch records, saved to `<config_dir>/ts-any-loop.json`.
+    pub ts_any: crate::ts_any_loop::Store,
     pub updater: crate::update::Updater,
     pub updates: crate::version::Updates,
     /// Anonymous usage reporting: the batch, the switch for it, and the sender that posts the batch
@@ -238,6 +253,7 @@ impl App {
             // ---- Module state: one line per module, in alphabetical order.
             activity: crate::activity::ActivityLog::new(),
             answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
+            answer_tokens: crate::answer_tokens::Registry::default(),
             api_tokens: crate::api_tokens::Registry::load(&cfg.config_dir),
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
@@ -254,12 +270,14 @@ impl App {
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
             ledger: crate::ledger::LedgerStore::load(&cfg.data_dir),
             login: Default::default(),
+            disk_cleanup: Default::default(),
             loops: crate::loops::LoopStore::new(&cfg.config_dir),
             memory: crate::memory::MemoryStore::new(cfg.data_dir.join("memory")),
             new_orgs: RwLock::new(BTreeMap::new()),
             org_descriptions: RwLock::new(BTreeMap::new()),
             orgs_failed_at: Mutex::new(None),
             orgs_refreshed: Mutex::new(None),
+            phones: crate::phone::PhoneStore::load(&cfg.config_dir),
             provider_probe_cache: Mutex::new(HashMap::new()),
             pull: Mutex::new(Default::default()),
             redteam: crate::redteam::RedTeamStore::new(&cfg.data_dir, &cfg.config_dir),
@@ -267,7 +285,9 @@ impl App {
             repo_owners: RwLock::new(BTreeSet::new()),
             runtime_cache: Mutex::new(None),
             stream: crate::stream::Hub::new(),
+            supply_chain: crate::supply_chain_loop::Store::new(&cfg.config_dir),
             telemetry: crate::telemetry::Telemetry::new(&cfg.config_dir)?,
+            ts_any: crate::ts_any_loop::Store::new(&cfg.config_dir),
             updater: crate::update::Updater::new(),
             updates: crate::version::Updates::new(&cfg.config_dir)?,
             usage: crate::usage::Usage::new(&cfg.config_dir)?,
@@ -288,9 +308,12 @@ impl App {
         self.claude_cred_for(None)
     }
 
-    /// The credential for one Claude account: the requested account's stored secret, else the
-    /// single-token file a pre-accounts install left behind, else the environment. `None` selects
-    /// the install default, so `claude_cred` — every existing caller — keeps working unchanged.
+    /// The credential for one Claude account. Precedence: the named (else default) account's stored
+    /// secret, then the single-token file a pre-accounts install left behind, then
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY`. `None` selects the install default, so
+    /// `claude_cred` — every existing caller — keeps working unchanged. The settings token route and
+    /// the claude-login flow save into the default account (`claude_accounts::save_default_token`),
+    /// so the legacy file only serves a token an older version left behind.
     pub fn claude_cred_for(&self, account: Option<&str>) -> Option<ClaudeCred> {
         let _ = claude_accounts::migrate_legacy(&self.cfg.config_dir);
         let meta = claude_accounts::load_meta(&self.cfg.config_dir);

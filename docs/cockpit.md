@@ -27,10 +27,14 @@ year) and then removes `?token=` from the address bar, so the token does not sta
 A browser without the cookie gets a "Sign in to your cockpit" page that tells you to run
 `colonizer open`.
 
+A phone pairs through [Add your phone](#add-your-phone) instead, and gets a sign-in of its own:
+the API token never appears on it or in any URL.
+
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file
-  (`<config_dir>/api-token`) and ignores `--host` and `--token-file`.
+  (`<config_dir>/api-token`) and refuses `--host` and `--token-file` (exit 2): it is local on
+  purpose.
 - When the mothership is bound to `0.0.0.0` or `[::]`, the link points at loopback (`127.0.0.1` or
   `[::1]`). To reach the cockpit from another device, use [remote access](#remote-access) or your
   own TLS proxy or SSH tunnel.
@@ -120,6 +124,7 @@ With **All workspaces** chosen, Overview shows everything at once:
   red-team buttons ([Red team](#red-team)),
 - **Colonies**: every colony in a table,
 - a system strip about the host,
+- the fleet panel and the [fleet colony list](fleet.md#the-fleet-colony-list), when there is a fleet,
 - the [storage panel](#storage).
 
 The range picker switches between 7, 30 and 90 days. **Compare** overlays the previous period of
@@ -382,6 +387,11 @@ and how the last one went. **New loop** starts from a template or from scratch. 
 lists every colony it launched. **Run now** starts one immediately. Deleting a loop keeps its past
 colonies.
 
+At the top sits the built-in **Dependencies & supply chain** loop: off until you switch it on and
+opt an org or repository in. Its card shows the scanners installed on the host, **Dry run** and
+**Run now**, its settings (allowlist, cadence, caps, cooldown, threshold), and the last report:
+findings by severity, what was dispatched, what was skipped and why, and anything that needs you.
+
 Details are in [loops.md](loops.md).
 
 ## Red team
@@ -411,8 +421,10 @@ Red-team runs do not drive their scans yet. See [red-team.md](red-team.md) for h
 
 **Sidebar: Memory.**
 
-Shared memory is notes that colonies can search while they work, at global, workspace and
-repository scope. Colonies propose new notes; nothing is shared until you approve it. The view lists
+Shared memory is notes that colonies can pull while they work, at global, workspace and
+repository scope; none of it is put into a colony's prompt. Colonies propose new notes; nothing is
+shared until you approve it, and a global note is proposed for your review only once colonies in two
+repositories agree on it. The view lists
 pending proposals grouped by colony, and the approved notes, which you can edit or delete. The
 sidebar badge counts proposals waiting for review.
 
@@ -448,7 +460,7 @@ what would be removed before you apply it.
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
 - **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
+  access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
   ([usage-data.md](usage-data.md)), Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
@@ -479,6 +491,57 @@ The link exposes this cockpit, including colony terminals, and nothing else on t
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
 [protocol.md](protocol.md#610-remote-access-tunnel) for the routes, and
 [remote-access-review.md](remote-access-review.md) for the security review.
+
+### Add your phone
+
+**Settings → Add your phone.**
+
+Pairs your phone with this cockpit, the way [remote access](#remote-access) pairs its owner: a
+single-use code to start, a code confirmed on this machine to finish.
+
+1. **Show a code to scan** shows a QR code of `<origin>/?pair=<invite>`. The invite is single use,
+   lives five minutes, and is kept only as a hash in memory. It is a ticket to ask, not a
+   credential: the API token appears in no QR code and no URL.
+2. The phone opens it and shows a six-digit code. Opening the invite spends it and ties the pairing
+   to that one browser, so a second phone that scans the same QR code gets the locked page.
+3. Type the phone's code into the pane on this machine and press **Confirm**. Confirming works
+   only in the cockpit on this machine, never through the remote-access link or from a phone.
+4. The phone gets a sign-in of its own and lands on a welcome sheet offering **Install** and
+   **Turn on notifications**.
+
+Each paired phone is listed under **Paired phones** with a **Revoke** button that signs out that
+phone alone; you can revoke from the relay link too. Revoking also removes the phone's
+notification subscription and disables the answer buttons on the notifications already sent to it.
+Once a phone turns on notifications, it is a device under Notifications like any other, with its
+own settings (named after the phone), and it can change only its own. A phone runs the whole
+cockpit, but it cannot pair or revoke phones, mint API tokens, or change remote access or the
+fleet. Failed pairing steps
+(an unknown invite, a wrong code) are rate limited: after ten in a minute, pairing pauses until the
+minute is over.
+
+The QR code names the best address your phone can reach, in this order: the remote-access link
+(`https://<install>.my.colonizer.dev`) when remote access is on and connected, then this machine's
+tailnet address, then its LAN address. Install from the remote-access link when you can:
+
+- The installed app belongs to the address it was installed from. Pairing through a different
+  address later means installing the app again.
+- A tailnet or LAN address is plain HTTP: the pairing crosses that network unencrypted, it works
+  only on that network, and browsers offer the app install and notifications only over HTTPS. The
+  pane warns when that is the best address it has.
+- When no address is reachable, the pane says why and how to fix it: bind past loopback
+  (`COLONIZER_BIND=0.0.0.0:7878`) and add the address to `COLONIZER_ALLOWED_HOSTS` (a wildcard bind
+  does not widen the Host allowlist), or turn on remote access.
+- Revoking takes effect at once: the phone's open colony, terminal and dashboard connections close,
+  its requests in flight fail, and it cannot connect again. Revoking a scoped API token does the
+  same for that token.
+
+**Offline answers and messages.** With a colony's live connection down, an answer or a message is
+queued in the service worker instead of lost, and the chat shows it as queued. It is sent when the
+mothership is reachable again: through Background Sync where the browser offers it, otherwise the
+next time the cockpit opens, comes back online or returns to the front. Each item is delivered
+once. A queued answer carries the question it answers, so if the question was answered from
+elsewhere, or changed while you were offline, the mothership refuses it and the cockpit says so.
+Anything still queued after a day is dropped unsent.
 
 ### API tokens
 
@@ -514,27 +577,89 @@ then it says to wait and can be pressed again, and **Cancel** abandons the join.
 owner's URL and **Leave fleet** (asked twice). Membership hands the other side a `fleet`-scoped
 token only — never this cockpit's own credential.
 
+A member also sees **History sync**, off at every join: beside the switch, how many finished
+colonies and log files — and how many bytes — turning it on would send to the owner, and what is
+never sent. **Send history to the owner** is the consent the history push waits for
+([fleet.md](fleet.md#history-push)); **Stop sending history** withdraws it. Leaving and re-joining
+turns it off again.
+
 ### Notifications and Web Push
 
 **Settings → Notifications.** These switches are kept in the browser, per browser:
 
 - **In this tab**: the number of colonies that need you in the tab title, a dot on the favicon, and a
-  strip above the colony list.
+  strip above the colony list. The same count is the app badge on the installed app's icon, set
+  whenever the session list moves and cleared again at zero; a browser without the Badging API simply
+  has no badge, and nothing else changes.
 - **Play a sound when a colony asks a question.**
 - **Browser notifications while the tab is not in front.** Switching it on asks the browser for
   permission. If the browser blocks notifications for the site, allow them in the browser's own site
   settings first.
 
+"Needs you" counts colonies with an open question (one answered while the colony was suspended no
+longer waits on you — it is queued for a slot), live colonies the watchdog has flagged (stalled or
+out of nudges; a model error only once the turn has stopped), and failed colonies nobody has opened
+yet. Answering a question clears its colony everywhere at once: the mothership pushes a silent
+"resolved" note to every enrolled device that could have been told about that colony (while the
+notify module is on; with it off nothing was announced), each of which closes that colony's notification and lowers its badge. The same happens when you open a failed colony nobody has looked at yet. Nothing else
+closes a notification: the cockpit reports a colony seen only while the page is in front, and only
+for that unseen failure, so a colony whose question is still open keeps counting — and keeps its
+notification on other devices — until its question is answered.
+
 **Web Push** reaches a device even when Colonizer is closed. Press **Subscribe** under "Push to this
-device" to enrol the current browser. Enrolled devices are listed with the date they joined;
-**Revoke** stops pushes to one. Tapping a notification opens the colony it names.
+device" to enrol the current browser. Each enrolled device is listed with its name (rename it in
+place), when it was last seen, **Send test**, **Prefs** and **Revoke**. Tapping a notification opens
+the colony it names. Notifications are grouped one per colony — a colony's next push replaces its
+last instead of stacking up — and when two or more colonies need you, a "N colonies need you"
+summary stands in for the pile and opens the front page; it closes again once fewer than two remain.
+
+Every device has preferences of its own, kept on the mothership and checked before it sends:
+
+- **Events**: Questions, Pull request opened, Needs rebase, Failed and Needs attention are on by
+  default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
+  preferences existed keep working on these defaults — so Provider degraded and the digest now start
+  off for them.
+- **Play a sound for questions.** A question is the only push that may sound; everything else
+  arrives silent. **Answer buttons on questions** and the **Needs-you count on the app icon** can
+  be switched off per device too.
+- **Repositories**: empty hears about every colony; entries name an `org` or an `org/repo`, and only
+  narrow the events tied to a colony.
+- **Quiet hours** hold everything back through the device's own night, with an optional break-through
+  for questions. The time zone is stamped when the preferences are saved from that device, and the
+  cockpit keeps it fresh while it is open.
+- A focused cockpit tab showing a colony holds that device's pushes for the same colony back: the tab
+  reports what it is showing every half minute while focused, and a report older than 75 seconds is
+  ignored.
 
 Notifications only name the repository and issue number. They never include the issue title, the
-question, or an error.
+question's text, or an error — with one exception: a question the notification itself can answer
+carries that question's option labels, so the buttons can name them (below). The question and its
+header are never sent.
+
+**Answering from the notification.** When the colony's open question set is exactly one
+single-select question with one to three options, its notification shows a button per option, then
+**Other…** for a typed reply where the browser delivers one (ChromeOS today), then **Open** while
+button slots remain. More options than fit, a multi-select, or several open questions get a single
+**Open to answer** button instead. Browsers that show no notification buttons at all — an iPhone or
+iPad home-screen app, Firefox, Safari on macOS — fall back to open-on-tap: the tap opens the colony,
+where the question card answers as usual. Chrome on Android and desktop show the buttons.
+
+A button answers straight from the service worker with a one-time token the push carried. The token
+works for that one question and colony, once, and expires after 24 hours or as soon as the question
+is answered or replaced, so a notification is a credential for exactly one answer and nothing else. On success the notification is replaced by a silent
+`Answered: <label>` confirmation; on any failure — the question was answered in the cockpit first,
+the token expired, no network — the tap opens the colony instead. With several devices subscribed,
+the first tap answers and the rest open the cockpit.
 
 Limits: Web Push needs a secure origin (localhost counts) and a browser with push support. On iPhone
 and iPad it needs iOS 16.4 or newer, with Colonizer added to the Home Screen; on an iOS device that
-isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead.
+isn't installed yet, this pane (and Desktop) shows the Add to Home Screen steps instead. The
+"resolved" push shows nothing by design, so it is never sent to Apple endpoints — Safari and iOS
+revoke a subscription that receives an invisible push — and there a notification stays until you tap
+or clear it, the badge catching up next time the app opens (an installed iOS 16.4+ app can show one).
+Chrome and Firefox budget silent pushes, so a resolution that leaves nothing to announce may
+occasionally surface their generic "site updated in the background" notice; with two or more
+colonies still waiting, the summary notification is visible anyway.
 
 ### Desktop
 
@@ -558,8 +683,9 @@ Each setting can follow the global default or be overridden for this workspace:
 - **Models**: **Agent module** (which agent runs this workspace's colonies), Orchestrator, Subagents
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
-  several are early: Pi cannot ask you questions, and the Codex and ACP agent binaries are not
-  yet staged into the colony image. Each module's description in Settings, Modules says what it
+  several are early: Pi cannot ask you questions, and the Hermes and ACP-grok binaries are not
+  yet staged into the colony image, while Codex, Grok Build and the ACP gemini preset fetch their
+  pinned CLI on first boot. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
   colony.
@@ -581,8 +707,9 @@ above the phone's home indicator.
 ⌘K and ⌘B are keyboard shortcuts and do nothing on a phone without a keyboard. Use the Colonize
 button on Overview instead. The Colonize pane opens full width over the tab bar.
 
-To reach the cockpit from a phone, turn on [remote access](#remote-access). To be told when a colony
-needs you, subscribe the phone to [Web Push](#notifications-and-web-push).
+To use the cockpit on your phone, pair it with [Add your phone](#add-your-phone); turn on
+[remote access](#remote-access) first to reach it from anywhere. To be told when a colony needs
+you, subscribe the phone to [Web Push](#notifications-and-web-push).
 
 ## Keyboard shortcuts
 

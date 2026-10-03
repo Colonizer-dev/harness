@@ -14,7 +14,8 @@ import {
 } from "react";
 import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState, type NotificationPrefs } from "../notifications";
-import { deviceLabel, pushSupported, subscribeThisDevice, unsubscribeThisDevice } from "../push";
+import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscriptions, unsubscribeThisDevice } from "../push";
+import { PushDeviceList } from "./PushDevicePrefs";
 import { Avatar } from "./Avatar";
 import type {
   HarnessStatus,
@@ -34,6 +35,9 @@ import type {
   ProviderPreset,
   ProviderPricing,
   ProviderWire,
+  QuotaActionReply,
+  QuotaCard,
+  SaveProviderRequest,
   SchemaField,
   TelemetryStatus,
   UpdateStatus,
@@ -60,6 +64,7 @@ import {
 import { MergeTrainSection } from "./MergeTrain";
 import { ModelPicker, SettingsNavContext } from "./ModelPicker";
 import { ProviderMark } from "./providerMark";
+import { ProviderQuotaCard, QuotaChangeSummary, runQuotaAction } from "../cockpit/ProviderQuotaCard";
 import { RemoteAccessPane } from "./RemoteAccessPane";
 import { TokensPane } from "./TokensPane";
 import { FleetPane } from "./FleetPane";
@@ -69,6 +74,7 @@ import { SetupSection } from "./SetupSection";
 import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
+import { PhonePane } from "./PhonePane";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -78,7 +84,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -378,6 +384,11 @@ export function SettingsBody({
           badge: remote ? (remote.enabled ? "On" : "Off") : undefined,
         },
         {
+          id: "phone",
+          label: "Add your phone",
+          hint: "Pair your phone with a code, and revoke it here",
+        },
+        {
           id: "tokens",
           label: "API tokens",
           hint: "Scoped keys for CLIs, agents and CI, in place of the owner token",
@@ -547,11 +558,12 @@ export function SettingsBody({
   else if (active === "runtime") pane = <RuntimePane status={status} back={back} />;
   else if (active === "live-map") pane = <LiveMapPane telemetry={telemetry} onChanged={onTelemetryChanged} back={back} />;
   else if (active === "remote") pane = <RemoteAccessPane remote={remote} onChanged={onRemoteChanged} back={back} />;
+  else if (active === "phone") pane = <PhonePane back={back} />;
   else if (active === "tokens") pane = <TokensPane back={back} />;
   else if (active === "fleet") pane = <FleetPane back={back} />;
   else if (active === "updates") pane = <UpdatesPane update={update} onChanged={setUpdate} back={back} />;
   else if (active === "usage") pane = <UsagePane usage={usage} onChanged={onUsageChanged} back={back} />;
-  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} back={back} />;
+  else if (active === "notifications") pane = <NotificationsPane prefs={notifications} onChanged={onNotificationsChanged} orgs={orgs} back={back} />;
   else if (active === "desktop") pane = <DesktopPane back={back} />;
   else if (active === "providers") {
     pane = (
@@ -1629,18 +1641,16 @@ function DesktopPane({ back }: { back?: () => void }) {
 // notifications.ts), not through the Api, so there is nothing here to save.
 // ---------------------------------------------------------------------------
 
-/** An enrolled device's date, as the list shows it: "Sep 23". */
-function pushDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-}
-
 function NotificationsPane({
   prefs,
   onChanged,
+  orgs,
   back,
 }: {
   prefs: NotificationPrefs;
   onChanged: Dispatch<SetStateAction<NotificationPrefs>>;
+  /** The workspaces the cockpit knows, offered as repo-filter suggestions for a device. */
+  orgs?: OrgInfo[];
   back?: () => void;
 }) {
   // The browser's answer as of the pane opening, or as of the last ask from the switch below.
@@ -1655,6 +1665,8 @@ function NotificationsPane({
   const pushable = pushSupported();
   const [subs, setSubs] = useState<PushSubscriptionSummary[] | null>(null);
   const [subscribing, setSubscribing] = useState(false);
+  // Which rows are this browser's own subscription: only their saves claim its timezone (#743).
+  const [ownIds, setOwnIds] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     if (!pushable) return;
@@ -1663,6 +1675,9 @@ function NotificationsPane({
       .pushSubscriptions()
       .then((rows) => !cancelled && setSubs(rows))
       .catch(() => !cancelled && setSubs([]));
+    thisDeviceSubscriptions(api)
+      .then((rows) => !cancelled && setOwnIds(new Set(rows.map((row) => row.id))))
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -1674,6 +1689,7 @@ function NotificationsPane({
     void subscribeThisDevice(api, deviceLabel(navigator.userAgent))
       .then((row) => {
         setSubs((rows) => [...(rows ?? []).filter((other) => other.id !== row.id), row]);
+        setOwnIds((ids) => new Set(ids).add(row.id));
         toast(`Push is on for ${row.label}.`, "success");
       })
       .catch((error) => toast(errorMessage(error), "error"))
@@ -1806,21 +1822,13 @@ function NotificationsPane({
           )}
           {!pushable && showIosInstallHint() && <IosHomeScreenSheet />}
           {subs !== null && subs.length > 0 && (
-            <div className="mt-1 overflow-hidden rounded-xl border border-border">
-              {subs.map((row) => (
-                <div key={row.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] font-medium">{row.label}</div>
-                    <div className="truncate font-mono text-[11px] text-faint">
-                      {row.endpoint_host} · enrolled {pushDate(row.created_at)}
-                    </div>
-                  </div>
-                  <Button variant="danger" size="sm" onClick={() => revokeDevice(row)}>
-                    Revoke
-                  </Button>
-                </div>
-              ))}
-            </div>
+            <PushDeviceList
+              subs={subs}
+              orgs={orgs}
+              ownIds={ownIds}
+              onRevoke={revokeDevice}
+              onChanged={(row) => setSubs((rows) => (rows ?? []).map((other) => (other.id === row.id ? row : other)))}
+            />
           )}
         </div>
 
@@ -2898,6 +2906,7 @@ function ProvidersPane({
       }
     >
       <div className="space-y-3">
+        <ProviderQuotaCards reloadProviders={reload} />
         <div className="space-y-2">
           <ClaudeRow claude={claude} models={models} onOpenConnections={onOpenConnections} />
           {error && <p className="text-[13px] text-err">{error}</p>}
@@ -2919,6 +2928,7 @@ function ProvidersPane({
                 <ProviderForm
                   key={provider.id}
                   initial={provider}
+                  peers={providers}
                   preset={provider.preset}
                   takenIds={[]}
                   onCancel={() => setEditing(null)}
@@ -2951,6 +2961,7 @@ function ProvidersPane({
               <ProviderForm
                 key={`new-${editing.preset}`}
                 preset={editing.preset}
+                peers={providers}
                 takenIds={providers.map((p) => p.id)}
                 onCancel={() => setEditing(null)}
                 onSaved={(saved) => {
@@ -3012,6 +3023,49 @@ function ProvidersPane({
         </p>
       </div>
     </Pane>
+  );
+}
+
+/**
+ * The "Provider out of quota" cards (issue #767) at the top of the providers pane: the same cards
+ * the inbox shows, answered here the same way. Refreshed on the pane's own 5 s rhythm.
+ */
+function ProviderQuotaCards({ reloadProviders }: { reloadProviders: () => Promise<void> }) {
+  const api = useApi();
+  const toast = useToast();
+  const [cards, setCards] = useState<QuotaCard[]>([]);
+  // The last switch's "was X → now Y" summary, kept after its card goes (issue #767).
+  const [switched, setSwitched] = useState<QuotaActionReply | null>(null);
+  const load = useCallback(async () => {
+    try {
+      setCards((await api.attention()).quota_cards ?? []);
+    } catch {
+      // An older mothership has no /api/attention: no cards, nothing to say.
+    }
+  }, [api]);
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [load]);
+  if (cards.length === 0 && !switched) return null;
+  return (
+    <div className="space-y-2">
+      <QuotaChangeSummary reply={switched} onDismiss={() => setSwitched(null)} />
+      {cards.map((card) => (
+        <ProviderQuotaCard
+          key={card.provider}
+          card={card}
+          onAction={async (provider, body) => {
+            const reply = await runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body);
+            if ((reply?.changes?.length ?? 0) > 0) setSwitched(reply);
+            await Promise.all([load(), reloadProviders()]);
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -3415,9 +3469,99 @@ function CatalogBrowser({
   );
 }
 
-function ProviderForm({
+/**
+ * The fallback picker's non-Claude choices (issue #767): every model on another provider that speaks
+ * the same wire, as `<provider>/<model>` — the gateway retries a quota-exhausted request there
+ * itself. A cross-wire provider is left out; the Mothership refuses it too.
+ */
+export function sameWireFallbacks(ownId: string, wire: ProviderWire, peers: ModelProvider[]): string[] {
+  return peers
+    .filter((p) => p.id !== ownId && p.wire === wire)
+    .flatMap((p) => p.models.map((m) => `${p.id}/${m}`));
+}
+
+/** One row of the canonical → wire model map editor (#295): the name picked and the name sent. */
+export interface ModelMapRow {
+  canonical: string;
+  wire: string;
+}
+
+/** The canonical names the rows would save: trimmed, blanks dropped. */
+export function modelMapCanonicals(rows: ModelMapRow[]): string[] {
+  return rows.map((row) => row.canonical.trim()).filter(Boolean);
+}
+
+/** Names set on more than one row. A saved map collapses duplicates last-wins, so the form refuses them. */
+export function duplicateModelMapCanonicals(rows: ModelMapRow[]): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const name of modelMapCanonicals(rows)) {
+    if (seen.has(name)) duplicates.add(name);
+    seen.add(name);
+  }
+  return [...duplicates];
+}
+
+/** The form's fields that decide the PUT body, as the form holds them — untrimmed, blanks included. */
+export interface ProviderSaveInput {
+  name: string;
+  base_url: string;
+  auth: ProviderAuth;
+  wire: ProviderWire;
+  models: string[];
+  preset: ProviderPreset;
+  api_key?: string;
+  pricing?: ProviderPricing;
+  quota: { url: string; pointer: string };
+  timeout_secs: number | null;
+  max_concurrent: number | null;
+  queue_timeout_secs: number | null;
+  context_tokens: number | null;
+  fallback_model: string | null;
+  /** The connection policy (#295, #472): trusted, the model map and the disabled tools. */
+  trusted: boolean;
+  model_map: ModelMapRow[];
+  disabled_tools: string[];
+}
+
+/**
+ * The PUT /api/providers/{id} body the form saves (#605). Pure, so the round-trip of the connection
+ * policy — trusted, the model map and the disabled tools — is testable without a DOM. A row is dropped
+ * only when its canonical name is blank; a blank wire name is kept as `""`, which the gateway reads as
+ * "send the canonical name as it is" and still counts as an entry in the map's allowlist. An editor
+ * left empty sends `{}`, which clears the saved map, like the key and pricing. `ChipsInput` has already
+ * trimmed and deduped the disabled tools.
+ */
+export function providerSaveBody(input: ProviderSaveInput): SaveProviderRequest {
+  return {
+    name: input.name.trim(),
+    base_url: input.base_url.trim(),
+    auth: input.auth,
+    wire: input.wire,
+    models: input.models,
+    preset: input.preset,
+    api_key: input.api_key,
+    pricing: input.pricing,
+    quota: { url: input.quota.url.trim(), pointer: input.quota.pointer.trim() },
+    timeout_secs: input.timeout_secs,
+    max_concurrent: input.max_concurrent,
+    queue_timeout_secs: input.queue_timeout_secs,
+    context_tokens: input.context_tokens,
+    fallback_model: input.fallback_model,
+    trusted: input.trusted,
+    model_map: Object.fromEntries(
+      input.model_map
+        .map((row) => [row.canonical.trim(), row.wire.trim()] as const)
+        .filter(([canonical]) => canonical),
+    ),
+    disabled_tools: input.disabled_tools,
+  };
+}
+
+export function ProviderForm({
   initial,
   preset,
+  peers = [],
   takenIds,
   onCancel,
   onSaved,
@@ -3425,6 +3569,8 @@ function ProviderForm({
 }: {
   initial?: ModelProvider;
   preset: ProviderPreset;
+  /** The providers on file, for the same-wire fallback choices. */
+  peers?: ModelProvider[];
   takenIds: string[];
   onCancel: () => void;
   onSaved: (provider: ModelProvider) => void;
@@ -3456,6 +3602,13 @@ function ProviderForm({
   // key string removes the key, so no keep/clear dance is needed for two plain text fields.
   const [quotaUrl, setQuotaUrl] = useState(initial?.quota?.url ?? "");
   const [quotaPointer, setQuotaPointer] = useState(initial?.quota?.pointer ?? "");
+  // The connection policy (#295, #472): all three prefill from GET /api/providers and go on the save
+  // as given; the model map's blank rows are dropped by `providerSaveBody`.
+  const [trusted, setTrusted] = useState(initial?.trusted ?? false);
+  const [modelMapRows, setModelMapRows] = useState<ModelMapRow[]>(() =>
+    Object.entries(initial?.model_map ?? {}).map(([canonical, wire]) => ({ canonical, wire })),
+  );
+  const [disabledTools, setDisabledTools] = useState<string[]>(initial?.disabled_tools ?? []);
   // A catalogue entry whose base URL has ${…} holes: ask for them, and the URL follows.
   const template = initial ? [] : (CATALOG_BY_ID.get(preset)?.variables ?? []);
   const [vars, setVars] = useState<Record<string, string>>(() =>
@@ -3464,6 +3617,7 @@ function ProviderForm({
   // A new Local provider opens Advanced so the prefilled limits are visible.
   const [advancedOpen, setAdvancedOpen] = useState(!initial && preset === "local");
   const anthropicModels = useModels().filter((m) => m.provider === "anthropic");
+  const sameWire = sameWireFallbacks(initial?.id ?? "", wire, peers);
   const ids = {
     id: useId(),
     name: useId(),
@@ -3474,6 +3628,9 @@ function ProviderForm({
     fallback: useId(),
     quotaUrl: useId(),
     quotaPointer: useId(),
+    trusted: useId(),
+    modelMap: useId(),
+    disabledTools: useId(),
   };
   const limits = {
     timeout_secs: parseLimit("timeout_secs", limitDraft.timeout_secs),
@@ -3506,6 +3663,24 @@ function ProviderForm({
     fallback_model: fallback || null,
   });
   const pricingSummary = pricingSummaryOf(pricing);
+  const setModelMapRow = (index: number, patch: Partial<ModelMapRow>) =>
+    setModelMapRows((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const addModelMapRow = () => setModelMapRows((rows) => [...rows, { canonical: "", wire: "" }]);
+  const removeModelMapRow = (index: number) => setModelMapRows((rows) => rows.filter((_, i) => i !== index));
+  const mappingCount = new Set(modelMapCanonicals(modelMapRows)).size;
+  const duplicateCanonicals = duplicateModelMapCanonicals(modelMapRows);
+  // A saved map collapses duplicate canonical names last-wins, silently dropping the earlier wire name.
+  const mapError = duplicateCanonicals.length
+    ? `Duplicate canonical name${duplicateCanonicals.length === 1 ? "" : "s"}: ${duplicateCanonicals.join(", ")}`
+    : null;
+  const policySummary =
+    [
+      trusted ? "Trusted" : null,
+      mappingCount ? `${mappingCount} model mapping${mappingCount === 1 ? "" : "s"}` : null,
+      disabledTools.length ? `${disabledTools.length} disabled tool${disabledTools.length === 1 ? "" : "s"}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ") || "Trusted routing, model map, disabled tools";
 
   const isNew = !initial;
   const idError = !isNew
@@ -3534,7 +3709,7 @@ function ProviderForm({
     originMoved && (keyMode === "keep" || auth === "none")
       ? "Changing the base URL to another origin requires entering the API key again — or removing the saved key"
       : null;
-  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || !name.trim());
+  const invalid = Boolean(idError || urlError || keyError || originKeyError || limitsInvalid || pricingInvalid || mapError || !name.trim());
   const loopback = /^https?:\/\/(127\.|localhost|\[::1\])/.test(url.trim());
 
   const save = async (event: FormEvent) => {
@@ -3547,29 +3722,35 @@ function ProviderForm({
       else if (keyMode === "replace" && key.trim()) api_key = key.trim();
     }
     try {
-      const saved = await api.saveProvider(id, {
-        name: name.trim(),
-        base_url: url.trim(),
-        auth,
-        wire,
-        models,
-        preset: initial?.preset ?? preset,
-        api_key,
-        pricing: pricingChanged
-          ? {
-              input_per_mtok: pricing.input_per_mtok.value ?? 0,
-              output_per_mtok: pricing.output_per_mtok.value ?? 0,
-              cache_read_per_mtok: pricing.cache_read_per_mtok.value ?? 0,
-              cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
-            }
-          : undefined,
-        quota: { url: quotaUrl.trim(), pointer: quotaPointer.trim() },
-        timeout_secs: limits.timeout_secs.value,
-        max_concurrent: limits.max_concurrent.value,
-        queue_timeout_secs: limits.queue_timeout_secs.value,
-        context_tokens: limits.context_tokens.value,
-        fallback_model: fallback || null,
-      });
+      const saved = await api.saveProvider(
+        id,
+        providerSaveBody({
+          name,
+          base_url: url,
+          auth,
+          wire,
+          models,
+          preset: initial?.preset ?? preset,
+          api_key,
+          pricing: pricingChanged
+            ? {
+                input_per_mtok: pricing.input_per_mtok.value ?? 0,
+                output_per_mtok: pricing.output_per_mtok.value ?? 0,
+                cache_read_per_mtok: pricing.cache_read_per_mtok.value ?? 0,
+                cache_write_per_mtok: pricing.cache_write_per_mtok.value ?? 0,
+              }
+            : undefined,
+          quota: { url: quotaUrl, pointer: quotaPointer },
+          timeout_secs: limits.timeout_secs.value,
+          max_concurrent: limits.max_concurrent.value,
+          queue_timeout_secs: limits.queue_timeout_secs.value,
+          context_tokens: limits.context_tokens.value,
+          fallback_model: fallback || null,
+          trusted,
+          model_map: modelMapRows,
+          disabled_tools: disabledTools,
+        }),
+      );
       toast(`${saved.name} saved`);
       onSaved(saved);
     } catch (e) {
@@ -3783,16 +3964,117 @@ function ProviderForm({
               error={limits.context_tokens.error}
               help="The model's context size, so agents compact before they hit it."
             />
-            <FormField id={ids.fallback} label="Fallback model" info={<p>Used when the provider is unreachable, times out or the queue is full.</p>}>
+            <FormField
+              id={ids.fallback}
+              label="Fallback model"
+              info={
+                <p>
+                  A Claude model is used when the provider is unreachable, times out, the queue is full or its plan runs out. A
+                  model on another provider of the same wire is used when its plan runs out: the Mothership retries there.
+                </p>
+              }
+            >
               <select id={ids.fallback} value={fallback} onChange={(e) => setFallback(e.target.value)} className={inputClass}>
                 <option value="">None</option>
-                {fallback && !anthropicModels.some((m) => m.id === fallback) && <option value={fallback}>{fallback}</option>}
+                {fallback && !anthropicModels.some((m) => m.id === fallback) && !sameWire.includes(fallback) && (
+                  <option value={fallback}>{fallback}</option>
+                )}
                 {anthropicModels.map((model) => (
                   <option key={model.id} value={model.id}>
                     {model.label === model.id ? model.id : `${model.id} · ${model.label}`}
                   </option>
                 ))}
+                {sameWire.map((model) => (
+                  <option key={model} value={model}>
+                    {model}
+                  </option>
+                ))}
               </select>
+            </FormField>
+          </div>
+        </details>
+        <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+            <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
+            <span className="font-medium">Connection policy</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{policySummary}</span>
+          </summary>
+          <div className="space-y-3 border-t border-border px-3 pb-3 pt-3">
+            <Row
+              id={ids.trusted}
+              label="Trusted"
+              inline
+              info={
+                <p>
+                  Marks the connection as vetted to carry restricted-sensitivity work — secrets, .env files, infra config.
+                  Left off, the security-aware routing gate keeps those paths away from this provider.
+                </p>
+              }
+            >
+              <Switch id={ids.trusted} labelledBy={`${ids.trusted}-label`} label="Trusted" checked={trusted} onChange={setTrusted} />
+            </Row>
+            <div className="min-w-0 space-y-1.5">
+              <div className="flex items-center gap-1">
+                <span className="text-[12.5px] font-medium text-muted">Model map</span>
+                <InfoButton label="Model map">
+                  <p>
+                    Canonical model name → the name sent on the wire. A <Code>provider/model</Code> picked anywhere goes
+                    out as the wire name on the right; a canonical with no row is sent as it is. A blank wire name sends
+                    the canonical name.
+                  </p>
+                </InfoButton>
+              </div>
+              {modelMapRows.length === 0 && <p className="text-[12px] text-faint">No mappings — every model name goes out as it is.</p>}
+              {modelMapRows.map((row, index) => (
+                <div key={index} className="flex items-center gap-2">
+                  <input
+                    value={row.canonical}
+                    onChange={(e) => setModelMapRow(index, { canonical: e.target.value })}
+                    placeholder="canonical name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Canonical model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-[13px]")}
+                  />
+                  <span aria-hidden="true" className="shrink-0 text-faint">
+                    →
+                  </span>
+                  <input
+                    value={row.wire}
+                    onChange={(e) => setModelMapRow(index, { wire: e.target.value })}
+                    placeholder="wire name"
+                    spellCheck={false}
+                    autoComplete="off"
+                    aria-label={`Wire model name, row ${index + 1}`}
+                    className={cx(inputClass, "font-mono text-[13px]")}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeModelMapRow(index)}
+                    aria-label={`Remove model mapping ${index + 1}`}
+                    className="grid size-8 shrink-0 cursor-pointer place-items-center rounded-lg text-faint hover:bg-panel-2 hover:text-text"
+                  >
+                    <IconX size={13} />
+                  </button>
+                </div>
+              ))}
+              <Button size="sm" variant="ghost" onClick={addModelMapRow}>
+                Add mapping
+              </Button>
+              {mapError && <span className="block text-[12px] text-err">{mapError}</span>}
+            </div>
+            <FormField
+              id={ids.disabledTools}
+              label="Disabled tools"
+              info={<p>Claude Code tool names stripped from every request through this connection, so an agent cannot call them here.</p>}
+              hint="Enter or a comma adds one."
+            >
+              <ChipsInput
+                id={ids.disabledTools}
+                values={disabledTools}
+                onChange={setDisabledTools}
+                placeholder={disabledTools.length ? "Add another" : "WebSearch, Bash, …"}
+              />
             </FormField>
           </div>
         </details>
@@ -3965,7 +4247,7 @@ function PriceField({
   );
 }
 
-function ChipsInput({
+export function ChipsInput({
   id,
   values,
   onChange,

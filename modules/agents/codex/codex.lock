@@ -1,0 +1,11 @@
+# The Codex builds colonies run, pinned so every install of the same Colonizer release gets the
+# same agent. Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+#
+# Like modules/agents/opencode/opencode.lock this file is read where the agent is fetched (the
+# runner itself, at colony boot) rather than bundled: a release carries no Codex code. The runner
+# downloads the row for its architecture from the GitHub release assets, checks the sha256, and only
+# then extracts the single binary at the archive root (the URL's basename without the .tar.gz). The
+# artifacts are the static musl builds; there is no AVX2 split, so x64 takes linux-x64 and colonies
+# on Apple Silicon take linux-arm64.
+codex  0.156.1  linux-x64    agent  aff46539a83aff86e3c62c592bce2c50d95391f9df289afaf03a50c01d14533d  https://github.com/openai/codex/releases/download/rust-v0.156.1/codex-x86_64-unknown-linux-musl.tar.gz
+codex  0.156.1  linux-arm64  agent  558e12aaa6dacb335ec47240bf9721db8a54746806d64f01185a403f44f79b72  https://github.com/openai/codex/releases/download/rust-v0.156.1/codex-aarch64-unknown-linux-musl.tar.gz

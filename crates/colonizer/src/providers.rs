@@ -10,6 +10,7 @@ use crate::{
     modules::AgentModule,
     orgs::effective_agent,
     provider_quota,
+    sensitivity::{self, ProviderMark, Sensitivity, SensitivityOverrides},
     sessions::agent_env,
     util::{delete_secret, read_secret, write_secret},
 };
@@ -199,6 +200,22 @@ pub struct Provider {
 }
 
 impl Provider {
+    /// The Claude model the colony's router retries on when this provider fails over: a
+    /// `fallback_model` with no `<provider>/` prefix. A provider-prefixed fallback is the gateway's
+    /// to route instead ([`Provider::provider_fallback`]), so the router never sees it.
+    pub fn claude_fallback(&self) -> Option<&str> {
+        self.fallback_model.as_deref().filter(|m| !m.is_empty() && !m.contains('/'))
+    }
+
+    /// The `(provider, model)` a quota-exhausted request is retried on by the gateway itself (issue
+    /// #767): a `fallback_model` of the form `<provider>/<model>` on another, same-wire provider.
+    pub fn provider_fallback(&self) -> Option<(&str, &str)> {
+        self.fallback_model
+            .as_deref()?
+            .split_once('/')
+            .filter(|(p, m)| !p.is_empty() && !m.is_empty())
+    }
+
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)
     }
@@ -363,7 +380,7 @@ pub fn apply_connection_policy(body: &[u8], provider: &Provider) -> Option<Vec<u
 }
 
 /// Models served by Anthropic with the Claude login, offered as suggestions in model pickers.
-const ANTHROPIC_MODELS: &[(&str, &str)] = &[
+pub(crate) const ANTHROPIC_MODELS: &[(&str, &str)] = &[
     ("opus", "Claude Opus (latest)"),
     ("sonnet", "Claude Sonnet (latest)"),
     ("haiku", "Claude Haiku (latest)"),
@@ -413,7 +430,7 @@ const SETTING_NAMES: [&str; 6] = [
 ];
 
 impl App {
-    fn providers_file(&self) -> PathBuf {
+    pub(crate) fn providers_file(&self) -> PathBuf {
         self.cfg.config_dir.join("providers.json")
     }
 
@@ -467,7 +484,7 @@ impl App {
         });
     }
 
-    async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
+    pub(crate) async fn save_providers(&self, providers: &[Provider]) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.cfg.config_dir)?;
         crate::util::write_atomic(&self.providers_file(), &serde_json::to_vec_pretty(providers)?).await
     }
@@ -507,6 +524,55 @@ fn duplicate_provider_ids(providers: &[Provider]) -> Vec<String> {
 
 pub(crate) fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 120 && model.chars().all(|c| c.is_ascii_alphanumeric() || "._:-/[]".contains(c))
+}
+
+/// Why `model` cannot be the `fallback_model` of provider `id` (speaking `wire`), if it cannot
+/// (issue #767). A Claude alias or id always can: the colony's router retries it on Anthropic. A
+/// `<provider>/<model>` can when that provider is another configured one that serves the model and
+/// speaks the same wire — the gateway retries the quota-exhausted request there itself, re-sending
+/// the request body it already holds, so an anthropic-wire provider falls back to an anthropic-wire
+/// one and an openai-wire provider to an openai-wire one. Cross-wire is refused: the gateway has no
+/// retry path that re-shapes an answer for the other wire mid-request.
+pub(crate) fn fallback_error(id: &str, wire: Wire, model: &str, providers: &[Provider]) -> Option<String> {
+    if !valid_model(model) {
+        return Some(format!("fallback model \"{model}\" must be a model ID without spaces"));
+    }
+    // No prefix: a Claude model, which any provider may fall back to.
+    let (other, canonical) = model.split_once('/')?;
+    if other.is_empty() || canonical.is_empty() {
+        return Some(format!(
+            "fallback model \"{model}\" must be a Claude model such as sonnet, or <provider>/<model>"
+        ));
+    }
+    if other == id {
+        return Some(format!("provider \"{id}\" can't fall back to one of its own models"));
+    }
+    let Some(target) = providers.iter().find(|p| p.id == other) else {
+        return Some(format!(
+            "fallback model \"{model}\" names provider \"{other}\", which is not configured"
+        ));
+    };
+    let serves = if !target.model_map.is_empty() {
+        target.model_map.contains_key(canonical)
+    } else {
+        target.models.is_empty() || target.models.iter().any(|m| m == canonical)
+    };
+    if !serves {
+        return Some(format!(
+            "fallback model \"{model}\": provider \"{other}\" does not list \"{canonical}\" among its models"
+        ));
+    }
+    if target.wire != wire {
+        return Some(format!(
+            "fallback model \"{model}\" is on an {}-wire provider and \"{id}\" speaks the {} wire; the gateway \
+             retries a quota fallback on the same wire only (anthropic to anthropic, openai to openai) — pick a \
+             model on a {}-wire provider, or a Claude model",
+            crate::gateway_audit::wire_name(target.wire),
+            crate::gateway_audit::wire_name(wire),
+            crate::gateway_audit::wire_name(wire)
+        ));
+    }
+    None
 }
 
 /// Claude Code resolves aliases itself, but a fallback request goes to the API as is, so it needs a model ID.
@@ -587,7 +653,7 @@ pub struct ColonyRoutes {
 /// and a non-empty canonical. `deepseek/` names no model, so it routes nothing on either side of
 /// the record — [`ColonyRoutes::used`] admits no provider for it and [`ColonyRoutes::used_models`]
 /// records no pair.
-fn names_model_on(value: &str, provider_id: &str) -> bool {
+pub(crate) fn names_model_on(value: &str, provider_id: &str) -> bool {
     value
         .strip_prefix(provider_id)
         .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
@@ -691,6 +757,83 @@ fn provider_prefix(model: &str) -> Option<&str> {
     rest.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)).then_some(prefix)
 }
 
+/// What to do, at boot, about a model setting whose provider the gateway would refuse for the task's
+/// sensitivity class (issue #704), resolved with the gateway's own rule so a booted colony is one it
+/// will carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModelFix {
+    /// The gateway would carry the model, or it names no configured provider (no route of ours
+    /// serves it): leave the setting alone.
+    Keep,
+    /// The gateway would refuse the model; run on `model` instead, or — for `None` — clear the
+    /// setting so it inherits the harness default.
+    Substitute { model: Option<String>, reason: String },
+    /// Refused, and nothing eligible exists to fall back to: the caller leaves it and warns.
+    NoFallback { reason: String },
+}
+
+/// The configured provider a `<provider>/<model>` setting names, or `None` for a bare Claude model or
+/// an unconfigured prefix — neither is a route the gateway serves, so neither is gated.
+fn gated_provider<'a>(providers: &'a [Provider], model: &str) -> Option<&'a Provider> {
+    provider_prefix(model).and_then(|prefix| providers.iter().find(|p| p.id == prefix))
+}
+
+/// Whether the gateway would carry `model` for a task of this class (see [`gated_provider`]).
+pub(crate) fn model_eligible(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+) -> bool {
+    let Some(provider) = gated_provider(providers, model) else {
+        return true;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides)
+}
+
+/// Resolve one model setting at boot (issue #704). When the gateway would refuse the model, the fix
+/// is `fallback` if eligible; a blank `fallback` clears the setting (inheriting the harness default)
+/// and a non-blank ineligible one is [`ModelFix::NoFallback`] rather than an invented name.
+pub(crate) fn model_fix(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+    fallback: &str,
+) -> ModelFix {
+    let Some(provider) = gated_provider(providers, model) else {
+        return ModelFix::Keep;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    if sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides) {
+        return ModelFix::Keep;
+    }
+    let reason = refusal_reason(sensitivity, overrides, provider);
+    let replacement = if fallback.is_empty() {
+        None
+    } else if model_eligible(sensitivity, overrides, providers, fallback) {
+        Some(fallback.to_string())
+    } else {
+        return ModelFix::NoFallback { reason };
+    };
+    ModelFix::Substitute {
+        model: replacement,
+        reason,
+    }
+}
+
+/// Why the gateway would refuse this model, in its own terms: the mark can be the blocker, or — when
+/// the org pins vendors — the vendor can be, even though the mark already meets the bar.
+fn refusal_reason(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>, provider: &Provider) -> String {
+    let required = sensitivity::required_mark(sensitivity, overrides);
+    if ProviderMark::of(provider.trusted, provider.vetted) < required {
+        format!("\"{}\" is not marked {}", provider.id, required.as_str())
+    } else {
+        format!("\"{}\" is not on this org's restricted-vendor list", provider.id)
+    }
+}
+
 /// The pricing the gateway would actually charge for `model`, if any provider's id prefixes it in
 /// `<provider>/<model>` form and that provider has pricing configured. `None` for a bare model name
 /// (no gateway involved) or a provider with no pricing on file.
@@ -711,9 +854,14 @@ pub fn colony_routes(app: &App, gateway_token: &str) -> ColonyRoutes {
                 "base_url": format!("http://host.microsandbox.internal:{port}/providers/{}", provider.id),
                 "auth": "none",
                 "headers": {COLONY_HEADER: gateway_token},
+                // The wire the provider speaks, so a runner that talks the OpenAI wire itself (a
+                // non-Claude agent module) knows which routes serve it untranslated (issue #629).
+                "wire": provider.wire,
                 "timeout_secs": provider.timeout_secs(),
                 "context_tokens": provider.context_tokens,
-                "fallback_model": provider.fallback_model.as_deref().map(api_model),
+                // Only a Claude fallback is the router's: a provider-prefixed one is retried by the
+                // gateway itself on quota exhaustion (issue #767).
+                "fallback_model": provider.claude_fallback().map(api_model),
             })
         })
         .collect();
@@ -824,6 +972,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "pricing": provider.pricing,
         "model_map": provider.model_map,
         "disabled_tools": provider.disabled_tools,
+        "trusted": provider.trusted,
         "quota": provider.quota,
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
@@ -992,10 +1141,11 @@ fn valid_price(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
 
-/// The gateway appends the request's own path to an anthropic-wire base_url (e.g. `/v1/messages`, and
-/// `/v1/models` for the health probe), so a base already ending in `/v1` doubles it and 404s silently
-/// until the first real call surfaces it. `openai`-wire providers are unaffected: their base_url
-/// legitimately ends in `/v1` (e.g. xai-grok), since the translator appends `/chat/completions` itself.
+/// The gateway appends the request's own path to a base_url (e.g. `/v1/messages`, and `/v1/models`
+/// for the health probe), so on the `anthropic` wire — where the path is fixed — a base already
+/// ending in `/v1` doubles it and 404s silently until the first real call surfaces it, and is
+/// refused here instead. An `openai`-wire base legitimately ends in `/v1` (xai-grok's is
+/// `https://api.x.ai/v1`): the gateway's join there skips the guest path's repeated `/v1`.
 fn base_url_needs_stripping(base_url: &str, wire: Wire) -> bool {
     wire == Wire::Anthropic && base_url.ends_with("/v1")
 }
@@ -1057,6 +1207,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             p.output_per_mtok,
             p.cache_read_per_mtok,
             p.cache_write_per_mtok,
+            p.thinking_per_mtok,
         ]
         .iter()
         .all(|rate| valid_price(*rate))
@@ -1100,8 +1251,10 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         None => None,
     };
     let fallback_model = req.fallback_model.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
-    if fallback_model.as_deref().is_some_and(|m| !valid_model(m) || m.contains('/')) {
-        return Err(bad("fallback model must be a Claude model such as sonnet or claude-sonnet-5"));
+    if fallback_model.as_deref().is_some_and(|m| !valid_model(m)) {
+        return Err(bad(
+            "fallback model must be a Claude model such as sonnet or claude-sonnet-5, or <provider>/<model> on another provider of the same wire",
+        ));
     }
     // The same rule the boot later checks a loaded providers.json against ([`config_error`]): a row
     // the policy can't honour — an id with a space, a wire name that is only spaces, a tool Claude
@@ -1132,6 +1285,14 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
         return Err(bad(&format!(
             "provider \"{id}\" is listed more than once in providers.json; delete it and add it again (or remove the duplicate by hand), then save"
         )));
+    }
+    // A provider-prefixed fallback is checked against the providers on file, under the same lock:
+    // it must name another provider that serves the model on the same wire (issue #767).
+    if let Some(error) = fallback_model
+        .as_deref()
+        .and_then(|m| fallback_error(&id, req.wire, m, &providers))
+    {
+        return Err(bad(&error));
     }
     // The credential rides the base URL: the gateway forwards it there, and the health probe follows.
     // So a save that moves the provider to another origin — scheme, host or port, the origin the quota
@@ -1343,6 +1504,101 @@ mod tests {
         }
     }
 
+    /// A restricted colony's model on a provider nobody marked trusted is rerouted onto the eligible
+    /// fallback (issue #704) — and the eligible, bare-Claude and ungated cases are left alone.
+    #[test]
+    fn a_model_on_an_untrusted_provider_is_rerouted_for_restricted_work() {
+        let mut trusted = provider("trustedai");
+        trusted.trusted = true;
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![trusted, untrusted];
+
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                None,
+                &all,
+                "zai/glm-5.3-flash",
+                "trustedai/claude-sonnet-5"
+            ),
+            ModelFix::Substitute {
+                model: Some("trustedai/claude-sonnet-5".into()),
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+        // A bare Claude model is Anthropic's own, served without a provider entry: never gated.
+        assert_eq!(model_fix(Sensitivity::Restricted, None, &all, "sonnet", ""), ModelFix::Keep);
+        // The eligible model is left alone, whatever it might fall back to.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "trustedai/x", "sonnet"),
+            ModelFix::Keep
+        );
+        // A `<prefix>/` nobody configured is not a gateway route, so it is not gated either.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "unconfigured/whatever", "sonnet"),
+            ModelFix::Keep
+        );
+        // A loose class gates nothing.
+        assert_eq!(
+            model_fix(Sensitivity::Standard, None, &all, "zai/glm-5.3-flash", "sonnet"),
+            ModelFix::Keep
+        );
+        // A blank fallback clears the setting to inherit the harness default: always a fix.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", ""),
+            ModelFix::Substitute {
+                model: None,
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        // The fix and the gateway's check are one rule: what we substitute is what it would carry.
+        assert!(!model_eligible(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash"));
+        assert!(model_eligible(
+            Sensitivity::Restricted,
+            None,
+            &all,
+            "trustedai/claude-sonnet-5"
+        ));
+    }
+
+    /// With no eligible fallback the model is left as it is — the boot warns rather than invent a
+    /// name (issue #704) — and an org's vendor pin refuses a trusted provider off the list.
+    #[test]
+    fn with_no_eligible_fallback_the_model_is_left_for_the_caller_to_warn_about() {
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![untrusted, provider("groq")];
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", "groq/llama"),
+            ModelFix::NoFallback {
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        let mut pinned_vendor = provider("trustedai");
+        pinned_vendor.trusted = true;
+        pinned_vendor.vendor = Some("Somewhere".into());
+        let pinned = SensitivityOverrides {
+            restricted_vendors: Some(vec!["Anthropic".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                Some(&pinned),
+                &[pinned_vendor],
+                "trustedai/claude-sonnet-5",
+                "sonnet"
+            ),
+            ModelFix::Substitute {
+                model: Some("sonnet".into()),
+                reason: "\"trustedai\" is not on this org's restricted-vendor list".into(),
+            }
+        );
+    }
+
     #[test]
     fn explicit_flag_strips_ttl_even_on_a_custom_preset() {
         let mut p = provider("meta-handpointed");
@@ -1475,6 +1731,23 @@ mod tests {
         assert!(!valid_price(f64::INFINITY));
     }
 
+    /// Every rate the save checks shares that refusal, thinking included (#622): the gateway bills
+    /// thinking tokens through `thinking_per_mtok`, so a negative one would subtract from the budget.
+    #[tokio::test]
+    async fn a_negative_thinking_rate_is_refused_like_the_other_prices() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.pricing = Some(Pricing {
+            thinking_per_mtok: -0.01,
+            ..Default::default()
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("pricing rates"), "{}", err.message());
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn urls_are_split_and_validated() {
         assert_eq!(
@@ -1495,9 +1768,10 @@ mod tests {
     }
 
     /// An anthropic-wire base_url ending in `/v1` doubles up with the path the gateway appends
-    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently. `openai`-wire
-    /// providers legitimately end in `/v1` (e.g. the xai-grok catalog entry), since the translator
-    /// appends `/chat/completions` itself, so the check only applies to `wire: anthropic`.
+    /// (`/v1/messages`, and `/v1/models` for the health probe) and 404s silently, so it is rejected.
+    /// An `openai`-wire base legitimately ends in `/v1` (e.g. the xai-grok catalog entry): the
+    /// gateway's join there skips the guest path's repeated `/v1`, so the check only applies to
+    /// `wire: anthropic`.
     #[test]
     fn an_anthropic_wire_base_url_ending_in_v1_is_rejected() {
         assert!(base_url_needs_stripping("https://api.example.com/v1", Wire::Anthropic));
@@ -1542,6 +1816,52 @@ mod tests {
         for bad in ["", "Custom", "has space", "under_score", &"x".repeat(49)] {
             assert!(!valid_preset(bad), "{bad}");
         }
+    }
+
+    /// A provider's fallback (issue #767): any Claude model, or a model another provider serves on
+    /// the same wire; never its own model, an unknown provider, an unlisted model or another wire.
+    #[test]
+    fn a_fallback_is_claude_or_a_same_wire_model_on_another_provider() {
+        let providers: Vec<Provider> = serde_json::from_value(json!([
+            {"id": "bailian", "name": "B", "base_url": "http://x", "auth": "none", "models": ["qwen3.8-max"]},
+            {"id": "zai", "name": "Z", "base_url": "http://x", "auth": "none", "models": ["glm-5"]},
+            {"id": "grok", "name": "G", "base_url": "http://x/v1", "auth": "none", "wire": "openai", "models": ["grok-5"]},
+            {"id": "xai", "name": "X", "base_url": "http://x/v1", "auth": "none", "wire": "openai", "models": ["grok-5-fast"]},
+        ]))
+        .unwrap();
+        let check = |id: &str, wire: Wire, model: &str| fallback_error(id, wire, model, &providers);
+        assert_eq!(check("bailian", Wire::Anthropic, "sonnet"), None);
+        assert_eq!(check("grok", Wire::Openai, "claude-sonnet-5"), None, "Claude serves any wire");
+        assert_eq!(check("bailian", Wire::Anthropic, "zai/glm-5"), None, "anthropic to anthropic");
+        assert_eq!(check("grok", Wire::Openai, "xai/grok-5-fast"), None, "openai to openai");
+        let cross = check("bailian", Wire::Anthropic, "grok/grok-5").unwrap();
+        assert!(cross.contains("same wire") && cross.contains("openai-wire"), "{cross}");
+        assert!(check("xai", Wire::Openai, "zai/glm-5").unwrap().contains("same wire"));
+        assert!(
+            check("bailian", Wire::Anthropic, "bailian/qwen3.8-max")
+                .unwrap()
+                .contains("its own")
+        );
+        assert!(
+            check("bailian", Wire::Anthropic, "nope/x")
+                .unwrap()
+                .contains("not configured")
+        );
+        assert!(
+            check("bailian", Wire::Anthropic, "zai/glm-9")
+                .unwrap()
+                .contains("does not list")
+        );
+        assert!(check("bailian", Wire::Anthropic, "two words").is_some());
+
+        let with = |fallback: &str| Provider {
+            fallback_model: Some(fallback.into()),
+            ..providers[0].clone()
+        };
+        assert_eq!(with("sonnet").claude_fallback(), Some("sonnet"));
+        assert_eq!(with("sonnet").provider_fallback(), None);
+        assert_eq!(with("zai/glm-5").claude_fallback(), None, "the router never sees it");
+        assert_eq!(with("zai/glm-5").provider_fallback(), Some(("zai", "glm-5")));
     }
 
     #[test]
@@ -2087,6 +2407,40 @@ mod tests {
         let stored = &app.providers()[0];
         assert!(!stored.vetted);
         assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `trusted` and the connection policy ride the same GET as pricing and the key state (#605):
+    /// the cockpit form prefills from it, and an unmarked provider reports `false` rather than being
+    /// omitted, so the Trusted switch has a value to sit on.
+    #[tokio::test]
+    async fn the_list_returns_trusted_and_the_connection_policy() {
+        let (app, root) = providers_app();
+        let mut marked = put_req("Marked");
+        marked.trusted = Some(true);
+        marked.model_map = Some(BTreeMap::from([("sonnet".into(), "claude-wire-sonnet".into())]));
+        marked.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _ = put(State(app.clone()), Path("marked".into()), Json(marked)).await.unwrap();
+        let _ = put(State(app.clone()), Path("plain".into()), Json(put_req("Plain")))
+            .await
+            .unwrap();
+
+        let Json(listed) = list(State(app.clone())).await;
+        let by_id = |id: &str| {
+            listed
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} in {listed:?}"))
+        };
+        let marked = by_id("marked");
+        assert_eq!(marked["trusted"], json!(true));
+        assert_eq!(marked["model_map"]["sonnet"], json!("claude-wire-sonnet"));
+        assert_eq!(marked["disabled_tools"], json!(["WebSearch"]));
+        assert_eq!(
+            by_id("plain")["trusted"],
+            json!(false),
+            "an unmarked provider reports trusted: false"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

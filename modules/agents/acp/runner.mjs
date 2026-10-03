@@ -6,18 +6,23 @@
 // COLONIZER_RESUME_SESSION id instead, when the agent can reload it), every user_message one
 // `session/prompt` turn. Verified presets: Google's Gemini CLI (`gemini --experimental-acp`) and
 // xAI's Grok Build (`grok agent stdio`); any other ACP agent runs through the custom-command
-// setting (README).
+// setting (README). Nothing stages the gemini CLI into the image, so the runner fetches the pinned
+// bundle on first boot (README, "Binary").
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { mkdtempSync, realpathSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
-import { loadPathPolicy, matchPathPolicy } from './pathpolicy.mjs';
+import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
+import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
+import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
@@ -25,13 +30,15 @@ export const CREDENTIAL_MISSING = 'ACP_CREDENTIAL_MISSING';
 export const AUTH_FAILED = 'ACP_AUTH_FAILED';
 export const AGENT_FAILED = 'ACP_AGENT_FAILED';
 
-// The known presets; `custom` takes its command line from the `command` setting instead. `env`
-// hardens the spawned agent the way the grok-build runner does (a fresh GROK_HOME is the nesting
-// lever: no host config, no cached login, an empty trust store). `opaqueAuthFailure` marks an agent
-// that answers a rejected credential with a bare JSON-RPC "Internal error" instead of naming
-// authentication, so the runner annotates the turn failure with the credential to check.
+// The known presets; `custom` takes its command line from the `command` setting instead. The
+// gemini preset declares no `command`: its argv comes from `resolveGemini` below (PATH, else the
+// fetched pinned bundle). `env` hardens the spawned agent the way the grok-build runner does (a
+// fresh GROK_HOME is the nesting lever: no host config, no cached login, an empty trust store).
+// `opaqueAuthFailure` marks an agent that answers a rejected credential with a bare JSON-RPC
+// "Internal error" instead of naming authentication, so the runner annotates the turn failure with
+// the credential to check.
 const PRESETS = {
-  gemini: { command: 'gemini --experimental-acp', credential: 'GEMINI_API_KEY' },
+  gemini: { credential: 'GEMINI_API_KEY' },
   grok: {
     command: 'grok agent stdio',
     credential: 'XAI_API_KEY',
@@ -49,6 +56,18 @@ const PRESETS = {
     }),
   },
 };
+
+// Shared memory's read tools (issue #766) as a stdio MCP server, the transport every ACP agent
+// must support: memory_briefing, memory_changes and memory_search over COLONIZER_MEMORY_DIR.
+export const MEMORY_MCP = fileURLToPath(new URL('./memory-mcp.mjs', import.meta.url));
+
+/** The MCP servers session/new and session/load register: the memory server when memory is
+ * mounted, none otherwise. Memory is pulled through it, never put into a prompt. */
+export function mcpServers(env = process.env) {
+  const dir = String(env.COLONIZER_MEMORY_DIR ?? '').trim();
+  if (!dir) return [];
+  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] }];
+}
 
 /** The preset's spec, or null for `custom` and unknown names. */
 function presetSpec(preset) {
@@ -77,11 +96,59 @@ function turnFailureText(preset, err) {
   return message;
 }
 
-/** The ACP agent argv: the preset's command, or COLONIZER_ACP_COMMAND for `custom`; null unknown. */
-function agentArgv(env) {
-  const preset = String(env.COLONIZER_ACP_AGENT ?? '').trim() || 'gemini';
-  if (preset === 'custom') return { preset, argv: splitCommand(env.COLONIZER_ACP_COMMAND ?? '') };
-  return { preset, argv: PRESETS[preset] ? splitCommand(PRESETS[preset].command) : null };
+/** The preset name from the `agent` setting; `gemini` when unset. */
+function agentPreset(env) {
+  return String(env.COLONIZER_ACP_AGENT ?? '').trim() || 'gemini';
+}
+
+/** The pin, read from module.json so the manifest and this runner cannot drift apart. */
+export function readPin() {
+  const pin = JSON.parse(readFileSync(join(here, 'module.json'), 'utf8'))?.requires?.pins?.['@google/gemini-cli'];
+  if (!pin?.version) throw new Error('module.json carries no @google/gemini-cli pin');
+  return pin;
+}
+
+const execTar = (args) => new Promise((resolve, reject) => { execFile('tar', args, (error) => (error ? reject(error) : resolve())); });
+
+/** Disk cache for the gemini bundle: under the cache dir rather than the colony's small /tmp tmpfs,
+ * as the OpenCode module does (the extracted bundle is ~96 MB). */
+export function defaultCacheDir(env = process.env) {
+  const base = env.XDG_CACHE_HOME || (env.HOME ? join(env.HOME, '.cache') : null);
+  return base ? join(base, 'colonizer', 'gemini') : join(tmpdir(), 'colonizer-gemini');
+}
+
+/** The gemini preset's argv: COLONIZER_GEMINI_BIN, then `gemini` on PATH, else the pinned
+ * @google/gemini-cli bundle — downloaded from registry.npmjs.org and sha256-checked before
+ * extraction. The bundle is platform-independent, so gemini.lock carries one row, platform `any`.
+ * The tarball is extracted into a scratch dir under the cache and then renamed into place, so a
+ * runner killed mid-extraction leaves no half-populated cache behind. */
+export async function resolveGemini({ env = process.env, lockText, version = readPin().version, fetchImpl = fetch, runTar = execTar, cacheDir = defaultCacheDir(env), log = () => {} } = {}) {
+  const acpArg = '--experimental-acp';
+  if (env.COLONIZER_GEMINI_BIN) return [env.COLONIZER_GEMINI_BIN, acpArg];
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'gemini'))) return [join(dir, 'gemini'), acpArg];
+  const row = String(lockText ?? '').split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length >= 6 && !c[0].startsWith('#')).map(([, v, , , sha256, url]) => ({ version: v, sha256, url })).find((r) => r.version === version);
+  if (!row) throw new Error(`no pinned Gemini CLI ${version} in gemini.lock`);
+  const dest = join(cacheDir, row.version);
+  const entry = join(dest, 'package', 'bundle', 'gemini.js');
+  if (existsSync(entry)) return [process.execPath, entry, acpArg];
+  log({ level: 'info', message: `downloading Gemini CLI ${row.version} (platform-independent bundle)` });
+  const res = await fetchImpl(row.url);
+  if (!res?.ok) throw new Error(`Gemini CLI download failed: HTTP ${res?.status ?? 'no response'}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error(`Gemini CLI ${row.version} refused: sha256 mismatch`);
+  mkdirSync(cacheDir, { recursive: true });
+  const tmp = mkdtempSync(join(cacheDir, `.${row.version}.tmp-`));
+  try {
+    const tgz = join(tmp, 'pkg.tgz');
+    writeFileSync(tgz, bytes);
+    await runTar(['-xzf', tgz, '-C', tmp, 'package/bundle']); // gemini.js imports its chunk-*.js siblings
+    mkdirSync(dest, { recursive: true });
+    rmSync(join(dest, 'package'), { recursive: true, force: true }); // evict a package a killed runner left half-extracted
+    renameSync(join(tmp, 'package'), join(dest, 'package')); // atomic: the cache only ever holds a complete package
+  } finally {
+    rmSync(tmp, { recursive: true, force: true }); // gone on success and on failure: no scratch dir, no tarball
+  }
+  return [process.execPath, entry, acpArg];
 }
 
 /** A command line into argv: split on whitespace, keeping quoted spans whole. */
@@ -156,22 +223,15 @@ function optionByKind(options, prefix) {
   return real.find((option) => option.kind === `${prefix}_once`) ?? real.find((option) => option.kind.startsWith(prefix));
 }
 
-/** The workspace-confined absolute path for `target`, or null when it escapes: symlinks resolve
- * through the longest existing ancestor, so a link out of the tree cannot hide an escape. */
+/** The workspace-confined absolute path for `target`, or null when it escapes. Every symlink on
+ * the way resolves, component by component — a dangling one too, to where a write through it
+ * would land — so a link out of the tree cannot hide an escape (pathpolicy.mjs `resolveInWorkspace`).
+ * The result keeps the caller's spelling of the workspace root. */
 export function confine(workspace, target) {
-  let abs = resolve(workspace, String(target ?? ''));
-  const tail = [];
-  for (;;) {
-    try {
-      const resolved = join(realpathSync(abs), ...tail);
-      return resolved === workspace || resolved.startsWith(workspace + sep) ? resolved : null;
-    } catch {
-      tail.unshift(basename(abs));
-      const parent = dirname(abs);
-      if (parent === abs) return null;
-      abs = parent;
-    }
-  }
+  const inside = resolveInWorkspace(workspace, target);
+  if (!inside) return null;
+  const rel = relative(inside.root, inside.full);
+  return rel === '' ? workspace : join(workspace, rel);
 }
 
 // §2 caps tool_result output; file reads refuse anything over READ_CAP instead of buffering it.
@@ -303,21 +363,35 @@ class AsyncQueue {
  * died (a death mid-turn also fails the turn, so the colony's turn always terminates). */
 export async function run({ commands, emit, env = process.env, spawnFn = spawn, cwd = process.cwd() }) {
   emit({ type: 'status', state: 'idle' });
-  const { preset, argv } = agentArgv(env);
+  const log = ({ level, message }) => emit({ type: 'log', level, message });
+  const preset = agentPreset(env);
+  const spec = presetSpec(preset);
+  let argv = null;
   let problem = null;
-  if (!argv?.length) {
-    problem =
-      preset === 'custom'
-        ? { code: AGENT_UNKNOWN, message: 'the custom command is empty; set the `command` setting to the ACP agent\'s full command line' }
-        : { code: AGENT_UNKNOWN, message: `"${preset}" is not an ACP agent preset; pick one of ${Object.keys(PRESETS).join(', ')}, or "custom" with a command` };
-  } else if (preset !== 'custom' && !String(env[PRESETS[preset].credential] ?? '').trim()) {
+  if (preset === 'custom') {
+    argv = splitCommand(env.COLONIZER_ACP_COMMAND ?? '');
+    if (!argv.length) problem = { code: AGENT_UNKNOWN, message: 'the custom command is empty; set the `command` setting to the ACP agent\'s full command line' };
+  } else if (!spec) {
+    problem = { code: AGENT_UNKNOWN, message: `"${preset}" is not an ACP agent preset; pick one of ${Object.keys(PRESETS).join(', ')}, or "custom" with a command` };
+  } else if (!String(env[spec.credential] ?? '').trim()) {
     problem = {
       code: CREDENTIAL_MISSING,
       message:
-        `${PRESETS[preset].credential} is unset or empty, and the colony never runs the agent's interactive login. ` +
-        `Add ${PRESETS[preset].credential} as a colony secret for the agent's API host (module.json's secrets list), ` +
+        `${spec.credential} is unset or empty, and the colony never runs the agent's interactive login. ` +
+        `Add ${spec.credential} as a colony secret for the agent's API host (module.json's secrets list), ` +
         'so the mothership injects it into this colony; or pick another agent preset.',
     };
+  } else if (preset === 'gemini') {
+    // The gemini CLI is not staged in the image: PATH, else the pinned bundle, fetched on first boot.
+    let lockText = '';
+    try { lockText = readFileSync(join(here, 'gemini.lock'), 'utf8'); } catch { /* resolveGemini reports the missing pin */ }
+    try {
+      argv = await resolveGemini({ env, lockText, log });
+    } catch (err) {
+      problem = { code: AGENT_FAILED, message: `the gemini CLI: ${err?.message ?? err}` };
+    }
+  } else {
+    argv = splitCommand(spec.command);
   }
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });
@@ -329,6 +403,9 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // before the agent can run anything. Warnings ride stderr; agentd turns those into `log` events.
   const execPolicy = loadExecPolicy(env, { cwd: workspace });
   for (const warning of execPolicy.warnings) process.stderr.write(`${warning}\n`);
+  // The operator's Allows of exec-policy asks, kept for this run (issue #759): the same command
+  // under the same rule is not asked about twice. In memory only, so the agent cannot forge one.
+  const execAllowCache = createExecAllowCache();
   // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
   // the runtime reports against. Absent (an older harness) means the feature is off, silently.
   const pathPolicy = loadPathPolicy(env).policy;
@@ -402,12 +479,21 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
       }
       const allow = optionByKind(options, 'allow');
       if (hit.decision === 'allow' && allow) return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      if (execAllowCache.has(hit, command) && allow) {
+        process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
+        return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
+      }
     }
     const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
     emit({
       type: 'question', question_id: questionId, message_id: turn?.messageId ?? null, risk: riskForKind(call.kind),
+      // Every permission request holds the agent's tool call in flight, blocked on this reply
+      // (issue #759): a session/load after a suspension has no request left to answer, so the
+      // mothership must not suspend the colony while it waits. An exec-policy ask also says why.
+      blocking: true,
+      ...(hit ? { kind: EXEC_POLICY_QUESTION_KIND } : {}),
       questions: [{ question: text, header: 'Permission', multi_select: false, options: options.map((o) => ({ label: o.name, description: o.kind })) }],
     });
     emit({ type: 'status', state: 'waiting_for_answer' });
@@ -420,6 +506,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (!chosen && answer.response) {
       emit({ type: 'log', level: 'info', message: `a free-text reply cannot select one of the agent's options; answered cancelled for ${questionId}` });
     }
+    if (hit && chosen && !chosen.synthetic && chosen.kind?.startsWith('allow')) execAllowCache.remember(hit, command);
     reply({ outcome: chosen && !chosen.synthetic ? { outcome: 'selected', optionId: chosen.optionId } : { outcome: 'cancelled' } });
   };
 
@@ -535,7 +622,22 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   };
 
   let acp = null;
+  let servers = [];
+  let memoryLine = false; // the next prompt leads with MEMORY_PROMPT_APPEND
   if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
+
+  // The one place a model is selected: the module's `model` setting at session start and the
+  // cockpit's live `set_model` command both send the same request and announce the same event. A
+  // refusal warns; it never fails the run.
+  const applyModel = async (model) => {
+    try {
+      await acp.request('session/set_model', { sessionId, modelId: model });
+      emit({ type: 'model_changed', model, previous: currentModel });
+      currentModel = model;
+    } catch (err) {
+      emit({ type: 'log', level: 'warn', message: `set_model ${model} failed: ${err?.message ?? err}` });
+    }
+  };
 
   // The handshake: negotiate ACP, then the session — `session/load` for §1's COLONIZER_RESUME_SESSION
   // when the agent advertises loadSession, `session/new` otherwise and as the fallback on a failed
@@ -552,12 +654,13 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         emit({ type: 'log', level: 'warn', message: `cannot resume session ${resumeId}: the agent does not advertise loadSession; a fresh session starts instead` });
       }
       let session = {};
+      servers = mcpServers(env);
       if (loadable && resumeId) {
         replaying = true; // the agent replays the old conversation; the harness logged it once already
         try {
           // The load result carries what session/new would (models included), so a resumed colony
           // keeps its model surface.
-          session = plainObject(await acp.request('session/load', { sessionId: resumeId, cwd: workspace, mcpServers: [] }));
+          session = plainObject(await acp.request('session/load', { sessionId: resumeId, cwd: workspace, mcpServers: servers }));
           // The agent may rename the session as it loads it; talk to the id it answered with.
           sessionId = typeof session.sessionId === 'string' && session.sessionId ? session.sessionId : resumeId;
         } catch (err) {
@@ -566,8 +669,11 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         replaying = false;
       }
       if (!sessionId) {
-        session = await acp.request('session/new', { cwd: workspace, mcpServers: [] });
+        session = await acp.request('session/new', { cwd: workspace, mcpServers: servers });
         sessionId = String(session.sessionId ?? '');
+        // A fresh session has no system prompt of ours, so its first prompt carries the one fixed
+        // line naming the memory tools; a reloaded session already had it.
+        memoryLine = servers.length > 0;
       }
       if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
@@ -575,6 +681,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         currentModel = String(session.models.currentModelId);
         emit({ type: 'model_changed', model: currentModel, previous: null });
       }
+      // The module's `model` setting (COLONIZER_MODEL, issue #603): pick it at session start with the
+      // same request the cockpit's live set_model sends. An agent that advertised no models cannot
+      // select one — one warning, and it stays on its own default.
+      const wantedModel = String(env.COLONIZER_MODEL ?? '').trim();
+      if (wantedModel && modelSupported) await applyModel(wantedModel);
+      else if (wantedModel) emit({ type: 'log', level: 'warn', message: `ignored COLONIZER_MODEL ${wantedModel}: the agent did not advertise model selection at session/new` });
     } catch (err) {
       if (!dead) {
         const auth = authProblem(preset, err);
@@ -608,7 +720,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
           let failureText = null;
           let stopped = null;
           try {
-            const result = await acp.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: message.text }] });
+            const prompt = [{ type: 'text', text: message.text }];
+            if (memoryLine) {
+              prompt.unshift({ type: 'text', text: MEMORY_PROMPT_APPEND });
+              memoryLine = false;
+            }
+            const result = await acp.request('session/prompt', { sessionId, prompt });
             const reason = String(result.stopReason ?? '');
             stopped = reason === 'cancelled' ? 'interrupted by the user' : reason === 'refusal' ? 'the agent refused to continue' : null;
             if (!stopped && reason !== 'end_turn') emit({ type: 'log', level: 'warn', message: `the turn stopped on ${JSON.stringify(result.stopReason)}` });
@@ -665,13 +782,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         } else if (!acp || !modelSupported) {
           emit({ type: 'log', level: 'warn', message: `ignored set_model ${model}: the agent did not advertise model selection at session/new` });
         } else {
-          try {
-            await acp.request('session/set_model', { sessionId, modelId: model });
-            emit({ type: 'model_changed', model, previous: currentModel });
-            currentModel = model;
-          } catch (err) {
-            emit({ type: 'log', level: 'warn', message: `set_model ${model} failed: ${err?.message ?? err}` });
-          }
+          await applyModel(model);
         }
         break;
       }

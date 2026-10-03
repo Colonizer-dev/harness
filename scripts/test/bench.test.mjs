@@ -5,7 +5,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { formatComparison, formatJevReport, jevReport, journalScoring, outsideTask, parseArgs, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
+import { actTier, briefMetrics, briefReport, formatBriefReport, formatComparison, formatJevReport, formatRoutingReport, jevReport, journalScoring, outsideTask, parseArgs, routingOutcome, routingReport, routingVerdict, runCheck, runOwnTests, scoreTask, summarizeRun } from '../bench.mjs';
 import { loadSpend, readJsonLines } from '../colony-report.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -319,4 +319,158 @@ test('parseArgs takes the jev subcommand: a threshold, --json and the run files'
   assert.throws(() => parseArgs(['jev', '--threshold']), /--threshold needs a value/);
   assert.throws(() => parseArgs(['jev', '--threshold', 'soon']), /--threshold needs a number/);
   assert.throws(() => parseArgs(['jev', '--json=false']), /unknown argument/);
+});
+
+// The brief-pick ledger rows the mothership writes (#585): one pick row per colony boot, and a used row
+// per watched note or skill pack the colony was later seen to touch. briefMetrics grades the picks against
+// those uses; a total pools the counts and recomputes the rates, and carries the per-colony means.
+const pickRow = (session_id, mandatory, candidates, picks) => ({ kind: 'pick', session_id, at: '2026-10-01T00:00:00Z', model: 'jev-1.13.0', mandatory, candidates, picks, would_load: [...mandatory, ...picks], rounds: picks.length, missed: false });
+const usedRow = (session_id, item) => ({ kind: 'used', session_id, at: '2026-10-01T00:00:01Z', item, via: 'Read' });
+const BRIEF = [
+  pickRow('s1', ['house-rule'], ['note:repo/a', 'note:repo/b', 'skill:pack'], ['note:repo/a', 'skill:pack']),
+  usedRow('s1', 'note:repo/a'),
+  usedRow('s1', 'note:repo/b'),
+  usedRow('s1', 'house-rule'),
+  pickRow('s2', ['security'], ['note:repo/c'], []),
+  usedRow('s2', 'note:repo/c'),
+];
+const briefRun = { label: 'one', results: [{ session_id: 's1', id: 'add-helper', agent: 'claude-code', model: 'zai/glm-5.3-flash' }, { session_id: 's2', id: 'readme-typo', agent: 'codex', model: null }] };
+
+test('briefMetrics grades pick against use, with mandatory notes out of the universe', () => {
+  const m = briefMetrics(BRIEF[0], ['note:repo/a', 'note:repo/b', 'house-rule']);
+  assert.deepEqual({ candidates: m.candidates, picks: m.picks, mandatory: m.mandatory, tp: m.tp, fp: m.fp, fn: m.fn }, { candidates: 3, picks: 2, mandatory: 1, tp: 1, fp: 1, fn: 1 }, 'a picked the colony used; a used one it did not pick; a picked one it never used; the mandatory use is ignored');
+  assert.equal(m.precision, 0.5);
+  assert.equal(m.recall, 0.5);
+});
+
+test('no picks leaves precision undefined, and an unpicked need is still a miss', () => {
+  const m = briefMetrics(BRIEF[4], ['note:repo/c']);
+  assert.deepEqual({ tp: m.tp, fp: m.fp, fn: m.fn }, { tp: 0, fp: 0, fn: 1 });
+  assert.equal(m.precision, null, 'nothing was picked: undefined, not a zero score');
+  assert.equal(m.recall, 0);
+});
+
+test('the brief report groups under its run and pools the counts into a total', () => {
+  const report = briefReport(BRIEF, [briefRun]);
+  assert.deepEqual(report.runs.map((r) => r.run), ['one']);
+  assert.equal(report.runs[0].colonies.length, 2);
+  const s1 = report.runs[0].colonies[0];
+  assert.equal(s1.task, 'add-helper', 'the task, agent and model ride from the run result for display');
+  assert.deepEqual({ tp: report.total.tp, fp: report.total.fp, fn: report.total.fn, precision: report.total.precision, recall: report.total.recall }, { tp: 1, fp: 1, fn: 2, precision: 0.5, recall: 1 / 3 });
+  assert.deepEqual({ candidates: report.total.mean_candidates, picks: report.total.mean_picks, mandatory: report.total.mean_mandatory }, { candidates: 2, picks: 1, mandatory: 1 });
+  const text = formatBriefReport(report);
+  assert.match(text, /# Jev brief picks, graded against the notes and packs the colony used/);
+  assert.match(text, /\| Run \| Colony \| Task \| Harness · model \| Candidates \| Picks \| Mandatory \| TP \| FP \| FN \| Precision \| Recall \|/);
+  assert.match(text, /\| one \| s1 \| add-helper \| claude-code · zai\/glm-5\.3-flash \| 3 \| 2 \| 1 \| 1 \| 1 \| 1 \| 0\.50 \| 0\.50 \|/);
+  assert.match(text, /\| one \| s2 \| readme-typo \| codex · – \| 1 \| 0 \| 1 \| 0 \| 0 \| 1 \| – \| 0\.00 \|/);
+  assert.match(text, /\| overall \| {2}\| {2}\| {2}\| 2\.0 \| 1\.0 \| 1\.0 \| 1 \| 1 \| 2 \| 0\.50 \| 0\.33 \|/);
+});
+
+test('parseArgs takes the brief subcommand, its run files and --json', () => {
+  const args = parseArgs(['brief', '--json', 'bench-one.json']);
+  assert.equal(args.command, 'brief');
+  assert.equal(args.json, true);
+  assert.deepEqual(args.files, ['bench-one.json']);
+});
+
+// The routing fixture ledger (scripts/test/fixtures/routing.jsonl): old-format rows with no jev_agrees, a
+// row with no opinion, an unconfident one, an operator override, a floor that cancels act, a colony act
+// already ran on Jev's tier, a resumed colony's second decision, actual rows (one for a colony with no
+// decision) and a torn line.
+const ROUTING = readJsonLines(join(ROOT, 'scripts/test/fixtures/routing.jsonl'));
+const ROUTING_SESSIONS = [
+  { id: 'r-agree', status: 'merged' },
+  { id: 'r-nojev', status: 'pr_opened' },
+  { id: 'r-lower', status: 'pr_opened', merged_at: '2026-09-02T00:00:00Z' },
+  { id: 'r-higher', status: 'failed' },
+  { id: 'r-unsure', status: 'closed', cost_usd: 0.3, routed_cost_usd: 0.2 },
+  { id: 'r-override', status: 'merged' },
+  { id: 'r-floor', status: 'merged' },
+  { id: 'r-acted', status: 'failed' },
+];
+
+test('routing outcomes map sessions.json statuses to merged, pr-open, failed, other and pending', () => {
+  assert.equal(routingOutcome({ status: 'merged' }), 'merged');
+  assert.equal(routingOutcome({ status: 'pr_opened', merged_at: '2026-09-02T00:00:00Z' }), 'merged', 'a merge the watcher saw counts');
+  assert.equal(routingOutcome({ status: 'pr_opened' }), 'pr-open');
+  assert.equal(routingOutcome({ status: 'closed' }), 'failed', 'a pull request closed unmerged');
+  assert.equal(routingOutcome({ status: 'failed' }), 'failed');
+  assert.equal(routingOutcome({ status: 'no_changes' }), 'other');
+  assert.equal(routingOutcome({ status: 'running' }), 'pending');
+  assert.equal(routingOutcome(undefined), 'pending', 'a colony sessions.json lost');
+});
+
+test('act never applies under an override or with routing off, and never below the floor', () => {
+  const jev = (tier, confidence) => ({ tier, confidence });
+  assert.deepEqual(actTier({ rule: 'high', source: 'rule', jev: jev('low', 0.9) }, 0.8), { tier: 'low', blocked: null });
+  assert.deepEqual(actTier({ rule: 'high', source: 'rule', jev: jev('low', 0.79) }, 0.8), { tier: 'high', blocked: 'unconfident' });
+  assert.deepEqual(actTier({ rule: 'high', source: 'rule', jev: jev('low', 0.8) }, 0.8), { tier: 'low', blocked: null }, 'at the threshold counts');
+  assert.deepEqual(actTier({ rule: 'medium', source: 'override', jev: jev('low', 0.9) }, 0.8), { tier: 'medium', blocked: 'override' });
+  assert.deepEqual(actTier({ rule: 'medium', source: 'off', jev: jev('low', 0.9) }, 0.8), { tier: 'medium', blocked: 'off' });
+  assert.deepEqual(actTier({ rule: 'high', source: 'rule', floor: 'medium', jev: jev('low', 0.9) }, 0.8), { tier: 'medium', blocked: 'floor' }, 'raised to the floor, still a change');
+  assert.deepEqual(actTier({ rule: 'low', source: 'rule', floor: 'medium', jev: jev('high', 0.9) }, 0.8), { tier: 'high', blocked: null }, 'a floor never caps a raise');
+});
+
+test('the routing report counts agreement, recomputing it for rows from before jev_agrees', () => {
+  const r = routingReport(ROUTING, ROUTING_SESSIONS, 0.8);
+  assert.equal(r.decision_rows, 9, 'the torn line is skipped');
+  assert.equal(r.colonies, 8, 'a resumed colony is one colony, judged on its last decision');
+  assert.equal(r.with_jev, 7);
+  assert.equal(r.agreement_rate, 1 / 7);
+  assert.deepEqual(r.agreement_by_rule.medium, { with_jev: 4, agree: 1, rate: 0.25 });
+  assert.deepEqual(r.agreement_by_rule.high, { with_jev: 2, agree: 0, rate: 0 });
+  assert.deepEqual(r.agreement_by_rule.low, { with_jev: 1, agree: 0, rate: 0 });
+  assert.equal(r.confidence.agree.mean, 0.9);
+  assert.equal(r.confidence.disagree.count, 6);
+  assert.ok(Math.abs(r.confidence.disagree.mean - (0.85 + 0.95 + 0.4 + 0.9 + 0.9 + 0.88) / 6) < 1e-9);
+});
+
+test('the routing report says what act would have changed, and what capped it', () => {
+  const r = routingReport(ROUTING, ROUTING_SESSIONS, 0.8);
+  assert.deepEqual(r.act, { confident_disagreements: 5, would_change: 3, capped_by_floor: 1, floor_cancels: 1, blocked_by_override: 1, blocked_routing_off: 0 });
+  const floor = r.disagreements.find((c) => c.session === 'r-floor');
+  assert.equal(floor.act_tier, 'medium');
+  const unsure = r.disagreements.find((c) => c.session === 'r-unsure');
+  assert.equal(unsure.actual_cost_usd, 0.5, 'no actual row: the session total stands in');
+  assert.equal(routingReport(ROUTING, ROUTING_SESSIONS, 0.3).act.would_change, 4, 'a lower threshold lets the unsure opinion act');
+});
+
+test('only shadow colonies act would have changed are evidence, split by direction', () => {
+  const r = routingReport(ROUTING, ROUTING_SESSIONS, 0.8);
+  assert.deepEqual(r.baseline, { colonies: 6, failed_rate: 2 / 6 }, 'the acted and overridden colonies did not run the rule');
+  assert.deepEqual(r.directions.lower, { count: 1, merged: 1, failed: 0, merged_rate: 1, failed_rate: 0, mean_actual_cost_usd: 2.5 });
+  assert.deepEqual(r.directions.higher, { count: 1, merged: 0, failed: 1, merged_rate: 0, failed_rate: 1, mean_actual_cost_usd: 0.4 });
+  assert.equal(r.verdict.justified, false);
+  assert.match(r.verdict.reason, /only 2 confident disagreements/);
+  assert.match(r.verdict.recommend, /--label rule.*--label jev.*compare/);
+});
+
+test('the verdict needs enough samples and every judged direction to show the rule was wrong', () => {
+  const dir = (count, merged_rate, failed_rate) => ({ count, merged_rate, failed_rate });
+  const ok = routingVerdict({ samples: 20, lower: dir(12, 0.92, 0.08), higher: dir(8, 0.3, 0.5), baselineFailedRate: 0.2 });
+  assert.equal(ok.justified, true);
+  assert.equal(routingVerdict({ samples: 20, lower: dir(20, 0.95, 0), higher: dir(0, null, null), baselineFailedRate: 0.2 }).justified, true, 'one judged direction is enough');
+  assert.match(routingVerdict({ samples: 20, lower: dir(12, 0.8, 0.2), higher: dir(8, 0.3, 0.5), baselineFailedRate: 0.2 }).reason, /merged 80%, under 90%/);
+  assert.match(routingVerdict({ samples: 20, lower: dir(12, 0.92, 0), higher: dir(8, 0.5, 0.3), baselineFailedRate: 0.2 }).reason, /failed 30%, not 15% over the 20% baseline/);
+  assert.match(routingVerdict({ samples: 20, lower: dir(4, 1, 0), higher: dir(4, 0, 1), baselineFailedRate: 0.2 }).reason, /neither direction has 5 samples/);
+  assert.match(routingVerdict({ samples: 19, lower: dir(19, 1, 0), higher: dir(0, null, null), baselineFailedRate: 0 }).reason, /only 19/);
+});
+
+test('the routing table shows the counts, the disagreements and the verdict', () => {
+  const text = formatRoutingReport(routingReport(ROUTING, ROUTING_SESSIONS, 0.8));
+  assert.match(text, /# Tier routing: the rule against Jev's second opinion \(act threshold 0\.8\)/);
+  assert.match(text, /8 routed colonies \(9 decision rows\); 7 with a Jev opinion; agreement 14%/);
+  assert.match(text, /\| r-floor \| acme\/app#7 \| medium \| low \| 0\.90 \| medium \| medium \(floor\) \| merged \| – \|/);
+  assert.match(text, /\| r-lower \| acme\/app#3 \| high \| low \| 0\.85 \| high \| low \| merged \| \$2\.50 \|/);
+  assert.match(text, /\| higher \| 1 \| 0% \| 100% \| \$0\.40 \|/);
+  assert.match(text, /Verdict: act is not yet justified: only 2 confident disagreements/);
+  assert.equal(parseArgs(['routing']).threshold, 0.8, 'routing defaults to the act confidence');
+  assert.equal(parseArgs(['routing', '--threshold', '0.7']).threshold, 0.7);
+});
+
+test('an empty ledger reports nothing to judge rather than failing', () => {
+  const r = routingReport([], [], 0.8);
+  assert.equal(r.colonies, 0);
+  assert.equal(r.agreement_rate, null);
+  assert.match(formatRoutingReport(r), /act is not yet justified: only 0 confident disagreements/);
 });

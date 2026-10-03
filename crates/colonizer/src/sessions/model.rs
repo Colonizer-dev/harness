@@ -96,6 +96,12 @@ impl Session {
         self.attention.take()
     }
 
+    /// Whether this colony's pre-warm boot is under way (issue #701): the queue has claimed it for
+    /// the boot, whether or not the runner has linked yet.
+    pub fn prewarming(&self) -> bool {
+        self.prewarm.as_ref().is_some_and(|p| p.started_at.is_some())
+    }
+
     /// Whether this colony holds a microVM slot against the parallel limit — the predicate
     /// `queue::has_room` counts. Any live colony holds one, and so does a publish claimed from a
     /// live colony: the teardown inside the publish frees the microVM, but the slot stays claimed
@@ -104,8 +110,11 @@ impl Session {
     /// nothing, so publishing a stopped colony never takes a slot another colony is waiting for.
     pub fn holds_slot(&self) -> bool {
         // A suspended colony's microVM is gone — that is the point (issue #562) — so it holds no
-        // slot and the queue can admit someone else until the answer restores it.
-        self.suspended.is_none()
+        // slot and the queue can admit someone else until the answer restores it. A colony whose
+        // question is being pre-warmed (issue #701) is the exception: its microVM is back, so it
+        // holds its slot again, but never ahead of a colony that already holds an answer — the
+        // queue admits those first.
+        (self.suspended.is_none() || self.prewarming())
             && (self.status.is_live() || (self.status == SessionStatus::Publishing && self.publishing_holds_slot))
     }
 }
@@ -200,9 +209,36 @@ pub struct PendingAnswer {
     pub answered_at: Option<DateTime<Utc>>,
 }
 
+/// A pre-warm request for a suspended colony's question (issue #701): the queue boots the colony
+/// through normal admission so the answer lands in an already-running VM. `requested_at` is when
+/// someone opened the question, what the queue lines candidates up by and what the timeout counts
+/// from once no boot followed; `started_at` is set when the queue claims the colony for the boot
+/// (None means the request is still waiting for a slot); `ready_at` is when the runner linked.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Prewarm {
+    pub requested_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_at: Option<DateTime<Utc>>,
+}
+
 /// How many changed paths a colony keeps: enough to place it in a monorepo's packages, bounded so a
 /// sweeping change cannot bloat sessions.json.
 pub const CHANGED_PATHS_CAP: usize = 500;
+
+/// One model setting the boot resolved away from what it started with because the gateway would have
+/// refused it for the task's sensitivity class (issue #704): `setting` is the model setting's name
+/// (`model`, `subagent_model`, `background_model`), `from` the model the setting named, `to` the
+/// eligible one it was replaced with, and `reason` why the gateway would refuse the first. Recorded
+/// on the session so the cockpit can say what the colony is really running on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSubstitution {
+    pub setting: String,
+    pub from: String,
+    pub to: String,
+    pub reason: String,
+}
 
 /// A colony record, as persisted in `sessions.json`. The container-level `#[serde(default)]` is what
 /// keeps a sessions.json written by an older version loadable: a field added here defaults instead of
@@ -254,6 +290,12 @@ pub struct Session {
     pub sandbox: String,
     pub mesh: Option<MeshInfo>,
     pub local_port: Option<u16>,
+    /// The guest-local port a dev-server preview is proxied from (previews.rs), set by the owner
+    /// through `POST /api/sessions/{id}/preview`; `None` when no preview is open. Cleared wherever
+    /// `local_port` and `mesh` are — a claim that boots a fresh microVM — so a stopped colony's
+    /// preview is closed rather than pointing at a port nothing serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_port: Option<u16>,
     pub agent: String,
     pub autopilot: bool,
     /// Whether a filed finding from this colony spawns a fix colony. `None` until the operator
@@ -315,6 +357,11 @@ pub struct Session {
     /// `needs_rebase` on its own. Cleared wherever `needs_rebase` is cleared.
     #[serde(default)]
     pub rebase_orphaned: bool,
+    /// Whether the failure that put the colony here has been seen by a person (issue #744): set
+    /// by [`App::update_session`] at the crossing itself, cleared by `POST /api/sessions/{id}/seen`,
+    /// read by the app badge (`push::needs_you`). A failure already on record was seen long ago.
+    #[serde(default)]
+    pub unseen_failure: bool,
     /// The live same-repo colony a fresh colony queued behind for overlap (issue #453): it starts
     /// once that colony is no longer live. `None` once started; stacked colonies never carry one —
     /// they already wait on their parent.
@@ -383,6 +430,11 @@ pub struct Session {
     /// booted before this field existed, or whose task named no sensitive path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitivity: Option<String>,
+    /// Model settings the boot replaced with an eligible model because the gateway would have refused
+    /// the one they named for this colony's sensitivity class (issue #704). Empty for a colony whose
+    /// task named no sensitive path, or whose models all cleared the class's bar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_substitutions: Vec<ModelSubstitution>,
     /// Dollars the gateway recorded for responses it routed to providers (everything but Claude, whose
     /// own cost lands above). Kept on the session so spend survives a restart and reaches the UI.
     pub routed_cost_usd: Option<f64>,
@@ -422,6 +474,28 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
+    /// question and the queue has not started (or has already given up on) the warm-up boot.
+    /// `None` unless a request is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<Prewarm>,
+    /// The supply-chain target this colony was launched against (issue #673): a package and the
+    /// advisory it was launched to fix. A live colony for one target refuses a second, like an
+    /// issue hold. `None` for everything not launched against one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
+    /// Set when a same-repo colony's pull request merged over this colony's work (issue #673): what
+    /// covered it, why, and whether the operator kept it running anyway. While it stands unkept the
+    /// queue and the resume route leave the colony where it is. `None` for a colony no merge covered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded: Option<crate::supersede::Supersession>,
+    /// Set by the claim that sends a colony to boot (lifecycle's resume, the queue's restore):
+    /// whether the colony was suspended when it was claimed (issue #700). The boot reads it for
+    /// session.json's `restore` key, so the guest can tell a suspension's restore from a plain
+    /// resume — the claim itself has just cleared `suspended`. Transient on purpose: not
+    /// persisted, and a harness restart between claim and boot only ever loses it towards "no".
+    #[serde(skip)]
+    pub was_suspended: bool,
     /// Last agent progress (filled from the runtime for live colonies).
     pub last_activity_at: Option<DateTime<Utc>>,
     /// Where the last launch's time went: `{total_ms, phases: [{name, ms}]}`.
@@ -481,6 +555,7 @@ impl Default for Session {
             sandbox: String::new(),
             mesh: None,
             local_port: None,
+            preview_port: None,
             agent: String::new(),
             autopilot: false,
             autofix: None,
@@ -496,6 +571,7 @@ impl Default for Session {
             publishing_holds_slot: false,
             needs_rebase: false,
             rebase_orphaned: false,
+            unseen_failure: false,
             queued_behind: None,
             claim_wait: false,
             verify: None,
@@ -511,6 +587,7 @@ impl Default for Session {
             allowed_providers: None,
             allowed_models: None,
             sensitivity: None,
+            model_substitutions: Vec::new(),
             routed_cost_usd: None,
             routed_tokens: None,
             host_disk_bytes: None,
@@ -521,6 +598,10 @@ impl Default for Session {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            prewarm: None,
+            supply_chain: None,
+            superseded: None,
+            was_suspended: false,
             last_activity_at: None,
             boot_timing: None,
             boot_cpus: None,
@@ -705,6 +786,7 @@ mod tests {
             ip: Some("10.0.0.1".into()),
         });
         full.local_port = Some(7070);
+        full.preview_port = Some(5173);
         full.agent = "claude".into();
         full.autopilot = true;
         full.autofix = Some(true);

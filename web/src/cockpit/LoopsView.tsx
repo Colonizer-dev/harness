@@ -10,8 +10,14 @@ import { Button, SESSION_STATUS, Spinner, Switch, cx } from "../components/ui";
 import { formatCost, sessionCost } from "../spend";
 import type { Loop, LoopCadence, ModuleInfo, NewLoop, OrgInfo, Repo, Session } from "../types";
 import { useModels } from "../useModels";
-import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { TsAnyLoopCard } from "./TsAnyLoop";
+import { DAY_PRESETS, LOOP_TEMPLATES, WEEKDAYS, describeLoop, describeLoopCadence, endAtError, endAtFromInput, endAtInputValue, mapLoopName, nameFromPrompt, relative, selfPacedWarning, toLocalChoice, toUtcLoopCadence, type LoopChoice } from "./loops";
+import { DocsLoopCard } from "./DocsLoopCard";
+import { MergeLoopCard } from "./MergeLoopCard";
 import { Page } from "./Page";
+import { DiskCleanupDialog, DiskCleanupRow, type DiskCleanupTab } from "./DiskCleanupLoop";
+import { diskCleanupBody, isDiskCleanup, reportSummary, toggleAction } from "./diskCleanup";
+import { SupplyChainLoopCard } from "./SupplyChainLoop";
 
 export const LOOP_ORIGIN = "loop:";
 
@@ -51,6 +57,7 @@ export function LoopsView({
   const [loops, setLoops] = useState<Loop[] | null>(null);
   const [editing, setEditing] = useState<Loop | "new" | null>(null);
   const [history, setHistory] = useState<Loop | null>(null);
+  const [cleanup, setCleanup] = useState<DiskCleanupTab | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(() => {
@@ -65,10 +72,41 @@ export function LoopsView({
     return () => clearInterval(t);
   }, [load]);
 
+  // The built-in disk cleanup belongs to the host, not an org: it gets its own row above the list.
+  const builtin = useMemo(() => (loops ?? []).find(isDiskCleanup) ?? null, [loops]);
   const shown = useMemo(
-    () => (loops ?? []).filter((l) => !org || l.org.toLowerCase() === org.toLowerCase()).sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name)),
+    () =>
+      (loops ?? [])
+        .filter((l) => !isDiskCleanup(l))
+        .filter((l) => !org || l.org.toLowerCase() === org.toLowerCase())
+        .sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.name.localeCompare(b.name)),
     [loops, org],
   );
+
+  // Turning disk cleanup on for the first time shows what it would remove before anything runs.
+  const toggleCleanup = async (l: Loop, on: boolean) => {
+    if (toggleAction(l, on) === "preview") {
+      setCleanup("preview");
+      return;
+    }
+    try {
+      await api.updateLoop(l.id, diskCleanupBody(l, { enabled: on }));
+      load();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
+
+  const runCleanupNow = async () => {
+    if (!builtin) return;
+    try {
+      const report = await api.runDiskCleanup(builtin.id, false);
+      toast(`Disk cleanup: ${reportSummary(report)}`);
+      load();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    }
+  };
 
   const save = async (id: string | null, body: NewLoop) => {
     const saved = id ? await api.updateLoop(id, body) : await api.createLoop(body);
@@ -120,6 +158,16 @@ export function LoopsView({
             New loop
           </Button>
         </div>
+
+        <MergeLoopCard repos={repos} />
+
+        <SupplyChainLoopCard onOpenColony={onOpenColony} />
+
+        {builtin && (
+          <ul className="m-0 mt-6 list-none overflow-hidden rounded-xl border border-border p-0" aria-label="Built-in loops">
+            <DiskCleanupRow loop={builtin} now={now} onToggle={(on) => void toggleCleanup(builtin, on)} onOpen={setCleanup} onRunNow={() => void runCleanupNow()} />
+          </ul>
+        )}
 
         <div className="mt-6 overflow-hidden rounded-xl border border-border">
           {loops === null ? (
@@ -178,8 +226,12 @@ export function LoopsView({
             </ul>
           )}
         </div>
+
+        <TsAnyLoopCard onOpenColony={onOpenColony} />
+      <DocsLoopCard onOpenColony={onOpenColony} />
       {editing && <LoopDialog loop={editing === "new" ? null : editing} org={org} orgs={orgs} repos={repos} onSave={save} onClose={() => setEditing(null)} />}
       {history && <LoopHistory loop={history} onOpenColony={onOpenColony} onClose={() => setHistory(null)} />}
+      {cleanup && builtin && <DiskCleanupDialog loop={builtin} tab={cleanup} onSaved={load} onClose={() => setCleanup(null)} />}
     </Page>
   );
 }
@@ -203,7 +255,7 @@ export function bodyOf(l: Loop, change: Partial<NewLoop> = {}): NewLoop {
   };
 }
 
-function LoopDialog({
+export function LoopDialog({
   loop,
   org,
   orgs,
@@ -238,13 +290,17 @@ function LoopDialog({
   const [name, setName] = useState(loop?.name ?? "");
   // What a run starts: a colony from the prompt, or the repository's architecture map (`owner/*`
   // covers every repository in the org).
-  const [kind, setKind] = useState<"colony" | "map">(loop?.kind ?? "colony");
+  // The built-in disk cleanup never opens this form (it has its own dialog).
+  const [kind, setKind] = useState<"colony" | "map">(loop?.kind === "map" ? "map" : "colony");
   const [allRepos, setAllRepos] = useState(loop?.kind === "map" && loop.repo.endsWith("/*"));
   const [choice, setChoice] = useState<LoopChoice>(loop ? toLocalChoice(loop.cadence) : { every: "daily", time: "09:00" });
   const [model, setModel] = useState(loop?.model ?? "");
   const [subagentModel, setSubagentModel] = useState(loop?.subagent_model ?? "");
   const [autopilot, setAutopilot] = useState(loop?.autopilot ?? true);
   const [maxRuns, setMaxRuns] = useState(loop?.max_runs ? String(loop.max_runs) : "");
+  // The optional end date, held in the field's own local `datetime-local` shape and sent as UTC.
+  const [endAt, setEndAt] = useState(endAtInputValue(loop?.end_at ?? null));
+  const [endAtProblem, setEndAtProblem] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -253,6 +309,9 @@ function LoopDialog({
   }, []);
 
   const submit = async () => {
+    const problem = endAtError(endAt);
+    setEndAtProblem(problem);
+    if (problem) return;
     setSaving(true);
     try {
       const cadence: LoopCadence = toUtcLoopCadence(choice);
@@ -268,7 +327,7 @@ function LoopDialog({
         subagent_model: subagentModel || null,
         autopilot,
         max_runs: maxRuns ? Number.parseInt(maxRuns, 10) : null,
-        end_at: loop?.end_at ?? null,
+        end_at: endAtFromInput(endAt),
         enabled: loop ? loop.enabled || !loop.ended_reason : true,
       });
     } catch (e) {
@@ -506,7 +565,26 @@ function LoopDialog({
             <input type="number" min={1} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} placeholder="∞" className={cx(field, "w-20")} />
             runs
           </label>
+          <label className="flex items-center gap-2">
+            ends
+            <input
+              type="datetime-local"
+              aria-label="Ends"
+              value={endAt}
+              onChange={(e) => {
+                setEndAt(e.target.value);
+                if (endAtProblem) setEndAtProblem(null);
+              }}
+              className={cx(field, "w-56")}
+            />
+            <span className="text-faint">your local time</span>
+          </label>
         </div>
+        {endAtProblem && (
+          <p role="alert" className="m-0 text-[12.5px] text-err">
+            {endAtProblem}
+          </p>
+        )}
         <p className="rounded-lg border border-border bg-panel-2 px-3 py-2 text-[12.5px] text-muted">
           Each run is a full colony with its own microVM and model spend. A frequent loop on a large repository adds up — start daily, and let the loop stop itself (loop_stop) when its goal is met.
         </p>

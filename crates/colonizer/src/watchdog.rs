@@ -2,9 +2,10 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
-use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus, util::short_id};
+use crate::{Shared, orgs::effective_watchdog, protocol::Origin, sessions::SessionStatus};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
+use std::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WatchdogSettings {
@@ -31,7 +32,25 @@ pub struct Activity {
     /// The question id whose above-the-ceiling note is already in the log, so the judge's
     /// once-per-question "left for you" line does not repeat every half-minute tick.
     pub risk_announced: Option<String>,
+    /// Automatic recoveries the recovery point (`recovery.rs`) has chosen for this colony, against
+    /// its own per-colony cap (issue #586). In memory like the rest of `Activity`: a restart resets
+    /// it, which at worst allows a few more automatic recoveries than the cap names.
+    pub recoveries: u32,
+    /// Consecutive errored `tool_result` events carrying a `denial`, with no successful result
+    /// between them (issue #609). A colony circling a boundary it cannot cross is not making
+    /// progress, and this is what `decide` and the nudge read. In memory like the rest: a restart
+    /// forgets the streak, which at worst lets one loop go a nudge longer before it is noticed.
+    pub denials: u32,
+    /// `last` as it stood just before the streak began — the last real progress. While the streak
+    /// stands, `last` moves with each retried call, so this is the reference `decide` reads.
+    pub denied_since: Option<DateTime<Utc>>,
+    /// The class and hint of the latest denial, so the nudge can name what was denied.
+    pub last_denial: Option<(String, String)>,
 }
+
+/// Consecutive denied tool results that make a hint loop (issue #609): two, so one denial — a
+/// one-off the agent works around — is not one.
+pub const HINT_LOOP_DENIALS: u32 = 2;
 
 impl Activity {
     pub fn new(now: DateTime<Utc>) -> Self {
@@ -43,7 +62,80 @@ impl Activity {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
+            denials: 0,
+            denied_since: None,
+            last_denial: None,
         }
+    }
+
+    /// The active hint loop (issue #609), when the denial streak has reached its threshold: how
+    /// many denials in a row, the class of the last, and its hint. `None` when no loop stands.
+    pub fn hint_loop(&self) -> Option<(u32, &str, &str)> {
+        let (class, hint) = self.last_denial.as_ref()?;
+        (self.denials >= HINT_LOOP_DENIALS).then_some((self.denials, class.as_str(), hint.as_str()))
+    }
+
+    /// The time the watchdog counts progress from (issue #609): `denied_since` while a hint loop
+    /// stands — the loop's own retries and text are not progress — and `last` otherwise. The
+    /// `since` stamps and `recovery::handle`'s `minutes_since_progress` read this too, so they do
+    /// not report the retry time.
+    pub fn progress_reference(&self) -> DateTime<Utc> {
+        match self.denied_since {
+            Some(since) if self.denials >= HINT_LOOP_DENIALS => since,
+            _ => self.last,
+        }
+    }
+
+    /// A request waiting on a slow model through the gateway is progress (issue #760): the stall
+    /// clock and the nudge budget reset. It restarts the hint loop's clock too (issue #609), or
+    /// `decide` would still read the old `denied_since` and nudge a looping colony on every other
+    /// tick; the streak itself stands, so the nudge can still name what was denied.
+    fn note_gateway_busy(&mut self, now: DateTime<Utc>) {
+        self.last = now;
+        self.nudges = 0;
+        self.last_nudge = None;
+        if self.denials > 0 {
+            self.denied_since = Some(now);
+        }
+    }
+
+    /// Ends the denial streak (issue #609): a successful result, a person's word, a question or a
+    /// turn end shows the colony is no longer simply circling a refused call.
+    fn break_denial_loop(&mut self) {
+        self.denials = 0;
+        self.denied_since = None;
+        self.last_denial = None;
+    }
+}
+
+/// Folds one line that counts as watchdog progress into the colony's denial streak (issue #609),
+/// returning whether the line is a denial — the one case the watchdog must not read as progress.
+/// An errored `tool_result` carrying a `denial` extends the streak (its `denied_since` is the `last`
+/// where the streak began, kept from the first denial). A successful result ends it, and so does a
+/// real break in the loop — a person's message, a question, a turn end. An error with no denial, and
+/// any other line, leaves the streak as it stands.
+pub fn note_denials(activity: &mut Activity, kind: &str, event: &serde_json::Value) -> bool {
+    match kind {
+        "tool_result" if event["is_error"] == true => {
+            let Some(denial) = event.get("denial") else {
+                return false;
+            };
+            if activity.denials == 0 {
+                activity.denied_since = Some(activity.last);
+            }
+            activity.denials += 1;
+            activity.last_denial = Some((
+                denial["class"].as_str().unwrap_or("policy").to_string(),
+                denial["hint"].as_str().unwrap_or_default().to_string(),
+            ));
+            true
+        }
+        "tool_result" | "user_message" | "question" | "turn_end" => {
+            activity.break_denial_loop();
+            false
+        }
+        _ => false,
     }
 }
 
@@ -90,7 +182,11 @@ pub fn decide(
             }
         }
         Observed::Working => {
-            let reference = activity.last_nudge.map_or(activity.last, |nudge| nudge.max(activity.last));
+            // A hint loop reads `denied_since` rather than the `last` its retries keep moving
+            // (issue #609); a nudge's `last_nudge` still restarts the wait.
+            let reference = activity.last_nudge.map_or(activity.progress_reference(), |nudge| {
+                nudge.max(activity.progress_reference())
+            });
             if now - reference < Duration::minutes(settings.stall_minutes as i64) {
                 Decision::Nothing
             } else if activity.nudges < settings.max_nudges {
@@ -124,6 +220,16 @@ pub fn nudge_text(minutes: u64) -> String {
     )
 }
 
+/// The nudge for a hint loop (issue #609): a colony whose last calls were all denied is circling a
+/// boundary, so the nudge names what was denied and asks for a different route rather than a retry.
+pub fn hint_loop_text(denials: u32, class: &str, hint: &str) -> String {
+    format!(
+        "Watchdog check: your last {denials} tool calls were denied ({class}: {hint}). Retrying the same thing \
+         will not get through; take a different route, or ask the maintainer with a choice card if you need the \
+         boundary changed."
+    )
+}
+
 /// Runs the watchdog forever, checking every live colony once a minute.
 pub async fn run(app: Shared) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -135,16 +241,20 @@ pub async fn run(app: Shared) {
 }
 
 async fn check_all(app: &Shared) {
+    // A colony blocked on an exhausted provider is flagged with the quota reason and left out of the
+    // nudging below (issue #760): nudging it only sends another request the plan cannot answer.
+    // `starting` colonies are included there — one whose agent never got a turn out would otherwise
+    // sit in `starting` with no flag at all.
+    let blocked = crate::quota_cards::flag_blocked(app).await;
     let sessions = app.sessions.read().await.clone();
     let modules = app.modules.read().await.clone();
     let now = Utc::now();
     // A suspended colony is skipped (issue #562): its microVM was removed on purpose and its link
     // with it, so there is nothing to nudge and the question is already a person's to answer — the
     // restore pass, not a nudge, brings it back.
-    for s in sessions
-        .into_iter()
-        .filter(|s| s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none())
-    {
+    for s in sessions.into_iter().filter(|s| {
+        s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none() && !blocked.contains(&s.id)
+    }) {
         let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
             continue;
         };
@@ -157,14 +267,19 @@ async fn check_all(app: &Shared) {
         let attention = s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(String::from);
         // A request waiting on a slow model through the gateway is progress, not a stall.
         if app.gateway.colony_busy(&s.id) {
+            rt.activity.lock().await.note_gateway_busy(now);
+            // Gateway traffic alone does not lift the watchdog's final flag (issue #760): an agent
+            // retrying into a failing provider keeps the gateway busy without making progress, and
+            // clearing the flag here left "this colony needs you" in the log with nothing in the
+            // cockpit. Only a real agent event (events.rs) clears `nudges_exhausted`.
+            if attention
+                .as_deref()
+                .is_some_and(|reason| reason != "waiting_for_answer" && reason != "nudges_exhausted")
             {
-                let mut current = rt.activity.lock().await;
-                current.last = now;
-                current.nudges = 0;
-                current.last_nudge = None;
-            }
-            if attention.as_deref().is_some_and(|reason| reason != "waiting_for_answer") {
                 app.update_session(&s.id, |x| x.attention = None).await;
+                continue;
+            }
+            if attention.as_deref() == Some("nudges_exhausted") {
                 continue;
             }
         }
@@ -172,32 +287,89 @@ async fn check_all(app: &Shared) {
         match decide(&settings, now, state, &activity, attention.as_deref()) {
             Decision::Nothing => {}
             Decision::Nudge => {
+                // The recovery point (issue #586): nudging is the rule, and when the point is on Jev
+                // may answer with another option. Off leaves this branch exactly as it was.
+                let (action, did) = crate::recovery::handle(app, &s, crate::recovery::Failure::Stall, "nudge_agent", false).await;
                 let nudges = activity.nudges + 1;
                 {
                     let mut current = rt.activity.lock().await;
                     current.nudges = nudges;
                     current.last_nudge = Some(now);
                 }
-                let command = json!({
-                    "type": "user_message",
-                    "id": format!("watchdog-{}", short_id()),
-                    "text": nudge_text(settings.stall_minutes),
-                });
-                rt.send_command(command);
-                app.session_log_as(
-                    Origin::Watchdog,
-                    &s.id,
-                    "info",
-                    format!(
-                        "watchdog: no progress for {} min, nudged the agent ({nudges}/{})",
-                        settings.stall_minutes, settings.max_nudges
-                    ),
-                )
-                .await;
-                app.update_session(&s.id, |x| {
-                    x.attention = Some(json!({"reason": "stalled", "since": activity.last, "nudges": nudges}));
-                })
-                .await;
+                match action {
+                    // `ask_human` and `stop` hand the colony to a person: no message to the agent,
+                    // the "needs you" flag instead. `stop` also interrupts the turn through the
+                    // existing, non-destructive interrupt, so nothing further is pushed.
+                    crate::recovery::Action::AskHuman | crate::recovery::Action::Stop => {
+                        if action == crate::recovery::Action::Stop {
+                            rt.send_command(json!({"type": "interrupt"}));
+                            rt.interrupted.store(true, Ordering::SeqCst);
+                        }
+                        // The `stalled` flag the nudge sets, so the colony reads as needing you the
+                        // same way; the log says whether Jev chose it or the cap forced it.
+                        let why = if did == "cap" {
+                            "the recovery cap was reached".to_string()
+                        } else {
+                            format!("Jev chose {}", action.as_str())
+                        };
+                        flag(
+                            app,
+                            &s.id,
+                            "stalled",
+                            activity.progress_reference(),
+                            nudges,
+                            format!(
+                                "watchdog: {why} after {} min of no progress; this colony needs you",
+                                settings.stall_minutes
+                            ),
+                        )
+                        .await;
+                    }
+                    other => {
+                        // The rule's own nudge is the watchdog's message, with the stall span in it;
+                        // a hint loop names the boundary that was denied instead. A distinct recovery
+                        // option keeps its own message, and the log below says which was sent.
+                        let hint = activity.hint_loop();
+                        let hint_used = other == crate::recovery::Action::NudgeAgent && hint.is_some();
+                        let text = if hint_used {
+                            let (denials, class, why) = hint.unwrap();
+                            hint_loop_text(denials, class, why)
+                        } else {
+                            match other.agent_message() {
+                                Some(text) => text.to_string(),
+                                None => nudge_text(settings.stall_minutes),
+                            }
+                        };
+                        crate::recovery::send_user_message(&rt, "watchdog", &text);
+                        // A nudge keeps the log line it has always had; a hint loop and any other
+                        // pick say which.
+                        let message = if hint_used {
+                            let (denials, class, _) = hint.unwrap();
+                            format!(
+                                "watchdog: {denials} tool calls denied in a row ({class}), nudged the agent ({nudges}/{})",
+                                settings.max_nudges
+                            )
+                        } else if other == crate::recovery::Action::NudgeAgent {
+                            format!(
+                                "watchdog: no progress for {} min, nudged the agent ({nudges}/{})",
+                                settings.stall_minutes, settings.max_nudges
+                            )
+                        } else {
+                            format!(
+                                "watchdog: no progress for {} min, sent the agent the {} recovery ({nudges}/{})",
+                                settings.stall_minutes,
+                                other.as_str(),
+                                settings.max_nudges
+                            )
+                        };
+                        app.session_log_as(Origin::Watchdog, &s.id, "info", message).await;
+                        app.update_session(&s.id, |x| {
+                            x.attention =
+                                Some(json!({"reason": "stalled", "since": activity.progress_reference(), "nudges": nudges}));
+                        })
+                        .await;
+                    }
+                }
             }
             Decision::Flag(reason) => {
                 let message = match reason {
@@ -210,22 +382,30 @@ async fn check_all(app: &Shared) {
                         activity.nudges
                     ),
                 };
-                app.session_log_as(Origin::Watchdog, &s.id, "error", message).await;
                 let since = if reason == "waiting_for_answer" {
                     activity.question_since.unwrap_or(now)
                 } else {
-                    activity.last
+                    activity.progress_reference()
                 };
-                app.update_session(&s.id, |x| {
-                    x.attention = Some(json!({"reason": reason, "since": since, "nudges": activity.nudges}));
-                })
-                .await;
+                flag(app, &s.id, reason, since, activity.nudges, message).await;
             }
             Decision::Clear => {
                 app.update_session(&s.id, |x| x.attention = None).await;
             }
         }
     }
+}
+
+/// Raises the watchdog's flag on a colony: the attention flag the cockpit's "needs you" list and
+/// notifications read, and the log line saying why, together (issue #760: the final "needs you"
+/// must reach the cockpit, not only the log). The flag is written first, so a colony whose log
+/// says it needs you always carries the flag that shows it.
+async fn flag(app: &Shared, id: &str, reason: &str, since: DateTime<Utc>, nudges: u64, message: String) {
+    app.update_session(id, |x| {
+        x.attention = Some(json!({"reason": reason, "since": since, "nudges": nudges}));
+    })
+    .await;
+    app.session_log_as(Origin::Watchdog, id, "error", message).await;
 }
 
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
@@ -294,6 +474,10 @@ mod tests {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
+            denials: 0,
+            denied_since: None,
+            last_denial: None,
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -312,6 +496,10 @@ mod tests {
             judged: 0,
             judge_failures: 0,
             risk_announced: None,
+            recoveries: 0,
+            denials: 0,
+            denied_since: None,
+            last_denial: None,
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),
@@ -337,6 +525,117 @@ mod tests {
         );
     }
 
+    /// A colony with a stalled runtime and its nudges spent, under a watchdog of 15 min / 2 nudges.
+    async fn stalled_app(name: &str, status: SessionStatus) -> (Shared, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-watchdog-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/orgs.json"),
+            r#"{"acme": {"watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 2}}}"#,
+        )
+        .unwrap();
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", status);
+        s.id = "w1".into();
+        s.allowed_providers = Some(vec!["bailian".into()]);
+        app.sessions.write().await.push(s);
+        std::fs::create_dir_all(app.session_dir("w1")).unwrap();
+        let rt = app.runtime("w1").await;
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = Utc::now() - Duration::hours(2);
+            activity.nudges = 2;
+            activity.last_nudge = Some(Utc::now() - Duration::hours(1));
+        }
+        (app, root)
+    }
+
+    /// The final "this colony needs you" raises the attention flag the cockpit reads, not only a
+    /// log line (issue #760), and gateway traffic alone does not take it down again.
+    #[tokio::test]
+    async fn the_final_needs_you_sets_the_attention_flag() {
+        let (app, root) = stalled_app("flag", SessionStatus::Running).await;
+        check_all(&app).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], "nudges_exhausted");
+        assert_eq!(attention["nudges"], 2);
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("this colony needs you"))),
+            "and the log says so: {logs:?}"
+        );
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.unwrap()["reason"],
+            "nudges_exhausted",
+            "the flag stays up"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// With the recovery point off, a nudge is byte-for-byte the log line it always was (issue #586):
+    /// the decision point must not change what a colony sees when it is not switched on.
+    #[tokio::test]
+    async fn an_off_recovery_point_nudges_with_the_original_log_line() {
+        let (app, root) = stalled_app("nudge-line", SessionStatus::Running).await;
+        {
+            let rt = app.runtime("w1").await;
+            let mut activity = rt.activity.lock().await;
+            activity.nudges = 0;
+            activity.last_nudge = None;
+        }
+        check_all(&app).await;
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter().any(|l| l["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("no progress for 15 min, nudged the agent (1/2)"))),
+            "the off-mode nudge line is unchanged: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose recent calls were all denied is nudged (issue #609), and the nudge names the
+    /// denied boundary with a log line that says it was a hint loop.
+    #[tokio::test]
+    async fn a_hint_loop_is_nudged_naming_the_denial() {
+        let (app, root) = stalled_app("hint-loop", SessionStatus::Running).await;
+        {
+            let rt = app.runtime("w1").await;
+            let mut activity = rt.activity.lock().await;
+            activity.nudges = 0;
+            activity.last_nudge = None;
+            activity.denials = 3;
+            activity.denied_since = Some(Utc::now() - Duration::hours(2));
+            activity.last_denial = Some(("egress".to_string(), "denied host example.com".to_string()));
+        }
+        check_all(&app).await;
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter().any(|l| l["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("3 tool calls denied in a row (egress), nudged the agent (1/2)"))),
+            "the log says it was a hint loop: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony blocked on an exhausted provider gets the quota flag and is not nudged: another
+    /// request cannot be answered until the plan resets (issue #760).
+    #[tokio::test]
+    async fn a_quota_blocked_colony_is_flagged_with_the_quota_reason_not_nudged() {
+        let (app, root) = stalled_app("quota", SessionStatus::Running).await;
+        app.gateway
+            .mark_quota_exhausted("bailian", None, Some(Utc::now().timestamp() + 600));
+        app.gateway.note_colony_quota("w1", "bailian");
+        check_all(&app).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], crate::provider_quota::QUOTA_EXHAUSTED_REASON);
+        assert_eq!(attention["provider"], "bailian");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn disabled_watchdog_clears_only_its_own_attention() {
         let settings = WatchdogSettings {
@@ -360,5 +659,198 @@ mod tests {
             decide(&SETTINGS, at(500), Observed::Other, &activity, Some("autopilot_held")),
             Decision::Nothing
         );
+    }
+
+    /// A hint loop is nudged on the progress that preceded it: a retried call that moved `last`
+    /// forward does not hold the nudge off (issue #609).
+    #[test]
+    fn a_hint_loop_is_nudged_on_the_progress_before_the_loop() {
+        let activity = Activity {
+            last: at(20),
+            nudges: 0,
+            last_nudge: None,
+            question_since: None,
+            judged: 0,
+            judge_failures: 0,
+            risk_announced: None,
+            recoveries: 0,
+            denials: 2,
+            denied_since: Some(at(0)),
+            last_denial: Some(("egress".to_string(), "denied host example.com".to_string())),
+        };
+        assert_eq!(
+            decide(&SETTINGS, at(14), Observed::Working, &activity, None),
+            Decision::Nothing
+        );
+        assert_eq!(decide(&SETTINGS, at(15), Observed::Working, &activity, None), Decision::Nudge);
+    }
+
+    /// One denial — a hiccup — leaves the clock on `last`, and a cleared streak does too: the loop
+    /// threshold is what switches the reference, not any denial at all (issue #609).
+    #[test]
+    fn one_denial_or_a_cleared_streak_keeps_the_normal_clock() {
+        let one = Activity {
+            last: at(10),
+            nudges: 0,
+            last_nudge: None,
+            question_since: None,
+            judged: 0,
+            judge_failures: 0,
+            risk_announced: None,
+            recoveries: 0,
+            denials: 1,
+            denied_since: Some(at(0)),
+            last_denial: Some(("read_only".to_string(), "path is read-only".to_string())),
+        };
+        assert_eq!(decide(&SETTINGS, at(24), Observed::Working, &one, None), Decision::Nothing);
+        assert_eq!(decide(&SETTINGS, at(25), Observed::Working, &one, None), Decision::Nudge);
+
+        let cleared = Activity::new(at(10));
+        assert_eq!(
+            decide(&SETTINGS, at(24), Observed::Working, &cleared, None),
+            Decision::Nothing
+        );
+        assert_eq!(decide(&SETTINGS, at(25), Observed::Working, &cleared, None), Decision::Nudge);
+    }
+
+    /// The hint-loop nudge names the denial's class and hint, and `Activity::hint_loop` names the
+    /// loop only at the threshold (issue #609).
+    #[test]
+    fn the_hint_loop_nudge_names_the_denial() {
+        let text = hint_loop_text(3, "egress", "denied host example.com");
+        assert!(text.contains("your last 3 tool calls were denied"), "{text}");
+        assert!(text.contains("egress: denied host example.com"), "{text}");
+
+        let mut activity = Activity::new(at(0));
+        activity.denials = 1;
+        activity.last_denial = Some(("egress".to_string(), "denied".to_string()));
+        assert!(activity.hint_loop().is_none(), "one denial is not a loop");
+        activity.denials = 2;
+        assert_eq!(
+            activity.hint_loop(),
+            Some((2, "egress", "denied")),
+            "two in a row, with the class and hint to name"
+        );
+    }
+
+    /// After the nudge cap a hint loop flags `nudges_exhausted` like any stall (issue #609).
+    #[test]
+    fn a_hint_loop_flags_nudges_exhausted_after_the_cap() {
+        let activity = Activity {
+            last: at(60),
+            nudges: 2,
+            last_nudge: Some(at(30)),
+            question_since: None,
+            judged: 0,
+            judge_failures: 0,
+            risk_announced: None,
+            recoveries: 0,
+            denials: 3,
+            denied_since: Some(at(0)),
+            last_denial: Some(("tool_disabled".to_string(), "tool is not allowed".to_string())),
+        };
+        assert_eq!(
+            decide(&SETTINGS, at(44), Observed::Working, &activity, Some("stalled")),
+            Decision::Nothing
+        );
+        assert_eq!(
+            decide(&SETTINGS, at(45), Observed::Working, &activity, Some("stalled")),
+            Decision::Flag("nudges_exhausted")
+        );
+    }
+
+    /// `note_denials` keeps the streak: a denial extends it (its `denied_since` the progress before
+    /// the loop began), an unclassified error or an unrelated line leaves it, and a success or a
+    /// real break in the loop — a person's message, a question, a turn end — clears it (issue #609).
+    #[test]
+    fn a_denial_streak_is_noted_and_a_break_clears_it() {
+        let mut activity = Activity::new(at(0));
+        let denial = json!({
+            "type": "tool_result",
+            "tool_call_id": "t",
+            "output": "blocked",
+            "is_error": true,
+            "denial": {"class": "egress", "hint": "denied host example.com"},
+        });
+        assert!(
+            note_denials(&mut activity, "tool_result", &denial),
+            "a denial is not progress"
+        );
+        assert_eq!(activity.denials, 1);
+        assert_eq!(activity.denied_since, Some(at(0)));
+        assert_eq!(
+            activity.last_denial,
+            Some(("egress".to_string(), "denied host example.com".to_string()))
+        );
+
+        activity.last = at(5);
+        assert!(note_denials(&mut activity, "tool_result", &denial));
+        assert_eq!(activity.denials, 2);
+        assert_eq!(activity.denied_since, Some(at(0)), "the streak's clock is where it began");
+
+        let plain = json!({"type": "tool_result", "tool_call_id": "t", "output": "boom", "is_error": true});
+        assert!(!note_denials(&mut activity, "tool_result", &plain));
+        assert_eq!(
+            activity.denials, 2,
+            "an unclassified error neither extends nor clears the streak"
+        );
+
+        assert!(!note_denials(&mut activity, "log", &json!({"type": "log", "message": "hi"})));
+        assert_eq!(activity.denials, 2, "an unrelated line leaves the streak alone");
+
+        // A person's message, a question and a turn end each break the loop.
+        let mut note_break = |kind: &str| {
+            activity.denials = 3;
+            activity.denied_since = Some(at(0));
+            activity.last_denial = Some(("egress".to_string(), "denied".to_string()));
+            assert!(!note_denials(&mut activity, kind, &json!({"type": kind})));
+            assert_eq!(activity.denials, 0, "{kind} ends the loop");
+            assert_eq!(activity.denied_since, None, "{kind} ends the loop");
+            assert_eq!(activity.last_denial, None, "{kind} ends the loop");
+        };
+        note_break("user_message");
+        note_break("question");
+        note_break("turn_end");
+
+        // A successful result also ends it.
+        activity.denials = 2;
+        activity.denied_since = Some(at(0));
+        activity.last_denial = Some(("egress".to_string(), "denied".to_string()));
+        let ok = json!({"type": "tool_result", "tool_call_id": "t", "output": "fine", "is_error": false});
+        assert!(!note_denials(&mut activity, "tool_result", &ok));
+        assert_eq!(activity.denials, 0);
+        assert_eq!(activity.denied_since, None);
+        assert_eq!(activity.last_denial, None);
+    }
+
+    /// A busy gateway restarts the hint loop's clock (issue #609) as it does the stall clock: the
+    /// old `denied_since` would otherwise nudge a looping colony on every other tick, while the
+    /// streak stands so the nudge can still name what was denied.
+    #[test]
+    fn a_busy_gateway_holds_off_the_hint_loop_nudge() {
+        let mut activity = Activity {
+            last: at(0),
+            nudges: 0,
+            last_nudge: None,
+            question_since: None,
+            judged: 0,
+            judge_failures: 0,
+            risk_announced: None,
+            recoveries: 0,
+            denials: 3,
+            denied_since: Some(at(0)),
+            last_denial: Some(("egress".to_string(), "denied host example.com".to_string())),
+        };
+        // Without a busy tick the loop would nudge at 15.
+        assert_eq!(decide(&SETTINGS, at(15), Observed::Working, &activity, None), Decision::Nudge);
+        activity.note_gateway_busy(at(14));
+        assert_eq!(activity.denied_since, Some(at(14)), "the busy tick restarts the loop's clock");
+        assert_eq!(activity.denials, 3, "the streak stands, so the nudge can still name it");
+        assert!(activity.hint_loop().is_some());
+        assert_eq!(
+            decide(&SETTINGS, at(20), Observed::Working, &activity, None),
+            Decision::Nothing
+        );
+        assert_eq!(decide(&SETTINGS, at(29), Observed::Working, &activity, None), Decision::Nudge);
     }
 }

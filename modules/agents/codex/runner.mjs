@@ -10,11 +10,12 @@
 // overrides of every turn); its asks park on this runner's loopback bridge until the matching
 // `answer` command. The pin lives in module.json; every flag and event field is cited in the README.
 
-import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { execFile, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +64,49 @@ function sanitizeHome(home) {
   }
 }
 
+// The wires a gateway route can speak (docs/protocol.md §6.5); a missing `wire` means the default.
+const WIRES = new Set(['anthropic', 'openai']);
+const HEADER_NAME = /^[A-Za-z0-9-]+$/;
+
+/** COLONIZER_MODEL_ROUTES → validated routes, with warnings instead of throwing — the same wire
+ * shape the hermes and pi runners parse, validated again here because a module is an independent
+ * directory. `wire` is newer than the routes themselves: a route without one speaks the gateway's
+ * default, anthropic. */
+export function parseRoutes(raw) {
+  let data;
+  try {
+    data = JSON.parse(raw ?? '');
+  } catch {
+    return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: not valid JSON'] };
+  }
+  if (!Array.isArray(data)) return { routes: [], warnings: ['ignoring COLONIZER_MODEL_ROUTES: expected a JSON array'] };
+  const routes = [];
+  const warnings = [];
+  data.forEach((entry, i) => {
+    const prefix = typeof entry?.prefix === 'string' ? entry.prefix : '';
+    const baseUrl = typeof entry?.base_url === 'string' ? entry.base_url : '';
+    const wire = entry?.wire ?? 'anthropic';
+    if (!prefix.endsWith('/') || prefix.length < 2 || !/^https?:\/\//.test(baseUrl) || !WIRES.has(wire)) {
+      warnings.push(`ignoring model route ${i}: needs a "<provider>/" prefix, an http(s) base_url and wire anthropic|openai`);
+      return;
+    }
+    const rawHeaders = entry.headers && typeof entry.headers === 'object' && !Array.isArray(entry.headers) ? entry.headers : {};
+    const headers = Object.fromEntries(
+      Object.entries(rawHeaders)
+        .filter(([name, header]) => HEADER_NAME.test(name) && typeof header === 'string')
+        .map(([name, header]) => [name.toLowerCase(), header]),
+    );
+    routes.push({
+      provider: typeof entry.provider === 'string' && entry.provider ? entry.provider : prefix.slice(0, -1),
+      prefix,
+      base_url: baseUrl,
+      headers,
+      wire,
+    });
+  });
+  return { routes, warnings };
+}
+
 /** The pin, read from module.json so the manifest and this preflight cannot drift apart. */
 export function readPin() {
   const pin = JSON.parse(readFileSync(join(here, 'module.json'), 'utf8'))?.requires?.pins?.codex;
@@ -70,9 +114,55 @@ export function readPin() {
   return pin;
 }
 
-/** Where the codex binary is: COLONIZER_CODEX_BIN wins, else `codex` on the PATH. */
-export function codexBin(env) {
-  return String(env.COLONIZER_CODEX_BIN ?? '').trim() || 'codex';
+/** The lock row for this machine: x64 takes linux-x64, arm64 linux-arm64 — the only two Codex
+ * builds. Unlike OpenCode there is no AVX2 split, so no cpuinfo is consulted. */
+export function archPlatform(arch = process.arch) {
+  return arch === 'arm64' ? 'linux-arm64' : arch === 'x64' ? 'linux-x64' : null;
+}
+
+const execTar = (args) => new Promise((resolve, reject) => { execFile('tar', args, (error) => (error ? reject(error) : resolve())); });
+
+/** Disk cache for the fetched binary: the colony's /tmp is a small tmpfs, so the tarball and the
+ * binary live under the cache dir instead (os.tmpdir() only when HOME is unset). */
+export function defaultCacheDir(env = process.env) {
+  const base = env.XDG_CACHE_HOME || (env.HOME ? join(env.HOME, '.cache') : null);
+  return base ? join(base, 'colonizer', 'codex') : join(tmpdir(), 'colonizer-codex');
+}
+
+/** The codex binary: COLONIZER_CODEX_BIN, then `codex` on the PATH, then the pinned build for this
+ * arch — downloaded from the GitHub release assets, sha256-checked before extraction. */
+export async function resolveCodex({ env = process.env, lockText, version = readPin().version, arch = process.arch, fetchImpl = fetch, runTar = execTar, cacheDir = defaultCacheDir(env), log = () => {} } = {}) {
+  const explicit = String(env.COLONIZER_CODEX_BIN ?? '').trim(); // an all-whitespace value counts as unset, like grok's resolveGrok
+  if (explicit) return explicit;
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'codex'))) return join(dir, 'codex');
+  const platform = archPlatform(arch);
+  const row = String(lockText ?? '').split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length >= 6 && !c[0].startsWith('#')).map(([, v, p, , sha256, url]) => ({ version: v, platform: p, sha256, url })).find((r) => r.platform === platform && r.version === version);
+  if (!row) throw new Error(`no pinned Codex ${version} build for platform ${platform ?? arch}`);
+  const dest = join(cacheDir, row.version, row.platform);
+  const bin = join(dest, 'codex');
+  if (existsSync(bin)) return bin;
+  log({ level: 'info', message: `downloading Codex ${row.version} (${row.platform})` });
+  const res = await fetchImpl(row.url);
+  if (!res?.ok) throw new Error(`Codex download failed: HTTP ${res?.status ?? 'no response'}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error(`Codex ${row.version} (${row.platform}) refused: sha256 mismatch`);
+  mkdirSync(dest, { recursive: true });
+  const tgz = join(dest, 'pkg.tgz');
+  writeFileSync(tgz, bytes);
+  const member = row.url.slice(row.url.lastIndexOf('/') + 1).replace(/\.tar\.gz$/, ''); // the archive root holds one binary, named after the tarball
+  try {
+    await runTar(['-xzf', tgz, '-C', dest, member]);
+    renameSync(join(dest, member), bin);
+  } finally {
+    rmSync(tgz, { force: true }); // gone on success and on failure: it is a tmpfs otherwise
+  }
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+/** The codex.lock text next to this module; '' when it is missing (resolveCodex then reports the gap). */
+function readLock() {
+  try { return readFileSync(join(here, 'codex.lock'), 'utf8'); } catch { return ''; }
 }
 
 /** The first X.Y.Z in `codex --version`'s output ("codex-cli 0.156.1"), whatever else surrounds it. */
@@ -93,48 +183,73 @@ function versionOf(bin, spawnFn) {
   });
 }
 
-/** The checks that must pass before any codex process is spawned: fail loudly, not on a prompt. */
-export async function preflight({ env, spawnFn = spawn, pin = readPin() }) {
+/** The checks that must pass before any codex process is spawned: fail loudly, not on a prompt.
+ * Resolves the binary too (COLONIZER_CODEX_BIN, then PATH, then the pinned build fetched into the
+ * cache), returning it alongside any problem, so the caller spawns exactly what was checked. */
+export async function preflight({ env, spawnFn = spawn, pin = readPin(), lockText = readLock(), resolve = resolveCodex, log = () => {} } = {}) {
   // Either secret name is a credential, and an empty one counts as absent — the same rule the
   // error below states, and the same rule childEnv applies when it names the key for the child.
+  // A model routed through the gateway needs neither: the colony token in its headers is the
+  // credential (§6.5), so the check only gates direct api.openai.com runs.
+  const routed = resolveModel(env.COLONIZER_MODEL, parseRoutes(env.COLONIZER_MODEL_ROUTES).routes).route;
   const credential = String(env.CODEX_API_KEY ?? '').trim() || String(env.OPENAI_API_KEY ?? '').trim();
-  if (!credential) {
+  const install = `npm install -g @openai/codex@${pin.version}`;
+  if (!credential && !routed) {
     return {
-      code: MISSING_CREDENTIAL,
-      message:
-        'CODEX_API_KEY is unset or empty, and the colony never runs browser OAuth (codex login). Add an OpenAI API key ' +
-        'from platform.openai.com as a colony secret named CODEX_API_KEY for host api.openai.com, so the mothership ' +
-        'injects it into this colony (README, "Credential story").',
+      problem: {
+        code: MISSING_CREDENTIAL,
+        message:
+          'CODEX_API_KEY is unset or empty, and the colony never runs browser OAuth (codex login). Add an OpenAI API key ' +
+          'from platform.openai.com as a colony secret named CODEX_API_KEY for host api.openai.com, so the mothership ' +
+          'injects it into this colony (README, "Credential story").',
+      },
     };
   }
-  const bin = codexBin(env);
+  let bin;
+  try {
+    bin = await resolve({ env, lockText, version: pin.version, log });
+  } catch (error) {
+    return { problem: { code: MISSING_BINARY, message: `the codex CLI could not be fetched (${error?.message ?? error}); install the pinned version: ${install}` } };
+  }
   const text = await versionOf(bin, spawnFn);
-  const install = `npm install -g @openai/codex@${pin.version}`;
   if (text === undefined) {
-    return { code: MISSING_BINARY, message: `the codex CLI was not found at "${bin}". Install the pinned version: ${install}` };
+    return { bin, problem: { code: MISSING_BINARY, message: `the codex CLI was not found at "${bin}". Install the pinned version: ${install}` } };
   }
   const found = parseVersion(text);
   if (found !== pin.version) {
     return {
-      code: VERSION_DRIFT,
-      message: `codex --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
-        `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: ${install}`,
+      bin,
+      problem: {
+        code: VERSION_DRIFT,
+        message: `codex --version printed "${String(text).trim()}" (parsed ${found ?? 'nothing'}) instead of the pinned ` +
+          `${pin.version} (SOURCE_REV ${pin.source_rev}). Install the pinned version: ${install}`,
+      },
     };
   }
-  return null;
+  return { bin };
 }
 
-/** The `-m` value for a model setting: `openai/<model>` or a bare OpenAI model id; any other
- * provider prefix is refused by name (gateway routing is a follow-up, README "Credential story").
- * An empty setting means no `-m`: codex then runs on the CLI's own default model. */
-export function resolveModel(spec) {
+/** The `-m` value for a model setting, plus the gateway route it rides when one applies. A bare
+ * OpenAI model id, or `openai/<model>` with no `openai/` route configured, goes straight to
+ * api.openai.com as before; a prefix a route carries rides that route through the provider gateway
+ * when its wire is `openai` — the only wire the gateway serves codex's OpenAI paths on (§6.5). An
+ * anthropic-wire route, or a prefix nobody configured, is refused by name. An empty setting means
+ * no `-m`: codex then runs on the CLI's own default model. */
+export function resolveModel(spec, routes = []) {
   const value = String(spec ?? '').trim();
   if (!value) return {};
   const slash = value.indexOf('/');
-  if (slash > 0 && value.slice(0, slash) !== 'openai') {
-    return { error: `${MODEL_PROVIDER}: "${value}" names another provider; this module runs openai/<model> only` };
+  if (slash < 1) return { model: value };
+  const prefix = value.slice(0, slash + 1);
+  const route = routes.find((r) => r.prefix === prefix);
+  if (route) {
+    if (route.wire !== 'openai') {
+      return { error: `${MODEL_PROVIDER}: "${value}" names provider ${route.provider}, whose gateway route speaks the anthropic wire; codex can only ride openai-wire routes (Settings → Model providers)` };
+    }
+    return { model: value.slice(slash + 1), route };
   }
-  return { model: slash > 0 ? value.slice(slash + 1) : value };
+  if (prefix === 'openai/') return { model: value.slice(slash + 1) };
+  return { error: `${MODEL_PROVIDER}: "${value}" names a provider with no gateway route; add it under Settings → Model providers, or use openai/<model>` };
 }
 
 /** Loopback bridge to mcp.mjs: finding_file, memory_propose, loop_next and loop_stop arrive here
@@ -172,7 +287,7 @@ export async function createBridge({ emit, findings = false, setStatus = () => {
         if (!['repo', 'org', 'global'].includes(scope)) reply(200, { error: 'memory_propose scope must be repo, org or global' });
         else if (typeof msg.title !== 'string' || !msg.title.trim() || typeof msg.content !== 'string' || !msg.content.trim()) reply(200, { error: 'memory_propose needs a title and content' });
         else {
-          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [] });
+          emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
         }
       } else if (req.url === '/loop_next') {
@@ -248,8 +363,9 @@ const TOOL_OFF = {
  * README applied. `mcp` carries the colonizer server's `-c` overrides (mcpArgs); `disabledTools`
  * the `disabled_tools` names, each a `-c` override behind exec's `--strict-config`, so a drifted
  * key fails the turn instead of silently keeping the tool (`apply_patch` and MCP tools have no
- * switch). */
-export function turnArgs({ model, threadId, mcp = [], disabledTools = [] }) {
+ * switch). A routed model adds the custom provider the config reference defines: every `-c`
+ * value is parsed as TOML, hence the quoted strings and the inline table for the headers. */
+export function turnArgs({ model, threadId, mcp = [], disabledTools = [], route = null }) {
   const args = [
     '--json', // events as JSONL on stdout (developers.openai.com/codex/noninteractive)
     '--skip-git-repo-check', // the runner may sit anywhere; the colony VM is the boundary
@@ -262,6 +378,21 @@ export function turnArgs({ model, threadId, mcp = [], disabledTools = [] }) {
       : []),
     ...mcp,
   ];
+  if (route) {
+    // The gateway ride (§6.5): base_url is the route's OpenAI passthrough, wire_api="responses" is
+    // the passthrough codex hits (`POST <base_url>/v1/responses`), and the colony header is the
+    // whole credential — no env_key, so codex demands no key for this provider.
+    const headers = Object.entries(route.headers)
+      .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+      .join(',');
+    args.push(
+      '-c', 'model_provider="colonizer"',
+      '-c', 'model_providers.colonizer.name="colonizer"',
+      '-c', `model_providers.colonizer.base_url="${route.base_url.replace(/\/+$/, '')}/v1"`,
+      '-c', 'model_providers.colonizer.wire_api="responses"',
+      '-c', `model_providers.colonizer.http_headers={${headers}}`,
+    );
+  }
   if (model) args.push('-m', model);
   if (threadId) args.push('resume', threadId); // resume: a colony is one continuous codex thread
   args.push('-'); // the prompt: read from stdin
@@ -329,7 +460,7 @@ export function mergeUsage(totals, model, usage) {
  * `thread.started` names one, so the colony's record carries it before the turn ends (§2).
  * `interrupt()` SIGINTs the child (codex saves the session rollout continuously) and escalates to
  * SIGKILL after a grace period. */
-export function startTurn({ prompt, model, threadId, messageId, env, home, emit, announceSession = () => {}, spawnFn = spawn, totals, mcp = [], disabledTools = [] }) {
+export function startTurn({ prompt, model, threadId, messageId, env, bin, home, emit, announceSession = () => {}, spawnFn = spawn, totals, mcp = [], disabledTools = [], route = null }) {
   let child = null;
   let interrupted = false;
   // The thread id the child actually named: whatever `thread.started` carried last. Null when it
@@ -344,7 +475,7 @@ export function startTurn({ prompt, model, threadId, messageId, env, home, emit,
     let completed = null;
     let failed = null;
     let failure = null;
-    child = spawnFn(codexBin(env), turnArgs({ model, threadId, mcp, disabledTools }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
+    child = spawnFn(bin, turnArgs({ model, threadId, mcp, disabledTools, route }), { env: childEnv(env, home), stdio: ['pipe', 'pipe', 'pipe'] });
     // The prompt rides stdin (`-` as the prompt argument): an issue brief can be far larger than
     // an argv slot, and a child that exits early must not turn a broken pipe into a crash.
     child.stdin.on('error', () => {});
@@ -472,7 +603,9 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
   // One place emits statuses, so the bridge's waiting_for_answer/working flips stay deduped.
   const setStatus = (state, detail) => { if (state === status && detail === undefined) return; status = state; emit(detail === undefined ? { type: 'status', state } : { type: 'status', state, detail }); };
   setStatus('idle');
-  const problem = await preflight({ env, spawnFn });
+  const { routes, warnings } = parseRoutes(env.COLONIZER_MODEL_ROUTES);
+  for (const message of warnings) emit({ type: 'log', level: 'warn', message });
+  const { problem, bin } = await preflight({ env, spawnFn, log: (m) => emit({ type: 'log', level: m.level, message: m.message }) });
   // The persisted colony home (§2's session_resume dir): sanitized to its rollout store before any
   // codex child runs, so a rollout written last boot is readable by this boot's `resume` and no
   // stale config is.
@@ -524,7 +657,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
       while (pending.length) {
         const message = pending.shift();
         setStatus('working');
-        const resolved = resolveModel(modelSpec);
+        const resolved = resolveModel(modelSpec, routes);
         if (problem || resolved.error) {
           const result = problem ? `${problem.code}: ${problem.message}` : resolved.error;
           emit({ type: 'turn_end', is_error: true, result, cost_usd: null, duration_ms: 0 });
@@ -545,7 +678,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
           if (seeded && event.type === 'turn_end') heldEnd = event;
           else emit(event);
         };
-        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, home, emit: emitFor, announceSession, spawnFn, totals, mcp, disabledTools });
+        turn = startTurn({ prompt: message.text, model: resolved.model, threadId, messageId: `msg-${n}`, env, bin, home, emit: emitFor, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
         try {
           let result = await turn.done;
           if (seeded && result.failure && !result.threadId && !result.interrupted) {
@@ -555,7 +688,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
             // user stopped must not start over on the fresh thread.
             heldEnd = null; // dropped here: only the failed attempt's turn_end was held back
             emit({ type: 'log', level: 'warn', message: `codex has no rollout for thread ${threadId} in the persisted CODEX_HOME; starting a fresh thread: ${clip(result.failure ?? 'unknown failure', 300)}` });
-            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, home, emit, announceSession, spawnFn, totals, mcp, disabledTools });
+            turn = startTurn({ prompt: message.text, model: resolved.model, threadId: null, messageId: `msg-${n}`, env, bin, home, emit, announceSession, spawnFn, totals, mcp, disabledTools, route: resolved.route ?? null });
             result = await turn.done;
             // The seed is proven dead: carry only what the retry named, so a retry that also ended
             // before naming a thread hands the next turn a fresh one instead of the dead id.
@@ -601,7 +734,7 @@ export async function run({ commands, emit, env, spawnFn = spawn }) {
         turn?.interrupt(); // the turn ends as an error naming the interrupt; the runner stays up
         break;
       case 'set_model': {
-        const resolved = resolveModel(command.model);
+        const resolved = resolveModel(command.model, routes);
         if (resolved.error || !resolved.model) {
           emit({ type: 'log', level: resolved.error ? 'error' : 'warn', message: resolved.error ?? 'ignored a set_model without a model' });
           break;

@@ -23,6 +23,98 @@ export interface Attention {
   reason: AttentionReason;
   since: string;
   nudges: number;
+  /** Why, in the mothership's own words — the failing checks and where their output went for `autopilot_held` (issue #672). Absent otherwise and on older motherships. */
+  detail?: string;
+  /** `provider_quota_exhausted` (issue #767): the provider the colony is blocked or parked on. */
+  provider?: string;
+  /** `provider_quota_exhausted` parked from its card: `"wait"`, with the scheduled resume. */
+  action?: "wait";
+  resume_unix?: number | null;
+  reset_at?: string | null;
+}
+
+/** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */
+export interface QuotaAlternative {
+  /** A Claude alias/id, or `<provider>/<model>`. */
+  id: string;
+  label: string;
+  /** `anthropic` for Claude's own models. */
+  provider: string;
+  /** The provider's wire; null for Claude's own models, which any provider can fall back to. */
+  wire?: "anthropic" | "openai" | null;
+  failure_pct: number;
+  rated: boolean;
+  degraded: boolean;
+  healthy: boolean;
+}
+
+/** One colony on a "Provider out of quota" card. */
+export interface QuotaCardColony {
+  id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  /** Quota answers in a row since its last success; null for a colony only parked on the provider. */
+  hits: number | null;
+  /** Parked on the provider (by the card's Wait, or on its own). */
+  waiting: boolean;
+  /** When a Wait scheduled it back; null otherwise. */
+  resume_unix: number | null;
+}
+
+/** GET /api/attention `quota_cards` (issue #767): one card per provider that ran out of quota. */
+export interface QuotaCard {
+  provider: string;
+  provider_name: string;
+  /** The provider's models the colonies run, most used first. */
+  models: string[];
+  /** e.g. "bailian · qwen3.8-max is out of quota". */
+  title: string;
+  reset_at: string | null;
+  reset_unix: number | null;
+  colonies: QuotaCardColony[];
+  orgs: string[];
+  /** How many of the colonies wait for the reset, and the earliest scheduled resume. */
+  waiting: number;
+  resume_unix: number | null;
+  fallback_model: string | null;
+  /** The provider's wire: a remembered fallback on another provider must speak the same one. */
+  wire?: "anthropic" | "openai";
+  alternatives: QuotaAlternative[];
+}
+
+/** POST /api/providers/{id}/quota-action. */
+export interface QuotaActionRequest {
+  action: "switch" | "wait" | "stop";
+  model?: string;
+  /** `colonies` (default), `org` (their orgs' model settings too) or `all` (every model role on the
+   *  provider install-wide: the agent module's settings and every org's overrides, plus the colonies). */
+  scope?: "colonies" | "org" | "all";
+  colonies?: string[];
+  org?: string;
+  /** Save the model as the provider's `fallback_model`: a Claude model, or one on a provider of the same wire. */
+  remember?: boolean;
+}
+
+/** One setting a quota switch changed, with the value it replaced. */
+export interface QuotaChange {
+  /** `install` (target: the agent module), `org`, `colony` or `provider` (the remembered fallback). */
+  scope: "install" | "org" | "colony" | "provider";
+  target: string;
+  key: string;
+  was: string | null;
+  now: string;
+}
+
+export interface QuotaActionReply {
+  action: string;
+  provider: string;
+  colonies: string[];
+  failed: { id: string; ok: false; error: string }[];
+  /** What a switch changed and what it replaced; older builds omit it. */
+  changes?: QuotaChange[];
 }
 
 /** One line of a colony's recent event history — GET /api/sessions/{id} only (issue #230). */
@@ -52,6 +144,22 @@ export interface StallInfo {
 
 export type CiState = "success" | "failure" | "pending" | "no_checks";
 
+/**
+ * One model setting the boot resolved away from what it named because the gateway would have refused
+ * the model for this colony's sensitivity class (issue #704) — a restricted colony's subagent model
+ * on an untrusted provider, for instance.
+ */
+export interface ModelSubstitution {
+  /** The model setting's name: `model`, `subagent_model`, `background_model` or `small_model`. */
+  setting: string;
+  /** The model the setting named, which the gateway would have refused. */
+  from: string;
+  /** The eligible model the colony runs on instead, or "the orchestrator's model" when cleared. */
+  to: string;
+  /** Why the gateway would have refused `from`, e.g. `"zai" is not marked trusted`. */
+  reason: string;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -80,6 +188,8 @@ export interface Session {
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
@@ -128,6 +238,12 @@ export interface Session {
   last_activity_at?: string | null;
   attention?: Attention | null;
   /**
+   * True while the colony is `failed` and nobody has opened it since (issue #744): the badge and
+   * the mothership's attention count include it until POST /api/sessions/{id}/seen marks it looked
+   * at, which also pushes "resolved" to every other device. Older mothership builds omit the field.
+   */
+  unseen_failure?: boolean;
+  /**
    * Set while the colony is paused with its question outstanding (issue #562): the microVM is
    * stopped and it holds no parallelism slot, but `status` stays `waiting_for_answer` and the
    * question stays answerable exactly as before. The answer re-boots the colony with priority;
@@ -149,10 +265,39 @@ export interface Session {
    * whole field.
    */
   pending_answer?: { question_id: string; prompt: string; answered_at?: string } | null;
+  /**
+   * A warm-up of this suspended colony's question is under way (issue #701): the mothership is
+   * booting it ahead of your answer. `suspended` stays set while warming, so an answer still holds
+   * as for any suspended colony; all three fields clear once the answer is delivered. Older
+   * mothership builds omit the whole field.
+   */
+  prewarm?: { requested_at: string; started_at?: string | null; ready_at?: string | null } | null;
+  /** The supply-chain target this colony was launched to fix (issue #673); absent for a colony launched against none. */
+  supply_chain?: { package: string; advisory: string } | null;
+  /**
+   * Set when a same-repository colony's pull request merged over this one's work (issue #673).
+   * While it stands unkept the queue and the resume route hold the colony; absent for a colony no
+   * merge covered, and `pr` is omitted when the merged pull request's URL carries no number.
+   */
+  superseded?: {
+    by: string;
+    pr_url: string;
+    pr?: number;
+    title: string;
+    reason: "supply_chain" | "issue" | "files";
+    at: string;
+    kept: boolean;
+  } | null;
   /** Why the colony is not progressing — single-session GET only (issue #230). */
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
   recent_events?: RecentEvent[] | null;
+  /**
+   * Model settings the boot replaced with an eligible one because the gateway would have refused
+   * what they named for this colony's sensitivity class (issue #704); absent when every model
+   * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
+   */
+  model_substitutions?: ModelSubstitution[];
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -281,6 +426,8 @@ export interface HarnessStatus {
   model_providers?: ModelProviderStatus[];
   /** Quota exhaustion across providers (issue #225); older mothership builds omit it. */
   quota?: StatusQuota | null;
+  /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
+  quota_cards?: QuotaCard[];
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
@@ -401,9 +548,23 @@ export interface FleetHost {
   queue_depth: number;
   /** Absent when the peer has never reported it. */
   disk_free_bytes: number | null;
+  /** The disk's size (issue #764); absent when unknown. */
+  disk_total_bytes?: number;
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
+  /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
+  fleet_sync?: PeerSync | null;
+}
+
+/** A member's `fleet_sync` block of its reduced `/api/status` (issue #764): where its history push stands. `backlog_rows` rises as colonies finish and falls as the drain sends them, so it moves on a push. */
+export interface PeerSync {
+  state: string;
+  backlog_rows: number;
+  /** Seconds the oldest unsent row has waited; null when nothing is backed up. */
+  oldest_unsent_age_s?: number | null;
+  last_error_class?: string | null;
+  consent: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,12 +596,31 @@ export interface FleetPending {
   status: "pending" | "approved" | "rejected";
 }
 
+/** GET /api/fleet member `health.state` (issue #764): the worst of what the owner observed; `unknown` until a poll has checked the member. */
+export type FleetMemberHealthState = "ok" | "unknown" | "degraded" | "stopped";
+
+/**
+ * GET /api/fleet member `health` (issue #764): one state, and when it is not `ok`, why and what to do.
+ * `code` is a stable key (`token_revoked`, `no_heartbeat`, `unreachable`, `disk_full`, `unwatched`, `not_checked`, …);
+ * `reason` and `hint` are for showing verbatim, e.g. "No heartbeat for 12 min" / "the machine may be asleep".
+ */
+export interface FleetMemberHealth {
+  state: FleetMemberHealthState;
+  code: string | null;
+  reason: string | null;
+  hint: string | null;
+  /** Something worth knowing that is not a fault, whatever the state: "History sync off". Absent from an older owner. */
+  note?: string | null;
+}
+
 /** A mothership that joined this one's fleet; it hosts colonies and sees the fleet view. */
 export interface FleetMember {
   id: string;
   name: string;
   url: string | null;
   joined_at: string;
+  /** Absent from owners built before issue #764. */
+  health?: FleetMemberHealth;
 }
 
 /** GET /api/fleet `membership`: this mothership's place in the fleet it joined. */
@@ -448,6 +628,132 @@ export interface FleetMembership {
   owner_url: string;
   member_id: string;
   joined_at: string;
+  /** Whether this machine's operator consented to pushing its history to the owner (issue #762). Off at every join. */
+  history_sync: boolean;
+}
+
+/** GET /api/fleet/sync/preview (issue #762): what turning the history push on would send — read from the same collection the push sends. */
+export interface FleetSyncPreview {
+  owner_url: string;
+  /** Finished colonies, one row each. */
+  colonies: number;
+  /** Their log files, and those files' bytes. */
+  payloads: number;
+  payload_bytes: number;
+  /** Logs over the size limit: named on their row, never sent. */
+  omitted_payloads: number;
+  row_bytes: number;
+  total_bytes: number;
+  /** What the owner has not acknowledged yet. */
+  pending_colonies: number;
+  pending_bytes: number;
+  includes: string;
+  excludes: string;
+}
+
+/** GET /api/fleet/sync's `status`: where the history push stands. */
+export type FleetSyncState = "idle" | "synced" | "backoff" | "unauthorized" | "removed" | "error" | "consent_required";
+
+/** GET /api/fleet/sync, and POST /api/fleet/sync/consent's answer. */
+export interface FleetSyncStatus {
+  member: boolean;
+  consent: boolean;
+  enabled: boolean;
+  status: FleetSyncState;
+  detail: string | null;
+  acknowledged: number;
+  retired: { id: string; error: string; attempts: number; at: string }[];
+  last_drain_at: string | null;
+  last_synced_at: string | null;
+  next_attempt_at: string | null;
+}
+
+// Fleet history (issue #762, the owner's view): what members pushed with history sync on, read
+// back from <data_dir>/fleet-ingest/ by GET /api/fleet/history… (docs/fleet.md). Owner-only.
+
+/** A synced colony's record: the allowlist projection the member sent (`ImportedSession`). */
+export interface FleetHistoryRecord {
+  /** `<origin_host>:<original_id>`. */
+  id: string;
+  origin_host: string;
+  original_id: string;
+  repo: string;
+  org: string;
+  issue: number | null;
+  issue_title: string;
+  status: SessionStatus;
+  branch: string;
+  base?: string | null;
+  pr_url: string | null;
+  pr_opened_at?: string | null;
+  merged_at: string | null;
+  summary: string | null;
+  error: string | null;
+  cost_usd: number | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
+  model_tier?: string | null;
+  agent: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One log a synced colony carries; `omitted` was too large to travel. */
+export interface FleetHistoryPayload {
+  name: string;
+  sha256: string;
+  bytes: number;
+  omitted?: boolean;
+}
+
+/** One synced colony in GET /api/fleet/history. `key` (`<member_id>/<row id>`) is its cursor. */
+export interface FleetHistoryEntry {
+  key: string;
+  member_id: string;
+  member_name: string;
+  /** The member was removed from the fleet; its history stays. */
+  member_removed: boolean;
+  id: string;
+  received_at: string;
+  record: FleetHistoryRecord;
+  payloads: FleetHistoryPayload[];
+}
+
+/** Totals over the filtered history; `cost_usd` is null when no row carried a cost. */
+export interface FleetHistoryTotals {
+  colonies: number;
+  merged: number;
+  cost_usd: number | null;
+}
+
+/** GET /api/fleet/history's filters and page; every field optional. Dates are YYYY-MM-DD or RFC 3339, on the colony's finish. */
+export interface FleetHistoryQuery {
+  member?: string;
+  repo?: string;
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+/** GET /api/fleet/history: one page, newest finish first, the totals over every filtered row, and the filter options. */
+export interface FleetHistoryPage {
+  colonies: FleetHistoryEntry[];
+  next_cursor: string | null;
+  stats: {
+    total: FleetHistoryTotals;
+    members: (FleetHistoryTotals & { member_id: string; name: string; removed: boolean })[];
+    repos: (FleetHistoryTotals & { repo: string })[];
+  };
+  members: { id: string; name: string; removed: boolean }[];
+  repos: string[];
+  retention_days: number;
+}
+
+/** GET /api/fleet/history/{member}/{row_id}: the entry, and each log with whether the owner holds it. */
+export interface FleetHistoryDetail extends FleetHistoryEntry {
+  logs: (FleetHistoryPayload & { omitted: boolean; stored: boolean })[];
 }
 
 /** GET /api/fleet `joining`: a join this mothership started and has not finished; both screens show `confirm_code` until the owner decides. */
@@ -531,8 +837,8 @@ export interface StorageSummary {
   free_bytes: number | null;
   /** Free space is below the floor: the queue is not starting new colonies (running ones keep running). */
   admission_paused: boolean;
-  /** Data-dir usage by category. `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
-  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; microsandbox_bytes: number | null };
+  /** Data-dir usage by category. `archive_bytes` is the log archive under `<data_dir>/archive`; `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
+  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; archive_bytes: number; microsandbox_bytes: number | null };
   /** Finished colonies whose work is pushed (a PR, or no_changes) and not yet cleaned up; `due` means past the auto-reclaim retention window. */
   reclaimable: Array<{ id: string; status: SessionStatus; pr_url: string | null; bytes: number; updated_at: string; due: boolean }>;
   /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
@@ -720,6 +1026,16 @@ export interface ModelProvider extends ProviderLimits {
   pricing?: ProviderPricing | null;
   /** null = no probe: the first sign of an exhausted plan stays the colonies failing over. */
   quota?: ProviderQuotaProbe | null;
+  /**
+   * Whether the operator vetted this connection to carry restricted-sensitivity work — secrets,
+   * `.env` files, infra config (issue #472). Defaults to false: a connection is not trusted with a
+   * colony's secrets just because it is configured.
+   */
+  trusted: boolean;
+  /** Canonical model id → the name sent on the wire (issue #295). Empty serves any canonical as-is. */
+  model_map?: Record<string, string>;
+  /** Claude Code tool names the gateway strips from every request through this connection (issue #295). */
+  disabled_tools?: string[];
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -818,6 +1134,12 @@ export interface SaveProviderRequest {
   queue_timeout_secs?: number | null;
   context_tokens?: number | null;
   fallback_model?: string | null;
+  /** Whether the connection may carry restricted-sensitivity work (issue #472). Omitted keeps the saved mark. */
+  trusted?: boolean;
+  /** Canonical model id → wire name (issue #295); omitted keeps the saved map, `{}` clears it. */
+  model_map?: Record<string, string>;
+  /** Claude Code tools stripped through this connection (issue #295); omitted keeps the list, `[]` clears it. */
+  disabled_tools?: string[];
 }
 
 /** GET /api/providers/{id}/health */
@@ -1001,6 +1323,12 @@ export interface OrgSettings {
   max_parallel?: number | null;
   /** Live colonies one repository of this org may run at once; null inherits the global per-repository limit. */
   repo_max_parallel?: number | null;
+  /**
+   * Repositories of this org (full `owner/name`) whose superseded colonies' pull requests Colonizer
+   * may close on GitHub when another colony's pull request merges over them (issue #673). Empty —
+   * the default — only marks the colonies superseded and leaves their pull requests open.
+   */
+  close_superseded_prs?: string[];
   /** Dollars one colony of this org may spend on models in total; 0 opts out of the global budget. */
   budget_usd?: number | null;
   /** The most disk one colony of this org may leave on the host, like `16G`; 0 opts out of the global quota. */
@@ -1015,6 +1343,12 @@ export interface OrgSettings {
    * colonies stay listed and resumable. Absent and null mean on, like every field above.
    */
   enabled?: boolean | null;
+  /**
+   * Whether this org's colonies may consult Jev at any decision point (issue #582). False turns every
+   * point off for the org's colonies — no network call — while absent, null or true follows the
+   * module settings, point by point.
+   */
+  jev?: boolean | null;
 }
 
 export interface OrgInfo {
@@ -1300,12 +1634,15 @@ export type AgentEventBody =
    */
   | {
       type: "verification";
-      verdict: "confirmed" | "contradicted" | "unverifiable";
+      /** `inconclusive` (issue #672): a check failed on the colony's work but fails on the merge-base too, so it is not this colony's doing — autopilot publishes anyway. */
+      verdict: "confirmed" | "contradicted" | "inconclusive" | "unverifiable";
       by_declaration: boolean;
       summary: string;
       contradictions: string[];
       /** Observations that do not change the verdict, e.g. a described path missing beside ones that are there. Absent on events recorded before it existed. */
       advisories?: string[];
+      /** Checks that failed on the merge-base as well, one reviewer-ready clause each (issue #672). Absent on events recorded before it existed. */
+      inconclusive?: string[];
       command: string | null;
       command_source:
         | "config"
@@ -1359,6 +1696,8 @@ export interface NewSessionRequest {
   automerge?: boolean;
   /** Start a colony on an issue another colony already holds; the mothership answers 409 without it. */
   allow_duplicate?: boolean;
+  /** The supply-chain target this colony fixes, `{package, advisory}` (issue #673): a second live colony of the same repository for one target is a 409 naming the holder unless `allow_duplicate` is set. */
+  supply_chain?: { package: string; advisory: string };
   /** Start a colony on an epic anyway; the mothership answers 409 without it, listing the epic's open sub-issues. */
   allow_epic?: boolean;
   /** Queue the colony for an issue another colony already holds instead of refusing: it comes back `queued` (`claim_wait`, `queued_behind` naming the holder) and starts when the holder releases. `allow_duplicate` wins if both are set; a remote conflict still answers 409. */
@@ -1369,6 +1708,19 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
+}
+
+/**
+ * One commit a colony wrote (GET /api/sessions/{id}/commits, issue #765): where the link points now,
+ * the shas it pointed at before a rebase or amend re-pointed it, and whether it was kept unmatched —
+ * a squash or a rewrite left no single commit with the same patch-id, so the link was not guessed.
+ */
+export interface CommitLink {
+  sha: string;
+  previous: string[];
+  orphaned: boolean;
+  agent_session?: string;
+  recorded_at: string;
 }
 
 /**
@@ -1392,6 +1744,29 @@ export interface FindingRecord {
   review_session?: string;
   verdict?: "pass" | "fail";
   pr?: string;
+}
+
+/** One file a colony changed, from GET /api/sessions/{id}/diff (issue #611): its path and line counts. */
+export interface SessionDiffFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/**
+ * Everything a colony changed against its base branch (GET /api/sessions/{id}/diff, issue #611):
+ * the per-file counts, their totals, and the unified diff text, capped at 200 KiB (`truncated` says
+ * when). The cockpit's pull request card reads only `files`; the CLI and MCP read the text.
+ */
+export interface SessionDiff {
+  id: string;
+  repo: string;
+  base: string | null;
+  files: SessionDiffFile[];
+  added: number;
+  removed: number;
+  diff: string;
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -1432,6 +1807,43 @@ export interface RedTeamSynthesis {
   superseded: string[];
 }
 
+/** Which focus list and briefing a run's hunters get: the bug hunt, or the security hunt with a pre-scan. */
+export type RedTeamPreset = "general" | "security";
+
+/** A security pre-scan lead: a deterministic heuristic hit, never a confirmed vulnerability. */
+export interface PreScanLead {
+  /** `P1`, `P2`, …; hunters and the synthesis cite it. */
+  id: string;
+  check: string | null;
+  /** Index into the security preset's eight focus areas. */
+  focus: number;
+  path: string;
+  line: number | null;
+  commit: string | null;
+  message: string;
+}
+
+/** Operator checklist item states. There is deliberately no "passed": code cannot prove these. */
+export type ChecklistStatus = "needs_review" | "not_verifiable";
+
+export interface ChecklistItem {
+  id: string;
+  title: string;
+  status: ChecklistStatus;
+  evidence: string;
+}
+
+/** A security run's pre-scan, run on the host mirror before the hunters launch. */
+export interface PreScan {
+  ran_at: string | null;
+  commit: string | null;
+  /** `gitleaks` when the host had it installed, `builtin` for the fallback, empty when it could not run. */
+  secret_scanner: string;
+  notes: string[];
+  leads: PreScanLead[];
+  checklist: ChecklistItem[];
+}
+
 /** GET /api/redteam/runs: one swarm against one repository. */
 export interface RedTeamRun {
   id: string;
@@ -1459,6 +1871,10 @@ export interface RedTeamRun {
   subagent_model?: string | null;
   /** The schedule that started this run, if one did. */
   schedule_id?: string | null;
+  /** Absent from runs made before presets: read as general. */
+  preset?: RedTeamPreset;
+  /** A security run's pre-scan; null for general runs and until a security run launches. */
+  prescan?: PreScan | null;
 }
 
 /** POST /api/redteam/runs. `arm: true` starts gated, waiting for the nest to empty. */
@@ -1471,6 +1887,8 @@ export interface StartRedTeamRunRequest {
   hunter?: string;
   model?: string | null;
   subagent_model?: string | null;
+  /** `general` when unset. */
+  preset?: RedTeamPreset;
 }
 
 /** When a red-team schedule fires, in UTC. `weekday` 0 = Monday; a monthly `day` past the month's end fires on its last day. */
@@ -1488,6 +1906,8 @@ export interface RedTeamSchedule {
   model: string | null;
   subagent_model: string | null;
   autofix: boolean;
+  /** Absent from schedules saved before presets: read as general. */
+  preset?: RedTeamPreset;
   cadence: RedTeamCadence;
   enabled: boolean;
   next_run_at: string;
@@ -1505,6 +1925,7 @@ export interface NewRedTeamSchedule {
   model?: string | null;
   subagent_model?: string | null;
   autofix?: boolean;
+  preset?: RedTeamPreset;
   cadence: RedTeamCadence;
   enabled?: boolean;
 }
@@ -1529,10 +1950,13 @@ export interface Loop {
   repo: string;
   prompt: string;
   cadence: LoopCadence;
-  /** What a run starts: a colony from `prompt` (the default), or the repository's architecture map. */
-  kind?: "colony" | "map";
+  /** What a run starts: a colony from `prompt` (the default), the repository's architecture map, or —
+   * for the one built-in loop, id `disk-cleanup` — the mothership's own disk cleanup. */
+  kind?: LoopKind;
   /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
   pending?: string[];
+  /** The built-in disk-cleanup loop only: its settings, run history and attention item. */
+  disk_cleanup?: DiskCleanupState;
   tz_offset_minutes: number;
   model: string | null;
   subagent_model: string | null;
@@ -1550,14 +1974,173 @@ export interface Loop {
   created_at: string;
 }
 
+export type LoopKind = "colony" | "map" | "disk_cleanup";
+
+/** What the built-in disk-cleanup loop may clean, each with its own switch. */
+export type DiskCleanupCategory = "build_output" | "worktrees" | "microvms" | "archives" | "host_paths";
+
+/** The disk-cleanup loop's settings (PUT /api/loops/disk-cleanup's `disk_cleanup`). */
+export interface DiskCleanupSettings {
+  /** Run early when free space is under this percent of the disk; 0 is off. */
+  trigger_free_pct: number;
+  build_output: boolean;
+  stopped_after_days: number;
+  worktrees: boolean;
+  microvms: boolean;
+  archives: boolean;
+  archive_keep_days: number;
+  archive_max_gb: number | null;
+  /** Owner only, off by default: Cargo target/ dirs under `extra_paths`. */
+  host_paths: boolean;
+  extra_paths: string[];
+  host_min_age_days: number;
+}
+
+export interface DiskCleanupCategoryReport {
+  category: DiskCleanupCategory;
+  enabled: boolean;
+  items: { path: string; bytes: number | null; colony?: string }[];
+  count: number;
+  /** Freed, or in a dry run, would be freed. */
+  bytes: number;
+  held?: { path: string; reason: string }[];
+  failed?: string[];
+  note?: string;
+}
+
+/** POST /api/loops/disk-cleanup/run-now[?dry_run=1], and each entry of the loop's history. */
+export interface DiskCleanupReport {
+  at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "low_disk" | "manual" | string;
+  bytes: number;
+  categories: DiskCleanupCategoryReport[];
+  free_bytes_after?: number;
+  used_pct_after?: number;
+  attention?: string;
+}
+
+export interface DiskCleanupState {
+  settings: DiskCleanupSettings;
+  /** Real runs, newest first. */
+  history: DiskCleanupReport[];
+  attention: string | null;
+  /** When a dry run was last shown; null until the owner has seen one. */
+  previewed_at: string | null;
+}
+
+// The built-in "Dependencies & supply chain" loop (GET/PUT /api/supply-chain-loop,
+// POST /api/supply-chain-loop/run; supply_chain_loop.rs).
+
+export type SupplySeverity = "critical" | "high" | "moderate" | "low";
+export type SupplyFindingKind = "vulnerability" | "yanked" | "unmaintained" | "deprecated" | "license" | "outdated";
+
+/** The loop's settings: off, with an empty allowlist, until the operator opts in. */
+export interface SupplyChainSettings {
+  enabled: boolean;
+  /** Orgs (`acme`) and repositories (`acme/app`) opted in. */
+  allow: string[];
+  /** Daily by default; `interval` no tighter than 60 minutes. */
+  cadence: LoopCadence;
+  max_per_repo: number;
+  max_per_run: number;
+  cooldown_hours: number;
+  /** The least severe finding that is dispatched; everything is reported. */
+  min_severity: SupplySeverity;
+  /** Also report direct dependencies a major version or more behind (never dispatched). */
+  outdated: boolean;
+  /** Check lockfiles no host scanner reads with the mothership's own OSV lookup. */
+  builtin: boolean;
+  autopilot: boolean;
+}
+
+export interface SupplyFinding {
+  ecosystem: string;
+  package: string;
+  version: string | null;
+  kind: SupplyFindingKind;
+  severity: SupplySeverity;
+  id: string | null;
+  title: string;
+  fixed: string | null;
+  fix_available: boolean;
+  fix_via?: string | null;
+  major_bump: boolean;
+  url: string | null;
+  lockfile: string;
+  scanner: string;
+}
+
+export interface SupplyRepoReport {
+  repo: string;
+  sha: string | null;
+  scanners: string[];
+  findings: SupplyFinding[];
+  notes: string[];
+  /** Files nothing checked, and what to install. */
+  missing: string[];
+  error: string | null;
+}
+
+export interface SupplyAttention {
+  repo: string;
+  ecosystem: string;
+  package: string;
+  version: string | null;
+  id: string | null;
+  severity: SupplySeverity;
+  reason: string;
+}
+
+export interface SupplyChainReport {
+  id: string;
+  started_at: string;
+  finished_at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "manual";
+  blocked: boolean;
+  repos: SupplyRepoReport[];
+  counts: Partial<Record<SupplySeverity, number>>;
+  dispatched: { repo: string; ecosystem: string; session: string | null; title: string; findings: number; worst: SupplySeverity }[];
+  skipped: { repo: string; ecosystem: string | null; reason: string; findings: number }[];
+  attention: SupplyAttention[];
+  note: string | null;
+}
+
+export interface SupplyChainRun {
+  id: string;
+  at: string;
+  trigger: string;
+  counts: Partial<Record<SupplySeverity, number>>;
+  dispatched: number;
+  skipped: number;
+  attention: number;
+  summary: string;
+}
+
+export interface SupplyChainLoop {
+  name: string;
+  settings: SupplyChainSettings;
+  next_run_at: string | null;
+  running: boolean;
+  /** Which scanners the mothership's host has installed. */
+  scanners: Record<string, boolean>;
+  /** Whether COLONIZER_NO_EXTERNAL_EFFECTS holds every dispatch. */
+  blocked: boolean;
+  last_report: SupplyChainReport | null;
+  history: SupplyChainRun[];
+  attention: SupplyAttention[];
+}
+
 /** POST /api/loops, and PUT /api/loops/{id} (a full replace). */
 export interface NewLoop {
   name: string;
   repo: string;
   prompt: string;
   cadence: LoopCadence;
-  /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. */
-  kind?: "colony" | "map";
+  /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. `disk_cleanup`
+   * only on the built-in loop's own PUT. */
+  kind?: LoopKind;
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;
@@ -1565,6 +2148,122 @@ export interface NewLoop {
   max_runs?: number | null;
   end_at?: string | null;
   enabled?: boolean;
+  /** The built-in disk-cleanup loop only; left out, its settings are kept. */
+  disk_cleanup?: DiskCleanupSettings;
+}
+
+// The built-in "TypeScript: remove any" loop (GET/PUT /api/ts-any-loop,
+// POST /api/ts-any-loop/run; ts_any_loop.rs).
+
+export type TsAnyForm = "annotation" | "as" | "angle" | "type_argument" | "array" | "array_generic" | "record" | "generic_default" | "other";
+export type TsAnyMethod = "typescript" | "token_scan";
+
+/** The loop's settings: off, with an empty allowlist, until the operator opts in. */
+export interface TsAnySettings {
+  enabled: boolean;
+  /** Orgs (`acme`) and repositories (`acme/app`) opted in. */
+  allow: string[];
+  /** Daily by default; `interval` no tighter than 60 minutes. */
+  cadence: LoopCadence;
+  /** Occurrences given to one colony (20 by default). */
+  batch_cap: number;
+  max_per_run: number;
+  cooldown_hours: number;
+  /** Also count implicit any (only with the repository's own TypeScript). */
+  implicit: boolean;
+  /** Install from the lockfile, offline, when node_modules is absent. */
+  offline_install: boolean;
+  autopilot: boolean;
+}
+
+export interface TsAnyModuleCount {
+  module: string;
+  explicit: number;
+  files: number;
+}
+
+export interface TsAnyFileCount {
+  path: string;
+  module: string;
+  explicit: number;
+  implicit?: number | null;
+  as_casts: number;
+  suppressions: number;
+}
+
+export interface TsAnyRepoReport {
+  repo: string;
+  sha: string | null;
+  typescript: boolean;
+  method: TsAnyMethod | null;
+  method_note: string | null;
+  ts_version: string | null;
+  total: number;
+  implicit: number | null;
+  as_casts: number;
+  suppressions: number;
+  ts_files: number;
+  forms: Partial<Record<TsAnyForm, number>>;
+  modules: TsAnyModuleCount[];
+  files: TsAnyFileCount[];
+  /** Earlier real runs' totals, newest first. */
+  previous: number[];
+  notes: string[];
+  error: string | null;
+}
+
+export interface TsAnyAttention {
+  repo: string;
+  module: string;
+  session: string;
+  pr_url: string | null;
+  problems: string[];
+  reason: string;
+}
+
+export interface TsAnyReport {
+  id: string;
+  started_at: string;
+  finished_at: string;
+  dry_run: boolean;
+  trigger: "schedule" | "manual";
+  blocked: boolean;
+  repos: TsAnyRepoReport[];
+  total: number;
+  dispatched: { repo: string; module: string; session: string | null; title: string; occurrences: number; module_total: number }[];
+  skipped: { repo: string; module: string | null; reason: string }[];
+  checks: { session: string; repo: string; module: string; pr_url: string | null; flagged: boolean; summary: string }[];
+  attention: TsAnyAttention[];
+  note: string | null;
+}
+
+export interface TsAnyRun {
+  id: string;
+  at: string;
+  trigger: string;
+  total: number;
+  totals: Record<string, number>;
+  dispatched: number;
+  skipped: number;
+  flagged: number;
+  summary: string;
+}
+
+export interface TsAnyLoop {
+  name: string;
+  settings: TsAnySettings;
+  next_run_at: string | null;
+  running: boolean;
+  /** Whether node is on the host (the repository's own TypeScript needs it). */
+  node: boolean;
+  /** Whether COLONIZER_NO_EXTERNAL_EFFECTS holds every dispatch. */
+  blocked: boolean;
+  last_report: TsAnyReport | null;
+  /** Newest first. */
+  history: TsAnyRun[];
+  attention: TsAnyAttention[];
+  /** Totals per repository, oldest first. */
+  trend: Record<string, { at: string; total: number; sha: string | null }[]>;
 }
 
 /** GET /api/hunters/{id}/probe: whether an external hunter is installed and could run here. */
@@ -1831,6 +2530,37 @@ export interface LoginItemStatus {
 // Web push (issue #516): the mothership pushes to phones via GET/POST/DELETE /api/push
 // ---------------------------------------------------------------------------
 
+/** One event a device can be told about; a key the prefs omit means "the default". */
+export type PushEventKind =
+  | "question"
+  | "pull_request"
+  | "needs_rebase"
+  | "failed"
+  | "attention"
+  | "provider_degraded"
+  | "digest";
+
+/** Per-device delivery prefs (issue #743), as PATCH takes and the summary answers. */
+export interface PushPrefs {
+  events: Partial<Record<PushEventKind, boolean>>;
+  /** A sound may accompany a question's push; every other event is silent. */
+  question_sound: boolean;
+  /** A question's notification may offer answer buttons (issue #742). */
+  answer_actions: boolean;
+  /** Pushes set the installed app's badge to the needs-you count (issue #744). */
+  badge: boolean;
+  /** Repositories the device hears about, entries "org" or "org/repo"; empty means all. */
+  scope: string[];
+  /** Minutes since local midnight; start may wrap past midnight, never equals end. Null is off. */
+  quiet: { start: number; end: number } | null;
+  /** A question's push breaks through quiet hours when nothing else may. */
+  questions_break_quiet: boolean;
+  /** The device's IANA timezone, as it reported itself; null until a save that knows it. */
+  tz: string | null;
+  /** Minutes east of UTC (the sign of JS `getTimezoneOffset()`, negated). */
+  utc_offset: number;
+}
+
 /** One enrolled device, as GET /api/push/subscriptions answers and POST returns. */
 export interface PushSubscriptionSummary {
   id: string;
@@ -1839,6 +2569,11 @@ export interface PushSubscriptionSummary {
   created_at: number;
   /** The push service's host (e.g. fcm.googleapis.com); the full endpoint never reaches the list. */
   endpoint_host: string;
+  /** Unix seconds of the last presence report; null until the first one. */
+  last_seen: number | null;
+  prefs: PushPrefs;
+  /** The paired phone (issue #746) that subscribed this device, if one did; revoking it drops this subscription. */
+  phone?: string | null;
 }
 
 /** POST /api/push/subscriptions: the browser's `PushSubscription.toJSON()` plus a device label. */
@@ -1846,6 +2581,22 @@ export interface PushSubscribeBody {
   label: string;
   endpoint: string;
   keys: { p256dh: string; auth: string };
+}
+
+/** PATCH /api/push/subscriptions/{id}: rename the device and/or replace its prefs wholesale. */
+export interface PushSubscriptionPatch {
+  label?: string;
+  prefs?: PushPrefs;
+}
+
+/** POST /api/push/presence: where this tab is, and whether it can take the notification itself. */
+export interface PushPresenceBody {
+  endpoint: string;
+  /** The colony this tab has open, or null when none — a push for it can be suppressed. */
+  colony: string | null;
+  focused: boolean;
+  tz?: string;
+  utc_offset?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,6 +2630,53 @@ export interface RemotePairingRequest {
 export interface RemotePairing {
   owner: { github_login: string } | null;
   pending: RemotePairingRequest[];
+}
+
+// ---------------------------------------------------------------------------
+// Add your phone (issue #746): /api/phone — a single-use invite a phone scans,
+// a code confirmed in the local cockpit, and a revocable credential per phone
+// ---------------------------------------------------------------------------
+
+/** One place the cockpit is reachable from, in the mothership's preference order (relay → tailnet → lan). */
+export interface PhoneOrigin {
+  kind: "relay" | "tailnet" | "lan";
+  /** `scheme://host[:port]`, no trailing slash — the base the invite link is built on. */
+  url: string;
+  /** Whether the mothership thinks a phone can reach this origin right now. */
+  reachable: boolean;
+  /** False for a plain-http origin: the phone can pair, but not install the app or get notifications. */
+  secure: boolean;
+  /** Why the origin is (un)usable, when the mothership has something to say about it. */
+  note: string | null;
+}
+
+/** POST /api/phone/invites: a single-use invite — a ticket to ask, never a credential — and where a phone might open it. */
+export interface PhoneInvite {
+  code: string;
+  /** RFC3339: when the invite stops working. */
+  expires_at: string;
+  ttl_secs: number;
+  origins: PhoneOrigin[];
+}
+
+/** A paired phone, with its own credential; revoking it signs that phone out alone. */
+export interface PairedPhone {
+  id: string;
+  label: string;
+  paired_at: string;
+}
+
+/** A phone that opened an invite and shows a code, waiting for it to be typed here. */
+export interface PendingPhone {
+  id: string;
+  label: string;
+  expires_at: string;
+}
+
+/** GET /api/phone. */
+export interface Phones {
+  devices: PairedPhone[];
+  pending: PendingPhone[];
 }
 
 // ---------------------------------------------------------------------------
@@ -2211,12 +3009,16 @@ export type ActivityKind =
   | "chat.issue"
   | "colonize.issue"
   | "colonize.colony"
+  | "decision.shadow"
+  | "decision.act"
+  | "decision.fallback"
   | "loop.create"
   | "loop.update"
   | "loop.pause"
   | "loop.resume"
   | "loop.delete"
   | "loop.run_now"
+  | "loop.docs"
   | "redteam.start"
   | "redteam.stop"
   | "redteam.schedule"
@@ -2310,4 +3112,76 @@ export interface MergeTrainRepo {
 /** GET /api/merge-train (issue #671): empty until a repository opts in. */
 export interface MergeTrainStatus {
   repos: MergeTrainRepo[];
+}
+
+/** The merge-train loop's settings (issue #754): off, hourly, and no repository opted in by default. */
+export interface MergeLoopSettings {
+  enabled: boolean;
+  cadence: LoopCadence;
+  /** Opted-in `owner` or `owner/repo` entries; empty merges nowhere. */
+  allow: string[];
+  /** `owner` or `owner/repo` entries never merged in (upstream-review-only forks), whatever `allow` says. */
+  never: string[];
+  max_merges: number;
+  /** Per-repository caps that replace `max_merges` there. */
+  repo_max_merges: Record<string, number>;
+  cooldown_secs: number;
+  ci_wait_minutes: number;
+  ci_poll_secs: number;
+  /** Check names re-run once when they are all that fails; a trailing `*` matches a prefix. */
+  flaky_checks: string[];
+  self_heal: boolean;
+  revert_on_red: boolean;
+  redo_on_conflict: boolean;
+  max_api_calls: number;
+  min_call_gap_ms: number;
+  /** Colony ids held out of the loop. */
+  held: string[];
+}
+
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "waiting" | "skipped";
+
+export interface MergeLoopItem {
+  session: string;
+  pr_url: string;
+  title: string;
+  action: MergeLoopAction;
+  reason: string;
+}
+
+export interface MergeLoopRepoReport {
+  repo: string;
+  /** Main's CI as the run last read it, in words. */
+  main: string;
+  paused: string | null;
+  /** What the run did about a red main. */
+  heal: string[];
+  items: MergeLoopItem[];
+}
+
+/** One run's report: merged, updated (CI running), red, redo dispatched, skipped — each with its reason. */
+export interface MergeLoopReport {
+  started_at: string | null;
+  finished_at: string | null;
+  dry_run: boolean;
+  /** The kill switch (COLONIZER_NO_EXTERNAL_EFFECTS) turned a real run into this dry run. */
+  forced_dry_run: boolean;
+  /** Why the run stopped early: GitHub pushed back (403/429), or the call budget ran out. */
+  stopped: string | null;
+  api_calls: number;
+  summary: string;
+  lines: string[];
+  repos: MergeLoopRepoReport[];
+}
+
+/** GET /api/merge-train/loop. */
+export interface MergeLoopView {
+  settings: MergeLoopSettings;
+  next_run_at: string | null;
+  running: boolean;
+  writes_blocked: boolean;
+  repos: Record<string, { paused: string | null; needs_redo: Record<string, string> }>;
+  last_report: MergeLoopReport | null;
+  /** Newest first. */
+  history: MergeLoopReport[];
 }

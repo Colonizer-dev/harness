@@ -4,7 +4,7 @@
 // means redefining the built-ins the orchestrator actually delegates to, under their own names, so a
 // Task call keeps landing where it did. An `agents` entry replaces the built-in of the same name.
 //
-// The descriptions and prompts are verbatim copies of the built-ins in the build vendor/claude-code.lock
+// The descriptions and prompts are verbatim copies of the built-ins in the build crates/colonizer/claude-code.lock
 // pins, snapshotted in vendor/claude-code-builtins.json; the Explore prompt is the variant a colony gets
 // (a POSIX guest searching with find and grep via Bash). A Claude Code bump that rewrites a built-in
 // fails CI until they are refreshed: `sh scripts/fetch-agent-binary.sh && node

@@ -705,7 +705,12 @@ export interface ThreadView {
   hasOpenQuestion: boolean;
 }
 
-function toParts(blocks: Block[]): Part[] {
+// `seen` holds the tool-call ids already emitted in this thread. A tool-call id must be unique across
+// the whole thread: assistant-ui keys tool-call resources by it (useResources), so a repeat — e.g. a
+// subagent reusing an id that also appears in the orchestrator's blocks — throws "Duplicate key
+// toolCallId-… in useResources" and blanks the cockpit. We keep the first part for an id and drop later
+// duplicates.
+function toParts(blocks: Block[], seen: Set<string>): Part[] {
   const parts: Part[] = [];
   for (const block of blocks) {
     switch (block.kind) {
@@ -716,6 +721,8 @@ function toParts(blocks: Block[]): Part[] {
         parts.push({ type: "reasoning", text: block.text });
         break;
       case "tool": {
+        if (seen.has(block.id)) break;
+        seen.add(block.id);
         const part: ToolCallPart = {
           type: "tool-call",
           toolCallId: block.id,
@@ -729,6 +736,8 @@ function toParts(blocks: Block[]): Part[] {
         break;
       }
       case "question": {
+        if (seen.has(block.id)) break;
+        seen.add(block.id);
         const part: ToolCallPart = {
           type: "tool-call",
           toolCallId: block.id,
@@ -782,8 +791,12 @@ export function buildThread(state: StreamState): ThreadView {
   // interleave their events; each one still gets a single card.
   let crew: Group[] = [];
 
+  // Tool-call ids must stay unique across every group in the thread (see toParts): a repeat blanks the
+  // cockpit via assistant-ui's useResources. Shared so a subagent card can't collide with the orchestrator.
+  const seenToolCallIds = new Set<string>();
+
   const emit = (g: Group) => {
-    const parts = toParts(g.blocks);
+    const parts = toParts(g.blocks, seenToolCallIds);
     if (parts.length > 0) {
       // Text still streaming is "running" wherever it is, not only in the newest bubble: settlers working in parallel
       // stream into cards above it, and a part that isn't running is drawn in whole chunks instead of revealed smoothly.

@@ -1,6 +1,7 @@
-// The inbox reads the colony list and nothing else, so what matters is that every
-// status lands on the right line, that "needs you" beats the status, that the day headings follow
-// the local calendar rather than an elapsed count, and that the order holds between polls.
+// The inbox reads the colony list and, since #612, the activity log. What matters is that every
+// status lands on the right line, that a logged event keeps its own time and stays marked once it
+// is answered or resolved, that "needs you" beats the status, that the day headings follow the
+// local calendar rather than an elapsed count, and that the order holds between polls.
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,6 +12,7 @@ import {
   feedEntry,
   feedKind,
   headlineFor,
+  inboxEntries,
   heldSlots,
   matchesOverviewFilter,
   needCountByOrg,
@@ -19,7 +21,7 @@ import {
   overviewSessions,
   queueStalled,
 } from "./feed";
-import type { Session, SessionStatus } from "../types";
+import type { ActivityEntry, Session, SessionStatus } from "../types";
 
 function session(overrides: Partial<Session> = {}): Session {
   return {
@@ -47,6 +49,12 @@ function session(overrides: Partial<Session> = {}): Session {
     attention: null,
     ...overrides,
   };
+}
+
+let seq = 0;
+function entry(overrides: Partial<ActivityEntry> = {}): ActivityEntry {
+  seq += 1;
+  return { seq, ts: "2026-09-18T09:00:00Z", kind: "colony.launch", actor: "you", via: "cockpit", org: "acme", repo: "acme/webshop", issue: 42, colony: "s1", ...overrides };
 }
 
 describe("feedKind", () => {
@@ -115,6 +123,94 @@ describe("feedEntries", () => {
     const two = session({ id: "a", updated_at: "2026-09-18T08:00:00Z" });
     expect(feedEntries([one, two]).map((e) => e.id)).toEqual(["a", "b"]);
     expect(feedEntries([two, one]).map((e) => e.id)).toEqual(["a", "b"]);
+  });
+});
+
+// The inbox read from the activity log (issue #612): one line per event, each at its own time, and
+// a line that has been answered or resolved stays, marked "handled", instead of vanishing.
+describe("inboxEntries", () => {
+  it("keeps a question at its own time and marks it answered once you answer", () => {
+    const asked = entry({ seq: 1, kind: "outcome.question", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const answered = entry({ seq: 2, kind: "colony.answer", actor: "you", ts: "2026-09-18T08:40:00Z", colony: "s1" });
+    const entries = inboxEntries([asked, answered], []);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "seq:1", kind: "question", at: "2026-09-18T08:00:00Z", colonyId: null, handled: "answered" });
+  });
+
+  it("keeps a question open while the colony is still waiting and nothing answered it", () => {
+    const asked = entry({ seq: 1, kind: "outcome.question", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const entries = inboxEntries([asked], [session({ id: "s1", status: "waiting_for_answer" })]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "seq:1", handled: null, text: "webshop#42 is waiting on your answer" });
+  });
+
+  it("shows a pull request opened then merged as two lines, the one already dealt with marked", () => {
+    const opened = entry({ seq: 1, kind: "outcome.pr_opened", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1", pr_url: "https://github.com/acme/webshop/pull/9" });
+    const merged = entry({ seq: 2, kind: "outcome.merged", actor: "colony", ts: "2026-09-18T08:30:00Z", colony: "s1" });
+    const entries = inboxEntries([opened, merged], [session({ id: "s1", status: "merged" })]);
+    expect(entries.map((e) => [e.id, e.kind, e.handled])).toEqual([
+      ["seq:2", "returned", "merged"],
+      ["seq:1", "returned", "handled"],
+    ]);
+    expect(entries[0].text).toBe("webshop#42 was merged");
+    expect(entries[1].prUrl).toBe("https://github.com/acme/webshop/pull/9");
+  });
+
+  it("keeps a failure open while the colony is failed, and marks it handled once it moves on", () => {
+    const failed = entry({ seq: 1, kind: "outcome.failed", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const open = inboxEntries([failed], [session({ id: "s1", status: "failed" })]);
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ kind: "failed", handled: null, text: "webshop#42 failed" });
+    const resumed = inboxEntries([failed], [session({ id: "s1", status: "running" })]);
+    expect(resumed[0]).toMatchObject({ id: "seq:1", handled: "handled" });
+  });
+
+  it("marks an outcome handled, and unopenable, when the colony is no longer in the workspace", () => {
+    const opened = entry({ seq: 1, kind: "outcome.pr_opened", actor: "colony", colony: "gone" });
+    expect(inboxEntries([opened], [])[0]).toMatchObject({ colonyId: null, handled: "handled" });
+  });
+
+  it("shows a fresh failure once, not again as a question the watchdog would read", () => {
+    const failed = entry({ seq: 1, kind: "outcome.failed", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const entries = inboxEntries([failed], [session({ id: "s1", status: "failed", unseen_failure: true })]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "seq:1", kind: "failed", handled: null });
+  });
+
+  it("supplements a stalled running colony even when the only question line was answered", () => {
+    const asked = entry({ seq: 1, kind: "outcome.question", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const answered = entry({ seq: 2, kind: "colony.answer", actor: "you", ts: "2026-09-18T08:30:00Z", colony: "s1" });
+    const stalled = session({ id: "s1", status: "running", attention: { reason: "stalled", since: "2026-09-18T09:05:00Z", nudges: 2 } });
+    const entries = inboxEntries([asked, answered], [stalled]);
+    expect(entries.map((e) => [e.id, e.kind, e.handled])).toEqual([
+      ["s1", "question", null],
+      ["seq:1", "question", "answered"],
+    ]);
+    expect(entries[0].text).toBe("webshop#42 has stopped making progress");
+  });
+
+  it("leaves out actions and the housekeeping outcomes nothing waits on", () => {
+    const launch = entry({ seq: 1, kind: "colony.launch", actor: "you", colony: "s1" });
+    const stopped = entry({ seq: 2, kind: "outcome.stopped", actor: "you", colony: "s2" });
+    expect(inboxEntries([launch, stopped], [])).toEqual([]);
+  });
+
+  it("supplements a colony that needs you when the log has no line for it, as an empty log would leave it", () => {
+    const waiting = session({ id: "s1", status: "waiting_for_answer", updated_at: "2026-09-18T09:10:00Z" });
+    const entries = inboxEntries([], [waiting, session({ id: "s2", status: "running" })]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "s1", colonyId: "s1", at: "2026-09-18T09:10:00Z", handled: null });
+  });
+
+  it("orders newest first, whatever the order of the log", () => {
+    const older = entry({ seq: 1, kind: "outcome.failed", actor: "colony", ts: "2026-09-18T08:00:00Z", colony: "s1" });
+    const newer = entry({ seq: 2, kind: "outcome.question", actor: "colony", ts: "2026-09-18T12:00:00Z", colony: "s1" });
+    expect(inboxEntries([newer, older], []).map((e) => e.id)).toEqual(["seq:2", "seq:1"]);
+  });
+
+  it("counts a log line once, however many pages brought it", () => {
+    const asked = entry({ seq: 7, kind: "outcome.question", actor: "colony", colony: "s1" });
+    expect(inboxEntries([asked, { ...asked }], [])).toHaveLength(1);
   });
 });
 

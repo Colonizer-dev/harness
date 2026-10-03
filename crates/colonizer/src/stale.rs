@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
 /// Whether `r` names something in the bare repo: `rev-parse --verify --quiet` answers in its exit
-/// status, so a missing ref is `false`, not an error.
-async fn ref_exists(app: &App, bare: &FsPath, r: &str) -> bool {
+/// status, so a missing ref is `false`, not an error. Shared with `maps` so the base branch is
+/// resolved the same way wherever it is measured against.
+pub(crate) async fn ref_exists(app: &App, bare: &FsPath, r: &str) -> bool {
     exec_status(app.git(bare).args(["rev-parse", "--verify", "--quiet", r]))
         .await
         .unwrap_or(false)
@@ -42,7 +43,7 @@ pub async fn behind(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let _guard = lock.lock().await;
     // Best effort: without a fresh fetch the count may lag, and a failed fetch leaves the
     // last-known answer rather than failing the poll.
-    let _ = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
+    let _ = exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await;
     let behind_by = count_behind(&app, &bare, &s.branch, &base).await;
     Ok(Json(json!({"behind_by": behind_by, "base": base, "branch": s.branch})))
 }
@@ -95,7 +96,7 @@ pub async fn catch_up(State(app): State<Shared>, Path(id): Path<String>) -> ApiR
     let _guard = lock.lock().await;
     // Merging a stale base would mislead — the colony would look caught up while still behind — so
     // a failed fetch refuses the merge instead of merging blind.
-    if let Err(e) = exec(app.git(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
+    if let Err(e) = exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await {
         let message = format!("could not fetch origin; merging a stale base would mislead ({e:#})");
         return Err(client_error(StatusCode::BAD_GATEWAY, &message));
     }

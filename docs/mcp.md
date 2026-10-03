@@ -24,7 +24,7 @@ The tool set is the token's scope, resolved once at startup from the mothership
 | `answer_colony` | operate | `id`, `answer` | a confirmation. The answer matches the pending question the way `colonizer answer` does: an option's 1-based number, its whole label, or free text |
 | `stop_colony` | operate | `id` | a confirmation; the microVM goes away, the worktree is kept for a later resume |
 | `resume_colony` | operate | `id` | a confirmation with the colony's new status |
-| `launch_colony` | launch | `repo`, `issue?`, `task?`, `model?`, `autopilot?` | `{id, status}` of the new colony. `autopilot` means the mothership opens the pull request by itself when the agent finishes cleanly; omitted, the install's setting decides. An issue another colony holds, or an epic, is refused (409): this tool cannot override those guards |
+| `launch_colony` | launch | `repo`, `issue?`, `task?`, `model?`, `autopilot?`, `allow_duplicate?`, `queue_behind_holder?`, `allow_epic?` | `{id, status}` of the new colony. `autopilot` means the mothership opens the pull request by itself when the agent finishes cleanly; omitted, the install's setting decides. `allow_duplicate` starts a second colony on an issue another colony already holds, `queue_behind_holder` waits behind the holder instead, and `allow_epic` starts one on an epic; each defaults to false, so the launch guard refuses with a 409 as usual |
 
 ## Scopes
 
