@@ -572,12 +572,7 @@ pub(crate) async fn park_colony(
     // The question the colony was parked on, if any: its risk class rides on the park record, so the
     // hold-timeout backoff can tell a question the autonomy judge may answer from one it never may
     // without reaching for a runtime a cold park has torn down.
-    let question_risk = app
-        .runtime(&s.id)
-        .await
-        .open_question()
-        .await
-        .map(|(_, _, risk)| risk);
+    let question_risk = app.runtime(&s.id).await.open_question().await.map(|(_, _, risk)| risk);
     let lifecycle = app.session_lock(&s.id).await;
     let _lifecycle = lifecycle.lock().await;
     let claimed = app

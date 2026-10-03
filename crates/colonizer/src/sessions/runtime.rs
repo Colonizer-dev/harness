@@ -220,7 +220,11 @@ impl Runtime {
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
-            pr_mark: Mutex::new(if resumed { None } else { github::pr_description_mark(&dir.join("out")) }),
+            pr_mark: Mutex::new(if resumed {
+                None
+            } else {
+                github::pr_description_mark(&dir.join("out"))
+            }),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,

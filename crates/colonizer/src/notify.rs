@@ -86,9 +86,7 @@ impl Event {
         let what = match self {
             Event::Question => "needs an answer",
             Event::Attention("nudges_exhausted") => "is out of nudges",
-            Event::Attention(crate::queue::HOLD_UNANSWERED_REASON) => {
-                "is parked on a question too risky to answer on its own"
-            }
+            Event::Attention(crate::queue::HOLD_UNANSWERED_REASON) => "is parked on a question too risky to answer on its own",
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",

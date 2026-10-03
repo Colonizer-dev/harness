@@ -533,7 +533,10 @@ pub(crate) async fn submit_answer(
     // A colony parked by the hold timeout still holds the question it parked on (issue #876): an
     // answer resumes it with the answer. Checked before the not-accepting refusal below, which a
     // parked colony would otherwise hit.
-    if !accepts_commands(s.status) && !suspended && crate::queue::hold_parked(&s) && s.parked.as_ref().is_some_and(|p| p.question_risk.is_some())
+    if !accepts_commands(s.status)
+        && !suspended
+        && crate::queue::hold_parked(&s)
+        && s.parked.as_ref().is_some_and(|p| p.question_risk.is_some())
     {
         return answer_parked(app, id, rt, answer, external, via).await;
     }
@@ -831,12 +834,8 @@ async fn answer_parked(
             }
             // The answer settles the question the same way a live one does (issue #744).
             spawn_resolved(app, id);
-            app.session_log(
-                id,
-                "info",
-                "answer received while parked; resuming the colony with it".into(),
-            )
-            .await;
+            app.session_log(id, "info", "answer received while parked; resuming the colony with it".into())
+                .await;
             // 409/404 back means the park is no longer this answer's to resume — a resume won the
             // race — and the answer stays on the record for that resume's boot to deliver.
             let _ = crate::lifecycle::resume(State(app.clone()), Path(id.to_string()), via.map(axum::Extension)).await;
@@ -1654,9 +1653,16 @@ mod tests {
         );
         let s = app.session("abc").await.unwrap();
         let note = s.resume_note.as_deref().unwrap_or_default();
-        assert!(note.contains("While you were parked, your question was answered"), "the parked wording: {note}");
+        assert!(
+            note.contains("While you were parked, your question was answered"),
+            "the parked wording: {note}"
+        );
         assert!(note.contains("Push now?"), "the note replays the question: {note}");
-        assert_eq!(s.status, SessionStatus::Queued, "the colony is on its way back, not left parked");
+        assert_eq!(
+            s.status,
+            SessionStatus::Queued,
+            "the colony is on its way back, not left parked"
+        );
         assert!(s.parked.is_none(), "the park had its say and goes");
         let _ = std::fs::remove_dir_all(root);
     }

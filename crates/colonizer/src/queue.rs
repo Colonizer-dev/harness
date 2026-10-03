@@ -111,8 +111,7 @@ pub(crate) fn hold_expired(session: &Session, now: DateTime<Utc>, timeout: chron
 /// backoff resume owns: a quota park carries its own reason and recovery, and an unparked colony no
 /// record.
 pub(crate) fn hold_parked(s: &Session) -> bool {
-    s.status == SessionStatus::Parked
-        && s.parked.as_ref().is_some_and(|p| p.reason == HOLD_TIMEOUT_REASON)
+    s.status == SessionStatus::Parked && s.parked.as_ref().is_some_and(|p| p.reason == HOLD_TIMEOUT_REASON)
 }
 
 /// What the queue does with a hold-parked colony on one tick (issue #876), decided as a pure function
@@ -136,11 +135,7 @@ pub(crate) enum HoldParkAction {
 /// question reaches a person instead of spinning a microVM up for ever. A question above the judge's
 /// ceiling is never auto-resumed, only notified; with no judge nothing is auto-resumed, and a park the
 /// hold timeout did not make is left alone.
-pub(crate) fn hold_park_action(
-    session: &Session,
-    now: DateTime<Utc>,
-    judge: Option<&crate::autonomy::Judge>,
-) -> HoldParkAction {
+pub(crate) fn hold_park_action(session: &Session, now: DateTime<Utc>, judge: Option<&crate::autonomy::Judge>) -> HoldParkAction {
     if !hold_parked(session) {
         return HoldParkAction::Wait;
     }
@@ -660,7 +655,10 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                     // touched is not doubled. A refusal (a race, a supersession, a failed rotation)
                     // leaves the colony parked: give the step back and take the note off, so a
                     // refusal neither burns the backoff nor rides a resume it was not written for.
-                    if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None).await.is_err() {
+                    if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
+                        .await
+                        .is_err()
+                    {
                         app.update_session(&id, |x| {
                             if x.resume_note.as_deref() != Some(HOLD_RESUME_NOTE) {
                                 return;
@@ -1471,12 +1469,7 @@ mod tests {
 
     /// A hold-timeout park (issue #876): parked with the hold reason and `risk`, a kept worktree, and
     /// `resumes` steps already spent. `risk` `None` is a park with no open question.
-    fn hold_parked_colony(
-        id: &str,
-        risk: Option<QuestionRisk>,
-        resumes: u32,
-        at: chrono::DateTime<chrono::Utc>,
-    ) -> Session {
+    fn hold_parked_colony(id: &str, risk: Option<QuestionRisk>, resumes: u32, at: chrono::DateTime<chrono::Utc>) -> Session {
         let mut s = colony("acme", SessionStatus::Parked);
         s.id = id.into();
         s.git_admin_dir = Some("git".into());
@@ -2290,11 +2283,19 @@ mod tests {
         );
         // Above the ceiling never resumes; a park with no open question counts as within it.
         assert_eq!(
-            hold_park_action(&hold_parked_colony("c", Some(CredentialAdjacent), 0, at), at + chrono::Duration::days(2), Some(&judge)),
+            hold_park_action(
+                &hold_parked_colony("c", Some(CredentialAdjacent), 0, at),
+                at + chrono::Duration::days(2),
+                Some(&judge)
+            ),
             HoldParkAction::NotifyOnly
         );
         assert_eq!(
-            hold_park_action(&hold_parked_colony("n", None, 0, at), at + HOLD_RESUME_SCHEDULE[0], Some(&judge)),
+            hold_park_action(
+                &hold_parked_colony("n", None, 0, at),
+                at + HOLD_RESUME_SCHEDULE[0],
+                Some(&judge)
+            ),
             HoldParkAction::Resume
         );
         // A quota park is left to its own recovery, not the hold backoff.
@@ -2340,13 +2341,19 @@ mod tests {
         let app = crate::tests::test_app(&root);
         *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
         let at = Utc::now() - chrono::Duration::days(2);
-        *app.sessions.write().await =
-            vec![hold_parked_colony("c", Some(QuestionRisk::CredentialAdjacent), 0, at)];
+        *app.sessions.write().await = vec![hold_parked_colony("c", Some(QuestionRisk::CredentialAdjacent), 0, at)];
         let reason = |s: &Session| s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(str::to_string);
         resume_hold_parked(&app).await;
         let c = app.session("c").await.unwrap();
-        assert_eq!(c.status, SessionStatus::Parked, "an above-ceiling question is never auto-resumed");
-        assert!(c.parked.is_some() && c.resume_note.is_none() && c.hold_resumes == 0, "nothing was spent on it");
+        assert_eq!(
+            c.status,
+            SessionStatus::Parked,
+            "an above-ceiling question is never auto-resumed"
+        );
+        assert!(
+            c.parked.is_some() && c.resume_note.is_none() && c.hold_resumes == 0,
+            "nothing was spent on it"
+        );
         assert_eq!(reason(&c).as_deref(), Some(HOLD_UNANSWERED_REASON), "the reason notify reads");
         // A second tick neither resumes nor re-raises: the reason is stamped, and notify fires once.
         resume_hold_parked(&app).await;
@@ -2364,15 +2371,22 @@ mod tests {
         let app = crate::tests::test_app(&root);
         *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
         let at = Utc::now() - chrono::Duration::days(2);
-        *app.sessions.write().await =
-            vec![hold_parked_colony("p", Some(QuestionRisk::WorkspaceWrite), HOLD_RESUME_SCHEDULE.len() as u32, at)];
+        *app.sessions.write().await = vec![hold_parked_colony(
+            "p",
+            Some(QuestionRisk::WorkspaceWrite),
+            HOLD_RESUME_SCHEDULE.len() as u32,
+            at,
+        )];
         tokio::fs::create_dir_all(app.session_dir("p")).await.unwrap();
         resume_hold_parked(&app).await;
         let p = app.session("p").await.unwrap();
         assert_eq!(p.status, SessionStatus::Failed, "every step spent, so the colony gives up");
         assert_eq!(p.error.as_deref(), Some(ABANDONED_QUESTION_REASON));
         assert!(p.parked.is_none(), "a failed colony keeps no park record");
-        assert!(p.git_admin_dir.is_some() && !p.cleaned_up, "the worktree is kept for a person to resume");
+        assert!(
+            p.git_admin_dir.is_some() && !p.cleaned_up,
+            "the worktree is kept for a person to resume"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
