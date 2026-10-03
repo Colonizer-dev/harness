@@ -112,8 +112,9 @@ flowchart LR
   end
 
   TS == "private mesh" ==> AD
-  AG -. "model calls" .-> GW
-  GW --> API["model providers<br/>Anthropic · DeepSeek · Z.AI · local"]:::vendor
+  AG -. "Claude · placeholder key,<br/>swapped at the edge" .-> ANT["api.anthropic.com"]:::vendor
+  AG -. "provider/model" .-> GW
+  GW --> API["other model providers<br/>DeepSeek · Z.AI · local"]:::vendor
   M --> GH["GitHub<br/>issues · pull requests · merges"]:::vendor
   C2["more colonies"]:::ghost
   TS -.-> C2
