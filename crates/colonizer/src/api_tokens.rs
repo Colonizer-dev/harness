@@ -569,10 +569,20 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // the fleet is the one write it may do. Every other fleet route is the owner's cockpit's.
         ["api", "hosts"] if get => Need::Fleet,
         ["api", "fleet", "peer", "leave"] if post => Need::Fleet,
+        // The fleet network policy (issue #690): a member reads the owner's egress floor with its
+        // fleet token. Setting it (`PUT`) stays the owner's — a member may not replace the floor.
+        ["api", "fleet", "policy"] if get => Need::Fleet,
         // The history push (issue #762): a member uploads its log payloads, then the colony rows
         // that reference them, onto its own directory on the owner — nothing else of the owner's.
         ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
         ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
+        // Dev-server previews (previews.rs): a fleet member reaches an open preview through the
+        // reverse proxy on the owner's mothership, the fleet's shared look at a running colony. The
+        // whole `/api/previews/{id}/…` surface is the fleet scope's, on every method; opening and
+        // closing a preview (`POST`/`DELETE /api/sessions/{id}/preview`) is the owner's, so it is
+        // deliberately not listed here. Which host a member may reach is the handler's, from the
+        // fleet network policy.
+        ["api", "previews", id, ..] if !id.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
         // with the owner: managing credentials is not a thing a credential may do.
         _ => Need::Owner,
