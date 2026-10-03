@@ -529,6 +529,18 @@ export interface FleetHost {
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
+  /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
+  fleet_sync?: PeerSync | null;
+}
+
+/** A member's `fleet_sync` block of its reduced `/api/status` (issue #764): where its history push stands. `backlog_rows` rises as colonies finish and falls as the drain sends them, so it moves on a push. */
+export interface PeerSync {
+  state: string;
+  backlog_rows: number;
+  /** Seconds the oldest unsent row has waited; null when nothing is backed up. */
+  oldest_unsent_age_s?: number | null;
+  last_error_class?: string | null;
+  consent: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +666,8 @@ export interface FleetHistoryRecord {
   summary: string | null;
   error: string | null;
   cost_usd: number | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
   model_tier?: string | null;
   agent: string;
   created_at: string;

@@ -164,7 +164,8 @@ status and finish date, and the totals at the top — colonies, merged, and cost
 carry one — are counted per member and per repository over whatever the filters leave. Picking a
 colony opens its record (repository, issue, branch, pull request, cost, summary, error) and its
 logs, each read from the payload the member sent. The cockpit's fleet panel lists hosts rather than
-colonies, so the history lives here. The routes are `GET /api/fleet/history`,
+colonies, and the Overview's [fleet colony list](#the-fleet-colony-list) shows only the newest of
+what is here, so the full history lives on this screen. The routes are `GET /api/fleet/history`,
 `GET /api/fleet/history/{member}/{row_id}` and `…/logs/{name}`
 ([protocol.md](protocol.md#fleet-history-on-the-owner-issue-762)); they are the owner's alone — a
 scoped token, a member's `fleet` token included, reads **403**.
@@ -180,6 +181,31 @@ scoped token, a member's `fleet` token included, reads **403**.
   rows and then every payload no remaining row references that is itself older than the window —
   so a log uploaded just before its row is never taken. A member directory left empty is removed.
   The member keeps its own copy either way, and an unchanged row is not sent again.
+
+## The fleet colony list
+
+The Overview's **Fleet colonies** panel — directly below the [fleet panel](cockpit.md#fleet) —
+gathers every colony the fleet knows about into one table (issue #689): this host's own colonies,
+live from the session stream, and the finished colonies each member pushed to the owner. Each row
+names the member it ran on (falling back to the origin host id), the colony (`repo#issue` and title),
+its status, what it is **waiting on**, its cost, and a link that opens the colony on its host.
+
+"Waiting on" is one word: `answer` (a question is out to a person), `slot` (queued for a parallelism
+slot, or behind another colony's issue), `quota` (parked for tokens — a provider's plan is out, or
+the autopilot hold timed out), `ci` (its pull request's checks are pending or failing) or `review`
+(its pull request is open). A working or done colony waits on nothing and shows an em dash; an
+imported row carries no check state, so an imported `pr_opened` colony always reads `review`.
+
+Filters narrow by host, org and repository; the totals above add cost up per repository, per host
+(member) and per day. A member that has pushed nothing still appears in the per-host totals — zero
+colonies and an em dash cost, never a made-up `$0.00`.
+
+The imported half is the newest of the history Settings → Fleet history pages, at most five pages of
+a hundred rows each; the rest lives on that screen. A member pushes only **finished** colonies
+([History push](#history-push)), so an in-flight colony on another member is not listed — this host
+live, every member only once done. The link is the cockpit's own `?colony=<id>` here and the member's
+own cockpit URL for an imported row; fleet members are not on the owner's colony mesh
+([What this is not (yet)](#what-this-is-not-yet)).
 
 ## Member health
 
