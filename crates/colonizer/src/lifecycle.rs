@@ -1027,6 +1027,9 @@ pub async fn resume(
             x.attention = None;
             x.mesh = None;
             x.local_port = None;
+            // The old microVM's preview is closed with its address (previews.rs): a resumed colony
+            // starts with no preview and the owner opens one again.
+            x.preview_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
             // the boot; any held answer stays on the record, and the boot delivers it. The boot is
             // told whether it is restoring a suspension (issue #700) before the flag goes. A pending

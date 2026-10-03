@@ -24,6 +24,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         sandbox: String::new(),
         mesh: None,
         local_port: None,
+        preview_port: None,
         agent: String::new(),
         autopilot: false,
         autofix: None,

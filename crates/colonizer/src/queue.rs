@@ -736,6 +736,8 @@ fn claimed_for_boot(x: &mut Session) {
     x.attention = None;
     x.mesh = None;
     x.local_port = None;
+    // A boot gets a fresh microVM, so the old one's preview port is gone (previews.rs).
+    x.preview_port = None;
     x.boot_timing = None;
     x.updated_at = Utc::now();
 }

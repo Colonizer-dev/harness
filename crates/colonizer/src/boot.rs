@@ -1516,7 +1516,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
     // its vendor's declared hosts without the operator restating them.
-    let resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
+    // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.
+    if let Some(floor) = crate::fleet_policy::load(&app.cfg.config_dir).and_then(|p| p.floor(&s.org, &s.repo)) {
+        let (clamped, refused) = crate::fleet_policy::enforce(&floor, resolved_egress.policy.clone());
+        for note in &refused {
+            log.warn(format!("fleet egress policy: {note}")).await;
+        }
+        resolved_egress.policy = clamped;
+        resolved_egress.fleet_refused = refused;
+    }
     let tls_hosts = tls_edge_hosts(&secrets);
     let (net_profiles, net_rules, egress_record) =
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);

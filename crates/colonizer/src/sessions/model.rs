@@ -277,6 +277,12 @@ pub struct Session {
     pub sandbox: String,
     pub mesh: Option<MeshInfo>,
     pub local_port: Option<u16>,
+    /// The guest-local port a dev-server preview is proxied from (previews.rs), set by the owner
+    /// through `POST /api/sessions/{id}/preview`; `None` when no preview is open. Cleared wherever
+    /// `local_port` and `mesh` are — a claim that boots a fresh microVM — so a stopped colony's
+    /// preview is closed rather than pointing at a port nothing serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_port: Option<u16>,
     pub agent: String,
     pub autopilot: bool,
     /// Whether a filed finding from this colony spawns a fix colony. `None` until the operator
@@ -531,6 +537,7 @@ impl Default for Session {
             sandbox: String::new(),
             mesh: None,
             local_port: None,
+            preview_port: None,
             agent: String::new(),
             autopilot: false,
             autofix: None,
@@ -760,6 +767,7 @@ mod tests {
             ip: Some("10.0.0.1".into()),
         });
         full.local_port = Some(7070);
+        full.preview_port = Some(5173);
         full.agent = "claude".into();
         full.autopilot = true;
         full.autofix = Some(true);

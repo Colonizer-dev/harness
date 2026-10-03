@@ -917,6 +917,7 @@ mod tests {
             boot_attempt_started_at: None,
             mesh: None,
             local_port: None,
+            preview_port: None,
             agent: "claude-code".into(),
             autopilot: true,
             autofix: None,
