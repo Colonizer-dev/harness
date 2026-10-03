@@ -211,6 +211,13 @@ impl Runtime {
                 logs_path.display()
             ));
         }
+        // A colony coming back from parked (or stopped) has just had its event log rotated aside, so
+        // this run starts with no events while an archive exists (issue #876). Its first completed
+        // turn counts as done even if the agent leaves an existing `pr.md` untouched, exactly as a
+        // fresh colony's first `pr.md` write does — so the mark starts empty and the first turn_end
+        // publishes. A restart of an ongoing run (events already on disk) is not a resume and keeps
+        // the ordinary compare against the mark on disk.
+        let resumed = events_bytes.is_empty() && crate::lifecycle::run_epoch_for_dir(dir) > 1;
         let (commands, commands_rx) = mpsc::unbounded_channel();
         Self {
             events: broadcast::channel(1024).0,
@@ -228,7 +235,11 @@ impl Runtime {
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
-            pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
+            pr_mark: Mutex::new(if resumed {
+                None
+            } else {
+                github::pr_description_mark(&dir.join("out"))
+            }),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             final_text_at: Mutex::new(None),
             open_tool_calls: Mutex::new(HashSet::new()),
@@ -665,6 +676,31 @@ mod tests {
             "a colony that has never emitted an event has no events.jsonl, and that is not a failure"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #876: a colony resumed from parked has had its event log rotated aside, so a load starts
+    /// with no events but an archive. Its `pr.md` mark then starts empty, so the first turn end counts
+    /// as a write even when the agent leaves an existing description untouched; an ongoing run (events
+    /// on disk) and a fresh colony keep the mark of the file.
+    #[test]
+    fn a_resumed_colonys_pr_mark_starts_empty_so_its_first_turn_publishes() {
+        let dir = std::env::temp_dir().join(format!("colonizer-resumed-{}", short_id()));
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(dir.join("out/pr.md"), "# the work\n").unwrap();
+        let seeded = |rt: &Runtime| rt.pr_mark.try_lock().unwrap().is_some();
+
+        // An ongoing run: events on disk, so the mark is the file's.
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1,\"type\":\"status\"}\n").unwrap();
+        assert!(seeded(&Runtime::load(&dir)), "an ongoing run keeps the description's mark");
+
+        // A resume: no events, one archive. The mark starts empty.
+        std::fs::remove_file(dir.join("events.jsonl")).unwrap();
+        std::fs::write(dir.join("events-1.jsonl"), "{\"seq\":1,\"type\":\"turn_end\"}\n").unwrap();
+        assert!(
+            !seeded(&Runtime::load(&dir)),
+            "a resumed run starts with an empty mark, so its first turn publishes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // -- org workspaces on and off --------------------------------------------------------------

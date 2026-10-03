@@ -569,6 +569,10 @@ pub(crate) async fn park_colony(
         app.session_log(&s.id, "warn", format!("park: {why_kept}")).await;
     }
     let vm_kept = !discard;
+    // The question the colony was parked on, if any: its risk class rides on the park record, so the
+    // hold-timeout backoff can tell a question the autonomy judge may answer from one it never may
+    // without reaching for a runtime a cold park has torn down.
+    let question_risk = app.runtime(&s.id).await.open_question().await.map(|(_, _, risk)| risk);
     let lifecycle = app.session_lock(&s.id).await;
     let _lifecycle = lifecycle.lock().await;
     let claimed = app
@@ -584,6 +588,7 @@ pub(crate) async fn park_colony(
                     reason: reason.into(),
                     resets_at: resets_at.clone(),
                     vm_kept,
+                    question_risk,
                 });
                 x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
                 // Parked by the host ends the wait outright, as a stop does: the held answer and
@@ -1222,6 +1227,9 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
     let lifecycle = app.session_lock(id).await;
     let _lifecycle = lifecycle.lock().await;
     let reason = park.reason.clone();
+    // The one-shot note this resume carries (issue #876): a warm resume never boots, so it is taken
+    // off the record here and handed over on the prompt below.
+    let mut note = None;
     let claimed = with_slot(
         &app.sessions,
         &s.org,
@@ -1235,6 +1243,7 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
             if x.status != SessionStatus::Parked || !room {
                 return None;
             }
+            note = x.resume_note.take();
             x.status = SessionStatus::Running;
             x.error = None;
             x.attention = None;
@@ -1255,15 +1264,26 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         format!("warm resume: the kept microVM is still running (parked for {reason}); prompting the agent to continue"),
     )
     .await;
+    // The kept runtime still carries the `pr.md` mark from before the park; clear it so the resumed
+    // colony's first completed turn counts as done even if it leaves an existing description
+    // untouched (a cold resume gets the same effect from `Runtime::load` seeding the mark empty).
+    *rt.pr_mark.lock().await = None;
     // The same channel the transcript's user messages take (sessions/api.rs `client_command`): the
     // runner starts a turn on it, which is all a warm resume is.
+    let mut text = format!(
+        "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
+         never stopped. Pick up where you left off and continue with the task."
+    );
+    // The note the resume carries, if any: the hold-timeout backoff's "choose for yourself", or the
+    // answer that arrived while the colony was parked.
+    if let Some(note) = &note {
+        text.push_str("\n\n");
+        text.push_str(note);
+    }
     let _ = rt.commands.send(json!({
         "type": "user_message",
         "id": format!("u-{}", crate::util::short_id()),
-        "text": format!(
-            "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
-             never stopped. Pick up where you left off and continue with the task."
-        ),
+        "text": text,
     }));
     Some(Ok(Json(s)))
 }
@@ -2957,6 +2977,7 @@ exit 0
                 reason: "hold_timeout".into(),
                 resets_at: None,
                 vm_kept,
+                question_risk: None,
             });
             app.sessions.write().await.push(s);
             tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();

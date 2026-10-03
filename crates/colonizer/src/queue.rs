@@ -49,6 +49,29 @@ pub(crate) const AUTOPILOT_HELD_REASON: &str = "autopilot_held";
 /// requeueing these: it only matches its own reason.
 pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 
+/// The `error` a colony is failed with when it stays parked on an unanswered question through every
+/// backoff step (issue #876): the question was abandoned and the worktree is kept.
+pub(crate) const ABANDONED_QUESTION_REASON: &str = "abandoned_question";
+
+/// The attention reason stamped on a hold-parked colony whose question is above the judge's ceiling
+/// (issue #876): the backoff never resumes it, so the queue raises this once for `notify` to read as
+/// "a person has to answer this". Distinct from [`HOLD_TIMEOUT_REASON`] so [`hold_park_action`] still
+/// sees a hold park.
+pub(crate) const HOLD_UNANSWERED_REASON: &str = "hold_parked_unanswered";
+
+/// The delay before each hold-timeout auto-resume (issue #876), indexed by `hold_resumes` and measured
+/// from the park's `at`: one hour, then three, then nine.
+pub(crate) const HOLD_RESUME_SCHEDULE: [chrono::Duration; 3] = [
+    chrono::Duration::hours(1),
+    chrono::Duration::hours(3),
+    chrono::Duration::hours(9),
+];
+
+/// The one-shot note a backoff resume hands the agent (issue #876): the question timed out unanswered,
+/// so it should pick the safe option itself and say what it chose.
+pub(crate) const HOLD_RESUME_NOTE: &str = "Your question timed out while you were parked; choose the option marked \
+     Recommended, or the one that keeps the PR small, and note the choice in /harness/out/pr.md.";
+
 /// How long a question that holds a tool call in flight (issue #759) keeps its colony's microVM
 /// before the colony is suspended anyway. Such a question is exempt from the ordinary grace, since
 /// suspending it loses the agent that asked; without a ceiling, a question nobody answers would hold
@@ -82,6 +105,60 @@ pub(crate) fn hold_expired(session: &Session, now: DateTime<Utc>, timeout: chron
         return false;
     };
     now - since >= timeout
+}
+
+/// Whether this colony is parked specifically by the hold timeout (issue #876), the park shape the
+/// backoff resume owns: a quota park carries its own reason and recovery, and an unparked colony no
+/// record.
+pub(crate) fn hold_parked(s: &Session) -> bool {
+    s.status == SessionStatus::Parked && s.parked.as_ref().is_some_and(|p| p.reason == HOLD_TIMEOUT_REASON)
+}
+
+/// What the queue does with a hold-parked colony on one tick (issue #876), decided as a pure function
+/// so the backoff policy is testable apart from the tick that acts on it (the `autopilot_step` pattern).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HoldParkAction {
+    /// Leave it parked: no judge to answer for it, the next step's delay has not come, or another
+    /// kind of park entirely.
+    Wait,
+    /// The next step is due: resume it, carrying [`HOLD_RESUME_NOTE`].
+    Resume,
+    /// Its question is above the judge's ceiling: never auto-resumed, notify a person once.
+    NotifyOnly,
+    /// Every step is spent and it parked again: give up, failing it with [`ABANDONED_QUESTION_REASON`].
+    GiveUp,
+}
+
+/// The hold-timeout backoff's verdict for one colony at `now` (issue #876). A colony parked by the
+/// hold timeout while the autonomy judge is configured gets up to [`HOLD_RESUME_SCHEDULE`] resumes,
+/// each `schedule[hold_resumes]` after the park, so one that keeps parking on the same unanswered
+/// question reaches a person instead of spinning a microVM up for ever. A question above the judge's
+/// ceiling is never auto-resumed, only notified; with no judge nothing is auto-resumed, and a park the
+/// hold timeout did not make is left alone.
+pub(crate) fn hold_park_action(session: &Session, now: DateTime<Utc>, judge: Option<&crate::autonomy::Judge>) -> HoldParkAction {
+    if !hold_parked(session) {
+        return HoldParkAction::Wait;
+    }
+    let Some(judge) = judge else {
+        return HoldParkAction::Wait;
+    };
+    let park = session.parked.as_ref().expect("hold_parked checked the record");
+    // A risk above the ceiling is the one thing the backoff must never paper over; a park with no
+    // question (risk `None`) counts as within it, since there is nothing to answer.
+    if park
+        .question_risk
+        .is_some_and(|risk| !crate::autonomy::within_ceiling(risk, judge.risk_ceiling))
+    {
+        return HoldParkAction::NotifyOnly;
+    }
+    let Some(delay) = HOLD_RESUME_SCHEDULE.get(session.hold_resumes as usize) else {
+        return HoldParkAction::GiveUp;
+    };
+    if now >= park.at + *delay {
+        HoldParkAction::Resume
+    } else {
+        HoldParkAction::Wait
+    }
 }
 
 /// How a queued colony's log line names the limits it is waiting on.
@@ -350,6 +427,10 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Holds past their timeout park on this same tick, ahead of admission, so the slots they release
     // are visible to the loop below.
     park_expired_holds(app, orgs::hold_timeout(&modules)).await;
+    // Hold-parked colonies whose backoff step is due resume on this same tick (issue #876), after
+    // the parks above so a colony just parked is not yet due; the resumes queue behind the slot
+    // rules like any other.
+    resume_hold_parked(app).await;
     // Colonies whose question has waited past the grace period suspend on this same tick, ahead of
     // admission, for the same reason: the slots they release are visible below (issue #562).
     suspend_waiting_colonies(app, &modules).await;
@@ -532,6 +613,113 @@ pub(crate) async fn park_expired_holds(app: &Shared, timeout: chrono::Duration) 
             format!("autopilot hold exceeded {minutes} min; parked to release its slot — worktree kept, resume to continue"),
         )
         .await;
+    }
+}
+
+/// Acts on the hold-timeout backoff for every hold-parked colony (issue #876), on the same tick as
+/// [`park_expired_holds`]: a due step stamps [`HOLD_RESUME_NOTE`], bumps `hold_resumes` and resumes
+/// (queuing when no slot is free), an above-ceiling question raises [`HOLD_UNANSWERED_REASON`] once,
+/// and a colony through every step is failed with [`ABANDONED_QUESTION_REASON`], the worktree kept.
+/// Each write re-checks the park under the lock, and the resume handler re-checks again.
+pub(crate) async fn resume_hold_parked(app: &Shared) {
+    let judge = crate::autonomy::judge(&app.modules.read().await.clone(), &app.agents);
+    let now = Utc::now();
+    let actions: Vec<(String, HoldParkAction)> = {
+        let sessions = app.sessions.read().await;
+        sessions
+            .iter()
+            // Issue #673: a merge covered this colony's work — it stays parked, park record
+            // intact, until it is kept; the tick after that resumes it like any other.
+            .filter(|s| !crate::supersede::blocks_start(s))
+            .map(|s| (s.id.clone(), hold_park_action(s, now, judge.as_ref())))
+            .filter(|(_, action)| *action != HoldParkAction::Wait)
+            .collect()
+    };
+    for (id, action) in actions {
+        match action {
+            HoldParkAction::Wait => {}
+            HoldParkAction::Resume => {
+                let stamped = app
+                    .update_session(&id, |x| {
+                        if !hold_parked(x) {
+                            return false;
+                        }
+                        x.resume_note = Some(HOLD_RESUME_NOTE.to_string());
+                        x.hold_resumes = x.hold_resumes.saturating_add(1);
+                        true
+                    })
+                    .await
+                    .is_some_and(|(_, stamped)| stamped);
+                if stamped {
+                    app.session_log(
+                        &id,
+                        "info",
+                        "the question's hold timed out; resuming once more so the agent can choose without waiting".into(),
+                    )
+                    .await;
+                    // The resume handler re-checks everything under its own locks (status, slot,
+                    // supersession) and queues when none is free, so a colony an operator just
+                    // touched is not doubled. A refusal (a race, a supersession, a failed rotation)
+                    // leaves the colony parked: give the step back and take the note off, so a
+                    // refusal neither burns the backoff nor rides a resume it was not written for.
+                    if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
+                        .await
+                        .is_err()
+                    {
+                        app.update_session(&id, |x| {
+                            if x.resume_note.as_deref() != Some(HOLD_RESUME_NOTE) {
+                                return;
+                            }
+                            x.resume_note = None;
+                            x.hold_resumes = x.hold_resumes.saturating_sub(1);
+                        })
+                        .await;
+                    }
+                }
+            }
+            HoldParkAction::NotifyOnly => {
+                // No repeated write: identical attention is a no-op under `update_session`, and
+                // the cockpit banner already names the park. `notify` fires once on the edge.
+                app.update_session(&id, |x| {
+                    if !hold_parked(x) {
+                        return;
+                    }
+                    if let Some(attention) = x.attention.as_mut().and_then(Value::as_object_mut) {
+                        attention.insert("reason".into(), Value::String(HOLD_UNANSWERED_REASON.into()));
+                    }
+                })
+                .await;
+            }
+            HoldParkAction::GiveUp => {
+                let mut attention = None;
+                let failed = app
+                    .update_session(&id, |x| {
+                        if !hold_parked(x) {
+                            return false;
+                        }
+                        x.status = SessionStatus::Failed;
+                        x.error = Some(ABANDONED_QUESTION_REASON.to_string());
+                        x.parked = None;
+                        attention = x.clear_attention();
+                        true
+                    })
+                    .await
+                    .is_some_and(|(_, failed)| failed);
+                if failed {
+                    app.note_cleared_attention(&id, attention).await;
+                    app.session_log(
+                        &id,
+                        "error",
+                        "the question stayed unanswered through every retry; the colony failed and its worktree is kept for a person to resume".into(),
+                    )
+                    .await;
+                    // A failed colony frees its issue for a retry, the same as any failure.
+                    if let Some(s) = app.session(&id).await {
+                        crate::claims::spawn_release_if_needed(app.clone(), &s);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1272,6 +1460,7 @@ pub(crate) fn start_tasks(app: &crate::Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::QuestionRisk;
     use crate::sessions::tests::{admit_create, admit_create_in, admit_resume, colony, stopped_colony_with_worktree};
     use serde_json::{Value, json};
     use std::sync::Arc;
@@ -1292,6 +1481,52 @@ mod tests {
         s.git_admin_dir = Some("git".into());
         s.attention = Some(json!({"reason": "autopilot_held", "since": since, "nudges": 0}));
         s
+    }
+
+    /// A hold-timeout park (issue #876): parked with the hold reason and `risk`, a kept worktree, and
+    /// `resumes` steps already spent. `risk` `None` is a park with no open question.
+    fn hold_parked_colony(id: &str, risk: Option<QuestionRisk>, resumes: u32, at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.id = id.into();
+        s.git_admin_dir = Some("git".into());
+        s.attention = Some(json!({"reason": HOLD_TIMEOUT_REASON, "nudges": 0}));
+        s.parked = Some(crate::sessions::Park {
+            at,
+            reason: HOLD_TIMEOUT_REASON.into(),
+            resets_at: None,
+            vm_kept: false,
+            question_risk: risk,
+        });
+        s.hold_resumes = resumes;
+        s
+    }
+
+    /// An autonomy judge with `ceiling` as its risk ceiling.
+    fn judge_at(ceiling: QuestionRisk) -> crate::autonomy::Judge {
+        crate::autonomy::Judge {
+            model: "judge-model".into(),
+            after_minutes: 0,
+            max_answers: 3,
+            free_text: false,
+            risk_ceiling: ceiling,
+        }
+    }
+
+    /// The modules config that arms the judge at `ceiling`, the way a configured install reads.
+    fn judging_modules(ceiling: QuestionRisk) -> crate::config::ModulesConfig {
+        use crate::config::ModuleChoice;
+        use serde_json::Map;
+        crate::config::ModulesConfig {
+            autonomy: Some(ModuleChoice {
+                provider: "judge".into(),
+                enabled: true,
+                settings: Map::from_iter([
+                    ("model".into(), json!("judge-model")),
+                    ("risk_ceiling".into(), serde_json::to_value(ceiling).unwrap()),
+                ]),
+            }),
+            ..crate::config::ModulesConfig::default()
+        }
     }
 
     #[test]
@@ -1795,6 +2030,7 @@ mod tests {
             reason: provider_quota::QUOTA_EXHAUSTED_REASON.into(),
             resets_at: Some("09-23 07:54 UTC".into()),
             vm_kept,
+            question_risk: None,
         });
         s
     }
@@ -2049,6 +2285,145 @@ mod tests {
         assert!(
             log.contains("autopilot hold exceeded 30 min; parked to release its slot"),
             "the colony's log says why it parked: {log}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The backoff policy, as `hold_park_action` decides it (issue #876): each step is its own delay
+    /// from the park, indexed by the resumes already spent; an above-ceiling question never resumes;
+    /// nothing happens without a judge or on a park the hold timeout did not make.
+    #[test]
+    fn the_backoff_resumes_on_its_schedule_and_never_above_the_ceiling() {
+        use crate::protocol::QuestionRisk::*;
+        let judge = judge_at(WorkspaceWrite);
+        let at = Utc::now();
+        let parked = hold_parked_colony("p", Some(WorkspaceWrite), 0, at);
+        for (spent, delay) in HOLD_RESUME_SCHEDULE.iter().enumerate() {
+            let mut s = parked.clone();
+            s.hold_resumes = spent as u32;
+            assert_eq!(
+                hold_park_action(&s, at + *delay - chrono::Duration::minutes(1), Some(&judge)),
+                HoldParkAction::Wait
+            );
+            assert_eq!(hold_park_action(&s, at + *delay, Some(&judge)), HoldParkAction::Resume);
+        }
+        // Every step spent: give up rather than resume a fourth time.
+        let mut spent = parked.clone();
+        spent.hold_resumes = HOLD_RESUME_SCHEDULE.len() as u32;
+        assert_eq!(
+            hold_park_action(&spent, at + chrono::Duration::days(2), Some(&judge)),
+            HoldParkAction::GiveUp
+        );
+        // No judge: nothing is auto-resumed, whatever the timing.
+        assert_eq!(
+            hold_park_action(&parked, at + chrono::Duration::days(2), None),
+            HoldParkAction::Wait
+        );
+        // Above the ceiling never resumes; a park with no open question counts as within it.
+        assert_eq!(
+            hold_park_action(
+                &hold_parked_colony("c", Some(CredentialAdjacent), 0, at),
+                at + chrono::Duration::days(2),
+                Some(&judge)
+            ),
+            HoldParkAction::NotifyOnly
+        );
+        assert_eq!(
+            hold_park_action(
+                &hold_parked_colony("n", None, 0, at),
+                at + HOLD_RESUME_SCHEDULE[0],
+                Some(&judge)
+            ),
+            HoldParkAction::Resume
+        );
+        // A quota park is left to its own recovery, not the hold backoff.
+        let mut quota = parked.clone();
+        quota.parked.as_mut().unwrap().reason = "provider_quota_exhausted".into();
+        assert_eq!(
+            hold_park_action(&quota, at + chrono::Duration::days(2), Some(&judge)),
+            HoldParkAction::Wait
+        );
+    }
+
+    /// A within-ceiling hold-parked question resumes itself on the first due step (issue #876): the
+    /// park and its pause go, the step is spent, and [`HOLD_RESUME_NOTE`] rides the resume. Every
+    /// slot is taken so the resume queues rather than booting under the test.
+    #[tokio::test]
+    async fn a_hold_parked_question_resumes_on_the_first_step_with_the_timeout_note() {
+        let root = std::env::temp_dir().join(format!("colonizer-hold-resume-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
+        let at = Utc::now() - HOLD_RESUME_SCHEDULE[0] - chrono::Duration::minutes(1);
+        let mut sessions = vec![hold_parked_colony("p", Some(QuestionRisk::WorkspaceWrite), 0, at)];
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            sessions.push(f);
+        }
+        *app.sessions.write().await = sessions;
+        tokio::fs::create_dir_all(app.session_dir("p")).await.unwrap();
+        resume_hold_parked(&app).await;
+        let p = app.session("p").await.unwrap();
+        assert_eq!(p.status, SessionStatus::Queued, "the resume queues behind the fillers");
+        assert_eq!(p.resume_note.as_deref(), Some(HOLD_RESUME_NOTE), "the note rides the resume");
+        assert_eq!(p.hold_resumes, 1, "the first step is spent");
+        assert!(p.parked.is_none() && p.attention.is_none(), "the park and its pause go");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A question above the ceiling is never auto-resumed (issue #876): the colony stays parked, the
+    /// queue raises the reason `notify` reads, and a second tick is quiet — the edge fires once.
+    #[tokio::test]
+    async fn a_question_above_the_ceiling_is_never_auto_resumed_and_flagged_once() {
+        let root = std::env::temp_dir().join(format!("colonizer-hold-notify-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
+        let at = Utc::now() - chrono::Duration::days(2);
+        *app.sessions.write().await = vec![hold_parked_colony("c", Some(QuestionRisk::CredentialAdjacent), 0, at)];
+        let reason = |s: &Session| s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(str::to_string);
+        resume_hold_parked(&app).await;
+        let c = app.session("c").await.unwrap();
+        assert_eq!(
+            c.status,
+            SessionStatus::Parked,
+            "an above-ceiling question is never auto-resumed"
+        );
+        assert!(
+            c.parked.is_some() && c.resume_note.is_none() && c.hold_resumes == 0,
+            "nothing was spent on it"
+        );
+        assert_eq!(reason(&c).as_deref(), Some(HOLD_UNANSWERED_REASON), "the reason notify reads");
+        // A second tick neither resumes nor re-raises: the reason is stamped, and notify fires once.
+        resume_hold_parked(&app).await;
+        let c = app.session("c").await.unwrap();
+        assert_eq!(c.status, SessionStatus::Parked);
+        assert_eq!(reason(&c).as_deref(), Some(HOLD_UNANSWERED_REASON));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A question unanswered through every backoff step fails the colony with the machine reason
+    /// (issue #876), clearing the park but keeping the worktree for a person to resume.
+    #[tokio::test]
+    async fn a_question_unanswered_through_every_step_fails_and_keeps_the_worktree() {
+        let root = std::env::temp_dir().join(format!("colonizer-hold-giveup-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        *app.modules.write().await = judging_modules(QuestionRisk::WorkspaceWrite);
+        let at = Utc::now() - chrono::Duration::days(2);
+        *app.sessions.write().await = vec![hold_parked_colony(
+            "p",
+            Some(QuestionRisk::WorkspaceWrite),
+            HOLD_RESUME_SCHEDULE.len() as u32,
+            at,
+        )];
+        tokio::fs::create_dir_all(app.session_dir("p")).await.unwrap();
+        resume_hold_parked(&app).await;
+        let p = app.session("p").await.unwrap();
+        assert_eq!(p.status, SessionStatus::Failed, "every step spent, so the colony gives up");
+        assert_eq!(p.error.as_deref(), Some(ABANDONED_QUESTION_REASON));
+        assert!(p.parked.is_none(), "a failed colony keeps no park record");
+        assert!(
+            p.git_admin_dir.is_some() && !p.cleaned_up,
+            "the worktree is kept for a person to resume"
         );
         let _ = std::fs::remove_dir_all(root);
     }

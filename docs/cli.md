@@ -73,6 +73,7 @@ Colonies — the ids are what `list` and the cockpit show:
 colonizer launch owner/repo "migrate the auth tests"   # a colony working the task you give it
 colonizer launch owner/repo --issue 42 --no-autopilot  # one issue; you open the pull request yourself
 colonizer list --org acme --status running             # colonies this token may see, newest first
+colonizer list --parked                                # only parked colonies (--status parked)
 colonizer status abc123                                # where it stands, what it costs, what it is doing now
 colonizer logs abc123 -f                               # recent events; -f streams until Ctrl-C
 colonizer diff abc123                                  # everything the colony changed, as a unified diff

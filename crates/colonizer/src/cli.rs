@@ -176,6 +176,9 @@ enum Command {
         /// Only colonies in this state: queued, running, waiting_for_answer, pr_opened, ...
         #[arg(long)]
         status: Option<String>,
+        /// Only colonies parked for a later resume — shorthand for `--status parked`
+        #[arg(long, conflicts_with = "status")]
+        parked: bool,
     },
     /// Show one colony: where it stands, what it costs, and what it is doing right now
     Status { id: String },
@@ -1409,8 +1412,10 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             })
             .await
         }
-        Command::List { org, status } => {
+        Command::List { org, status, parked } => {
             let json = cli.json;
+            // `--parked` is `--status parked`, and the two conflict, so no merge is needed.
+            let status = if parked { Some("parked".to_string()) } else { status };
             client_command(cli, move |machine| async move {
                 let sessions = machine.get("/api/sessions").await?;
                 let filtered = filter_sessions(
@@ -2970,6 +2975,7 @@ mod tests {
             &["man"][..],
             &["launch", "acme/app"][..],
             &["list", "--org", "acme", "--status", "running"][..],
+            &["list", "--parked"][..],
             &["status", "abc123"][..],
             &["logs", "abc123"][..],
             &["logs", "abc123", "-f"][..],
@@ -3153,7 +3159,7 @@ mod tests {
             "`update --help` should not list --json:\n{update}"
         );
         let list = help_for("list");
-        for flag in ["--host", "--token-file", "--json"] {
+        for flag in ["--host", "--token-file", "--json", "--parked"] {
             assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
     }
@@ -3546,6 +3552,23 @@ mod tests {
         assert_eq!(filter_sessions(sessions.clone(), None, Some("RUNNING")).len(), 2);
         let both = filter_sessions(sessions, Some("acme"), Some("pr_opened"));
         assert_eq!(both.iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["b"]);
+    }
+
+    /// `list --parked` is `--status parked`: it sets the flag the handler reads, and the two
+    /// conflict so a caller cannot ask for a state and a park at once.
+    #[test]
+    fn list_parked_is_status_parked_and_conflicts_with_status() {
+        match parse(&["list", "--parked"]).unwrap().command {
+            Some(Command::List { parked, status, .. }) => {
+                assert!(parked);
+                assert!(status.is_none(), "no explicit status alongside --parked");
+            }
+            other => panic!("expected a list command, got {other:?}"),
+        }
+        assert!(
+            parse(&["list", "--parked", "--status", "parked"]).is_err(),
+            "--parked and --status conflict"
+        );
     }
 
     /// A stored map document, as `GET /api/maps/{owner}/{name}`'s `map` carries it.

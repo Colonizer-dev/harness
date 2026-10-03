@@ -193,6 +193,11 @@ pub struct Park {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     pub vm_kept: bool,
+    /// The risk class of the question the colony was parked on, when it was waiting on one
+    /// (issue #876): a hold park records it so the backoff decision can tell a question the judge
+    /// may answer from one it never may. `None` for a park with no open question, or a quota park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_risk: Option<crate::protocol::QuestionRisk>,
 }
 
 /// A user answer that arrived while the colony was suspended and is still undelivered.
@@ -469,6 +474,11 @@ pub struct Session {
     /// was kept. `None` for a colony that has never been parked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked: Option<Park>,
+    /// How many times the hold timeout has auto-resumed this colony (issue #876): the index into
+    /// the backoff schedule. On the session, not the park record, because a resume clears `parked`
+    /// and a colony that parks again must not start the schedule over.
+    #[serde(default)]
+    pub hold_resumes: u32,
     /// The agent runner's own session id, as last reported by the `agent_session` event: what a
     /// resumed boot continues. `None` until the first report, and permanently unknown to agents
     /// whose module declares no `session_resume`.
@@ -479,6 +489,12 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// A one-shot note the next resume hands the agent (issue #876): the hold-timeout backoff writes
+    /// what to do about the timed-out question here, and an answer given while parked writes the
+    /// answer itself. Delivered on a cold resume (the brief) and a warm one (the prompt), then
+    /// cleared — like `pending_answer` but with no suspension behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_note: Option<String>,
     /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
     /// question and the queue has not started (or has already given up on) the warm-up boot.
     /// `None` unless a request is live.
@@ -615,8 +631,10 @@ impl Default for Session {
             attention: None,
             suspended: None,
             parked: None,
+            hold_resumes: 0,
             agent_session: None,
             pending_answer: None,
+            resume_note: None,
             prewarm: None,
             supply_chain: None,
             superseded: None,
@@ -767,6 +785,7 @@ mod tests {
             reason: "hold_timeout".into(),
             resets_at: None,
             vm_kept: true,
+            question_risk: Some(crate::protocol::QuestionRisk::WorkspaceWrite),
         });
         let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         assert_eq!(again.parked, s.parked);
@@ -834,6 +853,7 @@ mod tests {
             reason: "provider_quota_exhausted".into(),
             resets_at: Some("2026-09-28T07:00:00Z".into()),
             vm_kept: false,
+            question_risk: None,
         });
         full.last_activity_at = Some(Utc::now());
         full.boot_timing = Some(json!({"total_ms": 5}));
