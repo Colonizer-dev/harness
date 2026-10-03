@@ -119,6 +119,12 @@ async fn reduced_status(app: &Shared) -> Value {
             host_value[key] = value;
         }
     }
+    // The same `kvm_ok` verdict the full body's host object carries, read back by a peer's placement
+    // policy (issue #688). A Mac has no `/dev/kvm` to check and omits it, as `runtime.kvm` is null
+    // there, so a peer reads "unknown" rather than "cannot".
+    if let Some(kvm) = &runtime.kvm {
+        host_value["kvm_ok"] = json!(kvm.ok);
+    }
     // The storage message names files, so only its verdict crosses over.
     let storage_ok = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())
         .get("ok")

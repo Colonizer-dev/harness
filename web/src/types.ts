@@ -183,6 +183,8 @@ export interface Session {
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
   origin?: string | null;
+  /** Why the fleet scheduler put this colony where it runs, in the scheduler's own words — e.g. "archlinux: 3 free slots" or "pinned to box-2" (issue #688). Absent when no reason was given. */
+  placement?: string | null;
   worktree: string;
   /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
   git_admin_dir: string | null;
@@ -553,6 +555,8 @@ export interface FleetHost {
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
+  /** Whether the peer can boot a microVM at all (issue #688); false means colonies cannot start there. Absent from an older peer build, null on a platform where KVM does not apply. */
+  kvm?: boolean | null;
   /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
   fleet_sync?: PeerSync | null;
 }
@@ -1708,6 +1712,8 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
+  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#298). */
+  host?: string;
 }
 
 /**

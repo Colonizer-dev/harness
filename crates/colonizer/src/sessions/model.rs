@@ -285,6 +285,11 @@ pub struct Session {
     /// `None` for anything the owner started. The token itself is never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launched_by_token: Option<String>,
+    /// Why this colony is where it is, in placement's words (issue #688): the member and its free
+    /// capacity, or that a peer had room but cross-member launch is not built yet. Recorded on a
+    /// fresh launch; `None` on colonies written before it existed or re-admitted from the queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<String>,
     pub worktree: String,
     pub git_admin_dir: Option<String>,
     pub sandbox: String,
@@ -550,6 +555,7 @@ impl Default for Session {
             stack_fork: None,
             origin: None,
             launched_by_token: None,
+            placement: None,
             worktree: String::new(),
             git_admin_dir: None,
             sandbox: String::new(),

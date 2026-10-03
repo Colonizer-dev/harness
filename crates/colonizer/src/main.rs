@@ -79,6 +79,7 @@ mod orgs;
 mod packages;
 mod path_policy;
 mod phone;
+mod placement;
 mod plugins;
 mod prescan;
 mod presets;

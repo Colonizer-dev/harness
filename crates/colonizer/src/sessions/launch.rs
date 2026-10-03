@@ -74,6 +74,11 @@ pub struct NewSession {
     /// `Some("burn_down")` so `POST /api/burn-down/stop` can find them again.
     #[serde(default)]
     pub origin: Option<String>,
+    /// Pin this colony to a named fleet member (issue #688): its id or its display name, or this
+    /// member's own. Cross-member execution is not built yet, so a pin to a peer is refused with the
+    /// reason; omitting it lets placement pick a member and record why, without moving the colony.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already
     /// touching files, instead of developing against the same paths at once. Off by default —
     /// most callers would rather start immediately than have an unrelated colony's edits hold
@@ -525,6 +530,13 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
+    // The fleet as placement candidates (issue #688): this member plus the last-known row of every
+    // peer the fleet view has polled — cached data only, never a fresh poll. With no fleet this is
+    // just this member, and placement below changes nothing but the reason it records.
+    let (local, peers) = crate::fleet::placement_candidates(&app).await;
+    // The peers the fleet reads as unreachable: a claim their host left is still refused, but the
+    // refusal can say their colony is not being re-run here (issue #688).
+    let unreachable_ids: Vec<String> = peers.iter().filter(|c| !c.online).map(|c| c.id.clone()).collect();
     // A second mothership shares no memory with this one, so the local guard above cannot see its
     // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
     // local guard rather than refusing the launch.
@@ -547,7 +559,17 @@ pub async fn create(
                     .collect();
                 crate::claims::claim_wait_conflict(Some(&info), issue, &ours)
             } else {
-                Some(crate::claims::remote_conflict_message(&info, issue))
+                // A holder whose host the fleet reads as unreachable is named as such, so the
+                // operator knows its colony is not being re-run elsewhere (issue #688).
+                let mut message = crate::claims::remote_conflict_message(&info, issue);
+                let holder_down = info
+                    .host
+                    .as_deref()
+                    .is_some_and(|host| crate::claims::holder_host_unreachable(host, &unreachable_ids));
+                if holder_down {
+                    message.push_str(crate::claims::UNREACHABLE_HOLDER_NOTE);
+                }
+                Some(message)
             }
         } else {
             None
@@ -556,6 +578,32 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
+    // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
+    // executes remotely (issue #298), so an unpinned choice of a peer is recorded and the colony runs
+    // here, a pin to a peer is refused rather than silently moved, and an unknown pin is a bad request.
+    let host_pin = req.host.as_deref().map(str::trim).filter(|host| !host.is_empty());
+    let placement_reason = match crate::placement::place(host_pin, &local, &peers) {
+        Ok(chosen) if chosen.local => chosen.reason,
+        // A peer has room, but nothing launches on another member yet: say so, run here.
+        Ok(chosen) if host_pin.is_none() => {
+            format!("{}; running on another member is not built yet (#298)", chosen.reason)
+        }
+        // Pinned to a peer that can take the colony: refused; remote execution is not built.
+        Ok(chosen) => {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                &format!(
+                    "pinned to {}: running a colony on another member is not built yet (#298)",
+                    chosen.host_name
+                ),
+            ));
+        }
+        Err(unknown @ crate::placement::Refusal::UnknownHost { .. }) => {
+            return Err(client_error(StatusCode::BAD_REQUEST, &unknown.to_string()));
+        }
+        // A pinned member that cannot take the colony: refused, never moved elsewhere.
+        Err(refusal) => return Err(client_error(StatusCode::CONFLICT, &refusal.to_string())),
+    };
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
@@ -600,6 +648,7 @@ pub async fn create(
         stack_fork: None,
         origin: req.origin.clone(),
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
+        placement: Some(placement_reason),
         worktree: app
             .cfg
             .data_dir
@@ -967,6 +1016,7 @@ mod tests {
             after: None,
             stack: false,
             origin: None,
+            host: None,
             serialize,
         })
     }
@@ -1443,6 +1493,7 @@ mod tests {
                 after: None,
                 stack: false,
                 origin: None,
+                host: None,
                 serialize: None,
             }),
         )
@@ -1525,6 +1576,7 @@ mod tests {
                 after: None,
                 stack: false,
                 origin: None,
+                host: None,
                 serialize: None,
             }),
         )
@@ -1567,6 +1619,7 @@ mod tests {
             after,
             stack,
             origin: None,
+            host: None,
             serialize: None,
         })
     }
