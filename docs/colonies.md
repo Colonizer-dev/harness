@@ -129,7 +129,8 @@ An issue counts as an epic when any of these is true:
 `allow_epic: true`. The Colonize pane greys out epics and leaves them out of bulk hand-offs.
 
 **Limits.** If the GitHub lookup fails, the launch goes ahead. The guard helps you avoid a mistake.
-It is not an access control. There is no CLI or MCP override (see above). Details are in
+It is not an access control. The CLI (`--allow-epic`) and MCP (`allow_epic`) take the same
+override (see above). Details are in
 [protocol.md](protocol.md#duplicate-colony-prevention-and-issue-claims), under "Epics".
 
 ## Questions, and who answers them
