@@ -235,7 +235,8 @@ lives longer than that even on an install that never touches the switch again.
 
 The sender composes Cratefield's telemetry module, not a bespoke HTTP client: the module asked for in
 `Cratefield/harness#413` and landed there on 2026-09-19 as `cratefield-module-telemetry`
-(`crates/module-telemetry`) is a pinned git dependency of `crates/colonizer`, and the batch is
+(`crates/module-telemetry`) is a crates.io dependency of `crates/colonizer`
+(`cratefield-module-telemetry = "0.2"`), and the batch is
 validated with its `Batch::parse` before it is shown or sent. What remains open is elsewhere:
 
 1. **colonizer.dev says the harness reports anonymous usage data** — the copy describing what is
