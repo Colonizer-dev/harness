@@ -15,7 +15,7 @@ environment is under [Settings](#settings).
   Node.js runtime the installer unpacks). The installer also uses `gh`, when it is present, to verify
   a release's build provenance ([Install a release](#install-a-release)). A build from source also
   needs `npm`, Node.js 20.19 or newer (or 22.12 or newer; the web UI's Vite requires one of those),
-  and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
+  and a Rust toolchain of 1.98 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
   the safe bet.
 - **Claude Code**: on Linux, a native Claude Code install, which colonies use. On a Mac the installer
   fetches the Linux build a colony needs ([On a Mac](#on-a-mac)).
@@ -146,6 +146,7 @@ this machine and read the same environment the mothership does:
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
 | `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
+| `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
 
@@ -274,6 +275,8 @@ What the mothership keeps in the config directory:
 | `updates.json` | The update check switch ([docs/updates.md](updates.md)) |
 | `loops.json`, `redteam-schedules.json` | Scheduled loops and red-team runs |
 | `colonizer.toml` | Optional hand-written file; today it holds `[publish] co_author` |
+| `fleet.json` | [Fleet](fleet.md) membership: pairings, members and this machine's own fleet token |
+| `phones.json` | Paired phones: each phone's credential, stored as a SHA-256 |
 | `remote/` | The remote-access identity key pair |
 | `host_id` | This mothership's id |
 
@@ -283,7 +286,8 @@ system keychain; the Secrets page shows which.
 What it keeps in the data directory: `sessions.json` (the colony list, read back at every start) and
 `sessions/<id>/` (each colony's logs and state), `repos/` and `worktrees/` (clones and each colony's
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
-`archive/`, `cache/`, `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
+`archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
+`colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
 `routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
 `mothership.out` when the mothership is started at login.
 
@@ -292,7 +296,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`, `migrate-store`) read the same variables.
+`telemetry`, `migrate-store`, `fleet export`, `fleet import`) read the same variables.
 
 ### The mothership
 
@@ -355,6 +359,7 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `MEM0_API_KEY` | The mem0 shared-memory provider |
 | `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). Never saved; only the environment |
 | `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in the composer, one per voice service (the last is the OpenAI-compatible one) |
+| `OPENAI_API_KEY`, `XAI_API_KEY` | Also the vendor key the `codex` and `grok-build` agent modules get, when no `openai` or `xai-grok` provider has a saved key ([docs/runner-authoring.md](runner-authoring.md)) |
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
 
 A login item does not carry any of these ([above](#desktop-install-the-cockpit-as-an-app-start-at-login)).
