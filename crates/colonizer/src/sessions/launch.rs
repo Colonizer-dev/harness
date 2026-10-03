@@ -676,6 +676,9 @@ pub async fn create(
         boot_image: None,
         app_slot: None,
         boot_attempt_started_at: None,
+        failure_class: None,
+        boot_retries: 0,
+        retry_at: None,
         created_at: now,
         updated_at: now,
     };

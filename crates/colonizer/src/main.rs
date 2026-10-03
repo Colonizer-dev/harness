@@ -98,6 +98,7 @@ mod remote;
 mod repo_identity;
 mod repo_meta;
 mod restack;
+mod retry;
 mod routing;
 mod runtime;
 mod sandbox;

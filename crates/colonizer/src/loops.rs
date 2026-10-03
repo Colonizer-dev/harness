@@ -45,6 +45,10 @@ const SKIP_RETRY_MINUTES: i64 = 15;
 /// whole org takes its cycle gently instead of all at once.
 pub const MAP_STAGGER_MINUTES: i64 = 10;
 const MAX_PROMPT: usize = 20_000;
+/// How long after a run that failed for an infrastructure reason it may be re-run, when the loop
+/// names no window of its own (issue #881): long enough to ride out a short outage, short enough
+/// that the re-run is still about the same work.
+pub const DEFAULT_RETRY_FAILED_RUNS: i64 = 60;
 
 /// The loop a colony belongs to, from its origin tag.
 pub fn loop_id_of(origin: &str) -> Option<&str> {
@@ -56,6 +60,16 @@ pub fn loop_id_of(origin: &str) -> Option<&str> {
 pub struct LastRun {
     pub session: String,
     pub at: DateTime<Utc>,
+    /// Whether this run is a re-run of the one before it (issue #881). The re-run replaces
+    /// `session` and keeps the original `at`, so the schedule does not move; the scheduler re-runs
+    /// only while this is false, so one failure earns at most one re-run.
+    #[serde(default)]
+    pub retried: bool,
+    /// The run's outcome for the loop list, filled by [`list`] and not persisted: the colony's
+    /// status, with a failed run's class on it (`failed (transient_infra)`). An old `loops.json`
+    /// has no such field, and `None` means the colony is gone.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// What a loop launches: an ordinary colony working from its prompt (`colony`), architecture-map
@@ -104,6 +118,11 @@ pub struct Loop {
     pub autopilot: bool,
     #[serde(default)]
     pub max_runs: Option<u32>,
+    /// Minutes after a run started within which a run that failed for an infrastructure reason is
+    /// run once more (issue #881). `None` — absent on a loop saved before this field — means the
+    /// default [`DEFAULT_RETRY_FAILED_RUNS`]; `Some(0)` switches the re-run off.
+    #[serde(default)]
+    pub retry_failed_runs: Option<u32>,
     #[serde(default)]
     pub end_at: Option<DateTime<Utc>>,
     pub enabled: bool,
@@ -137,6 +156,16 @@ impl Loop {
         self.kind == LoopKind::Map && self.repo.ends_with("/*")
     }
 
+    /// The window within which a run that failed for an infrastructure reason is run once more, or
+    /// `None` when the loop has that off (issue #881).
+    fn retry_window(&self) -> Option<ChronoDuration> {
+        match self.retry_failed_runs {
+            Some(0) => None,
+            Some(minutes) => Some(ChronoDuration::minutes(minutes as i64)),
+            None => Some(ChronoDuration::minutes(DEFAULT_RETRY_FAILED_RUNS)),
+        }
+    }
+
     /// Ends the loop with a reason: disabled, nothing scheduled.
     fn end(&mut self, reason: String) {
         self.enabled = false;
@@ -152,6 +181,8 @@ impl Loop {
         self.last_run = Some(LastRun {
             session: session.to_string(),
             at: now,
+            retried: false,
+            outcome: None,
         });
         self.next_run_at = Some(next_run_after(&self.cadence, now));
         self.check_limits();
@@ -374,6 +405,10 @@ pub struct NewLoop {
     autopilot: Option<bool>,
     #[serde(default)]
     max_runs: Option<u32>,
+    /// Minutes within which a run that failed for an infrastructure reason is run once more; 0
+    /// switches the re-run off (issue #881).
+    #[serde(default)]
+    retry_failed_runs: Option<u32>,
     #[serde(default)]
     end_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -453,6 +488,7 @@ fn loop_from(
         subagent_model,
         autopilot: req.autopilot.unwrap_or(true),
         max_runs: req.max_runs,
+        retry_failed_runs: req.retry_failed_runs,
         end_at: req.end_at,
         enabled,
         runs: 0,
@@ -464,19 +500,40 @@ fn loop_from(
     })
 }
 
+/// The last run's outcome for the loop list (issue #881): the colony's status name, with a failed
+/// run's failure class on it — `failed (transient_infra)`. `None` when the colony is gone.
+fn run_outcome(sessions: &[Session], id: &str) -> Option<String> {
+    let s = sessions.iter().find(|s| s.id == id)?;
+    Some(match (s.status, s.failure_class) {
+        (SessionStatus::Failed, Some(class)) => format!("{} ({})", s.status.as_str(), class.as_str()),
+        _ => s.status.as_str().to_string(),
+    })
+}
+
 /// Every loop, filtered to the caller's org/repo limits when a scoped token asks — the way the
 /// colony list is filtered (issue #627).
 pub async fn list(State(app): State<Shared>, scoped: Option<axum::Extension<ScopedToken>>) -> Json<Vec<Loop>> {
-    let loops = app.loops.loops.read().await;
-    // The built-in disk cleanup is the host's housekeeping, not a token's business: owner only.
-    Json(
+    let mut out: Vec<Loop> = {
+        let loops = app.loops.loops.read().await;
+        // The built-in disk cleanup is the host's housekeeping, not a token's business: owner only.
         loops
             .iter()
             .filter(|l| scoped.is_none() || l.kind != LoopKind::DiskCleanup)
             .filter(|l| scoped.as_ref().is_none_or(|axum::Extension(t)| t.covers(&l.org, &l.repo)))
             .cloned()
-            .collect(),
-    )
+            .collect()
+    };
+    // Enrich each loop's last run with its colony's outcome, for `loop list`'s LAST column. The
+    // outcome is not persisted: it is derived here, from the live session store, on every read.
+    if out.iter().any(|l| l.last_run.is_some()) {
+        let sessions = app.sessions.read().await;
+        for l in &mut out {
+            if let Some(last) = &mut l.last_run {
+                last.outcome = run_outcome(&sessions, &last.session);
+            }
+        }
+    }
+    Json(out)
 }
 
 pub async fn create(
@@ -752,6 +809,15 @@ async fn run_token(app: &Shared, l: &Loop) -> Result<Option<ScopedToken>, crate:
 async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, crate::AppError> {
     let run = l.runs + 1;
     let scoped = run_token(app, l).await?;
+    let session = start_run(app, l, run, scoped).await?;
+    app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
+    Ok(session)
+}
+
+/// The colony-creating half of a launch, shared by the tick and a re-run (issue #881): admits the
+/// run through the same path a hand launch takes, under the loop's token when it has one. `run` is
+/// the number the brief names.
+async fn start_run(app: &Shared, l: &Loop, run: u32, scoped: Option<ScopedToken>) -> Result<Session, crate::AppError> {
     // Whether the brief may name the loop tools: the same resolution `sessions::create` is about
     // to launch on — the repository's org's pick, else the install's (issue #643).
     let owner = l.repo.split('/').next().unwrap_or_default();
@@ -774,8 +840,101 @@ async fn launch(app: &Shared, l: &Loop, now: DateTime<Utc>) -> Result<Session, c
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
     let Json(session) = sessions::create(State(app.clone()), scoped.map(axum::Extension), Json(req)).await?;
-    app.loops.update(&l.id, |x| x.record_run(&session.id, now)).await;
     Ok(session)
+}
+
+/// Re-runs a colony loop's run that ended `Failed` for an infrastructure reason, once (issue #881):
+/// within the loop's window a fresh run is launched without `record_run`, so the run count and the
+/// next run are untouched. The record's `retried` flag allows one re-run at most, and a live run
+/// holds it off until the next tick.
+async fn retry_failed_runs(app: &Shared, now: DateTime<Utc>) {
+    let sessions = app.sessions.read().await.clone();
+    // A snapshot, so the read lock is not held while `retry_run` takes the loops lock to book the
+    // re-run.
+    let loops = app.loops.loops.read().await.clone();
+    for l in loops {
+        if !l.enabled {
+            continue;
+        }
+        // Only a plain colony loop is re-run: that is the kind `launch` serves. A map loop's runs
+        // are mapping colonies launched another way, and the built-in cleanup runs in-process with
+        // no colony at all — neither is `start_run`'s to re-launch.
+        if l.kind != LoopKind::Colony {
+            continue;
+        }
+        let Some(last) = &l.last_run else { continue };
+        if last.retried {
+            continue;
+        }
+        let Some(window) = l.retry_window() else { continue };
+        if now.signed_duration_since(last.at) > window {
+            continue;
+        }
+        let failed_transiently = sessions.iter().find(|s| s.id == last.session).is_some_and(|s| {
+            s.status == SessionStatus::Failed && s.failure_class == Some(crate::retry::FailureClass::TransientInfra)
+        });
+        if !failed_transiently || live_run_for(&sessions, &l).is_some() {
+            continue;
+        }
+        retry_run(app, &l, last, now).await;
+    }
+}
+
+/// Launches the re-run of `last` and books it as the loop's last run, keeping the original time and
+/// marking it retried so no second re-run follows.
+async fn retry_run(app: &Shared, l: &Loop, last: &LastRun, now: DateTime<Utc>) {
+    let scoped = match run_token(app, l).await {
+        Ok(token) => token,
+        // run_token ends the loop and records why; nothing to re-run.
+        Err(_) => return,
+    };
+    // Re-checked against a fresh read: the snapshot `retry_failed_runs` filtered on may be older
+    // than this launch, and a run started in between (a hand run-now, say) must hold the re-run off.
+    if live_run_for(&app.sessions.read().await, l).is_some() {
+        return;
+    }
+    match start_run(app, l, l.runs, scoped).await {
+        Ok(session) => {
+            let fresh = session.id.clone();
+            app.loops
+                .update(&l.id, |x| {
+                    x.last_run = Some(LastRun {
+                        session: fresh.clone(),
+                        at: last.at,
+                        retried: true,
+                        outcome: None,
+                    });
+                })
+                .await;
+            eprintln!(
+                "loops: re-running loop {}'s run {}, which failed for an infrastructure reason",
+                l.name, last.session
+            );
+            app.session_log(
+                &session.id,
+                "info",
+                format!(
+                    "loop: re-running the run of loop \"{}\" ({}) that failed for an infrastructure reason",
+                    l.name, last.session
+                ),
+            )
+            .await;
+        }
+        Err(e) => {
+            // A refusal — a parallel limit, the token's cap — is not the run's end: the next tick
+            // tries again while the window is open, and the loop's note says why.
+            let message = e.message().to_string();
+            app.loops
+                .update(&l.id, |x| {
+                    x.last_note = Some(format!(
+                        "could not re-run the failed run ({}) at {}: {message}",
+                        last.session,
+                        now.format("%H:%M UTC")
+                    ));
+                })
+                .await;
+        }
+    }
 }
 
 /// One step of an org-wide map loop's cycle. An empty `pending` starts a cycle from the fresh
@@ -933,6 +1092,9 @@ pub(crate) async fn fire_due(app: &Shared, now: DateTime<Utc>) {
             }
         }
     }
+    // Separate from the due schedule: a run that has already fired may be re-run once when it
+    // failed for an infrastructure reason (issue #881).
+    retry_failed_runs(app, now).await;
 }
 
 /// A colony of a self-paced loop names its next run (`loop_next`).
@@ -1036,6 +1198,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retry::FailureClass;
     use crate::sessions::tests::colony;
     use chrono::TimeZone;
 
@@ -1059,6 +1222,7 @@ mod tests {
             subagent_model: None,
             autopilot: true,
             max_runs: None,
+            retry_failed_runs: None,
             end_at: None,
             enabled: true,
             next_run_at: Some(utc(2026, 9, 24, 9, 0)),
@@ -1098,6 +1262,7 @@ mod tests {
             subagent_model: None,
             autopilot: None,
             max_runs: None,
+            retry_failed_runs: None,
             end_at: None,
             enabled: None,
             disk_cleanup: None,
@@ -1615,6 +1780,141 @@ mod tests {
         fire_due(&app, now).await;
         let l = app.loops.get("loop_a").await.unwrap();
         assert_eq!(l.last_note.as_deref(), Some("its API token was revoked"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    // -- Re-running a run that failed for an infrastructure reason (issue #881) ---------------
+    /// The app a re-run test starts from: a loop of `kind` whose last run is a colony that ended
+    /// `Failed` with `class`, started `age_minutes` before `now`, and the loop's own retry window.
+    /// The loop is enabled and not due, so only the re-run pass can touch it.
+    async fn app_with_failed_last_run(
+        root: &FsPath,
+        kind: LoopKind,
+        class: FailureClass,
+        age_minutes: i64,
+        window: Option<u32>,
+    ) -> (Shared, DateTime<Utc>) {
+        let app = app_that_can_create(root);
+        let now = utc(2026, 9, 24, 9, 0);
+        let mut failed = colony("acme", SessionStatus::Failed);
+        failed.id = "run1".into();
+        failed.repo = "acme/app".into();
+        failed.origin = Some("loop:loop_a".into());
+        failed.failure_class = Some(class);
+        app.sessions.write().await.push(failed);
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.kind = kind;
+        l.repo = "acme/app".into();
+        l.retry_failed_runs = window;
+        l.runs = 1;
+        l.last_run = Some(LastRun {
+            session: "run1".into(),
+            at: now - ChronoDuration::minutes(age_minutes),
+            retried: false,
+            outcome: None,
+        });
+        l.next_run_at = Some(now + ChronoDuration::minutes(30));
+        app.loops.loops.write().await.push(l);
+        (app, now)
+    }
+
+    #[tokio::test]
+    async fn a_run_that_failed_for_an_infrastructure_reason_is_re_run_once() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-rerun-{}", short_id()));
+        let (app, now) = app_with_failed_last_run(&root, LoopKind::Colony, FailureClass::TransientInfra, 5, None).await;
+        fire_due(&app, now).await;
+        let l = app.loops.get("loop_a").await.unwrap();
+        let last = l.last_run.clone().expect("a run");
+        assert!(last.retried, "the run is booked as re-run");
+        assert_ne!(last.session, "run1", "a fresh colony");
+        assert_eq!(
+            last.at,
+            now - ChronoDuration::minutes(5),
+            "the original time is kept, so the schedule does not move"
+        );
+        assert_eq!(l.runs, 1, "a re-run is not a new run");
+        assert_eq!(
+            l.next_run_at,
+            Some(now + ChronoDuration::minutes(30)),
+            "the regular schedule is untouched"
+        );
+        let fresh = app.session(&last.session).await.expect("the re-run colony exists");
+        assert_eq!(fresh.origin.as_deref(), Some("loop:loop_a"));
+
+        // The next tick re-runs nothing: the record is marked, and the fresh run holds the loop.
+        let before = app.sessions.read().await.len();
+        fire_due(&app, now).await;
+        assert_eq!(app.sessions.read().await.len(), before, "no second re-run");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_is_not_re_run_outside_its_window_for_a_verdict_switched_off_or_not_a_colony() {
+        for (kind, class, age_minutes, window) in [
+            (LoopKind::Colony, FailureClass::TransientInfra, 61, None), // past the default hour
+            (LoopKind::Colony, FailureClass::Permanent, 5, None),       // a verdict a re-run cannot fix
+            (LoopKind::Colony, FailureClass::TransientInfra, 5, Some(0)), // the loop has it off
+            (LoopKind::Colony, FailureClass::TransientInfra, 30, Some(15)), // past the loop's window
+            (LoopKind::Map, FailureClass::TransientInfra, 5, None),     // a map loop is not `launch`'s
+        ] {
+            let root = std::env::temp_dir().join(format!("colonizer-loops-norerun-{}", short_id()));
+            let (app, now) = app_with_failed_last_run(&root, kind.clone(), class, age_minutes, window).await;
+            fire_due(&app, now).await;
+            let l = app.loops.get("loop_a").await.unwrap();
+            assert_eq!(l.runs, 1);
+            let last = l.last_run.clone().expect("a run");
+            assert_eq!(
+                last.session, "run1",
+                "{kind:?}/{class:?}/{age_minutes}/{window:?}: the run is left alone"
+            );
+            assert!(!last.retried);
+            assert_eq!(app.sessions.read().await.len(), 1, "no colony was launched");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// The loop list's last-run outcome is derived on the read, not stored: [`run_outcome`] names
+    /// the colony's status with a failed run's class on it, `list` reads it from the live store per
+    /// loop, and it never reaches `loops.json`.
+    #[tokio::test]
+    async fn the_loop_list_reports_a_runs_outcome_with_its_class() {
+        let root = std::env::temp_dir().join(format!("colonizer-loops-outcome-{}", short_id()));
+        let app = app_with_config(&root);
+        let mut failed = colony("acme", SessionStatus::Failed);
+        failed.id = "run1".into();
+        failed.failure_class = Some(FailureClass::TransientInfra);
+        let mut opened = colony("acme", SessionStatus::PrOpened);
+        opened.id = "run2".into();
+        app.sessions.write().await.extend([failed, opened]);
+        // The derivation on its own: a class on a failed run, a bare status otherwise, none when the
+        // colony is gone.
+        let sessions = app.sessions.read().await.clone();
+        assert_eq!(run_outcome(&sessions, "run1").as_deref(), Some("failed (transient_infra)"));
+        assert_eq!(run_outcome(&sessions, "run2").as_deref(), Some("pr_opened"));
+        assert_eq!(run_outcome(&sessions, "gone"), None, "a colony that is gone has no outcome");
+        // And `list` derives it per loop.
+        let mut l = a_loop(Cadence::Interval { minutes: 60 });
+        l.last_run = Some(LastRun {
+            session: "run1".into(),
+            at: utc(2026, 9, 24, 9, 0),
+            retried: false,
+            outcome: None,
+        });
+        let mut never = a_loop(Cadence::Interval { minutes: 60 });
+        never.id = "loop_b".into();
+        app.loops.loops.write().await.extend([l, never]);
+        let Json(loops) = list(State(app.clone()), None).await;
+        let by_id = |id: &str| loops.iter().find(|l| l.id == id).unwrap().last_run.clone();
+        assert_eq!(by_id("loop_a").unwrap().outcome.as_deref(), Some("failed (transient_infra)"));
+        assert!(by_id("loop_b").is_none(), "a loop that has not run has no outcome");
+        // And the outcome never reaches loops.json: only `session`, `at` and `retried` persist.
+        app.loops.save().await.unwrap();
+        let raw: Value = serde_json::from_slice(&std::fs::read(root.join("config/loops.json")).unwrap()).unwrap();
+        let saved = raw.as_array().unwrap().iter().find(|x| x["id"] == "loop_a").unwrap();
+        assert!(
+            saved["last_run"].get("outcome").is_none(),
+            "the outcome is not persisted: {saved}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

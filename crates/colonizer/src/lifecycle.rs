@@ -1040,6 +1040,11 @@ pub async fn resume(
             x.parked = None;
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
+            // An operator resume starts the boot afresh (issue #881): a stale retry wait must not
+            // hold it and a spent transient budget must not fail it, so the bookkeeping is cleared.
+            x.retry_at = None;
+            x.failure_class = None;
+            x.boot_retries = 0;
             x.updated_at = Utc::now();
             Ok(Some((x.clone(), room, waiting)))
         },

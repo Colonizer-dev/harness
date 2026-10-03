@@ -45,6 +45,13 @@ working, idle, waiting for an answer (suspended included), or publishing — ski
 at its next slot; a self-paced one 15 minutes later. **Run now** starts a run immediately, and is
 refused (409) while the previous one is live.
 
+**A run that fails for an infrastructure reason is re-run once** (issue #881): a run that ends failed
+with a transient class — a runtime or image hiccup, a timeout, a dropped connection, an HTTP 5xx — is
+launched again within `retry_failed_runs` minutes of the run's start (60 by default, `0` to switch the
+re-run off). The re-run does not count as a run and the next slot does not move, so the schedule is
+untouched; the Loops page and `loop list` show the last run's outcome, with the failure class when it
+failed.
+
 ## What the colony can do
 
 Every run is an ordinary colony (its origin is `loop:<id>`, and colony lists badge it ↻ loop). It

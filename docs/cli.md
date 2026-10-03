@@ -187,13 +187,15 @@ days, still an interval), `14d@03:00` (every N days at a time of day), `daily@09
 and `--name`, with the prompt from `--prompt` or `--prompt-file PATH` (`-` reads stdin). The
 clock times are your local time, stored in UTC exactly as the cockpit's form stores them. The
 other flags mirror `launch`: `--model`, `--subagent-model`, `--autopilot`/`--no-autopilot`;
-`--max-runs N` ends the loop after N runs and `--disabled` creates it paused. Cadence ranges
+`--max-runs N` ends the loop after N runs, `--retry-failed-runs N` sets how many minutes after a
+run that failed for an infrastructure reason it is run once more (default 60; `0` switches the
+re-run off) and `--disabled` creates it paused. Cadence ranges
 (15 minutes to a week, days 1–365) are the mothership's to refuse, with its message.
 
 `loop stop` and `loop start` are the cockpit's switch: the loop's own settings are sent back
 with `enabled` flipped, so pausing keeps everything and re-enabling books the next run from the
 cadence. `loop list` shows the cadence in words with its times in your local time, the state
-(`enabled`, `paused`, `ended`) and when it runs next; an empty list prints a note to stderr, and
+(`enabled`, `paused`, `ended`), when it runs next and the last run's outcome; an empty list prints a note to stderr, and
 `--json` prints the raw records everywhere.
 
 ## Fleet export and import

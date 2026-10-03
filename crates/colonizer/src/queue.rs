@@ -162,6 +162,13 @@ enum Gate {
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
+    // Issue #881: a colony retrying a transient boot failure waits out its backoff — held, looked
+    // past this tick like any other wait, so it never stalls the colonies behind it. Ahead of the
+    // resume fast-path below, which would otherwise admit the kept worktree at once; the 5 s tick
+    // picks it up as soon as `retry_at` passes.
+    if s.retry_at.is_some_and(|at| at > Utc::now()) {
+        return Gate::Hold;
+    }
     // Issue #673: a colony a merge superseded stays put — held, not retired — until the operator
     // keeps it. Ahead of the resume fast-path below, which would otherwise admit a resumed-queued
     // colony the marker must hold; looked past this tick like any other wait.
@@ -1550,6 +1557,28 @@ mod tests {
             "the second waiter re-points to the first"
         );
         assert!(matches!(gate(&sessions[1], &sessions), Gate::Hold));
+    }
+
+    /// A colony retrying a transient boot failure waits out its backoff (issue #881) — checked ahead
+    /// of the resume fast-path, so a kept worktree does not admit it early — and is looked past this
+    /// tick like any other wait, so the colonies behind it are not stalled.
+    #[test]
+    fn a_colony_waiting_out_its_boot_retry_holds_and_does_not_block_others() {
+        let mut retrying = colony("acme", SessionStatus::Queued);
+        retrying.id = "retrying".into();
+        // A kept worktree: without the retry wait, the resume fast-path would admit it at once.
+        retrying.git_admin_dir = Some("git".into());
+        retrying.retry_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        let mut other = colony("acme", SessionStatus::Queued);
+        other.id = "other".into();
+        let sessions = vec![retrying.clone(), other.clone()];
+        assert!(matches!(gate(&retrying, &sessions), Gate::Hold), "the backoff has not passed");
+        // The colony behind it is admitted this tick: a retrying colony is held, not a blocker.
+        let (picked, _) = next_queued(&sessions, |_| true).expect("the colony behind starts");
+        assert_eq!(picked.id, "other");
+        // Once the wait passes, the colony itself is admitted again.
+        retrying.retry_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert!(matches!(gate(&retrying, &sessions), Gate::Admit));
     }
 
     /// A queued colony stacked on `parent_id`, in the queue ahead of anything created later.
