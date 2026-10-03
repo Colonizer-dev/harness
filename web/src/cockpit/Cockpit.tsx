@@ -730,6 +730,19 @@ export function Cockpit({
               onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
             />
           ) : null}
+          {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
+              so above every view, like the quota banner. It clears itself when the drain finishes,
+              so there is nothing to dismiss. Absent on a mothership from before the drain. */}
+          {status?.draining ? (
+            <div className="px-6 pt-4">
+              <div
+                role="status"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+              >
+                Draining for an update or restart: new colonies stay queued until it finishes.
+              </div>
+            </div>
+          ) : null}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {body()}
             {/* The way back into the dashboard once it has been hidden: a small pill parked above

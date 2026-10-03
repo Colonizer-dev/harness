@@ -688,6 +688,10 @@ pub async fn create(
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
     // the same 409 inside the lock, where check and insert are one atomic step. A scoped token's
     // caps are re-checked beside it for the same reason (`Admission`).
+    // Issue #880: while the mothership drains for an update or restart a fresh launch queues
+    // instead of booting, like a colony admitted by the queue's own gate. The drain is read again
+    // inside the lock, beside `room`: a drain that begins between here and the claim must not let a
+    // boot slip through.
     let claimed = with_slot(
         &app.sessions,
         owner,
@@ -703,7 +707,7 @@ pub async fn create(
             }
             Admission::Claimed(Box::new(try_claim_session(
                 sessions,
-                room,
+                room && !app.drain.draining(),
                 session,
                 &repo,
                 req.issue,
@@ -797,8 +801,15 @@ pub async fn create(
             } else {
                 format!(", behind {waiting} already waiting")
             };
-            let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
-            app.session_log(&id, "info", format!("queued: {limits}{ahead}")).await;
+            // Issue #880: while the mothership drains for an update or restart, say so rather than
+            // naming limits that are not what is holding the colony.
+            let why = if app.drain.draining() {
+                "the mothership is draining for an update or restart, so no colony starts yet".to_string()
+            } else {
+                let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
+                format!("queued: {limits}")
+            };
+            app.session_log(&id, "info", format!("{why}{ahead}")).await;
         }
     } else {
         tokio::spawn(boot(app.clone(), id, false, None));

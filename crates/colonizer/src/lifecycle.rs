@@ -309,19 +309,38 @@ pub async fn recover(app: &Shared) {
         } else {
             // A snapshot already `Starting` is an orphaned boot — its owner died with the restart
             // and nothing else reaps `Starting` — so it falls through here instead of stranding
-            // the colony forever.
+            // the colony forever. Issue #880: rather than stop it, tear down the half-booted
+            // microVM and put it back in the queue with `interrupted_by_restart` on its log; a
+            // colony whose boot already made the worktree reboots on it (like a quota resume),
+            // one that never got that far boots fresh. Every other status here is a live colony
+            // whose microVM is gone, and is stopped as before.
+            let interrupted = fresh.status == SessionStatus::Starting;
             teardown_vm(app, &fresh).await;
             let at = fresh.status;
             let mut attention = None;
-            app.update_session(&fresh.id, |x| {
-                if !mark_stopped_after_restart(x, at) {
-                    return false;
-                }
-                attention = x.clear_attention();
-                true
-            })
-            .await;
+            let landed = app
+                .update_session(&fresh.id, |x| {
+                    let landed = if interrupted {
+                        mark_queued_after_restart(x, at)
+                    } else {
+                        mark_stopped_after_restart(x, at)
+                    };
+                    if landed {
+                        attention = x.clear_attention();
+                    }
+                    landed
+                })
+                .await
+                .is_some_and(|(_, landed)| landed);
             app.note_cleared_attention(&fresh.id, attention).await;
+            if landed && interrupted {
+                app.session_log(
+                    &fresh.id,
+                    "info",
+                    "the harness restarted while this colony was booting (interrupted_by_restart); queued to start again".into(),
+                )
+                .await;
+            }
         }
     }
 }
@@ -361,6 +380,20 @@ fn mark_stopped_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bo
     }
     x.status = SessionStatus::Stopped;
     x.error = Some(VM_GONE_AFTER_RESTART.into());
+    true
+}
+
+/// This pass's flip of a colony whose half-finished boot it has just torn down (issue #880): a
+/// compare-and-set against the status the re-read saw, so a publish that claimed the colony while
+/// the teardown was in flight keeps its claim. The colony goes back to `Queued` rather than being
+/// stranded `Stopped` — the queue restarts it, on the worktree its boot already made if it got
+/// that far. Returns whether the flip landed.
+fn mark_queued_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bool {
+    if x.status != at_teardown {
+        return false;
+    }
+    x.status = SessionStatus::Queued;
+    x.error = None;
     true
 }
 
@@ -1018,7 +1051,10 @@ pub async fn resume(
             if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
                 return Err(RESUME_CONFLICT.to_string()); // another resume won the race between the handler and the lock
             }
-            x.status = if room {
+            // Issue #880: while the mothership drains for an update or restart a resume queues
+            // rather than boots, so the restart cannot cut the boot short.
+            let admitted = room && !app.drain.draining();
+            x.status = if admitted {
                 SessionStatus::Starting
             } else {
                 SessionStatus::Queued
@@ -1041,7 +1077,7 @@ pub async fn resume(
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
             x.updated_at = Utc::now();
-            Ok(Some((x.clone(), room, waiting)))
+            Ok(Some((x.clone(), admitted, waiting)))
         },
     )
     .await;
@@ -1211,7 +1247,9 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         |sessions, room| {
             let x = sessions.iter_mut().find(|x| x.id == id)?;
             // The mesh and the local port survive on purpose: the microVM they point at never left.
-            if x.status != SessionStatus::Parked || !room {
+            // Issue #880: while the mothership drains, the warm resume is refused so the cold path
+            // queues the colony instead of prompting a runner a restart is about to cut off.
+            if x.status != SessionStatus::Parked || !room || app.drain.draining() {
                 return None;
             }
             x.status = SessionStatus::Running;
@@ -2744,6 +2782,25 @@ mod tests {
         assert_eq!(claimed.error, None, "and the restart's error is not painted over it");
     }
 
+    /// Issue #880: a colony whose half-finished boot this pass tore down goes back to `Queued`,
+    /// and the flip is a compare-and-set so a publish that claimed it meanwhile keeps its claim.
+    #[test]
+    fn a_restart_requeue_flip_lands_on_the_boot_it_tore_down_and_not_on_a_claim_that_moved() {
+        let mut boot = colony("acme", SessionStatus::Starting);
+        assert!(
+            mark_queued_after_restart(&mut boot, SessionStatus::Starting),
+            "the flip lands while the colony is still on the status the re-read saw"
+        );
+        assert_eq!(boot.status, SessionStatus::Queued, "the interrupted boot rejoins the queue");
+        assert_eq!(boot.error, None, "and carries no error");
+        let mut claimed = colony("acme", SessionStatus::Publishing);
+        assert!(
+            !mark_queued_after_restart(&mut claimed, SessionStatus::Starting),
+            "the flip refuses a colony that moved off its teardown status"
+        );
+        assert_eq!(claimed.status, SessionStatus::Publishing, "the publish keeps its claim");
+    }
+
     #[tokio::test]
     async fn recover_reaps_what_the_restart_orphaned_and_leaves_a_finished_colony_alone() {
         // Safe without KVM: the fixture colonies have no mesh address and no local port, so none
@@ -2770,10 +2827,15 @@ mod tests {
         let boot = app.session("boot").await.unwrap();
         assert_eq!(
             boot.status,
-            SessionStatus::Stopped,
-            "an orphaned boot is not stranded forever"
+            SessionStatus::Queued,
+            "an orphaned boot is requeued, not stranded"
         );
-        assert_eq!(boot.error.as_deref(), Some(VM_GONE_AFTER_RESTART), "the reaped boot says why");
+        assert_eq!(boot.error, None, "a requeued boot carries no error");
+        let boot_log = std::fs::read_to_string(app.session_dir("boot").join("harness.jsonl")).unwrap_or_default();
+        assert!(
+            boot_log.contains("interrupted_by_restart"),
+            "the requeue says why: {boot_log}"
+        );
         let push = app.session("push").await.unwrap();
         assert_eq!(push.status, SessionStatus::Failed, "an orphaned push is reaped");
         assert_eq!(

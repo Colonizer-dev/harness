@@ -1,4 +1,6 @@
 /api/activity                                        GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     POST   unauth=401    token=owner            activity=-
 /api/archive                                         GET    unauth=401    token=owner            activity=-
 /api/archive/retention                               POST   unauth=401    token=owner            activity=-
 /api/attention                                       GET    unauth=401    token=owner            activity=-
