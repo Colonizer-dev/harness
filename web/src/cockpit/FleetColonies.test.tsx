@@ -1,13 +1,13 @@
 // The fleet colony view (issue #689), rendered through react-dom/server like the other cockpit
 // tests: no jsdom, assertions read the markup string. The view is presentational — rows are built by
-// fleetColonies.ts and handed in — so these check the table, the per-host totals, and the two link
+// fleetColoniesModel.ts and handed in — so these check the table, the per-host totals, and the two link
 // shapes: a local `?colony=` link and a member's own URL.
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { FleetHistoryEntry, FleetHost, Session } from "../types";
 import { FleetColoniesView } from "./FleetColonies";
-import { fromImported, fromSession } from "./fleetColonies";
+import { fromImported, fromSession } from "./fleetColoniesModel";
 
 const session = (o: Partial<Session> = {}): Session => ({
   id: "s1", repo: "acme/webshop", org: "acme", issue: 42, issue_title: "Checkout fails for guest users",

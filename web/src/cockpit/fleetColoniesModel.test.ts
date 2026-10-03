@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import type { FleetHistoryEntry, FleetHost, Session } from "../types";
 import { dayKeyOf } from "./dash";
-import { filterColonies, fromImported, fromSession, hostOptions, mergeFleetColonies, totalsBy, waitingOn } from "./fleetColonies";
+import { filterColonies, fromImported, fromSession, hostOptions, mergeFleetColonies, totalsBy, waitingOn } from "./fleetColoniesModel";
 
 const session = (o: Partial<Session> = {}): Session => ({
   id: "s1", repo: "acme/webshop", org: "acme", issue: 42, issue_title: "Checkout fails for guest users",
