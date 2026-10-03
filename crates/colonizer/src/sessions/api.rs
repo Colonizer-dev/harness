@@ -530,6 +530,13 @@ pub(crate) async fn submit_answer(
 ) -> Result<(), AnswerError> {
     let s = app.session(id).await.ok_or(AnswerError::NoSession)?;
     let suspended = s.suspended.is_some();
+    // A colony parked by the hold timeout still holds the question it parked on (issue #876): an
+    // answer resumes it with the answer. Checked before the not-accepting refusal below, which a
+    // parked colony would otherwise hit.
+    if !accepts_commands(s.status) && !suspended && crate::queue::hold_parked(&s) && s.parked.as_ref().is_some_and(|p| p.question_risk.is_some())
+    {
+        return answer_parked(app, id, rt, answer, external, via).await;
+    }
     if !accepts_commands(s.status) && !suspended {
         return Err(AnswerError::NotAccepting(s.status));
     }
@@ -607,11 +614,30 @@ pub(crate) async fn submit_answer(
 /// question as it was asked, then the choices made, then the free-text note. Pure, so tests pin the
 /// wording the agent reads.
 fn answer_prompt(questions: &[Value], answers: &Value, response: &str) -> String {
-    let mut lines = vec![
+    answer_body(
         "Earlier you asked the user something, and this colony was suspended while it waited (its \
-         microVM was stopped to free its slot). The conversation continues now — this is their answer."
-            .to_string(),
-    ];
+         microVM was stopped to free its slot). The conversation continues now — this is their answer.",
+        questions,
+        answers,
+        response,
+    )
+}
+
+/// The note a colony parked by the hold timeout resumes on when its answer arrives (issue #876): the
+/// same replay, opened with what happened instead of a suspension's wording.
+fn parked_answer_prompt(questions: &[Value], answers: &Value, response: &str) -> String {
+    answer_body(
+        "While you were parked, your question was answered. This is the person's answer.",
+        questions,
+        answers,
+        response,
+    )
+}
+
+/// The shared body of the two answer prompts above: the opening line, one `Q:`/`A:` pair per question,
+/// then the free-text note when there is one.
+fn answer_body(intro: &str, questions: &[Value], answers: &Value, response: &str) -> String {
+    let mut lines = vec![intro.to_string()];
     let given = |text: &str| -> Option<String> {
         let map = answers.as_object()?;
         match map.get(text) {
@@ -735,6 +761,90 @@ async fn hold_answer(
         None => return Err(AnswerError::NoSession),
     }
     Ok(())
+}
+
+/// The answer path for a colony parked by the hold timeout (issue #876): the question it parked on is
+/// still the one on the record, so the answer is kept as the resume note and the colony resumes at
+/// once, queued when no slot is free. The question is closed in the event log, as a suspended
+/// colony's answer is, so a restart's replay finds none still open.
+async fn answer_parked(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    answer: AnswerCommand,
+    external: Option<&str>,
+    via: Option<crate::auth::Via>,
+) -> Result<(), AnswerError> {
+    let open = rt.open_question().await;
+    // An answer that says what it saw must match the question still on the runtime, exactly as the
+    // suspended path checks — ids alone do not name one question.
+    let open_matches = open.as_ref().is_some_and(|(open_id, questions, _)| {
+        open_id == &answer.question_id && answer.questions.as_ref().is_none_or(|saw| saw == questions)
+    });
+    if !open_matches {
+        return Err(if open.is_some() {
+            AnswerError::Stale
+        } else {
+            AnswerError::NoQuestion
+        });
+    }
+    let (_, questions, _) = open.expect("open_matches checked the question");
+    // The free-text note carries the external-input marker exactly as the live path's `forward` does.
+    let response = match external {
+        Some(name) => external_text(name, answer.response.as_str().unwrap_or_default()),
+        None => answer.response.as_str().unwrap_or_default().to_string(),
+    };
+    let note = parked_answer_prompt(&questions, &answer.answers, &response);
+    // Conditional on purpose: a backoff resume or an operator's press that claimed the colony
+    // between the caller's snapshot and this write must not hang a note on a colony that is no
+    // longer parked — `false` says exactly that happened.
+    let stored = app
+        .update_session(id, |x| {
+            if !crate::queue::hold_parked(x) {
+                return false;
+            }
+            x.resume_note = Some(note.clone());
+            true
+        })
+        .await;
+    match stored {
+        Some((_x, true)) => {
+            // The question is closed as of now, in the same terms the runner closes it, so a
+            // restart's replay finds no question still open. The answers travel too, so the
+            // transcript keeps what was chosen.
+            crate::validation::emit_chain(
+                app,
+                id,
+                json!({
+                    "type": "question_answered",
+                    "question_id": answer.question_id,
+                    "answers": answer.answers,
+                    "response": response,
+                }),
+            )
+            .await;
+            *rt.open_question.lock().await = None;
+            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+            rt.activity.lock().await.question_since = None;
+            if let Some(s) = app.session(id).await {
+                crate::activity::record_answer(app, &s, via.clone()).await;
+            }
+            // The answer settles the question the same way a live one does (issue #744).
+            spawn_resolved(app, id);
+            app.session_log(
+                id,
+                "info",
+                "answer received while parked; resuming the colony with it".into(),
+            )
+            .await;
+            // 409/404 back means the park is no longer this answer's to resume — a resume won the
+            // race — and the answer stays on the record for that resume's boot to deliver.
+            let _ = crate::lifecycle::resume(State(app.clone()), Path(id.to_string()), via.map(axum::Extension)).await;
+            Ok(())
+        }
+        Some((x, false)) => Err(AnswerError::NotAccepting(x.status)),
+        None => Err(AnswerError::NoSession),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1504,6 +1614,50 @@ mod tests {
             submit_answer(&app, "abc", &rt, parsed, None, None, true).await,
             Err(AnswerError::NotAccepting(_))
         ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An answer that arrives while a colony is parked by the hold timeout (issue #876) is kept as the
+    /// resume note — the person's answer in place of the backoff's wording — and the colony resumes.
+    #[tokio::test]
+    async fn an_answer_while_parked_resumes_the_colony_with_it() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Parked).await;
+        let rt = app.runtime("abc").await;
+        app.update_session("abc", |x| {
+            x.git_admin_dir = Some("git".into());
+            x.parked = Some(crate::sessions::Park {
+                at: chrono::Utc::now(),
+                reason: crate::queue::HOLD_TIMEOUT_REASON.into(),
+                resets_at: None,
+                vm_kept: false,
+                question_risk: Some(QuestionRisk::WorkspaceWrite),
+            });
+        })
+        .await;
+        // Every slot taken, so the resume queues rather than booting under the test.
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            app.sessions.write().await.push(f);
+        }
+        let asked = vec![json!({"question": "Push now?", "options": [{"label": "yes"}, {"label": "no"}]})];
+        *rt.open_question.lock().await = Some(("q-1".into(), asked.clone(), QuestionRisk::WorkspaceWrite));
+        let parsed = AnswerCommand::parse(&json!({
+            "question_id": "q-1",
+            "answers": {"Push now?": "yes"},
+            "questions": asked,
+        }))
+        .unwrap();
+        assert!(
+            submit_answer(&app, "abc", &rt, parsed, None, None, true).await.is_ok(),
+            "a parked colony accepts the answer and resumes"
+        );
+        let s = app.session("abc").await.unwrap();
+        let note = s.resume_note.as_deref().unwrap_or_default();
+        assert!(note.contains("While you were parked, your question was answered"), "the parked wording: {note}");
+        assert!(note.contains("Push now?"), "the note replays the question: {note}");
+        assert_eq!(s.status, SessionStatus::Queued, "the colony is on its way back, not left parked");
+        assert!(s.parked.is_none(), "the park had its say and goes");
         let _ = std::fs::remove_dir_all(root);
     }
 

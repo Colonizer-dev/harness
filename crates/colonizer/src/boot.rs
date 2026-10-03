@@ -716,6 +716,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if resume && let Some(story) = resume_digest(&dir).await {
         prompt.push_str(&story);
     }
+    // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
+    // for yourself" or an answer that arrived while the colony was parked — rides the brief. Cleared
+    // once the runner is up, below; a warm resume hands it over on its own prompt instead.
+    if let Some(note) = s.resume_note.as_deref() {
+        prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
+    }
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -1688,16 +1694,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
-    // stays for the next resume; a stop cleared it under its own claim.
-    let delivered = app.update_session(id, |x| x.pending_answer.take().is_some()).await;
-    if let Some((s, true)) = delivered {
-        app.session_log(
-            id,
-            "info",
-            "held answer delivered: the agent resumes its session with it".into(),
-        )
+    // stays for the next resume; a stop cleared it under its own claim. A resume note (issue #876)
+    // is spent the same way, for the same reason.
+    let delivered = app
+        .update_session(id, |x| {
+            let answer = x.pending_answer.take().is_some();
+            let note = x.resume_note.take().is_some();
+            (answer, note)
+        })
         .await;
-        crate::activity::record_restored(app, &s).await;
+    if let Some((s, (answered, noted))) = delivered {
+        if answered {
+            app.session_log(
+                id,
+                "info",
+                "held answer delivered: the agent resumes its session with it".into(),
+            )
+            .await;
+            crate::activity::record_restored(app, &s).await;
+        }
+        if noted {
+            app.session_log(id, "info", "resume note delivered to the agent".into()).await;
+        }
     }
     Ok(())
 }

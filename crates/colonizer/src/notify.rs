@@ -86,6 +86,9 @@ impl Event {
         let what = match self {
             Event::Question => "needs an answer",
             Event::Attention("nudges_exhausted") => "is out of nudges",
+            Event::Attention(crate::queue::HOLD_UNANSWERED_REASON) => {
+                "is parked on a question too risky to answer on its own"
+            }
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",
@@ -154,7 +157,7 @@ pub fn decide(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec
         events.push(Event::Question);
     }
     if settings.on_attention {
-        for reason in ["stalled", "nudges_exhausted"] {
+        for reason in ["stalled", "nudges_exhausted", crate::queue::HOLD_UNANSWERED_REASON] {
             if now.attention.as_deref() == Some(reason) && last.attention.as_deref() != Some(reason) {
                 events.push(Event::Attention(reason));
             }
@@ -968,6 +971,22 @@ mod tests {
             "autopilot's flag is not the watchdog's"
         );
         assert!(edge(Some("autopilot_held"), None).is_empty(), "clearing announces nothing");
+    }
+
+    /// An above-ceiling hold-parked colony announces exactly once (issue #876): the reason change is
+    /// the edge a person hears about — held, it stays quiet, and clearing it announces nothing.
+    #[test]
+    fn a_park_too_risky_to_answer_announces_once() {
+        let s = settings();
+        let parked = seen(SessionStatus::Parked, Some(crate::queue::HOLD_TIMEOUT_REASON));
+        let raised = seen(SessionStatus::Parked, Some(crate::queue::HOLD_UNANSWERED_REASON));
+        assert_eq!(
+            decide(&s, Some(&parked), &raised),
+            vec![Event::Attention(crate::queue::HOLD_UNANSWERED_REASON)],
+            "the raised reason is the edge"
+        );
+        assert!(decide(&s, Some(&raised), &raised).is_empty(), "held, it does not repeat");
+        assert!(decide(&s, Some(&raised), &parked).is_empty(), "clearing announces nothing");
     }
 
     #[test]

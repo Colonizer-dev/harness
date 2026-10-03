@@ -47,9 +47,9 @@ impl AgentState {
 /// runner's — reads as [`QuestionRisk::WorkspaceWrite`], the default ceiling, and a value outside
 /// the vocabulary — a future runner's — reads as [`QuestionRisk::Unknown`], which is ordered above
 /// every known class and so is never answered automatically.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum QuestionRisk {
+pub enum QuestionRisk {
     ReadOnly,
     WorkspaceWrite,
     PublishAffecting,
