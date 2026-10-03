@@ -1776,10 +1776,7 @@ mod tests {
     fn the_watchdog_turn_end_tally_is_counted_and_reported() {
         let before = watchdog_turn_ends();
         note_watchdog_turn_end();
-        assert!(
-            watchdog_turn_ends() > before,
-            "the counter moves"
-        );
+        assert!(watchdog_turn_ends() > before, "the counter moves");
         let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
         let name = names(&batch)
             .into_iter()
