@@ -25,10 +25,10 @@ clap_mangen = "0.3"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
 # Cratefield's module-telemetry (Cratefield/harness#413): the payload grammar the usage batch is
-# validated with (`payload::Batch::parse`) and the consent helpers. Not on crates.io, so a git
-# dependency pinned to a rev; the wire contract is docs/usage-data.md. The collector half runs on
+# validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
+# colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
 # the venture's side; this crate composes the client half only (docs/usage-data.md).
-cratefield-module-telemetry = "0.2"
+cratefield-module-telemetry = "0.2.1"
 futures-util = "0.3.34"
 # Response body frame iteration, so tunnelled answers stream back to the relay in chunks (remote.rs).
 http-body-util = "0.1"
