@@ -1129,6 +1129,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             p.output_per_mtok,
             p.cache_read_per_mtok,
             p.cache_write_per_mtok,
+            p.thinking_per_mtok,
         ]
         .iter()
         .all(|rate| valid_price(*rate))
@@ -1555,6 +1556,23 @@ mod tests {
         assert!(!valid_price(-0.01));
         assert!(!valid_price(f64::NAN));
         assert!(!valid_price(f64::INFINITY));
+    }
+
+    /// Every rate the save checks shares that refusal, thinking included (#622): the gateway bills
+    /// thinking tokens through `thinking_per_mtok`, so a negative one would subtract from the budget.
+    #[tokio::test]
+    async fn a_negative_thinking_rate_is_refused_like_the_other_prices() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.pricing = Some(Pricing {
+            thinking_per_mtok: -0.01,
+            ..Default::default()
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("pricing rates"), "{}", err.message());
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
