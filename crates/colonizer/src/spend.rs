@@ -404,6 +404,7 @@ fn usage_rows(day: &str, s: &Session, delta: &TurnDelta) -> Vec<SpendRow> {
         if let Some(cost) = delta.cost {
             rows.push(colony_row(
                 SpendRow {
+                    ts: Utc::now().to_rfc3339(),
                     day: day.to_string(),
                     org: s.org.clone(),
                     kind: "usage".into(),
@@ -721,6 +722,33 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, None);
         assert_eq!(rows[0].cost_usd, Some(1.0));
+    }
+
+    #[test]
+    fn every_usage_row_carries_a_parseable_timestamp() {
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "col-1".into();
+        // A multi-model turn and a cost-only turn both file the un-modeled cost row.
+        let delta = turn_deltas(
+            None,
+            None,
+            Some(3.0),
+            Some(&json!({"a": {"input_tokens": 10}, "b": {"input_tokens": 20}})),
+        );
+        let mut rows = usage_rows("2026-09-20", &s, &delta);
+        let flat = json!({"a": {"input_tokens": 5}});
+        let only_cost = turn_deltas(Some(1.0), Some(&flat), Some(2.0), Some(&flat));
+        rows.extend(usage_rows("2026-09-20", &s, &only_cost));
+
+        for row in &rows {
+            assert!(!row.ts.is_empty(), "every row names when it was filed");
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&row.ts).is_ok(),
+                "ts is RFC 3339 like the ledger's other rows: {}",
+                row.ts
+            );
+            assert_eq!(row.day, "2026-09-20", "the timestamp never moves a row's filed day");
+        }
     }
 
     #[tokio::test]

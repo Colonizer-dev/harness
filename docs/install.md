@@ -263,7 +263,7 @@ What the mothership keeps in the config directory:
 | `modules.json` | Module settings, edited in Settings → Modules |
 | `orgs.json`, `known-orgs.json` | Per-org overrides, and the orgs the cockpit has seen |
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
-| `github-token`, `claude-token`, `claude-accounts.json` | Saved GitHub and Claude credentials |
+| `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
 | `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
@@ -395,8 +395,7 @@ keyed by the SHA-256 of its value, and writes each one as a `.enc` file beside w
 be, removing the plaintext. Unset or blank, secrets are written in plaintext (0600). It protects a
 copied, synced or backed-up config directory, not a machine where something runs as you, since that can
 read the variable too. Use a long random value (32 or more random bytes): the single SHA-256 does no key
-stretching. Without the key, or with the wrong one, an encrypted secret counts as missing. The README's
-[Configuration](https://github.com/Colonizer-dev/harness#configuration) section has the rest: rotation,
+stretching. Without the key, or with the wrong one, an encrypted secret counts as missing. [configuration.md](configuration.md#colonizer_master_key) has the rest: rotation,
 the system keychain, and the per-colony budgets.
 
 ## Updating

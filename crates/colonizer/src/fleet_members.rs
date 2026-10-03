@@ -1091,6 +1091,7 @@ mod tests {
                 axum::routing::get(|| async { axum::Json(json!({"hosts": []})) }),
             )
             .merge(routes())
+            .merge(crate::fleet_policy::routes())
             .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
             .with_state(app.clone())
     }
@@ -1399,6 +1400,40 @@ mod tests {
         // The token form refuses the scope: the pairing machinery is its only minter.
         let err = form_token(&app, "sneak", "fleet").await.unwrap_err();
         assert!(err.contains("read, operate, launch"), "{err}");
+    }
+
+    /// The fleet network policy (#690): the owner sets the egress floor, a fleet token may read it,
+    /// and a mothership that is itself a member may not replace it (409).
+    #[tokio::test]
+    async fn a_fleet_token_reads_the_fleet_policy_but_a_member_cannot_replace_it() {
+        let (_root, app, router, owner) = rig();
+        let body = json!({"egress": {"mode": "allowlist", "allow": ["api.github.com"]}}).to_string();
+        let (status, _) = ask(&router, Method::PUT, "/api/fleet/policy", owner.as_deref(), Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "the owner sets the fleet's egress floor");
+
+        let (token, _id) = app.api_tokens.create_fleet_token("worker").await.unwrap();
+        let (status, answer) = ask(&router, Method::GET, "/api/fleet/policy", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK, "a fleet token reads the floor");
+        assert_eq!(answer["egress"]["mode"], "allowlist");
+        assert_eq!(answer["egress"]["allow"][0], "api.github.com");
+
+        // A mothership that has joined a fleet may not replace the floor its owner set.
+        app.fleet_members
+            .set_membership_for_tests(Some(crate::fleet_sync::Target {
+                owner_url: "http://owner.example".into(),
+                member_id: "mem_us".into(),
+                token: "col_ours".into(),
+            }))
+            .await;
+        let (status, _) = ask(
+            &router,
+            Method::PUT,
+            "/api/fleet/policy",
+            owner.as_deref(),
+            Some(json!({}).to_string()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "a member may not set the fleet policy");
     }
 
     /// Removing a member from the cockpit and a member's own leave both revoke the token and drop

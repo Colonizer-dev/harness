@@ -88,7 +88,7 @@ provider-key save (`PUT /api/providers/{id}`) answers the refusal with a 503 who
 both variables. The rule covers everything that goes through the secret writer: provider keys, the
 GitHub token, the Claude credential, colony secrets, the notification signing secret, the memory,
 voice and push keys. This is an extra mothership-side layer only; colony-facing mechanics are
-unchanged, and are the ones the [trust model](../README.md#trust-model) names: per-colony gateway
+unchanged, and are the ones the [trust model](trust-model.md) names: per-colony gateway
 tokens, placeholders swapped for the real credential at the TLS edge, agentd's per-session bearer
 token, 0600 files.
 
@@ -106,8 +106,9 @@ same operation as recovery — re-entering — because there is no re-key comman
 1. Set the new `COLONIZER_MASTER_KEY` and restart the mothership.
 2. Re-enter each credential in Settings. Every save writes a fresh `.enc` under the new key and
    removes the stale one, so no separate cleanup is needed: the provider keys (`provider-keys/`),
-   the GitHub token (`github-token`), the Claude credential (`claude-token`, or
-   `claude-accounts/<account>` when you use several), colony secrets (`colony-secrets/<ENV>`),
+   the GitHub token (`github-token`), the Claude credential (`claude-accounts/<account>` — the
+   token routes save into the default account, and a pre-accounts `claude-token` is migrated into
+   `claude-accounts/default`), colony secrets (`colony-secrets/<ENV>`),
    the notification signing secret (`notify-secret`), the mem0 key (`memory-keys/mem0`), the
    voice keys (`voice-keys/<provider>`) and the web-push VAPID key (`push-vapid-key`).
 3. Alternatively, delete the stale `.enc` files under the config directory first and then

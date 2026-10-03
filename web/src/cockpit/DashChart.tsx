@@ -849,6 +849,17 @@ export function ColonyRow({
             {session.placement}
           </span>
         )}
+        {isLive(session.status) && session.preview_port != null && (
+          <a
+            href={`/api/previews/${session.id}/`}
+            target="_blank"
+            rel="noopener"
+            title={`Open the dev-server preview on guest port ${session.preview_port}`}
+            className="text-[11.5px] text-accent hover:underline"
+          >
+            preview
+          </a>
+        )}
         {parkLine != null && <span className="text-[11.5px] leading-tight text-faint">{parkLine}</span>}
         {parkLine != null && onResume && (
           <button

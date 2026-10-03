@@ -144,6 +144,22 @@ export interface StallInfo {
 
 export type CiState = "success" | "failure" | "pending" | "no_checks";
 
+/**
+ * One model setting the boot resolved away from what it named because the gateway would have refused
+ * the model for this colony's sensitivity class (issue #704) — a restricted colony's subagent model
+ * on an untrusted provider, for instance.
+ */
+export interface ModelSubstitution {
+  /** The model setting's name: `model`, `subagent_model`, `background_model` or `small_model`. */
+  setting: string;
+  /** The model the setting named, which the gateway would have refused. */
+  from: string;
+  /** The eligible model the colony runs on instead, or "the orchestrator's model" when cleared. */
+  to: string;
+  /** Why the gateway would have refused `from`, e.g. `"zai" is not marked trusted`. */
+  reason: string;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -174,6 +190,8 @@ export interface Session {
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
@@ -276,6 +294,12 @@ export interface Session {
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
   recent_events?: RecentEvent[] | null;
+  /**
+   * Model settings the boot replaced with an eligible one because the gateway would have refused
+   * what they named for this colony's sensitivity class (issue #704); absent when every model
+   * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
+   */
+  model_substitutions?: ModelSubstitution[];
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -533,6 +557,18 @@ export interface FleetHost {
   health: FleetHostHealth;
   /** Whether the peer can boot a microVM at all (issue #688); false means colonies cannot start there. Absent from an older peer build, null on a platform where KVM does not apply. */
   kvm?: boolean | null;
+  /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
+  fleet_sync?: PeerSync | null;
+}
+
+/** A member's `fleet_sync` block of its reduced `/api/status` (issue #764): where its history push stands. `backlog_rows` rises as colonies finish and falls as the drain sends them, so it moves on a push. */
+export interface PeerSync {
+  state: string;
+  backlog_rows: number;
+  /** Seconds the oldest unsent row has waited; null when nothing is backed up. */
+  oldest_unsent_age_s?: number | null;
+  last_error_class?: string | null;
+  consent: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +694,8 @@ export interface FleetHistoryRecord {
   summary: string | null;
   error: string | null;
   cost_usd: number | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
   model_tier?: string | null;
   agent: string;
   created_at: string;
