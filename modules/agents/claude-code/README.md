@@ -35,7 +35,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_HEADROOM` | off | Model requests pass through Headroom inside the colony (`headroom.mjs`) |
 | `COLONIZER_JEV_COMPACTION`, `COLONIZER_JEV_KEEP_THRESHOLD`, `COLONIZER_JEV_PRESERVE_RECENT` | off, 0.5, 6 | Compaction by Jev score instead of Claude Code's summary |
 | `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
-| `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy above |
+| `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy below |
 | `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON; narrows the install layer, is narrowed by the repo file |
 | `COLONIZER_FINDINGS`, `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED`, `COLONIZER_RESUME_SESSION`, `COLONIZER_IMAGE` | set by the mothership | The findings tool, a loop colony's tools, the Claude Code session to resume (a suspended colony picks up where it stopped), and the image named in the prompt |
 
