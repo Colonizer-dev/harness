@@ -33,7 +33,8 @@ the API token never appears on it or in any URL.
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file
-  (`<config_dir>/api-token`) and ignores `--host` and `--token-file`.
+  (`<config_dir>/api-token`) and refuses `--host` and `--token-file` (exit 2): it is local on
+  purpose.
 - When the mothership is bound to `0.0.0.0` or `[::]`, the link points at loopback (`127.0.0.1` or
   `[::1]`). To reach the cockpit from another device, use [remote access](#remote-access) or your
   own TLS proxy or SSH tunnel.
@@ -123,6 +124,7 @@ With **All workspaces** chosen, Overview shows everything at once:
   red-team buttons ([Red team](#red-team)),
 - **Colonies**: every colony in a table,
 - a system strip about the host,
+- the fleet panel and the [fleet colony list](fleet.md#the-fleet-colony-list), when there is a fleet,
 - the [storage panel](#storage).
 
 The range picker switches between 7, 30 and 90 days. **Compare** overlays the previous period of
@@ -681,8 +683,9 @@ Each setting can follow the global default or be overridden for this workspace:
 - **Models**: **Agent module** (which agent runs this workspace's colonies), Orchestrator, Subagents
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
-  several are early: Pi cannot ask you questions, and the Codex and ACP agent binaries are not
-  yet staged into the colony image. Each module's description in Settings, Modules says what it
+  several are early: Pi cannot ask you questions, and the Hermes and ACP-grok binaries are not
+  yet staged into the colony image, while Codex, Grok Build and the ACP gemini preset fetch their
+  pinned CLI on first boot. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
   colony.

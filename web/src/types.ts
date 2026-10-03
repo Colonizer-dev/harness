@@ -144,6 +144,22 @@ export interface StallInfo {
 
 export type CiState = "success" | "failure" | "pending" | "no_checks";
 
+/**
+ * One model setting the boot resolved away from what it named because the gateway would have refused
+ * the model for this colony's sensitivity class (issue #704) — a restricted colony's subagent model
+ * on an untrusted provider, for instance.
+ */
+export interface ModelSubstitution {
+  /** The model setting's name: `model`, `subagent_model`, `background_model` or `small_model`. */
+  setting: string;
+  /** The model the setting named, which the gateway would have refused. */
+  from: string;
+  /** The eligible model the colony runs on instead, or "the orchestrator's model" when cleared. */
+  to: string;
+  /** Why the gateway would have refused `from`, e.g. `"zai" is not marked trusted`. */
+  reason: string;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -172,6 +188,8 @@ export interface Session {
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
@@ -274,6 +292,12 @@ export interface Session {
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
   recent_events?: RecentEvent[] | null;
+  /**
+   * Model settings the boot replaced with an eligible one because the gateway would have refused
+   * what they named for this colony's sensitivity class (issue #704); absent when every model
+   * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
+   */
+  model_substitutions?: ModelSubstitution[];
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -529,6 +553,18 @@ export interface FleetHost {
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
+  /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
+  fleet_sync?: PeerSync | null;
+}
+
+/** A member's `fleet_sync` block of its reduced `/api/status` (issue #764): where its history push stands. `backlog_rows` rises as colonies finish and falls as the drain sends them, so it moves on a push. */
+export interface PeerSync {
+  state: string;
+  backlog_rows: number;
+  /** Seconds the oldest unsent row has waited; null when nothing is backed up. */
+  oldest_unsent_age_s?: number | null;
+  last_error_class?: string | null;
+  consent: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +690,8 @@ export interface FleetHistoryRecord {
   summary: string | null;
   error: string | null;
   cost_usd: number | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
   model_tier?: string | null;
   agent: string;
   created_at: string;
@@ -799,8 +837,8 @@ export interface StorageSummary {
   free_bytes: number | null;
   /** Free space is below the floor: the queue is not starting new colonies (running ones keep running). */
   admission_paused: boolean;
-  /** Data-dir usage by category. `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
-  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; microsandbox_bytes: number | null };
+  /** Data-dir usage by category. `archive_bytes` is the log archive under `<data_dir>/archive`; `microsandbox_bytes` is microsandbox's whole home directory (holding the shared OCI image cache) — informational, never offered for cleanup; null when unmeasured. */
+  totals: { worktrees_bytes: number; repos_bytes: number; sessions_bytes: number; archive_bytes: number; microsandbox_bytes: number | null };
   /** Finished colonies whose work is pushed (a PR, or no_changes) and not yet cleaned up; `due` means past the auto-reclaim retention window. */
   reclaimable: Array<{ id: string; status: SessionStatus; pr_url: string | null; bytes: number; updated_at: string; due: boolean }>;
   /** Terminal colonies with no PR: listed for a person, never auto-deleted. */
@@ -988,6 +1026,16 @@ export interface ModelProvider extends ProviderLimits {
   pricing?: ProviderPricing | null;
   /** null = no probe: the first sign of an exhausted plan stays the colonies failing over. */
   quota?: ProviderQuotaProbe | null;
+  /**
+   * Whether the operator vetted this connection to carry restricted-sensitivity work — secrets,
+   * `.env` files, infra config (issue #472). Defaults to false: a connection is not trusted with a
+   * colony's secrets just because it is configured.
+   */
+  trusted: boolean;
+  /** Canonical model id → the name sent on the wire (issue #295). Empty serves any canonical as-is. */
+  model_map?: Record<string, string>;
+  /** Claude Code tool names the gateway strips from every request through this connection (issue #295). */
+  disabled_tools?: string[];
   /** Live counts across all colonies. */
   in_flight: number;
   queued: number;
@@ -1086,6 +1134,12 @@ export interface SaveProviderRequest {
   queue_timeout_secs?: number | null;
   context_tokens?: number | null;
   fallback_model?: string | null;
+  /** Whether the connection may carry restricted-sensitivity work (issue #472). Omitted keeps the saved mark. */
+  trusted?: boolean;
+  /** Canonical model id → wire name (issue #295); omitted keeps the saved map, `{}` clears it. */
+  model_map?: Record<string, string>;
+  /** Claude Code tools stripped through this connection (issue #295); omitted keeps the list, `[]` clears it. */
+  disabled_tools?: string[];
 }
 
 /** GET /api/providers/{id}/health */
@@ -1690,6 +1744,29 @@ export interface FindingRecord {
   review_session?: string;
   verdict?: "pass" | "fail";
   pr?: string;
+}
+
+/** One file a colony changed, from GET /api/sessions/{id}/diff (issue #611): its path and line counts. */
+export interface SessionDiffFile {
+  path: string;
+  added: number;
+  removed: number;
+}
+
+/**
+ * Everything a colony changed against its base branch (GET /api/sessions/{id}/diff, issue #611):
+ * the per-file counts, their totals, and the unified diff text, capped at 200 KiB (`truncated` says
+ * when). The cockpit's pull request card reads only `files`; the CLI and MCP read the text.
+ */
+export interface SessionDiff {
+  id: string;
+  repo: string;
+  base: string | null;
+  files: SessionDiffFile[];
+  added: number;
+  removed: number;
+  diff: string;
+  truncated: boolean;
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ use crate::{
     modules::AgentModule,
     orgs::effective_agent,
     provider_quota,
+    sensitivity::{self, ProviderMark, Sensitivity, SensitivityOverrides},
     sessions::agent_env,
     util::{delete_secret, read_secret, write_secret},
 };
@@ -756,6 +757,83 @@ fn provider_prefix(model: &str) -> Option<&str> {
     rest.all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)).then_some(prefix)
 }
 
+/// What to do, at boot, about a model setting whose provider the gateway would refuse for the task's
+/// sensitivity class (issue #704), resolved with the gateway's own rule so a booted colony is one it
+/// will carry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ModelFix {
+    /// The gateway would carry the model, or it names no configured provider (no route of ours
+    /// serves it): leave the setting alone.
+    Keep,
+    /// The gateway would refuse the model; run on `model` instead, or — for `None` — clear the
+    /// setting so it inherits the harness default.
+    Substitute { model: Option<String>, reason: String },
+    /// Refused, and nothing eligible exists to fall back to: the caller leaves it and warns.
+    NoFallback { reason: String },
+}
+
+/// The configured provider a `<provider>/<model>` setting names, or `None` for a bare Claude model or
+/// an unconfigured prefix — neither is a route the gateway serves, so neither is gated.
+fn gated_provider<'a>(providers: &'a [Provider], model: &str) -> Option<&'a Provider> {
+    provider_prefix(model).and_then(|prefix| providers.iter().find(|p| p.id == prefix))
+}
+
+/// Whether the gateway would carry `model` for a task of this class (see [`gated_provider`]).
+pub(crate) fn model_eligible(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+) -> bool {
+    let Some(provider) = gated_provider(providers, model) else {
+        return true;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides)
+}
+
+/// Resolve one model setting at boot (issue #704). When the gateway would refuse the model, the fix
+/// is `fallback` if eligible; a blank `fallback` clears the setting (inheriting the harness default)
+/// and a non-blank ineligible one is [`ModelFix::NoFallback`] rather than an invented name.
+pub(crate) fn model_fix(
+    sensitivity: Sensitivity,
+    overrides: Option<&SensitivityOverrides>,
+    providers: &[Provider],
+    model: &str,
+    fallback: &str,
+) -> ModelFix {
+    let Some(provider) = gated_provider(providers, model) else {
+        return ModelFix::Keep;
+    };
+    let mark = ProviderMark::of(provider.trusted, provider.vetted);
+    if sensitivity::eligible(sensitivity, mark, provider.vendor.as_deref(), overrides) {
+        return ModelFix::Keep;
+    }
+    let reason = refusal_reason(sensitivity, overrides, provider);
+    let replacement = if fallback.is_empty() {
+        None
+    } else if model_eligible(sensitivity, overrides, providers, fallback) {
+        Some(fallback.to_string())
+    } else {
+        return ModelFix::NoFallback { reason };
+    };
+    ModelFix::Substitute {
+        model: replacement,
+        reason,
+    }
+}
+
+/// Why the gateway would refuse this model, in its own terms: the mark can be the blocker, or — when
+/// the org pins vendors — the vendor can be, even though the mark already meets the bar.
+fn refusal_reason(sensitivity: Sensitivity, overrides: Option<&SensitivityOverrides>, provider: &Provider) -> String {
+    let required = sensitivity::required_mark(sensitivity, overrides);
+    if ProviderMark::of(provider.trusted, provider.vetted) < required {
+        format!("\"{}\" is not marked {}", provider.id, required.as_str())
+    } else {
+        format!("\"{}\" is not on this org's restricted-vendor list", provider.id)
+    }
+}
+
 /// The pricing the gateway would actually charge for `model`, if any provider's id prefixes it in
 /// `<provider>/<model>` form and that provider has pricing configured. `None` for a bare model name
 /// (no gateway involved) or a provider with no pricing on file.
@@ -894,6 +972,7 @@ fn describe(app: &App, provider: &Provider, envs: &[Map<String, Value>]) -> Valu
         "pricing": provider.pricing,
         "model_map": provider.model_map,
         "disabled_tools": provider.disabled_tools,
+        "trusted": provider.trusted,
         "quota": provider.quota,
         "normalize_cache_ttl": provider.normalize_cache_ttl,
         "in_flight": in_flight,
@@ -1128,6 +1207,7 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
             p.output_per_mtok,
             p.cache_read_per_mtok,
             p.cache_write_per_mtok,
+            p.thinking_per_mtok,
         ]
         .iter()
         .all(|rate| valid_price(*rate))
@@ -1424,6 +1504,101 @@ mod tests {
         }
     }
 
+    /// A restricted colony's model on a provider nobody marked trusted is rerouted onto the eligible
+    /// fallback (issue #704) — and the eligible, bare-Claude and ungated cases are left alone.
+    #[test]
+    fn a_model_on_an_untrusted_provider_is_rerouted_for_restricted_work() {
+        let mut trusted = provider("trustedai");
+        trusted.trusted = true;
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![trusted, untrusted];
+
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                None,
+                &all,
+                "zai/glm-5.3-flash",
+                "trustedai/claude-sonnet-5"
+            ),
+            ModelFix::Substitute {
+                model: Some("trustedai/claude-sonnet-5".into()),
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+        // A bare Claude model is Anthropic's own, served without a provider entry: never gated.
+        assert_eq!(model_fix(Sensitivity::Restricted, None, &all, "sonnet", ""), ModelFix::Keep);
+        // The eligible model is left alone, whatever it might fall back to.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "trustedai/x", "sonnet"),
+            ModelFix::Keep
+        );
+        // A `<prefix>/` nobody configured is not a gateway route, so it is not gated either.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "unconfigured/whatever", "sonnet"),
+            ModelFix::Keep
+        );
+        // A loose class gates nothing.
+        assert_eq!(
+            model_fix(Sensitivity::Standard, None, &all, "zai/glm-5.3-flash", "sonnet"),
+            ModelFix::Keep
+        );
+        // A blank fallback clears the setting to inherit the harness default: always a fix.
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", ""),
+            ModelFix::Substitute {
+                model: None,
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        // The fix and the gateway's check are one rule: what we substitute is what it would carry.
+        assert!(!model_eligible(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash"));
+        assert!(model_eligible(
+            Sensitivity::Restricted,
+            None,
+            &all,
+            "trustedai/claude-sonnet-5"
+        ));
+    }
+
+    /// With no eligible fallback the model is left as it is — the boot warns rather than invent a
+    /// name (issue #704) — and an org's vendor pin refuses a trusted provider off the list.
+    #[test]
+    fn with_no_eligible_fallback_the_model_is_left_for_the_caller_to_warn_about() {
+        let mut untrusted = provider("zai");
+        untrusted.vendor = Some("zai".into());
+        let all = vec![untrusted, provider("groq")];
+        assert_eq!(
+            model_fix(Sensitivity::Restricted, None, &all, "zai/glm-5.3-flash", "groq/llama"),
+            ModelFix::NoFallback {
+                reason: "\"zai\" is not marked trusted".into(),
+            }
+        );
+
+        let mut pinned_vendor = provider("trustedai");
+        pinned_vendor.trusted = true;
+        pinned_vendor.vendor = Some("Somewhere".into());
+        let pinned = SensitivityOverrides {
+            restricted_vendors: Some(vec!["Anthropic".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            model_fix(
+                Sensitivity::Restricted,
+                Some(&pinned),
+                &[pinned_vendor],
+                "trustedai/claude-sonnet-5",
+                "sonnet"
+            ),
+            ModelFix::Substitute {
+                model: Some("sonnet".into()),
+                reason: "\"trustedai\" is not on this org's restricted-vendor list".into(),
+            }
+        );
+    }
+
     #[test]
     fn explicit_flag_strips_ttl_even_on_a_custom_preset() {
         let mut p = provider("meta-handpointed");
@@ -1554,6 +1729,23 @@ mod tests {
         assert!(!valid_price(-0.01));
         assert!(!valid_price(f64::NAN));
         assert!(!valid_price(f64::INFINITY));
+    }
+
+    /// Every rate the save checks shares that refusal, thinking included (#622): the gateway bills
+    /// thinking tokens through `thinking_per_mtok`, so a negative one would subtract from the budget.
+    #[tokio::test]
+    async fn a_negative_thinking_rate_is_refused_like_the_other_prices() {
+        let (app, root) = providers_app();
+        let mut req = put_req("DeepSeek");
+        req.pricing = Some(Pricing {
+            thinking_per_mtok: -0.01,
+            ..Default::default()
+        });
+        let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(err.message().contains("pricing rates"), "{}", err.message());
+        assert!(app.providers().is_empty(), "the refused save writes nothing");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2215,6 +2407,40 @@ mod tests {
         let stored = &app.providers()[0];
         assert!(!stored.vetted);
         assert_eq!(stored.vendor, None, "a blank vendor string clears the vendor");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `trusted` and the connection policy ride the same GET as pricing and the key state (#605):
+    /// the cockpit form prefills from it, and an unmarked provider reports `false` rather than being
+    /// omitted, so the Trusted switch has a value to sit on.
+    #[tokio::test]
+    async fn the_list_returns_trusted_and_the_connection_policy() {
+        let (app, root) = providers_app();
+        let mut marked = put_req("Marked");
+        marked.trusted = Some(true);
+        marked.model_map = Some(BTreeMap::from([("sonnet".into(), "claude-wire-sonnet".into())]));
+        marked.disabled_tools = Some(vec!["WebSearch".into()]);
+        let _ = put(State(app.clone()), Path("marked".into()), Json(marked)).await.unwrap();
+        let _ = put(State(app.clone()), Path("plain".into()), Json(put_req("Plain")))
+            .await
+            .unwrap();
+
+        let Json(listed) = list(State(app.clone())).await;
+        let by_id = |id: &str| {
+            listed
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap_or_else(|| panic!("no {id} in {listed:?}"))
+        };
+        let marked = by_id("marked");
+        assert_eq!(marked["trusted"], json!(true));
+        assert_eq!(marked["model_map"]["sonnet"], json!("claude-wire-sonnet"));
+        assert_eq!(marked["disabled_tools"], json!(["WebSearch"]));
+        assert_eq!(
+            by_id("plain")["trusted"],
+            json!(false),
+            "an unmarked provider reports trusted: false"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

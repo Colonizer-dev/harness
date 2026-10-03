@@ -309,6 +309,12 @@ groups, not hostnames. An org may pin its own `mode` and add to both lists in it
 mode when it set one and unions the lists, adds the running agent module's declared hosts in
 `allowlist` mode (see [below](#hosts-an-agent-module-declares)), and drops entries a hand-edited
 file let in that do not parse: an invalid entry can only shrink a colony's reach, never widen it.
+A fleet member is clamped on top of this: when its owner has set a [fleet network
+policy](fleet.md#network-policy) ([#690](https://github.com/Colonizer-dev/harness/issues/690)), the
+fleet, org and repo levels union into a floor the colony may tighten but never loosen, and each
+refused loosening is listed in the colony's egress record. The dev-server
+[previews](fleet.md#dev-server-previews) that reach a colony's guest ports ride the mesh, not this
+policy.
 
 | Mode | Flags | Behaviour |
 | :--- | :--- | :--- |

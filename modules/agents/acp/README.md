@@ -3,8 +3,9 @@
 Drives any [Agent Client Protocol](https://agentclientprotocol.com) agent (Zed's ACP: JSON-RPC 2.0
 over stdio, newline-delimited) as a Colonizer agent module on the `colonizer-runner/1` protocol.
 **Status: PLANNED — the runner is in-tree and verified against the real Gemini CLI handshake
-([#509](https://github.com/Colonizer-dev/harness/issues/509)); nothing stages the `gemini` or
-`grok` binary into the colony image yet, and no end-to-end colony run has happened.**
+([#509](https://github.com/Colonizer-dev/harness/issues/509)); the `gemini` CLI is fetched by the
+runner on first boot ([Binary](#binary)), since nothing stages it into the colony image, the `grok`
+binary is still unstaged, and no end-to-end colony run has happened.**
 
 The runner is `runner.mjs`: one long-lived ACP agent process per colony. At boot it negotiates
 `initialize` (protocolVersion 1, clientCapabilities `fs.readTextFile`/`fs.writeTextFile` and
@@ -131,18 +132,32 @@ reloaded session does not get it again. Without the mount no server is registere
 (`mcpServers: []`). `memory-mcp.mjs` is the original the OpenCode and Pi modules copy; its logic is
 `memory.mjs`, a byte-for-byte copy of Claude Code's, kept identical by a test.
 
+## Binary
+
+The `gemini` preset runs the pinned @google/gemini-cli release, which nothing stages into the colony
+image. At boot the runner resolves the CLI in order: `COLONIZER_GEMINI_BIN`, then `gemini` on
+`PATH`, else downloads the pinned tarball from **registry.npmjs.org**, checks it against
+`gemini.lock` (sha256, before extraction), and reuses it on later boots. The tarball is a
+platform-independent JS bundle (`engines node >= 20`, one `any` row in the lock), so it runs as
+`node <cache>/package/bundle/gemini.js --experimental-acp` with the colony's own node
+(`process.execPath`); the extracted `package/bundle` is ~96 MB and lives under
+`$XDG_CACHE_HOME/colonizer/gemini` (or `~/.cache/…`), not the colony's small `/tmp` tmpfs. The
+colony's egress allowlist must permit `registry.npmjs.org` (declared in `module.json`'s
+`egress.extra`). The `grok` preset is not fetched: it still needs the `grok` binary on `PATH`, which
+nothing stages.
+
 ## Verified and planned agents
 
 - **Gemini CLI (`gemini --experimental-acp`) — handshake verified.** The real CLI 0.61.0 completed
   `initialize` and `session/new` and sent a prompt to the API; a full colony run with a real key,
-  tool calls and a pull request has not been done. Pinned in `module.json` (`requires.pins`
-  carries the npm version and its sha512 integrity; install with
-  `npm install -g @google/gemini-cli@<pinned>`). The colony authenticates with a `GEMINI_API_KEY`
-  secret for `generativelanguage.googleapis.com` (declared in `secrets`/`egress`; add the value in
-  the cockpit's Secrets view, as a colony secret for that host); the runner
-  refuses to boot the preset without it (`ACP_CREDENTIAL_MISSING`) — the colony never runs the
-  CLI's interactive OAuth login. Manual end-to-end: install the pinned CLI, export
-  `GEMINI_API_KEY=…`, run `node runner.mjs`, and send
+  tool calls and a pull request has not been done. The CLI is not staged into the image: the runner
+  fetches the pinned bundle on first boot ([Binary](#binary)), pinned in `gemini.lock` and matched
+  by `module.json`'s `requires.pins` (npm version and its sha512 integrity). The colony
+  authenticates with a `GEMINI_API_KEY` secret for `generativelanguage.googleapis.com` (declared in
+  `secrets`/`egress`; add the value in the cockpit's Secrets view, as a colony secret for that
+  host); the runner refuses to boot the preset without it (`ACP_CREDENTIAL_MISSING`) — the colony
+  never runs the CLI's interactive OAuth login. Manual end-to-end: export `GEMINI_API_KEY=…`, run
+  `node runner.mjs` (it fetches and caches the pinned CLI), and send
   `{"type":"user_message","id":"initial","text":"hello"}` on stdin — see the handshake the tests
   assert for what comes back.
 - **Grok Build (`grok agent stdio`) — handshake verified.** Verified against the real grok 1.0.34:

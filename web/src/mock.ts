@@ -1899,6 +1899,8 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["deepseek-flash", "deepseek-v4-pro"],
       preset: "deepseek",
+      // Vetted for restricted-sensitivity work, so the Trusted switch shows on (#472).
+      trusted: true,
       // Priced, so routed spend and the budget can be exercised; strix and lab stay unpriced ($0).
       pricing: { input_per_mtok: 0.27, output_per_mtok: 1.1, cache_read_per_mtok: 0.07, cache_write_per_mtok: 0.27 },
       // A prepaid plan with a balance endpoint, so the health line shows "… left in plan" (issue #199).
@@ -1921,6 +1923,7 @@ export function createMockApi(): Api {
       has_key: false,
       models: ["ds4-flash"],
       preset: "local",
+      trusted: false,
       timeout_secs: 900,
       max_concurrent: 1,
       queue_timeout_secs: null,
@@ -1950,6 +1953,7 @@ export function createMockApi(): Api {
       has_key: true,
       models: ["qwen3-coder"],
       preset: "custom",
+      trusted: false,
       ...DEFAULT_LIMITS,
       max_concurrent: 4,
       in_flight: 0,
@@ -3219,6 +3223,30 @@ export function createMockApi(): Api {
       ),
     findings: (id) => later(() => (id === "demo1234" ? FINDINGS : [])),
     sessionCommits: () => later(() => ({ commits: [] })),
+    sessionDiff: (id) =>
+      later(() => {
+        const s = sessions.get(id)?.session;
+        // No pull request, no card to fill: an empty answer, where the real route would 409 with no worktree.
+        if (!s?.pr_url) return { id, repo: s?.repo ?? "", base: s?.base ?? null, files: [], added: 0, removed: 0, diff: "", truncated: false };
+        const files = [
+          { path: "web/src/cockpit/Inspector.tsx", added: 41, removed: 6 },
+          { path: "web/src/api.ts", added: 8, removed: 0 },
+          { path: "web/src/types.ts", added: 12, removed: 1 },
+          { path: "web/src/cockpit/Inspector.test.tsx", added: 55, removed: 2 },
+          { path: "docs/gaps.md", added: 1, removed: 1 },
+          { path: "changelog.d/611.added.md", added: 4, removed: 0 },
+        ];
+        return {
+          id,
+          repo: s.repo,
+          base: s.base,
+          files,
+          added: files.reduce((n, f) => n + f.added, 0),
+          removed: files.reduce((n, f) => n + f.removed, 0),
+          diff: "",
+          truncated: false,
+        };
+      }),
     sessions: () =>
       later(() => [...sessions.values()].map((s) => s.session).sort((a, b) => b.updated_at.localeCompare(a.updated_at))),
     session: async (id) =>
@@ -3406,6 +3434,8 @@ export function createMockApi(): Api {
       worktrees_bytes: 3_221_225_472,
       repos_bytes: 1_073_741_824,
       sessions_bytes: 268_435_456,
+      // The two seeded archive bundles (issue #496), under <data_dir>/archive.
+      archive_bytes: 5_242_880 + 2_621_440,
       // Microsandbox's home directory, holding the shared image cache: listed, never offered for cleanup.
       microsandbox_bytes: 2_147_483_648,
     },
@@ -3606,6 +3636,10 @@ export function createMockApi(): Api {
         : body.quota.url.trim()
           ? { url: body.quota.url.trim(), pointer: body.quota.pointer.trim() }
           : null,
+    // Omitted keeps the saved mark; the model map and disabled tools follow the same convention.
+    trusted: body.trusted ?? existing?.trusted ?? false,
+    model_map: body.model_map ?? existing?.model_map ?? {},
+    disabled_tools: body.disabled_tools ?? existing?.disabled_tools ?? [],
     in_flight: existing?.in_flight ?? 0,
     queued: existing?.queued ?? 0,
     usage: existing?.usage ?? zeroUsage(),
@@ -4388,7 +4422,7 @@ export function createMockApi(): Api {
 const mockKeychain = { available: true, backend: "macOS Keychain", reason: null, checked_at: new Date().toISOString() };
 const mockSecrets: import("./types").SecretRow[] = [
   { id: "github-token", label: "GitHub token", group: "connections", used_by: "Issues, pushes and pull requests", icon: "github", location: "file", env: null, env_set: false, updated_at: "2026-09-20T10:00:00Z", editable: true, colonies: { kind: "none", hosts: [] } },
-  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "keychain", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: true, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
+  { id: "claude-token", label: "Claude token", group: "connections", used_by: "Every Claude colony", icon: "claude", location: "file", env: null, env_set: false, updated_at: "2026-09-22T08:00:00Z", editable: false, colonies: { kind: "injected", hosts: ["api.anthropic.com"] } },
   { id: "api-token", label: "Cockpit API token", group: "connections", used_by: "The cockpit sign-in and the colonizer CLI", icon: "key", location: "file", env: null, env_set: false, updated_at: null, editable: false, colonies: { kind: "none", hosts: [] } },
   { id: "provider-keys:zai", label: "Z.AI", group: "providers", used_by: "Models routed to zai", icon: "plug", location: "file", env: null, env_set: false, updated_at: "2026-09-17T04:00:00Z", editable: true, colonies: { kind: "gateway", hosts: [] } },
   { id: "provider-keys:bailian", label: "Alibaba Bailian", group: "providers", used_by: "Models routed to bailian", icon: "plug", location: "unset", env: null, env_set: false, updated_at: null, editable: true, colonies: { kind: "gateway", hosts: [] } },

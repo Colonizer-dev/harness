@@ -27,6 +27,7 @@ import { useSpendHistory } from "../useSpendHistory";
 import { BurnDownCard } from "./BurnDownCard";
 import { AreaChart, ChartSection, ColonyRow, KpiStrip, OrgTile, RangePicker, Rules, Section, TrendLine, type KpiDef } from "./DashChart";
 import { deliveryKpis } from "./delivery";
+import { FleetColonies } from "./FleetColonies";
 import { FleetPanel } from "./FleetPanel";
 import { isBumped, isFlashed, useLiveEvents } from "./liveEvents";
 import { OrgDashboard } from "./OrgDashboard";
@@ -638,6 +639,7 @@ export function OverviewView({
         <div className="flex flex-col gap-4">
           <BurnDownCard />
           <FleetPanel hosts={fleetHosts} />
+          <FleetColonies hosts={fleetHosts} sessions={sessions} />
           <StoragePanel onOpenColony={onOpenColony} onOpenSettings={onOpenSettings} liveStorage={liveStorage} />
         </div>
       <RedTeamWizard

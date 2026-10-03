@@ -13,6 +13,9 @@
     "binaries": [
       "grok"
     ],
+    "fetched_by_runner": [
+      "grok"
+    ],
     "image": "glibc + node >= 20",
     "pins": {
       "grok": {
@@ -36,7 +39,9 @@
     "api": ["api.x.ai"],
     "auth": [],
     "telemetry": [],
-    "extra": []
+    "extra": [
+      "x.ai"
+    ]
   },
   "settings": {
     "type": "object",

@@ -19,6 +19,7 @@ const SUMMARY: StorageSummary = {
     worktrees_bytes: 3_221_225_472,
     repos_bytes: 1_073_741_824,
     sessions_bytes: 268_435_456,
+    archive_bytes: 5_242_880 + 2_621_440,
     microsandbox_bytes: 2_147_483_648,
   },
   reclaimable: [
@@ -54,6 +55,8 @@ describe("StoragePanel", () => {
     expect(out).toContain("worktrees 3G");
     expect(out).toContain("repos 1G");
     expect(out).toContain("sessions 256M");
+    expect(out).toContain("archive 7.5M");
+    expect(out).toContain("colony log bundles");
     expect(out).toContain("microsandbox home 2G");
     expect(out).toContain("holds the shared image cache · kept");
     expect(out).toContain("12G free");
@@ -100,7 +103,8 @@ describe("StoragePanel", () => {
     const out = archiveMarkup();
     expect(out).toContain("LOG ARCHIVE");
     expect(out).toContain("2 bundles · 7.5M");
-    expect(out).toContain("Automatic cleanup");
+    expect(out).toContain("Clean up now");
+    expect(out).toContain("Automatic retention is the Disk cleanup loop");
     expect(out).toContain("Allow deleting the only copy");
     expect(out).toContain("Preview");
     // No preview yet, so the danger button cannot fire: the only disabled control is Apply.

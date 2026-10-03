@@ -613,13 +613,20 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
         if blocking && now - since < cap {
             continue;
         }
-        // How the colony comes back. Today's sandbox has no memory snapshot (the seam in
-        // `sandbox::supports_memory_snapshot`), so the path is always the fallback: the agent
-        // resumes its own session transcript in a fresh microVM.
-        let path = if crate::sandbox::supports_memory_snapshot() {
-            "memory_snapshot"
+        // How the colony comes back. The memory-snapshot store (issue #702) freezes the running
+        // VM's memory while the colony waits; it sits behind `sandbox::supports_memory_snapshot`,
+        // which is false because the pinned msb cannot restore a `--secret`-carrying sandbox (that
+        // function has the measurement). So today the path is always the fallback — the agent
+        // resumes its own session transcript in a fresh microVM — and `capture` seals the VM's
+        // memory under a fresh per-colony key only when the gate turns on. Any capture failure is
+        // the same fallback.
+        let (path, snapshot) = if crate::sandbox::supports_memory_snapshot() {
+            match crate::snapshot::capture(app, &id, &s.sandbox).await {
+                Some(meta) => (crate::snapshot::MEMORY_SNAPSHOT, serde_json::to_value(&meta).ok()),
+                None => (SESSION_RESUME, None),
+            }
         } else {
-            SESSION_RESUME
+            (SESSION_RESUME, None)
         };
         let claimed = app
             .update_session(&id, |x| {
@@ -628,7 +635,7 @@ pub(crate) async fn suspend_waiting_colonies(app: &Shared, modules: &crate::conf
                 }
                 x.suspended = Some(Suspension {
                     at: Utc::now(),
-                    snapshot: None,
+                    snapshot: snapshot.clone(),
                     reason: WAITING_FOR_ANSWER.into(),
                     path: path.into(),
                 });
@@ -736,6 +743,8 @@ fn claimed_for_boot(x: &mut Session) {
     x.attention = None;
     x.mesh = None;
     x.local_port = None;
+    // A boot gets a fresh microVM, so the old one's preview port is gone (previews.rs).
+    x.preview_port = None;
     x.boot_timing = None;
     x.updated_at = Utc::now();
 }

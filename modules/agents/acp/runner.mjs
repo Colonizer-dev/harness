@@ -6,11 +6,13 @@
 // COLONIZER_RESUME_SESSION id instead, when the agent can reload it), every user_message one
 // `session/prompt` turn. Verified presets: Google's Gemini CLI (`gemini --experimental-acp`) and
 // xAI's Grok Build (`grok agent stdio`); any other ACP agent runs through the custom-command
-// setting (README).
+// setting (README). Nothing stages the gemini CLI into the image, so the runner fetches the pinned
+// bundle on first boot (README, "Binary").
 
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createInterface } from 'node:readline';
@@ -20,19 +22,23 @@ import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, ex
 import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
 
+const here = dirname(fileURLToPath(import.meta.url));
+
 // Named preflight problems (README): the detail on the `status error` event, and the log prefix.
 export const AGENT_UNKNOWN = 'ACP_AGENT_UNKNOWN';
 export const CREDENTIAL_MISSING = 'ACP_CREDENTIAL_MISSING';
 export const AUTH_FAILED = 'ACP_AUTH_FAILED';
 export const AGENT_FAILED = 'ACP_AGENT_FAILED';
 
-// The known presets; `custom` takes its command line from the `command` setting instead. `env`
-// hardens the spawned agent the way the grok-build runner does (a fresh GROK_HOME is the nesting
-// lever: no host config, no cached login, an empty trust store). `opaqueAuthFailure` marks an agent
-// that answers a rejected credential with a bare JSON-RPC "Internal error" instead of naming
-// authentication, so the runner annotates the turn failure with the credential to check.
+// The known presets; `custom` takes its command line from the `command` setting instead. The
+// gemini preset declares no `command`: its argv comes from `resolveGemini` below (PATH, else the
+// fetched pinned bundle). `env` hardens the spawned agent the way the grok-build runner does (a
+// fresh GROK_HOME is the nesting lever: no host config, no cached login, an empty trust store).
+// `opaqueAuthFailure` marks an agent that answers a rejected credential with a bare JSON-RPC
+// "Internal error" instead of naming authentication, so the runner annotates the turn failure with
+// the credential to check.
 const PRESETS = {
-  gemini: { command: 'gemini --experimental-acp', credential: 'GEMINI_API_KEY' },
+  gemini: { credential: 'GEMINI_API_KEY' },
   grok: {
     command: 'grok agent stdio',
     credential: 'XAI_API_KEY',
@@ -90,11 +96,59 @@ function turnFailureText(preset, err) {
   return message;
 }
 
-/** The ACP agent argv: the preset's command, or COLONIZER_ACP_COMMAND for `custom`; null unknown. */
-function agentArgv(env) {
-  const preset = String(env.COLONIZER_ACP_AGENT ?? '').trim() || 'gemini';
-  if (preset === 'custom') return { preset, argv: splitCommand(env.COLONIZER_ACP_COMMAND ?? '') };
-  return { preset, argv: PRESETS[preset] ? splitCommand(PRESETS[preset].command) : null };
+/** The preset name from the `agent` setting; `gemini` when unset. */
+function agentPreset(env) {
+  return String(env.COLONIZER_ACP_AGENT ?? '').trim() || 'gemini';
+}
+
+/** The pin, read from module.json so the manifest and this runner cannot drift apart. */
+export function readPin() {
+  const pin = JSON.parse(readFileSync(join(here, 'module.json'), 'utf8'))?.requires?.pins?.['@google/gemini-cli'];
+  if (!pin?.version) throw new Error('module.json carries no @google/gemini-cli pin');
+  return pin;
+}
+
+const execTar = (args) => new Promise((resolve, reject) => { execFile('tar', args, (error) => (error ? reject(error) : resolve())); });
+
+/** Disk cache for the gemini bundle: under the cache dir rather than the colony's small /tmp tmpfs,
+ * as the OpenCode module does (the extracted bundle is ~96 MB). */
+export function defaultCacheDir(env = process.env) {
+  const base = env.XDG_CACHE_HOME || (env.HOME ? join(env.HOME, '.cache') : null);
+  return base ? join(base, 'colonizer', 'gemini') : join(tmpdir(), 'colonizer-gemini');
+}
+
+/** The gemini preset's argv: COLONIZER_GEMINI_BIN, then `gemini` on PATH, else the pinned
+ * @google/gemini-cli bundle — downloaded from registry.npmjs.org and sha256-checked before
+ * extraction. The bundle is platform-independent, so gemini.lock carries one row, platform `any`.
+ * The tarball is extracted into a scratch dir under the cache and then renamed into place, so a
+ * runner killed mid-extraction leaves no half-populated cache behind. */
+export async function resolveGemini({ env = process.env, lockText, version = readPin().version, fetchImpl = fetch, runTar = execTar, cacheDir = defaultCacheDir(env), log = () => {} } = {}) {
+  const acpArg = '--experimental-acp';
+  if (env.COLONIZER_GEMINI_BIN) return [env.COLONIZER_GEMINI_BIN, acpArg];
+  for (const dir of String(env.PATH ?? '').split(':')) if (dir && existsSync(join(dir, 'gemini'))) return [join(dir, 'gemini'), acpArg];
+  const row = String(lockText ?? '').split('\n').map((l) => l.trim().split(/\s+/)).filter((c) => c.length >= 6 && !c[0].startsWith('#')).map(([, v, , , sha256, url]) => ({ version: v, sha256, url })).find((r) => r.version === version);
+  if (!row) throw new Error(`no pinned Gemini CLI ${version} in gemini.lock`);
+  const dest = join(cacheDir, row.version);
+  const entry = join(dest, 'package', 'bundle', 'gemini.js');
+  if (existsSync(entry)) return [process.execPath, entry, acpArg];
+  log({ level: 'info', message: `downloading Gemini CLI ${row.version} (platform-independent bundle)` });
+  const res = await fetchImpl(row.url);
+  if (!res?.ok) throw new Error(`Gemini CLI download failed: HTTP ${res?.status ?? 'no response'}`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (createHash('sha256').update(bytes).digest('hex') !== row.sha256) throw new Error(`Gemini CLI ${row.version} refused: sha256 mismatch`);
+  mkdirSync(cacheDir, { recursive: true });
+  const tmp = mkdtempSync(join(cacheDir, `.${row.version}.tmp-`));
+  try {
+    const tgz = join(tmp, 'pkg.tgz');
+    writeFileSync(tgz, bytes);
+    await runTar(['-xzf', tgz, '-C', tmp, 'package/bundle']); // gemini.js imports its chunk-*.js siblings
+    mkdirSync(dest, { recursive: true });
+    rmSync(join(dest, 'package'), { recursive: true, force: true }); // evict a package a killed runner left half-extracted
+    renameSync(join(tmp, 'package'), join(dest, 'package')); // atomic: the cache only ever holds a complete package
+  } finally {
+    rmSync(tmp, { recursive: true, force: true }); // gone on success and on failure: no scratch dir, no tarball
+  }
+  return [process.execPath, entry, acpArg];
 }
 
 /** A command line into argv: split on whitespace, keeping quoted spans whole. */
@@ -309,21 +363,35 @@ class AsyncQueue {
  * died (a death mid-turn also fails the turn, so the colony's turn always terminates). */
 export async function run({ commands, emit, env = process.env, spawnFn = spawn, cwd = process.cwd() }) {
   emit({ type: 'status', state: 'idle' });
-  const { preset, argv } = agentArgv(env);
+  const log = ({ level, message }) => emit({ type: 'log', level, message });
+  const preset = agentPreset(env);
+  const spec = presetSpec(preset);
+  let argv = null;
   let problem = null;
-  if (!argv?.length) {
-    problem =
-      preset === 'custom'
-        ? { code: AGENT_UNKNOWN, message: 'the custom command is empty; set the `command` setting to the ACP agent\'s full command line' }
-        : { code: AGENT_UNKNOWN, message: `"${preset}" is not an ACP agent preset; pick one of ${Object.keys(PRESETS).join(', ')}, or "custom" with a command` };
-  } else if (preset !== 'custom' && !String(env[PRESETS[preset].credential] ?? '').trim()) {
+  if (preset === 'custom') {
+    argv = splitCommand(env.COLONIZER_ACP_COMMAND ?? '');
+    if (!argv.length) problem = { code: AGENT_UNKNOWN, message: 'the custom command is empty; set the `command` setting to the ACP agent\'s full command line' };
+  } else if (!spec) {
+    problem = { code: AGENT_UNKNOWN, message: `"${preset}" is not an ACP agent preset; pick one of ${Object.keys(PRESETS).join(', ')}, or "custom" with a command` };
+  } else if (!String(env[spec.credential] ?? '').trim()) {
     problem = {
       code: CREDENTIAL_MISSING,
       message:
-        `${PRESETS[preset].credential} is unset or empty, and the colony never runs the agent's interactive login. ` +
-        `Add ${PRESETS[preset].credential} as a colony secret for the agent's API host (module.json's secrets list), ` +
+        `${spec.credential} is unset or empty, and the colony never runs the agent's interactive login. ` +
+        `Add ${spec.credential} as a colony secret for the agent's API host (module.json's secrets list), ` +
         'so the mothership injects it into this colony; or pick another agent preset.',
     };
+  } else if (preset === 'gemini') {
+    // The gemini CLI is not staged in the image: PATH, else the pinned bundle, fetched on first boot.
+    let lockText = '';
+    try { lockText = readFileSync(join(here, 'gemini.lock'), 'utf8'); } catch { /* resolveGemini reports the missing pin */ }
+    try {
+      argv = await resolveGemini({ env, lockText, log });
+    } catch (err) {
+      problem = { code: AGENT_FAILED, message: `the gemini CLI: ${err?.message ?? err}` };
+    }
+  } else {
+    argv = splitCommand(spec.command);
   }
   if (problem) {
     emit({ type: 'log', level: 'error', message: `${problem.code}: ${problem.message}` });

@@ -2,9 +2,9 @@
 
 Drives OpenAI's [Codex CLI](https://developers.openai.com/codex) (`codex`, the `@openai/codex` npm
 package) as a Colonizer agent module on the `colonizer-runner/1` protocol. **Status: SHIPPING as a
-runner — the `codex` binary is not staged into the colony image yet, so the harness refuses a
-launch on the stock preset images and, on a custom image, a colony stops at this module's
-preflight, until you put the pinned CLI on the image's PATH.**
+runner — the runner fetches the pinned `codex` binary into its cache on first boot, so a launch on
+the stock preset images no longer stops at preflight. It has not yet been exercised in a real
+colony run with that fetched binary.**
 
 The runner is `runner.mjs`: one headless `codex exec --json` process per turn, the prompt on stdin
 (`-` as the prompt argument — an issue brief can be far larger than an argv slot), the first turn's
@@ -56,15 +56,26 @@ rollout continuously, so the partial turn stays resumable) and ends the turn as 
 Questions still reach the user — through the colonizer MCP server's `ask_user` (above), which the
 `answer` command answers.
 
-## Pinned binary and preflight
+## Binary
 
-`module.json` pins `@openai/codex` **0.156.1** (upstream tag `rust-v0.156.1`). The runner resolves
-the binary from `COLONIZER_CODEX_BIN`, else `codex` on the colony's PATH, and reads the pin back
-from `module.json`. Before any codex process is spawned, each named problem emits a `log` error
-plus `status error` with the name as `detail`:
+At boot the runner uses `COLONIZER_CODEX_BIN`, then `codex` on `PATH`, else downloads the pinned
+build for its architecture from the GitHub release assets, checks it against `codex.lock` (sha256,
+before extraction), and reuses it on later boots. The tarball and the binary are cached on disk
+under `$XDG_CACHE_HOME/colonizer/codex` (or `~/.cache/…`), not in `/tmp`: the colony's `/tmp` is a
+small tmpfs. The rows are the static musl builds, `linux-x64` and `linux-arm64` (Codex publishes no
+AVX2 split, unlike OpenCode), and each archive holds a single binary at its root. The download comes
+from `github.com` release assets, served via `release-assets.githubusercontent.com` /
+`objects.githubusercontent.com`, so an allowlist-egress colony needs all three hosts allowed (the
+module declares them under `egress.extra`).
+
+## Preflight
+
+`module.json` pins `@openai/codex` **0.156.1** (upstream tag `rust-v0.156.1`), read back from
+`module.json`. Before any codex process is spawned, each named problem emits a `log` error plus
+`status error` with the name as `detail`:
 
 - `CODEX_CREDENTIAL_MISSING` — neither `CODEX_API_KEY` nor `OPENAI_API_KEY` is set. Fix below.
-- `CODEX_BINARY_MISSING` — no codex at `COLONIZER_CODEX_BIN`/PATH; the log carries `npm install -g @openai/codex@0.156.1`.
+- `CODEX_BINARY_MISSING` — the binary could not be resolved: no `codex` at `COLONIZER_CODEX_BIN`/PATH and the pinned build could not be fetched (no cache row for the platform, or a failed download); the log carries `npm install -g @openai/codex@0.156.1`.
 - `CODEX_VERSION_DRIFT` — `codex --version` (prints `codex-cli X.Y.Z`) is not the pinned version.
 - `CODEX_MODEL_PROVIDER` — a model setting that names a provider with no gateway route, or one whose route speaks the anthropic wire (see below).
 
@@ -148,14 +159,16 @@ scripts `CODEX_FAKE_MCP_CALLS` — plays the
 model against the registered colonizer MCP server, so findings, memory, the loop tools, wait and an
 ask-and-answer round trip are tested end to end. `test/mcp.test.mjs` drives `mcp.mjs` directly. The
 happy path's events are checked against the
-required fields of `docs/agent-events.schema.json`. CI covers only these stubbed contract tests.
+required fields of `docs/agent-events.schema.json`. The binary resolver is tested with an injected
+`fetchImpl`/`runTar` (no network, no tar): it prefers `COLONIZER_CODEX_BIN` and `PATH`, caches the
+download, reuses it on a second call, and refuses a sha256 mismatch before extraction. CI covers
+only these stubbed contract tests.
 
 ## What is not supported yet
 
-- The `codex` binary in the colony image: nothing fetches or stages it
-  ([#602](https://github.com/Colonizer-dev/harness/issues/602); see the grok-build module's
-  "What remains" for the same gap); until then the harness refuses a codex launch on the stock
-  preset images, and a custom image's colony at the runner's preflight.
+- The fetched `codex` binary has not been through a real colony run yet: the tests cover the
+  resolve-and-fetch path with a stub, but no end-to-end colony has booted on the downloaded build
+  ([#602](https://github.com/Colonizer-dev/harness/issues/602)).
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
   launch a codex colony while one is set (the install's `exec_policy` setting, or a repo
   `.colonizer/exec-policy.json`).

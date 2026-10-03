@@ -324,6 +324,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/fleet/history` · `GET /api/fleet/history/{member}/{row_id}` · `…/logs/{name}` | The owner's view of what members synced (Fleet history on the owner, below): the filtered, paged list with totals per member and repository, one colony's record and its logs, and one log streamed; owner-only |
 | `PUT /api/fleet/peer/payloads/{sha256}` · `POST /api/fleet/peer/rows` | The owner's ingest for a member's history push, on the member's `fleet` token: one log payload stored by its hash (**204**), then a batch of colony rows upserted by id (`{rows}` → `{accepted, rejected}`); **403** for a token that belongs to no member |
 | `POST /api/fleet/peer/redeem` · `POST /api/fleet/peer/pairings/{id}` · `POST /api/fleet/peer/leave` | The peer-facing half on an owner (Fleet pairing, below): redeem an invite unauthenticated (`{code, nonce, name, url?}` → `{pairing_id, confirm_code}`), poll the pairing (`{nonce}`) until `{status: "approved", token, member_id}` comes back exactly once, and leave on the member's `fleet` token (**204**) |
+| `GET` · `PUT /api/fleet/policy` | The [fleet network policy](fleet.md#network-policy) (issue #690): `{egress, orgs, repos, reach}`. `PUT` sets it — owner-only, **409** on a mothership that is itself a member, **400** for an unparseable mode or egress entry — and `GET` reads it back, for the owner or a `fleet` token |
 | `GET /api/modules` | `[{kind, provider, providers:[{id,name,description}], enabled, settings, schema}]`; the `agent` entry also carries `manifest_errors` for module manifests that did not load |
 | `PUT /api/modules/{kind}` | `{provider, enabled (default true), settings}` → saves config and answers the module as `GET` lists it. **400** for an unknown provider or setting, a value of the wrong type or out of range, or switching off a kind that must stay on (`source`, `sandbox`, `agent`, `publish`) |
 | `GET /api/repos` · `GET /api/repos/{owner}/{repo}/issues` | Source module. `GET /api/repos` answers `[{full_name, description, private, fork, archived, open_issues_count, pushed_at, has_issues}]`. The issue list is up to 200 open issues, filtered by the Source module's labels. Each issue carries `epic`: null, or `{reason, sub_issues}` when it is an epic (sub-issues, an `epic` label, or a title marking one; see *Epics* under `POST /api/sessions`) — sub-issue counts from up to two best-effort GraphQL pages (100 each) of the newest open issues, the label and title always |
@@ -369,6 +370,8 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions/{id}/question` | The question the colony's agent is waiting on, answered **204** with no body when nothing is pending (an empty inbox, not an error; **404** stays the unknown colony's answer): `{question_id, risk, questions}` — `question_id` is what an answer names, `risk` is the question class (`read_only`, `workspace_write`, `publish_affecting`, `credential_adjacent`, `unknown`), and `questions` are the agent's own question bodies with their `options` (`{label, description?, preview?}`), exactly as the events socket's `question` frame carries them |
 | `POST /api/sessions/{id}/answer` | `{question_id, answers, response?, questions?}` — the events socket's `answer` command over HTTP, answered **204**. `answers` maps each question's label to an option label; `response` is the free-text note the agent reads; `questions`, when given, is the question content the answerer saw, and must equal the open question's or the answer is the stale **409** (runners number questions afresh after a reboot, so an id alone can name a different question). A colony suspended while it waits still takes one ([#562]): the answer is held on the colony and delivered when the suspension is restored. **404** for an unknown colony; **400** when the body is not shaped like an answer; **409** when the colony cannot take an answer, is not asking, or is asking a different question (a stale `question_id` — re-read the `GET` above); an answer landing mid-restore, or one whose send into a colony that stopped between the checks and the send fails, is the cannot-take one — retry it once the fresh runner is up (a repeat answer to one already forwarded reads `no question is pending`) |
 | `POST /api/sessions/{id}/prewarm` | Warms a suspended colony up ahead of its answer ([#701]): asks the queue to boot it through the same admission as any restore — behind colonies that already hold an answer, after queued launches — so the answer lands in an already running VM instead of a cold boot. Sets `prewarm` on the session (below). Answers **202** when a warm-up was requested and **204** when it is a no-op (already warming or ready, nothing to warm). **404** for an unknown colony |
+| `POST` · `DELETE /api/sessions/{id}/preview` | Open a [dev-server preview](fleet.md#dev-server-previews) on a guest-local port (issue #690): `{port}` → `{url}`, owner-only, **400** for port 0 or agentd's own `7070`, **409** while the colony is not running with a microVM. `DELETE` closes it |
+| `GET` · `POST` · `PUT` · `PATCH` · `DELETE /api/previews/{id}/…` | The preview's reverse proxy: plain HTTP to the colony's preview port over the mesh, on the owner's credentials or a `fleet` token (a fleet caller must be allowed to reach `owner` by the [policy](fleet.md#network-policy)'s `reach` map); **404** once the colony stops, **409** with the mesh off. Credentials are stripped before forwarding |
 | `POST /api/sessions/{id}/seen` | Someone is looking at the colony: clears `unseen_failure` (below), and when it actually cleared something — the cockpit only calls this for a `failed` colony nobody has opened yet, with the page in front — pushes the silent `{"type":"resolved","colony","badge"}` to every push subscription, so each device closes that colony's notification and lowers its badge ([cockpit.md](cockpit.md#notifications-and-web-push)). Answered **204** either way; **404** for an unknown colony. Read scope for API tokens — looking is not driving |
 | `POST /api/sessions/{id}/messages` | `{id, text}` — the events socket's `user_message` command over HTTP, the offline outbox's route (§5). It shares the socket's one user-message path, so the same colony-state check, the same trim and 100,000-byte cap, and a scoped token's text marked external input — but it answers instead of dropping: `200 {"id": "u-<id>", "duplicate": false}`, `duplicate: true` when that client `id` was already delivered to this colony, so a repeat sent after a lost answer is answered, not delivered twice (`id` is 1–64 of `A–Z a–z 0–9 _ -`, **400** otherwise). **400** also for an empty or over-cap `text`, which the socket drops silently; **404** for an unknown colony; **409** when the colony is not live and cannot take a message, or when the send into a colony that stopped between that check and the send fails — nothing was delivered and the `id` stays free, so the retry is not absorbed as a duplicate |
 | `GET /api/sessions/{id}/findings` | The finding ledger for one colony, one line per stage transition, append-only, folded by title in the UI: records `{session, title, state, reason?, severity?, issue?, duplicate_of?, fix_session?, review_session?, verdict?, pr?}`, `state` one of `validated\|rejected\|filed\|duplicate\|fix_colony\|review\|automerge\|blocked\|merged\|error` (§6.6). **404** for an unknown colony |
@@ -389,7 +392,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `PUT /api/merge-train/loop` | Replaces the loop's settings (the same shape); out-of-range limits, a malformed `allow`/`never` entry or `revert_on_red` without `self_heal` are a `400`. Switching it on books the next run one cadence away. Owner only |
 | `POST /api/merge-train/loop/run[?dry_run=true]` | A dry run (or any run while external writes are blocked) answers `{started: false, report}`; a real run starts in the background and answers `{started: true}`, `409` while one is going. Owner only |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow (may list "module"), block}, module: {agent, allow}\|absent, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares)). `module` names the running agent module and the `egress` hosts it added to the allow list (#601); it is absent in `open` mode and for a module that declared nothing of its own. **404** for a colony booted before the record existed |
-| `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`, and `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
+| `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`. `totals` breaks the data dir down by category — `worktrees_bytes`, `repos_bytes`, `sessions_bytes` and `archive_bytes` (the log archive under `<data_dir>/archive`, [colonies.md](colonies.md#the-log-archive)) — plus `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
 | `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
@@ -468,8 +471,9 @@ routed together).
   loop reads as **404** — and map loops, whose runs launch outside any token's caps, stay
   owner-only.
 - `fleet` sits outside that ladder and cannot be minted here: fleet pairing
-  ([fleet.md](fleet.md), below) hands it to a member at approval, and it reaches only
-  `GET /api/hosts` and `POST /api/fleet/peer/leave`.
+  ([fleet.md](fleet.md), below) hands it to a member at approval, and it reaches only the fleet's own
+  routes — `GET /api/hosts`, `POST /api/fleet/peer/leave`, the history push's two ingest routes
+  (below), `GET /api/fleet/policy` and the `/api/previews/{id}/…` proxy.
 
 Anything else is **403** naming the token's scope and the route; a colony- or map-scoped route for
 a repository outside the token's org/repo limits is **404**, the same answer an unknown id gets, so
@@ -492,9 +496,9 @@ All owner only. Tokens are never sent back to the browser.
 | `GET /api/claude-accounts` | Named Claude credentials. A colony runs on the account it names, else its org's `agent.claude_account`, else the install default. `[{id, label, is_default, kind: "ANTHROPIC_API_KEY"\|"CLAUDE_CODE_OAUTH_TOKEN"\|null, source, added_at}]`. Names live in `<config>/claude-accounts.json`, each secret in `<config>/claude-accounts/<id>` (or the keychain). The first read moves a pre-accounts `<config>/claude-token` into an account named `default` |
 | `POST /api/claude-accounts` | `{id?, label?, token}`: `token` must start with `sk-ant-` and hold no whitespace; `id` is 1–40 of `a-z 0-9 -`, derived from `label` when absent. The same `id` again replaces its token and label. The first account added becomes the default. Answers the list entry; **400** for a bad token or id |
 | `DELETE /api/claude-accounts/{id}` | `{ok: true}`. **404** for an unknown id; **409** while it is the default, an org's settings name it, or a live colony runs on it (the message says which). There is no route that changes the default |
-| `POST /api/settings/claude-token` · `DELETE /api/settings/claude-token` | The older single Claude token, `{token}` (`sk-ant-…`, **400** otherwise), kept at `<config>/claude-token`. Answers `{ok: true}` |
+| `POST /api/settings/claude-token` · `DELETE /api/settings/claude-token` | The single-token front door, `{token}` (`sk-ant-…`, **400** otherwise). The save lands in the default Claude account, creating the `default` account (and making it the default) when none exists, and clears any pre-accounts `<config>/claude-token`; the delete clears the default account's secret (and the legacy file) but keeps the account record. Answers `{ok: true}` |
 | `GET /api/claude-login` | The "Log in with your Claude subscription" flow: `{state: "idle"\|"starting"\|"awaiting_code"\|"verifying"\|"done"\|"error", url, message}`. The mothership runs `claude setup-token` in a pseudo-terminal; `url` is the sign-in link, set once `state` is `awaiting_code`. One flow per mothership, held in memory |
-| `POST /api/claude-login/start` | Starts a flow (replacing any running one) and answers the state. It times out after 15 minutes. On success the token is saved to `<config>/claude-token` and `state` is `done` |
+| `POST /api/claude-login/start` | Starts a flow (replacing any running one) and answers the state. It times out after 15 minutes. On success the token is saved to the default Claude account and `state` is `done` |
 | `POST /api/claude-login/code` | `{code}` (printable ASCII, 1–2000 bytes, **400** otherwise): the code the sign-in page showed, typed into the flow. **409** when no flow is waiting for a code |
 | `POST /api/claude-login/cancel` | Ends the flow: `{state: "idle", url: null, message: null}` |
 
@@ -691,7 +695,9 @@ of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspe
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
-(§6.1b), `verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
+(§6.1b), `model_substitutions` (§6.1b — the models the boot resolved away from because the gateway
+would have refused them for the task's sensitivity class, as `[{setting, from, to, reason}]`),
+`verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
 colony moves into `failed` and cleared by the `seen` route above, so a failure stays in the
 needs-you count (the app badge's) until a person has opened the colony; colonies from before the
 field existed load as seen.
@@ -1857,6 +1863,22 @@ models resolve through the same provider routes as `model` (§6.5's `used_by` co
 env variables are stripped from the colony's environment once the tier is chosen, so only the
 provider actually in use is probed at boot.
 
+Every model the boot settles on — the orchestrator (a tier pick or the operator's `model_override`),
+`subagent_model`, `background_model` and `small_model` — is then resolved against the task's
+sensitivity class before it is used (issue #704). The gateway refuses a class more sensitive than the
+provider's mark (§6.5), so a subagent model on a provider the class will not trust, or a `low`-tier
+model on one, would fail every call: the colony could not work. A model that fails the gate is
+replaced with the effective orchestrator model (for a subagent, background or small setting) or the
+module's `model` (for the orchestrator itself — what `medium` would run on if routing had not moved
+it); an operator's named `model_override`/`subagent_model_override` is resolved the same way. The
+fallback must itself be eligible, and the boot never invents a model name: when the fallback is blank
+— the default setup, where the module names no `model` — the setting is cleared, so the task inherits
+the harness default, and recorded as "the orchestrator's model"; when no eligible model exists at all
+the setting is left exactly as it is and the boot logs a `warn` that the gateway will refuse it. Each
+substitution is one `info` line in the colony's session log — not repeated by a resume, which resolves
+the same models again — and recorded as a `model_substitutions` entry on the session record (below),
+so the cockpit can show what the colony is really running on.
+
 Routing down is not always the cheaper run: the cheaper model reloads the task's context from
 scratch at its input price, which sometimes costs more than the output saved. When all three token
 estimates are set and both models have pricing on file, the cost gate prices the two ways of running
@@ -2634,7 +2656,10 @@ character set plus `=` and `&`):
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
   provider; `403` `sensitivity_error` when the task's sensitivity class exceeds the provider's mark —
   `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted`
-  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md);
+  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md).
+  The launch resolves the orchestrator, subagent and background models against this class first
+  (§6.1b), substituting an eligible model rather than letting a colony boot into calls this gate can
+  only refuse; what it substituted is on the session's `model_substitutions`;
   `502` `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend
   plus in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body
   the wire cannot carry.

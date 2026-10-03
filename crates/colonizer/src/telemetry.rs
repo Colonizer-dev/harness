@@ -3,7 +3,7 @@
 //! about 25 km across, that lights up while colonies run. It is off until the user switches it on; the web
 //! UI asks once. `Heartbeat` below is everything that is sent. The receiving end is services/telemetry.
 
-use crate::{Shared, util};
+use crate::{Shared, sessions::Session, util};
 use anyhow::{Context, Result, bail};
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
@@ -222,14 +222,19 @@ impl Telemetry {
     }
 }
 
-async fn live_colonies(app: &Shared) -> usize {
-    app.sessions
-        .read()
-        .await
+/// How many colonies the live map counts as running, capped at what the service counts. The same
+/// predicate `usage.rs` reports as parallel now: a suspended colony's microVM is down — that is what
+/// the suspension freed — so it is not live, whatever its status still says (issue #562).
+fn count_live(sessions: &[Session]) -> usize {
+    sessions
         .iter()
-        .filter(|s| s.status.is_live())
+        .filter(|s| s.status.is_live() && s.suspended.is_none())
         .count()
         .min(MAX_COLONIES)
+}
+
+async fn live_colonies(app: &Shared) -> usize {
+    count_live(&app.sessions.read().await)
 }
 
 /// The heartbeat loop: every interval while the live map is on, within a minute when the colony count changes,
@@ -333,6 +338,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::{SessionStatus, Suspension};
     use axum::{Router, routing::post};
     use std::sync::Arc;
 
@@ -396,6 +402,38 @@ mod tests {
         saved.save(&path).unwrap();
         assert_eq!(Choice::load(&path), saved);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A suspended colony's microVM is down (issue #562), so it must not put a dot on the live
+    /// map — the count `usage.rs` reports as parallel now, not the status alone.
+    #[test]
+    fn a_suspended_colony_is_not_counted_as_live() {
+        let suspended = Session {
+            status: SessionStatus::Running,
+            suspended: Some(Suspension {
+                at: Utc::now(),
+                snapshot: None,
+                reason: "waiting_for_answer".into(),
+                path: "resume".into(),
+            }),
+            ..Default::default()
+        };
+        let sessions = vec![
+            Session {
+                status: SessionStatus::Running,
+                ..Default::default()
+            },
+            Session {
+                status: SessionStatus::Idle,
+                ..Default::default()
+            },
+            suspended,
+            Session {
+                status: SessionStatus::Stopped,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(count_live(&sessions), 2, "only the two running microVMs count");
     }
 
     /// A stand-in telemetry service that records what it receives.

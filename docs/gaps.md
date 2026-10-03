@@ -27,17 +27,14 @@ Last checked against the code on 2026-09-27.
 | Element | Where the design shows it | What the code has instead | Issue |
 | --- | --- | --- | --- |
 | Remote access that works end to end | `docs/remote-tunnel.md`; the Settings switch (`web/src/components/RemoteAccessPane.tsx`) | The relay (`services/relay`), the tunnel client (`crates/colonizer/src/remote.rs`) and the Settings switch are merged, pairing included (#599), but the relay is not deployed, and the relay throws on the mothership's response headers (finding R1 in `docs/remote-access-review.md`). Off by default | [#531](https://github.com/Colonizer-dev/harness/issues/531) |
-| Codex, Hermes, Grok Build and Gemini (ACP) colonies | The org dialog offers every agent module (`web/src/components/OrgSettingsDialog.tsx`) | The runners and their tests exist, but only Claude Code is staged into the colony, Pi is bundled and OpenCode downloads itself. The other four CLIs are not staged, so the harness refuses a launch on the stock preset images — which carry no agent CLIs — unless you build your own image | [#602](https://github.com/Colonizer-dev/harness/issues/602) |
+| Hermes colonies | The org dialog offers every agent module (`web/src/components/OrgSettingsDialog.tsx`) | The runner and its tests exist, but nothing stages the `hermes` binary: Claude Code is staged, Pi is bundled, and OpenCode, Codex, Grok Build and the ACP gemini preset fetch their pinned CLI on first boot (sha256-verified), while Hermes has no fetcher — so the harness refuses a Hermes launch on the stock preset images, which carry no agent CLIs, unless you build your own image | [#602](https://github.com/Colonizer-dev/harness/issues/602) |
 | The ACP module's Model setting | `modules/agents/acp/module.json`, setting `model` | Nothing reads it (`modules/agents/acp/runner.mjs`); only a live model switch from the cockpit works | [#603](https://github.com/Colonizer-dev/harness/issues/603) |
 | Strix and Shannon as red-team hunters | The red-team wizard shows both as "Coming soon" (`web/src/cockpit/RedTeamWizard.tsx`) | Strix installs and probes (off unless `COLONIZER_HUNTER_INSTALL=1`), Shannon is a manifest only; a run that names either gets a 400. Only the colony swarm hunts | [#216](https://github.com/Colonizer-dev/harness/issues/216) |
-| Claim and epic overrides from the CLI and MCP | `docs/cli.md`, `docs/mcp.md`; the refusal text says "pass allow_duplicate" | The cockpit and `POST /api/sessions` take `allow_duplicate`, `queue_behind_holder` and `allow_epic`; `colonizer launch` and `launch_colony` do not | [#600](https://github.com/Colonizer-dev/harness/issues/600) |
-| `--host` and `--token-file` on local commands | `colonizer open --help` and the other local commands list them | `open`, `update`, `login-item`, `telemetry`, `version`, `completions` and `man` ignore them (`crates/colonizer/src/cli.rs`) | [#604](https://github.com/Colonizer-dev/harness/issues/604) |
 | Provider Trusted, model map and disabled tools in the cockpit | `docs/providers.md`; the gateway's 403 says "mark it trusted in providers.json" | The fields work through `PUT /api/providers/{id}` or `providers.json`; the cockpit has no controls and `GET /api/providers` does not return `trusted` | [#605](https://github.com/Colonizer-dev/harness/issues/605) |
 | Automatic log-archive retention | The Storage panel's "Automatic cleanup" form (`web/src/cockpit/StoragePanel.tsx`) | Retention runs only on request (`POST /api/archive/retention`); nothing sweeps on its own, and `GET /api/storage` leaves the archive out (`crates/colonizer/src/archive.rs`) | [#606](https://github.com/Colonizer-dev/harness/issues/606) |
 | The graft skillset download | Settings offers it (`web/src/components/Skillsets.tsx`) | No bundle is published or pinned in `crates/colonizer/graft.lock`, so it is always "Not published for this machine yet" | [#607](https://github.com/Colonizer-dev/harness/issues/607) |
-| A loop end date in the cockpit | `docs/loops.md` | `end_at` is stored and honoured, but only the API sets it; the form has no field (`web/src/cockpit/LoopsView.tsx`) | [#608](https://github.com/Colonizer-dev/harness/issues/608) |
 | The loop tools on Pi, Hermes and ACP | `docs/loops.md` | Their runners serve no colonizer MCP server, so loops on them get a brief without `loop_next`/`loop_stop`, the Loops form warns when you pick self-paced, and a self-paced one runs every 24 hours. Claude Code, Codex, Grok Build and OpenCode serve both tools | [#643](https://github.com/Colonizer-dev/harness/issues/643) |
-| Watchdog hint-loop and control-defeat signatures | `docs/boundaries.md`, "Watchdog signatures (planned)" | Only the stall path exists (`crates/colonizer/src/watchdog.rs`) | [#609](https://github.com/Colonizer-dev/harness/issues/609) |
+| Watchdog control-defeat signature | `docs/boundaries.md`, "Watchdog signatures" | The hint-loop and genuine-stall signatures are built (`crates/colonizer/src/watchdog.rs`), but no boundary event — an audit, publish-rewrite or sandbox event showing a control was bypassed — reaches the mothership for the watchdog to read, so control-defeat is not | [#609](https://github.com/Colonizer-dev/harness/issues/609) |
 | A session store other than local disk | `docs/session-store.md` | The `SessionStore` trait and a reference object-store backend exist, but startup reads and per-session writes bypass it, and no command runs the migration | [#610](https://github.com/Colonizer-dev/harness/issues/610) |
 | Verifying bun and pnpm repositories | `docs/colonies.md`, "Verifying done" | Verification detects the package manager, but the stock colony image has no bun or pnpm | [#589](https://github.com/Colonizer-dev/harness/issues/589) |
 | Resuming a colony whose tokens ran out | `docs/protocol.md`, quota exhaustion | A quota-parked colony reuses `stopped` and is resumed by hand | [#213](https://github.com/Colonizer-dev/harness/issues/213) |
@@ -45,8 +42,6 @@ Last checked against the code on 2026-09-27.
 | Landlock inside the colony | `docs/architecture.md`, in-guest hardening | Capabilities, no_new_privs, no core dumps and a seccomp denylist apply; Landlock is blocked upstream — no libkrunfw release through 5.6.2 or main builds the guest kernel with it, and microsandbox 0.7.3 still bundles the 5.6.1 build, so it waits on upstream, not on us | [#638](https://github.com/Colonizer-dev/harness/issues/638) |
 | Remote outposts and a fleet board of every colony | `docs/vision.md`, `docs/outposts.md` | The colony launch path runs through the `ExecutionBackend` trait, but the local backend is the only one — no remote outpost, no scheduler (`crates/colonizer/src/execution.rs`); a [fleet](fleet.md) lists peer motherships and, once a member syncs its history, its finished colonies, but not the ones still running | none filed |
 | Previews over the mesh | `docs/vision.md`, principle 5: "a hop away for chat, terminals and previews" | Chat and terminal only (`web/src/components/ChatPanel.tsx`, `web/src/components/TerminalPanel.tsx`) | none filed |
-| Per-file +/- counts on the pull request card | Cockpit prototype, inspector ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | Pull request number, publish stage and branch (`web/src/cockpit/Inspector.tsx`). The counts now exist in `GET /api/sessions/{id}/diff`; the card does not read them | [#611](https://github.com/Colonizer-dev/harness/issues/611) |
-| An inbox read from the activity log | Cockpit prototype, inbox ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | One entry per colony, its current state stamped with its `updated_at` (`web/src/cockpit/feed.ts`). History reads the activity log since [#527](https://github.com/Colonizer-dev/harness/pull/527); the inbox does not | [#612](https://github.com/Colonizer-dev/harness/issues/612) |
 | Today's spend in the header | Cockpit prototype, header ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | The workspace's running total, "$N spent" (`web/src/cockpit/OverviewView.tsx`) | [#613](https://github.com/Colonizer-dev/harness/issues/613) |
 | A settler count on each overview row | Cockpit prototype, overview ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | No count: the mothership streams one colony's events at a time (`web/src/cockpit/OverviewView.tsx`) | none filed |
 | Role captions under a crew's ants | `colonizer-website/colonies.html`, "a crew on one trail" illustration | The ants on one trail and a count ("3 settlers · all done"); each ant's name is only its hover title (`web/src/components/ChatPanel.tsx`, `CrewStrip`) | none filed |
@@ -72,8 +67,9 @@ Elements that are easy to remember as missing, and where they are.
 | Twelve settler roles | `colonizer-website/colonies.html`, "03 / settlers" | `web/src/settlers.ts`, `web/src/components/AntAvatar.tsx` |
 | Five ant states, and a stumble on a failed step | `colonizer-website/colonies.html`, "the ant shows what its settler is doing" | `web/src/components/AntAvatar.tsx`; "stopped" is its `paused` state |
 | A model for each kind of work | `colonizer-website/index.html`, "03 / the router" illustration | `web/src/components/SettingsDialog.tsx` |
-| History read from an event log | Cockpit prototype, history ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | Since [#527](https://github.com/Colonizer-dev/harness/pull/527), History reads the activity log (`GET /api/activity`, `web/src/cockpit/history.ts`); the inbox does not yet (above) |
+| History read from an event log | Cockpit prototype, history ([#187](https://github.com/Colonizer-dev/harness/pull/187)) | Since [#527](https://github.com/Colonizer-dev/harness/pull/527), History reads the activity log (`GET /api/activity`, `web/src/cockpit/history.ts`); since [#612](https://github.com/Colonizer-dev/harness/issues/612) the inbox reads it too, one line per event at its own time, answered or resolved entries kept and marked (`web/src/cockpit/feed.ts`, `inboxEntries`) |
 | Sending usage data | `docs/usage-data.md` | Built since #628: the batch is Cratefield's `module-telemetry` payload, and the sender posts it at most once a day — but there is no default endpoint, so an install that never sets `COLONIZER_TELEMETRY_ENDPOINT` in the mothership's environment sends nothing, ever (`crates/colonizer/src/usage.rs`) |
+| Per-file +/- counts on the pull request card | Cockpit prototype, inspector ([#194](https://github.com/Colonizer-dev/harness/pull/194)) | Since [#611](https://github.com/Colonizer-dev/harness/issues/611), the card reads `GET /api/sessions/{id}/diff` and lists the changed files with their +/- counts, folded after five (`web/src/cockpit/Inspector.tsx`, `web/src/sessionDiff.ts`) |
 
 ## Keeping it true
 
@@ -85,3 +81,51 @@ The pull request template asks.
 `scripts/test/gaps.test.mjs` checks that every repository path cited here exists, and that every
 **Not built** row names a tracking issue or says `none filed`. It cannot check the pictures: the
 website lives in another repository, so when an illustration changes there, record it here by hand.
+
+## What this does not do
+
+Stated here rather than buried.
+
+- **One machine.** Colonies run on the host that launched them: Linux x86_64 with KVM, or an Apple
+  Silicon Mac — where the bundled `tailscaled` is built from pinned source, because Tailscale
+  publishes no macOS build of it.
+- **Two agents, one forge.** Claude Code and Pi are the agent modules; GitHub the only source and publisher.
+- **The cockpit needs its per-install token.** Startup prints a sign-in link and opens it
+  (`colonizer open` reprints it later; `COLONIZER_NO_BROWSER=1` skips the auto-open). The token is
+  kept in `~/.config/colonizer/api-token`. The server binds to `127.0.0.1`, checks `Host` and
+  `Origin` headers, and should stay there.
+- **Colony images need glibc.** A Linux Claude Code binary is mounted read-only into the microVM: the
+  host's own on Linux, the `linux-arm64` build fetched at install time on a Mac.
+- **Relays are Tailscale's.** Direct connections don't need them; when a colony falls back to a relay,
+  encrypted traffic crosses Tailscale's public DERP servers.
+- **`install.sh --install` is not exercised yet.** It is implemented, but it hasn't been run against the
+  real world. Colonies opening pull requests has been.
+- **Cross-provider subagents are off the beaten path.** Anthropic doesn't support routing Claude Code to
+  non-Claude models. Routing and the gateway are tested with stub Anthropic-compatible providers inside
+  real colonies and against a local `ds4-server` on the operator's tailnet, not against DeepSeek's hosted
+  API, and Claude-specific request fields are forwarded as they are. The OpenAI translation (the `openai`
+  wire) is exercised against real Claude Code and a stub gateway, not against OpenAI's hosted API.
+- **ChatGPT subscriptions are not a credential.** OpenAI-compatible providers take an API key: a ChatGPT
+  plan is honoured by the Responses API behind Codex sign-in, which the gateway's `openai` wire does not
+  speak. The [`codex` agent module](../modules/agents/codex) runs on an OpenAI API key instead — a `CODEX_API_KEY`
+  colony secret for `api.openai.com` — but a ChatGPT sign-in is still nothing the harness can spend
+  ([#30](https://github.com/Colonizer-dev/harness/issues/30), [docs/decisions.md](decisions.md)).
+- **Memory search inside a colony is plain text matching.** With the mem0 provider, a colony's `MEMORY.md`
+  is ordered by mem0's relevance to the task, but `memory_search` still matches words in the notes it was
+  given. mem0's Platform API is supported; self-hosted mem0 serves a different API and is not.
+- **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
+  real credentials included. It found four ways a colony could cross into the host, filed as draft
+  security advisories and not fixed yet ([docs/audit.md](audit.md)).
+- **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
+  crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
+  microsandbox, the in-VM daemon, the agent modules and the web UI beside it — use the installer.
+  Nothing is published to npm.
+- **CI runs every suite, including one that boots a real colony.** The Rust tests and clippy, the
+  runner's, the live map receiver's and the web UI's all run on every pull request; releases are
+  built, smoke-tested and attested with build provenance; dependency audits and SBOMs run with every
+  change and on a weekly schedule; runtime pins move only by reviewed pull request. GitHub-hosted
+  runners do have `/dev/kvm` (the job makes it usable), so the `colony-e2e` job also boots a whole
+  colony end to end — mothership, microVM, agentd and the Claude Code runner against a scratch
+  repository and a stub model server, asserting it reaches `no_changes`. What that still does not
+  cover is a real model or a real GitHub write ([roadmap](vision.md#roadmap-in-public)). The crates are
+  published to crates.io through Trusted Publishing; nothing is published to npm.

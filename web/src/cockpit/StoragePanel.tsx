@@ -43,10 +43,11 @@ const numeric = (value: string): number | null => {
   return value.trim() === "" || !Number.isFinite(n) || n < 0 ? null : n;
 };
 
-/** The archive's Automatic cleanup form (issue #496): keep N days and/or cap at X GB, with a
+/** The archive's Clean up now form (issue #496): keep N days and/or cap at X GB, with a
  *  Preview that words the plan and an Apply that only goes out once a preview is on the table,
  *  carrying its bundle list as `expect`. Changing any input voids the preview; a 409 — the
- *  archive moved under us — does the same and asks for a fresh one. */
+ *  archive moved under us — does the same and asks for a fresh one. Automatic retention is the
+ *  Disk cleanup loop's "Session archives" category, not this. */
 function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) => Promise<RetentionPlan>; onApplied: () => void }): ReactElement {
   const [keepDays, setKeepDays] = useState("");
   const [maxGb, setMaxGb] = useState("");
@@ -95,7 +96,7 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
 
   return (
     <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[12.5px] text-muted">
-      <span className="text-faint">Automatic cleanup</span>
+      <span className="text-faint">Clean up now</span>
       <label className="flex items-center gap-1">
         keep
         <input type="number" min={0} value={keepDays} placeholder="—" onChange={(e) => retool(() => setKeepDays(e.target.value))} className={ARCHIVE_FIELD} />
@@ -119,6 +120,10 @@ function RetentionForm({ onRun, onApplied }: { onRun: (body: RetentionRequest) =
       {stale && <span className="text-warn">The archive changed since the preview — preview again.</span>}
       {error && <span className="text-warn">{error}</span>}
       {preview && !stale && <span className="font-mono text-[11px] text-faint">{retentionSummary(preview)}</span>}
+      <span className="w-full text-[11.5px] text-faint">
+        Runs once, on request: Preview words the plan, Apply removes exactly what it listed. Automatic retention is the Disk cleanup loop's
+        "Session archives" category (Loops).
+      </span>
     </div>
   );
 }
@@ -155,6 +160,7 @@ export function StoragePanelView({
     { label: "worktrees", bytes: summary.totals.worktrees_bytes },
     { label: "repos", bytes: summary.totals.repos_bytes },
     { label: "sessions", bytes: summary.totals.sessions_bytes },
+    { label: "archive", bytes: summary.totals.archive_bytes, note: "colony log bundles" },
     { label: "microsandbox home", bytes: summary.totals.microsandbox_bytes, note: "holds the shared image cache · kept" },
   ];
   const limits = [
