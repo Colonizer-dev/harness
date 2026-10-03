@@ -122,6 +122,7 @@ mod supersede;
 mod supply_chain_loop;
 mod telemetry;
 mod timing;
+mod transcript;
 mod ts_any_loop;
 mod uhp;
 mod update;

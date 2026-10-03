@@ -74,6 +74,9 @@ pub use api::*;
 // The shared answer path, callable in-process by the push-answer route (issue #742).
 pub(crate) use api::{AnswerCommand, AnswerError, submit_answer};
 pub(crate) use attention::*;
+// The colony-visibility guard, shared with `transcript.rs` (the files module's
+// own paths keep `crate::sessions::files::…`).
+pub(crate) use files::visible_session;
 pub use launch::*;
 pub use model::*;
 pub use runtime::*;
