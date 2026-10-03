@@ -18,7 +18,7 @@ import { colonyFromUrl } from "../push";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
-import type { FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
+import type { AutonomyStatus, FleetHost, HarnessStatus, OrgInfo, RedTeamRun, Repo, Session, StartRedTeamRunRequest, StorageSummary, UpdateStatus } from "../types";
 import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { Composer } from "./Composer";
@@ -168,6 +168,19 @@ export function Cockpit({
 }) {
   const api = useApi();
   const toast = useToast();
+  // The autonomy judge's health (issue #875): a slow poll feeding the header's warning chip.
+  // Errors are ignored — an older mothership has no /api/autonomy/status, and the chip stays hidden.
+  const [judge, setJudge] = useState<AutonomyStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => void api.autonomyStatus().then((s) => live && setJudge(s)).catch(() => {});
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      live = false;
+      window.clearInterval(id);
+    };
+  }, [api]);
   // A launch url (`?view=`, issue #745) overrides the persisted view once, at boot.
   const [view, setView] = useState<CockpitView>(() => viewFromUrl(window.location.href) ?? storedView());
   // A question from the composer's Ask mode, handed to Chat once (a fresh `n` each time).
@@ -702,6 +715,7 @@ export function Cockpit({
         statusError={statusError}
         connection={liveConnection}
         remoteOn={remoteOn}
+        judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,

@@ -2187,7 +2187,17 @@ export function createMockApi(): Api {
       ],
       enabled: true,
       settings: {},
-      schema: { type: "object", properties: {} },
+      schema: {
+        type: "object",
+        properties: {
+          fallback_models: {
+            type: "string",
+            title: "Fallback models",
+            description: "Comma-separated model ids the judge may fall back to when the main one fails",
+            default: "",
+          },
+        },
+      },
     },
     {
       kind: "watchdog",
@@ -2722,6 +2732,18 @@ export function createMockApi(): Api {
       Object.assign(module, { provider: body.provider, enabled: body.enabled, settings: body.settings });
       return clone(module);
     },
+    // The autonomy judge's health (issue #875): a healthy judge with a recent answer, so the
+    // Settings status line and the header chip have something to read in mock mode.
+    autonomyStatus: () =>
+      later(() => ({
+        enabled: true,
+        model: "deepseek/deepseek-flash",
+        fallback_models: ["anthropic/claude-haiku-4-5"],
+        last_success: { at: ago(2), model: "deepseek/deepseek-flash" },
+        last_error: null,
+        consecutive_failures: 0,
+        alerted: false,
+      })),
     burnDown: () => later(() => burnDown),
     stopBurnDown: async () => {
       await sleep(200);

@@ -930,6 +930,25 @@ export interface ModuleInfo {
   schema: SettingsSchema | null;
 }
 
+/** Why the autonomy judge's last call failed (issue #875), as the mothership classified it. */
+export type JudgeFailureKind = "provider_error" | "rate_limited" | "timeout" | "unreachable" | "refused";
+
+/**
+ * GET /api/autonomy/status (issue #875): the autonomy judge's recent health, for the Settings
+ * status line and the header's warning chip. `last_success` and `last_error` are null until the
+ * judge has answered or failed once; `consecutive_failures` counts the run of failures since the
+ * last success, and `alerted` says whether the mothership has already told the operator about them.
+ */
+export interface AutonomyStatus {
+  enabled: boolean;
+  model: string | null;
+  fallback_models: string[];
+  last_success: { at: string; model: string } | null;
+  last_error: { at: string; model: string; kind: JudgeFailureKind; status: number | null; message: string } | null;
+  consecutive_failures: number;
+  alerted: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------

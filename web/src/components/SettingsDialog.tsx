@@ -18,6 +18,7 @@ import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscription
 import { PushDeviceList } from "./PushDevicePrefs";
 import { Avatar } from "./Avatar";
 import type {
+  AutonomyStatus,
   HarnessStatus,
   HeadroomStatus,
   Mem0Check,
@@ -2139,6 +2140,7 @@ function ModulePane({
   const api = useApi();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const providerId = useId();
   const headroom = useHeadroom(module.kind === "agent");
   const info = kindInfo(module.kind);
@@ -2146,18 +2148,43 @@ function ModulePane({
   const dirty = isDirty(module, draft);
   const providerInfo = module.providers.find((p) => p.id === draft.provider);
 
-  const save = async () => {
+  // The autonomy judge's health (issue #875): fetched when its pane opens and again after a save,
+  // since a save is the moment a broken judge is most likely to have just been configured.
+  const [judge, setJudge] = useState<AutonomyStatus | null>(null);
+  const loadJudge = useCallback(async () => {
+    try {
+      setJudge(await api.autonomyStatus());
+    } catch {
+      /* an older mothership has no /api/autonomy/status: there is no line to show */
+    }
+  }, [api]);
+  useEffect(() => {
+    if (module.kind === "autonomy") void loadJudge();
+  }, [module.kind, loadJudge]);
+
+  const save = async (anyway = false) => {
     setSaving(true);
     try {
-      const saved = await api.saveModule(module.kind, { provider: draft.provider, enabled: draft.enabled, settings: draft.settings });
+      const saved = await api.saveModule(module.kind, {
+        provider: draft.provider,
+        enabled: draft.enabled,
+        settings: draft.settings,
+        ...(anyway ? { save_anyway: true } : {}),
+      });
       onSaved(saved);
+      setSaveError(null);
       toast(`${info.title} module saved`);
       // Choosing a stack is the moment to download it, not the first launch.
       if (module.kind === "sandbox") void pull.start();
       // Switching Headroom on is the moment to download its bundle, too.
       if (module.kind === "agent" && saved.settings?.headroom === true) void headroom.start();
+      if (module.kind === "autonomy") void loadJudge();
     } catch (error) {
-      toast(errorMessage(error), "error");
+      const message = errorMessage(error);
+      toast(message, "error");
+      // The autonomy judge is the one module whose save runs a live test call, so its refusal is
+      // shown in the pane with a way past it (issue #875).
+      if (module.kind === "autonomy") setSaveError(message);
     } finally {
       setSaving(false);
     }
@@ -2223,7 +2250,7 @@ function ModulePane({
               Reset
             </Button>
           )}
-          <Button variant="primary" disabled={!dirty || saving} onClick={save}>
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => void save()}>
             {saving && <Spinner />} Save
           </Button>
         </>
@@ -2232,6 +2259,19 @@ function ModulePane({
       {module.kind === "sandbox" && (
         <div className="mb-1">
           <ImagePullRow pull={pull} />
+        </div>
+      )}
+      {module.kind === "autonomy" && (judge !== null || saveError !== null) && (
+        <div className="mb-3 flex flex-col gap-2">
+          {judge && <AutonomyHealth status={judge} />}
+          {saveError && (
+            <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+              <p className="[overflow-wrap:anywhere]">{saveError}</p>
+              <Button size="sm" className="mt-2" disabled={saving} onClick={() => void save(true)}>
+                {saving && <Spinner />} Save anyway
+              </Button>
+            </div>
+          )}
         </div>
       )}
       <div className={cx(!draft.enabled && "opacity-60")}>
@@ -3117,6 +3157,47 @@ function KeyBadge({ provider }: { provider: ModelProvider }) {
 }
 
 type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealth } | { state: "failed"; message: string };
+
+/**
+ * The autonomy judge's recent health (issue #875), shown above its settings: a compact line while
+ * it is answering, and the last provider error — with how long the run of failures is — when it is
+ * not. The pane renders it only for the autonomy module; a fetch failure (an older mothership) has
+ * nothing to show and renders nothing.
+ */
+export function AutonomyHealth({ status, now = new Date() }: { status: AutonomyStatus; now?: Date }) {
+  const failing = status.consecutive_failures > 0;
+  const answered = status.last_success
+    ? `Last answered ${timeAgo(status.last_success.at, now)} by ${status.last_success.model}`
+    : "No answer yet";
+  return (
+    <div
+      role="status"
+      className={cx(
+        "rounded-xl border px-4 py-3 text-[12.5px]",
+        failing ? "border-warn/40 bg-warn-soft text-warn" : "border-border bg-panel-2/40 text-muted",
+      )}
+    >
+      <p className="flex items-center gap-1.5">
+        <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", failing ? "bg-warn" : "bg-ok")} />
+        {answered}
+        {failing && <span>· {status.consecutive_failures} in a row</span>}
+      </p>
+      {status.last_error && <p className="mt-1 [overflow-wrap:anywhere]">{judgeErrorLine(status.last_error, now)}</p>}
+    </div>
+  );
+}
+
+/** The judge's last failure as one clause: when, which model, how it failed, and what the provider said. */
+function judgeErrorLine(error: NonNullable<AutonomyStatus["last_error"]>, now: Date): string {
+  return [
+    `Failed ${timeAgo(error.at, now)} by ${error.model}`,
+    error.kind.replace(/_/g, " "),
+    error.status !== null ? `HTTP ${error.status}` : null,
+    error.message || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 export function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
   if (health.state === "checking") {

@@ -50,6 +50,11 @@ pub struct Runtime {
     /// tick says so once instead of every 5 s (issue #562). In memory like the other cursors: a
     /// restart saying it again is a minor repeat, a per-tick drumbeat is the leak.
     pub(crate) suspend_skip_logged: std::sync::atomic::AtomicBool,
+    /// The last skip the autonomy judge logged for this colony — `<reason>` or `<reason>:<question
+    /// id>` (autonomy.rs, issue #875) — so a state that hides a question (parked, out of answers)
+    /// is one log line per question, not one every thirty-second tick. In memory, like the other
+    /// cursors: a restart repeating it once is a minor repeat.
+    pub(crate) judge_skip_logged: Mutex<Option<String>>,
     pub(crate) stop: watch::Sender<bool>,
     /// Set once, by `resume` on the retired run's Runtime only: pre-existing event sockets hold
     /// that Runtime and can never see the new run's events, so they close and reconnect into the
@@ -216,6 +221,7 @@ impl Runtime {
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
+            judge_skip_logged: Mutex::new(None),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),

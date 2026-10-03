@@ -316,6 +316,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::answer_tokens::routes())
         .merge(crate::api_tokens::routes())
         .merge(crate::archive::routes())
+        .merge(crate::autonomy::routes())
         .merge(crate::burn_down::routes())
         .merge(crate::chat::routes())
         .merge(crate::chat_images::routes())
