@@ -14,9 +14,8 @@ transmits are valid by construction. It is a separate question from the [live ma
 with its own switch and its own random id, kept in `~/.config/colonizer/usage.json` next to the map's
 `telemetry.json`.
 
-A [planned observability add-on](https://github.com/Colonizer-dev/harness/issues/839) is a third,
-separate and opt-in thing: it exports your own runs over OTLP to *your* backend, never to
-colonizer.dev.
+A [planned observability add-on](design/observability.md) is a third, separate and opt-in thing: it
+exports your own runs over OTLP to *your* backend, never to colonizer.dev.
 
 To switch it off, with or without the mothership running:
 
