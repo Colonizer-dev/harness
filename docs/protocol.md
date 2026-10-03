@@ -3220,7 +3220,7 @@ cost was never attributed reads `null`, never `0.0` — and never a routed dolla
 applies the same rule per turn, so the two surfaces agree. A subscription plan that reports no cost
 at all reads as `null`, never as free.
 
-### `GET /api/spend/history?days=30`
+### `GET /api/spend/history?days=30&tz_offset_minutes=0`
 
 ```json
 {"days": [
@@ -3235,7 +3235,11 @@ at all reads as `null`, never as free.
 ```
 
 `days` is how far back to answer, default 30, clamped to 1–365. Days come back oldest first and only
-days the journal mentions appear; each day's orgs are sorted by org name. Per day, `orgs` entries
+days the journal mentions appear; each day's orgs are sorted by org name. `tz_offset_minutes`, a
+browser's `-getTimezoneOffset()`, buckets the days by the caller's local calendar instead of UTC —
+each row's day is re-derived from its timestamp and the window ends on the caller's local today —
+so the cockpit's header and sparklines line up with the reader's day (issue #613); it is clamped to
+±14 h and 0 or absent keeps the UTC days the rows were filed under. Per day, `orgs` entries
 carry the `spend` object above plus `launched` (colonies admitted that day, queued or starting),
 `returned` (colonies that crossed into a terminal state that day — pull request opened, merged or
 closed, nothing to push, or stopped/failed) and `scoring_ms` (the bench's scoring time journaled
