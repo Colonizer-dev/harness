@@ -73,6 +73,7 @@ mod merge_train;
 mod mesh;
 mod modules;
 mod notify;
+mod observability;
 mod openai;
 mod orgs;
 mod packages;

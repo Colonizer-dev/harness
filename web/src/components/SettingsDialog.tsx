@@ -104,6 +104,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
   screen: { title: "Prompt screening", description: "Screen the diff and PR body for hidden code points before publishing" },
   voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
+  observability: { title: "Observability", description: "Send logs, traces and metrics to Grafana or any OpenTelemetry backend" },
 };
 
 const kindInfo = (kind: string) => KIND_INFO[kind] ?? { title: kind, description: "" };

@@ -536,6 +536,19 @@ fn catalog(app: &App) -> Vec<Item> {
         colonies: Access::None,
     });
     items.push(Item {
+        id: "observability-headers".into(),
+        label: "Observability headers".into(),
+        group: "integrations",
+        // A standard OTEL_EXPORTER_OTLP_HEADERS list, `k=v,k2=v2`, read only by the exporter
+        // (observability module, #840); it never enters a colony.
+        used_by: "OTLP export (observability module)".into(),
+        icon: "key",
+        path: Some(dir.join("observability-headers")),
+        env: Some("OTEL_EXPORTER_OTLP_HEADERS"),
+        editable: true,
+        colonies: Access::None,
+    });
+    items.push(Item {
         id: "jev".into(),
         label: "TypeSafe (Jev)".into(),
         group: "integrations",
@@ -833,6 +846,35 @@ mod tests {
         assert_eq!(store.location(&path), Location::Unset);
         assert!(lock(&fake.items).is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_observability_headers_secret_is_listed_as_metadata_never_a_value() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        let item = catalog(&app)
+            .into_iter()
+            .find(|item| item.id == "observability-headers")
+            .expect("the OTLP headers secret is registered");
+        assert_eq!(item.group, "integrations");
+        assert_eq!(item.env, Some("OTEL_EXPORTER_OTLP_HEADERS"));
+        assert!(item.editable, "the page may set, replace and remove it");
+        assert!(matches!(item.colonies, Access::None), "it never enters a colony");
+
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let store = Store::new(&app.cfg.config_dir, Some(Box::new(std::sync::Arc::new(Fake::default()))));
+        store.probe();
+        // A value built at runtime: no credential-looking literal lives in the source.
+        let value = format!("canary-{}", std::process::id());
+        store.write(item.path.as_deref().unwrap(), &value).unwrap();
+        assert_eq!(store.read(item.path.as_deref().unwrap()), Some(Some(value.clone())));
+        let shown = row(&store, &item).to_string();
+        assert!(
+            !shown.contains(&value),
+            "the API returns where it lives, never its value: {shown}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

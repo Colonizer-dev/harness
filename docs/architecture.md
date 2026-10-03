@@ -105,6 +105,7 @@ Two settings layers sit next to the modules:
 | `notify` | A desktop notification or a webhook when a colony asks a question, stalls, fails or opens a pull request, or when a model provider starts failing. Off until configured, and the webhook carries no repository content — the event, the time, and the colony or provider counters behind it | Slack or email relays `PLANNED` |
 | `loops` | Besides the loops you write, a built-in "TypeScript: remove any" loop that counts the explicit `any` in the TypeScript repositories you opt in, with their own compiler or a token scan and no model, and hands one small batch per repository to a colony that types them properly, then recounts its pull request. Off, with an empty allowlist, until configured ([docs/loops.md](loops.md#typescript-remove-any)) | — |
 | `burn_down` | Spends a weekly token plan before it resets: launches bug-hunt colonies paced across the window down to a reserve, then stops. Off until configured ([docs/burn-down.md](burn-down.md)) | — |
+| `observability` | Sends logs, traces and metrics over OTLP to Grafana Cloud, a local collector, Datadog, Honeycomb, Elastic, SigNoz, New Relic or any OpenTelemetry backend — or writes them to capped local files. Off until configured ([docs/observability/settings.md](observability/settings.md)) | gRPC, more backends `PLANNED` |
 
 Each GitHub org the signed-in account belongs to can be a workspace with its own overrides for models, the
 parallel limit, the per-colony budget and host-disk quota, the sandbox stack, memory, the watchdog and
