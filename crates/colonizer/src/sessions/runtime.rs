@@ -46,6 +46,18 @@ pub struct Runtime {
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
+    /// When the runner last emitted a final, non-delta `assistant_text` — the colony's "it's done"
+    /// signal — and the tool calls it has opened and not yet answered (issue #878). A final answer
+    /// whose `turn_end` never came is a wedge the event stream cannot report, and these two are the
+    /// watchdog's evidence of it: any later sign of work (`events.rs` `note_turn_shape`) clears them.
+    /// In memory only, like `judged_questions`: a restart forgets a turn in flight, losing at worst
+    /// the recovery of one that was already ending.
+    pub(crate) final_text_at: Mutex<Option<DateTime<Utc>>>,
+    pub(crate) open_tool_calls: Mutex<HashSet<String>>,
+    /// The `final_text_at` the watchdog last logged "agentd is not answering" for, so a recovery it
+    /// is retrying logs once per final answer rather than once per tick (issue #878). In memory,
+    /// like the two above.
+    pub(crate) final_text_logged: Mutex<Option<DateTime<Utc>>>,
     /// Set once a run has been told its agent cannot resume a session, so the queue's suspension
     /// tick says so once instead of every 5 s (issue #562). In memory like the other cursors: a
     /// restart saying it again is a minor repeat, a per-tick drumbeat is the leak.
@@ -121,7 +133,7 @@ impl Runtime {
         // The reconnect cursor is agentd's, not the file's: only lines the runner wrote count, each
         // at its own seq (a line `handle_agent_event` renumbered because it collided with a host
         // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
-        // the seven this build emits and the protocol reserves — so a restart mid-life asks agentd to
+        // the eight this build emits and the protocol reserves — so a restart mid-life asks agentd to
         // replay exactly the events it has missed, and cannot skip the ones that never landed.
         //
         // The same pass restores the open question. It is otherwise set only while live events are
@@ -218,6 +230,9 @@ impl Runtime {
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
             pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
             interrupted: std::sync::atomic::AtomicBool::new(false),
+            final_text_at: Mutex::new(None),
+            open_tool_calls: Mutex::new(HashSet::new()),
+            final_text_logged: Mutex::new(None),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
