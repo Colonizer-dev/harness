@@ -39,6 +39,8 @@ import { NestDashboard } from "./NestDashboard";
 import { OverviewView } from "./OverviewView";
 import { Page } from "./Page";
 import { PhoneWelcomeSheet } from "../components/PhoneWelcomeSheet";
+import { BookmarkPrompt } from "../components/BookmarkPrompt";
+import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
@@ -703,6 +705,7 @@ export function Cockpit({
         connection={liveConnection}
         remoteOn={remoteOn}
         onOpenRemote={() => onOpenSettings("remote")}
+        onOpenCockpit={() => onOpenSettings("cockpit")}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -822,6 +825,11 @@ export function Cockpit({
       {/* The phone sign-in welcome (issue #746): offered once, gone on dismiss or on reload —
           the ?welcome= that opened it is stripped at boot. */}
       {welcome && <PhoneWelcomeSheet onClose={() => setWelcome(null)} />}
+      {/* The bookmark prompt (issue #867): once per device in the signed-in cockpit, and never
+          again once dismissed or installed. Held back while the phone welcome sheet is up so the two
+          do not stack, and left out of the hosted demo, which has no real cockpit to bookmark.
+          Self-gating, so it renders null when it has nothing to say. */}
+      {!welcome && !DEMO && <BookmarkPrompt />}
     </div>
     </ColonizeProvider>
   );

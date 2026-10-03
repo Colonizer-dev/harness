@@ -75,6 +75,7 @@ import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { PhonePane } from "./PhonePane";
+import { YourCockpitCard } from "./YourCockpitCard";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -84,7 +85,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "cockpit" | "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -349,6 +350,11 @@ export function SettingsBody({
       label: "General",
       items: [
         {
+          id: "cockpit",
+          label: "Your cockpit",
+          hint: "The address to bookmark for this cockpit",
+        },
+        {
           id: "setup",
           label: "Setup",
           hint: "The checklist for the first colony",
@@ -536,7 +542,14 @@ export function SettingsBody({
   };
 
   let pane: ReactNode = null;
-  if (active === "setup") {
+  // Your cockpit first: the address to bookmark, with Copy and a QR code, and the way into pairing.
+  if (active === "cockpit") {
+    pane = (
+      <Pane title="Your cockpit" subtitle="The address to bookmark for this cockpit" back={back}>
+        <YourCockpitCard remote={remote} onOpenPhone={() => select("phone")} />
+      </Pane>
+    );
+  } else if (active === "setup") {
     pane = (
       <SetupSection
         status={status}
@@ -551,6 +564,7 @@ export function SettingsBody({
         onDismiss={onSetupDismissed}
         onShown={onSetupShown}
         onOpenLiveMap={() => select("live-map")}
+        onOpenCockpit={() => select("cockpit")}
         back={back}
       />
     );

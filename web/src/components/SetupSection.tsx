@@ -31,6 +31,7 @@ export function SetupSection({
   onDismiss,
   onShown,
   onOpenLiveMap,
+  onOpenCockpit,
   back,
 }: {
   status: HarnessStatus | null;
@@ -45,6 +46,8 @@ export function SetupSection({
   onDismiss: () => void;
   onShown: () => void;
   onOpenLiveMap: () => void;
+  /** Opens Settings → Your cockpit once the checklist is done, so the address can be bookmarked. */
+  onOpenCockpit: () => void;
   back?: () => void;
 }) {
   const api = useApi();
@@ -343,6 +346,14 @@ export function SetupSection({
           );
         })}
       </ol>
+      {setup.progress.done === setup.progress.total && (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
+          <p className="min-w-0 flex-1 text-[12.5px] text-muted">All set. Bookmark this cockpit so you can come back to it from any device.</p>
+          <Button size="sm" onClick={onOpenCockpit}>
+            Your cockpit address
+          </Button>
+        </div>
+      )}
     </PaneShell>
   );
 }

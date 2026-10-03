@@ -462,8 +462,8 @@ what would be removed before you apply it.
 
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
-- **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
+- **General**: Your cockpit, Setup, Connections (GitHub and Claude), Model providers, Runtime, Live
+  map, Remote access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
   ([usage-data.md](usage-data.md)), Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
@@ -494,6 +494,36 @@ The link exposes this cockpit, including colony terminals, and nothing else on t
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
 [protocol.md](protocol.md#610-remote-access-tunnel) for the routes, and
 [remote-access-review.md](remote-access-review.md) for the security review.
+
+### Your cockpit
+
+**Settings → Your cockpit** (also the small button in the header, and offered at the end of Setup)
+lists the addresses this cockpit can be reached on, each with **Copy** and **Show QR**:
+
+- **On this computer** — the loopback address, when you are opening the cockpit on the machine itself.
+- **On your network** (or **On your tailnet**) — an address another device on the same network can
+  use, taken from the same ranked origins the pairing flow answers with (`GET /api/phone`). Only a
+  **reachable** origin is offered: one the mothership cannot answer on is left out, and a line says
+  it is not reachable from other devices, naming what to change (usually the bind) and pointing at
+  Remote access. A plain-http address still pairs, but carries a note that a phone cannot install
+  the app or get notifications over it. A mothership too old to send origins falls back to the
+  address this page is already open on.
+- **Anywhere** — the remote-access link (`https://<install>.my.colonizer.dev`) while remote access is on.
+
+Every address is reduced to its scheme, host and base path. The one-time sign-in link from your
+terminal (which carries `?token=…`) and a phone pairing code are never shown, copied or drawn into a
+QR code, so a bookmark made here is a plain address that asks for a real sign-in like any other.
+
+**Put it on your phone** opens [Add your phone](#add-your-phone). **Add to this device** offers the
+bookmark-or-install prompt again.
+
+On your first sign-in the cockpit asks once, per device, to **Bookmark this page** — naming your
+browser's shortcut, ⌘D on macOS and Ctrl+D otherwise — or, where the browser supports it, to
+**Install app**. A phone gets its own Add to Home Screen steps instead: iOS Safari is walked through
+Share → Add to Home Screen, another iOS browser is pointed at Safari, and Android Chrome gets its
+native install prompt (or the **⋮ → Install app** menu path). Dismissing or installing is remembered,
+and the card's **Add to this device** brings the offer back; nothing is shown once the cockpit is
+running as the installed app.
 
 ### Add your phone
 

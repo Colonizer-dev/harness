@@ -93,6 +93,7 @@ import type {
   RemotePairing,
   RemoteStatus,
   Phones,
+  PhoneOrigin,
 } from "./types";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -1414,6 +1415,14 @@ export function createMockApi(): Api {
   let remoteState: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
   const phoneState: Phones = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
   let remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
+  // Where a phone might reach this cockpit, in the mothership's preference order: the relay when
+  // remote access is on, otherwise a plain-http lan address (so the insecure-origin warning has a
+  // real case). GET /api/phone answers with this list too — bare origins, no code — so a bookmark
+  // can name the network address without minting an invite (issue #867).
+  const phoneOrigins = (): PhoneOrigin[] =>
+    remoteState.enabled
+      ? [{ kind: "relay", url: `https://${remoteHost}`, reachable: true, secure: true, note: null }]
+      : [{ kind: "lan", url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" }];
   const remotePairingState: RemotePairing = {
     owner: null,
     pending: [{ code: "481516", github_login: "octocat", expires_at: Math.floor(Date.now() / 1000) + 600 }],
@@ -2965,7 +2974,7 @@ export function createMockApi(): Api {
     // switch, and the lan origin is plain http so the insecure-origin warning has a real case. The
     // mock has no phone to scan with, so a minted invite shows up as one phone waiting for a code
     // ("123 456"), which confirming turns into a paired phone.
-    phones: () => later(() => clone(phoneState)),
+    phones: () => later(() => clone({ ...phoneState, origins: phoneOrigins() })),
     phoneInvite: async () => {
       await sleep(250);
       phoneState.pending = [{ id: `ph_${mockId()}`, label: "iPhone", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
@@ -2973,11 +2982,7 @@ export function createMockApi(): Api {
         code: `${mockId()}${mockId()}`,
         expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
         ttl_secs: 300,
-        origins: [
-          remoteState.enabled
-            ? { kind: "relay" as const, url: `https://${remoteHost}`, reachable: true, secure: true, note: null }
-            : { kind: "lan" as const, url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" },
-        ],
+        origins: phoneOrigins(),
       });
     },
     confirmPhone: async (code) => {
