@@ -5,7 +5,7 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{Shared, findings, github, memory, orgs, provider_quota, spend, util::append_line};
+use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -249,16 +249,26 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // one re-serialisation the host makes on every line (agentd's own output is sorted-key JSON
         // too, so nothing else moves).
         let (file_seq, file_line);
+        // Through the store, so the line lands in `sessions/<id>/events.jsonl` by the same name a
+        // remote backend would answer by; the store adds the newline, as `append_line` did.
         let err = if seq <= rt.last_seq.load(Ordering::SeqCst) {
             event["seq"] = json!(rt.last_seq.load(Ordering::SeqCst) + 1);
             event["a_seq"] = json!(seq);
             file_seq = event["seq"].as_u64().unwrap_or(seq);
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         } else {
             file_seq = seq;
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         };
         (
             match err {
@@ -1024,7 +1034,14 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
-        let recorded = append_line(&record, &crate::redact::redact_line(&entry.to_string())).await;
+        // Through the store, so the ledger line lands in `sessions/<id>/findings.jsonl` by the same
+        // name a remote backend would answer by; the store adds the newline, as `append_line` did.
+        let text = entry.to_string();
+        let recorded = app
+            .store()
+            .append(&id, "findings.jsonl", crate::redact::redact_line(&text).as_bytes())
+            .await
+            .map_err(anyhow::Error::from);
         if let Err(e) = recorded {
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.

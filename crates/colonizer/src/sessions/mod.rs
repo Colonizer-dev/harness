@@ -13,7 +13,6 @@ use crate::{
     protocol::{Origin, QuestionRisk},
     restack, spend,
     stack::Stacked,
-    store::SessionStore,
     util::{append_line, read_trimmed, short_id, truncate, valid_repo},
     watchdog::Activity,
 };

@@ -447,10 +447,12 @@ its tailnet VM key with the old node dropped. But the `msb snapshot restore` cal
 credentials into a live guest are not — the thaw is a stub that always fails, so a restore falls back today —
 and that stub is the one piece left for the gate.
 
-Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` is now
-written through the `SessionStore` in `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)),
-whose contract — atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session —
-is what will let the per-session files under `data/sessions/<id>/` move onto other backends in follow-ups. That is
+Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` and the
+per-session files and logs under `data/sessions/<id>/` are read and written through the `SessionStore` in
+`crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)) — startup loads the index through it, the
+saves write it back, and the event, harness and findings appends go through it — and its contract, atomic replaces,
+at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets another backend serve the
+same colonies (`colonizer migrate-store` copies one store into another). That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
 

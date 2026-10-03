@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `open`, `login-item`, `telemetry`, `migrate-store`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -62,6 +62,8 @@ colonizer update --force      # also over a development build, or a build newer 
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)
 colonizer telemetry show      # anonymous usage reporting (on, off; no network, no daemon needed)
+colonizer migrate-store --to /new/data               # copy this install's colonies into another local store
+colonizer migrate-store --to /new/data --dry-run     # count what would move, write nothing
 ```
 
 Colonies — the ids are what `list` and the cockpit show:
