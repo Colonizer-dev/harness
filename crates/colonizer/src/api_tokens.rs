@@ -16,20 +16,19 @@
 //! repository in their handler, where the body is parsed ([`ScopedToken::covers`]).
 
 use crate::{
-    client_error,
+    ApiResult, App, Shared, client_error,
     sessions::{Session, SessionStatus},
     util::{short_id, valid_repo},
-    ApiResult, App, Shared,
 };
 use axum::{
+    Json,
     extract::{Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 /// How much a token may do, ordered so `token.scope >= needed` reads as "may". `fleet` is the
@@ -480,12 +479,15 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id,
             at_least: Scope::Read,
         },
-        ["api", "sessions", id, "question" | "events" | "diff" | "commits" | "transcript"] if get && !id.is_empty() => {
-            Need::Session {
-                id,
-                at_least: Scope::Read,
-            }
-        }
+        [
+            "api",
+            "sessions",
+            id,
+            "question" | "events" | "diff" | "commits" | "transcript",
+        ] if get && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Read,
+        },
         // Artifacts (§7.5, issue #651): a colony's `out/` files read at watch scope, like the
         // colony itself — the listing, the archive and the per-file download are one read.
         ["api", "sessions", id, "files"] if get && !id.is_empty() => Need::Session {
@@ -502,12 +504,15 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         },
         // `messages` is the offline queue's twin of the socket's `user_message` (issue #746): a
         // colony drive, like answering.
-        ["api", "sessions", id, "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm"] if post && !id.is_empty() => {
-            Need::Session {
-                id,
-                at_least: Scope::Operate,
-            }
-        }
+        [
+            "api",
+            "sessions",
+            id,
+            "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm",
+        ] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Operate,
+        },
         // `seen` (issue #744) is looking at a colony, not driving it — it clears the badge's
         // unseen-failure flag — so watching it is enough, however it arrives.
         ["api", "sessions", id, "seen"] if post && !id.is_empty() => Need::Session {
@@ -769,8 +774,8 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sessions::tests::colony;
     use crate::sessions::SessionStatus;
+    use crate::sessions::tests::colony;
     use crate::tests::test_app;
 
     fn root() -> PathBuf {
@@ -1150,8 +1155,8 @@ mod tests {
     // driven with `oneshot` the way main.rs's auth tests drive theirs.
 
     use axum::{
-        http::{header, Request},
         Router,
+        http::{Request, header},
     };
     use tower::ServiceExt as _;
 
