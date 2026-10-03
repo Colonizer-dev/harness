@@ -26,6 +26,7 @@ async fn save_observability(
         provider: provider.into(),
         enabled: true,
         settings,
+        save_anyway: false,
         confirm_content,
     };
     update(State(app.clone()), Path("observability".into()), Json(req))

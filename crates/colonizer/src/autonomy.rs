@@ -18,7 +18,7 @@
 
 use crate::{
     App, Shared,
-    config::{ModulesConfig, setting, setting_str, setting_u64},
+    config::{ModuleChoice, ModulesConfig, setting, setting_str, setting_u64},
     ledger,
     modules::schema_for,
     protocol::{Origin, QuestionRisk},
@@ -26,8 +26,9 @@ use crate::{
     sessions::SessionStatus,
     util::truncate,
 };
-use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use anyhow::{Context, Result};
+use axum::{Json, extract::State};
+use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use std::{path::Path, time::Duration};
 
@@ -49,9 +50,121 @@ const EVENT_TAIL_BYTES: u64 = 64 * 1_024;
 /// not spin for long — `max_answers` caps answers, not attempts.
 const MAX_TRANSPORT_FAILURES: u64 = 3;
 
+/// The attention reason the outage alert raises, so the cockpit shows it as its own flag and the
+/// success path can tell it apart from a watchdog's.
+pub(crate) const ALERT_REASON: &str = "judge_unreachable";
+/// How long one judged call may take before it is a timeout worth falling back on.
+const JUDGE_TIMEOUT: Duration = Duration::from_secs(120);
+/// The save-time probe: a prompt that costs almost nothing and a wait short enough that saving
+/// settings never seems to hang.
+const PROBE_PROMPT: &str = "Reply with the single word: ok";
+const PROBE_TOKENS: u64 = 16;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How one call to one model ended, recorded on the colony's harness line with the model and, when
+/// the provider answered with one, the HTTP status — so an outage that used to fail silently reads
+/// as `provider_error 402` rather than nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Ok,
+    /// A status that is not a success.
+    ProviderError,
+    /// 429.
+    RateLimited,
+    /// The call ran out of time.
+    Timeout,
+    /// Anything else that stopped the call landing: a refused connection, DNS, TLS, a model id that
+    /// routes nowhere, a reply that could not be read.
+    Unreachable,
+    /// The model answered, and the answer was not one that can be used.
+    Refused,
+}
+
+impl Kind {
+    /// The name the harness line and the status payload carry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Ok => "ok",
+            Kind::ProviderError => "provider_error",
+            Kind::RateLimited => "rate_limited",
+            Kind::Timeout => "timeout",
+            Kind::Unreachable => "unreachable",
+            Kind::Refused => "refused",
+        }
+    }
+
+    /// Whether this is a provider-level failure a fallback is worth trying for. A refusal is not: the
+    /// model answered, and another model is not a fix for the answer being unusable.
+    fn is_provider(self) -> bool {
+        !matches!(self, Kind::Refused | Kind::Ok)
+    }
+}
+
+/// Why one call to one model produced nothing.
+#[derive(Debug)]
+pub(crate) struct ModelError {
+    pub(crate) kind: Kind,
+    /// The status the provider answered with, when it answered at all.
+    pub(crate) status: Option<u16>,
+    /// The model id as configured, e.g. `deepseek/deepseek-flash`.
+    pub(crate) model: String,
+    /// The provider the model resolved to, or the model id when routing failed and none was found.
+    pub(crate) provider: String,
+    /// The provider's own words, or why the call never landed; [`Display`] adds the model id.
+    ///
+    /// [`Display`]: std::fmt::Display
+    pub(crate) message: String,
+}
+
+impl std::fmt::Display for ModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let status = self.status.map(|s| format!("{s} ")).unwrap_or_default();
+        write!(f, "{} {status}{}", self.model, self.message)
+    }
+}
+
+impl std::error::Error for ModelError {}
+
+/// The last judged call that produced an answer, for `GET /api/autonomy/status`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Success {
+    pub at: DateTime<Utc>,
+    pub model: String,
+}
+
+/// The last judged call that produced nothing, for `GET /api/autonomy/status` and the one alert.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Failure {
+    pub at: DateTime<Utc>,
+    pub model: String,
+    pub kind: Kind,
+    pub status: Option<u16>,
+    pub message: String,
+    /// The provider the model resolved to, so the alert names what could not be reached.
+    pub provider: String,
+}
+
+/// The judge's health, one per install and in memory only ([`crate::App::judge_health`]): the last
+/// success and failure, how many primary-model failures have piled up, and whether that streak has
+/// already raised its one alert. A restart re-learns it; a primary success clears it.
+#[derive(Debug, Clone, Default)]
+pub struct Health {
+    pub last_success: Option<Success>,
+    pub last_error: Option<Failure>,
+    /// Provider-level failures of the *primary* in a row. A fallback answering does not reset it —
+    /// the primary is still down — but a primary success does.
+    pub consecutive_failures: u64,
+    /// Set when the streak's one alert has been raised, cleared by a primary success, so it is not
+    /// repeated tick after tick.
+    pub alerted: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Judge {
     pub model: String,
+    /// Fallback models, in order, tried only when the primary fails at the provider level — an HTTP
+    /// error, a rate limit, a timeout, an unreachable endpoint — never on a refusal.
+    pub fallback_models: Vec<String>,
     /// Minutes a question waits for a person first. Zero answers as soon as it is seen.
     pub after_minutes: u64,
     pub max_answers: u64,
@@ -63,7 +176,12 @@ pub struct Judge {
 
 /// The judge this install is configured with, or `None` when autonomous mode is off or has no model.
 pub fn judge(modules: &ModulesConfig, agents: &[crate::modules::AgentModule]) -> Option<Judge> {
-    let choice = modules.autonomy.as_ref()?;
+    judge_of(modules.autonomy.as_ref()?, agents)
+}
+
+/// The judge one module choice describes, or `None` when it is off or has no model. Split from
+/// [`judge`] so the save-time check can describe a choice that is not stored yet.
+pub(crate) fn judge_of(choice: &ModuleChoice, agents: &[crate::modules::AgentModule]) -> Option<Judge> {
     if !choice.enabled || choice.provider != "judge" {
         return None;
     }
@@ -75,11 +193,23 @@ pub fn judge(modules: &ModulesConfig, agents: &[crate::modules::AgentModule]) ->
     let risk_ceiling = setting(choice, &schema, "risk_ceiling");
     Some(Judge {
         model,
+        fallback_models: model_list(&setting_str(choice, &schema, "fallback_models")),
         after_minutes: setting_u64(choice, &schema, "after_minutes"),
         max_answers: setting_u64(choice, &schema, "max_answers"),
         free_text: choice.settings.get("free_text").and_then(Value::as_bool).unwrap_or(false),
         risk_ceiling: QuestionRisk::from_wire(risk_ceiling),
     })
+}
+
+/// A comma-separated list of model ids as the ordered list it means: whitespace trimmed, empty
+/// entries dropped. The stored shape is a string because it sits beside `model`, a string.
+fn model_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Why a question was not answered by the judge. Each one ends with the person, not a guess.
@@ -108,37 +238,49 @@ impl std::fmt::Display for Refusal {
 
 /// Why a judged attempt produced nothing. The two kinds are treated differently downstream: a refusal
 /// means the model answered and the answer was not fit to use, so the question goes to the person at
-/// once, while an unreachable model is worth another try on a later tick.
+/// once, while a provider-level failure is worth another try on a later tick — and, within one tick,
+/// worth trying each fallback model first.
 #[derive(Debug)]
 enum JudgeError {
     Refused(Refusal),
-    Unreachable(anyhow::Error),
-}
-
-impl From<anyhow::Error> for JudgeError {
-    fn from(e: anyhow::Error) -> Self {
-        Self::Unreachable(e)
-    }
+    /// Every model in the chain failed; carries the last attempt's classified error.
+    Failed(ModelError),
 }
 
 /// What one failed judged attempt says happened, for the session log.
 fn describe(failure: &JudgeError) -> String {
     match failure {
         JudgeError::Refused(refusal) => refusal.to_string(),
-        JudgeError::Unreachable(e) => format!("{e:#}"),
+        JudgeError::Failed(e) => e.to_string(),
+    }
+}
+
+/// The ledger's `Drop` reason for a failed attempt, carrying the classified kind (issue #875) so a
+/// dropped judged answer reads as `undelivered: provider_error` rather than a bare `undelivered`.
+/// The status is deliberately not spelled here: `Verdict::Drop` carries a `&'static str` and the
+/// reason is never persisted, so the code itself lives on the harness line and in `Health`.
+fn drop_reason(failure: &JudgeError) -> &'static str {
+    match failure {
+        JudgeError::Refused(_) => "undelivered: refused",
+        JudgeError::Failed(e) => match e.kind {
+            Kind::ProviderError => "undelivered: provider_error",
+            Kind::RateLimited => "undelivered: rate_limited",
+            Kind::Timeout => "undelivered: timeout",
+            Kind::Unreachable => "undelivered: unreachable",
+            Kind::Refused | Kind::Ok => "undelivered",
+        },
     }
 }
 
 /// Whether this failure ends the judge for the colony now, or is retried on a later tick. A refusal
 /// escalates at once — the model answered, and the answer was not fit to use, so another try at the
-/// same question would only spend the provider's key again. Any other failure — a provider that
-/// could not be reached, an HTTP error, a reply that could not be used — is retried until it has
-/// happened [`MAX_TRANSPORT_FAILURES`] times in a row, so one provider blip costs nothing while a
-/// permanently misconfigured judge still reaches a person.
+/// same question would only spend the provider's key again. A provider-level failure is retried
+/// until it has happened [`MAX_TRANSPORT_FAILURES`] times in a row, so one provider blip costs
+/// nothing while a permanently misconfigured judge still reaches a person.
 fn escalates(failure: &JudgeError, consecutive_failures: u64) -> bool {
     match failure {
         JudgeError::Refused(_) => true,
-        JudgeError::Unreachable(_) => consecutive_failures >= MAX_TRANSPORT_FAILURES,
+        JudgeError::Failed(e) => e.kind.is_provider() && consecutive_failures >= MAX_TRANSPORT_FAILURES,
     }
 }
 
@@ -400,10 +542,16 @@ pub(crate) fn route<'a>(model: &str, providers: &'a [Provider]) -> Result<(&'a P
 }
 
 /// The Anthropic-shaped body the judge sends, before the wire branch translates it if it has to.
+#[cfg(test)]
 fn judge_body(model: &str, prompt: &str) -> Value {
+    judge_body_with(model, prompt, MAX_TOKENS)
+}
+
+/// [`judge_body`] with an explicit token budget: the save-time probe sends a much smaller one.
+fn judge_body_with(model: &str, prompt: &str, max_tokens: u64) -> Value {
     json!({
         "model": model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     })
 }
@@ -451,29 +599,47 @@ pub(crate) fn outbound_request(provider: &Provider, body: &Value) -> Result<Outb
     }
 }
 
-/// One judged request. It goes only to a model provider the operator configured, authenticated with
-/// the key they saved for that provider (issue #143). The Mothership's own Claude credential is
-/// normally a `claude setup-token` subscription token, issued for Claude Code to use inside a colony,
-/// and answering questions with it from the outside would spend the login the colonies themselves run
-/// on — so there is no fallback to it, and a plain model id resolves through the operator's Anthropic
-/// provider or fails telling them what to add.
+/// One judged request, classified. Returns the reply's text, or a [`ModelError`] saying how it
+/// failed, so the caller can tell a provider outage from a refusal and try a fallback. The save-time
+/// probe uses it too, with a smaller budget.
 ///
-/// An `openai`-wire provider is translated on the way out and back, the same translation the gateway
-/// does for colonies; both wires end at one Anthropic-shaped reply, so the text extraction below
-/// stays single-source.
-pub(crate) async fn ask_model(app: &App, model: &str, prompt: &str) -> Result<String> {
+/// The request goes only to a model provider the operator configured, authenticated with the key they
+/// saved for that provider (issue #143): the Mothership's own Claude credential is a subscription
+/// token for the colonies to run on, so a plain model id resolves through the operator's Anthropic
+/// provider or fails telling them what to add. An `openai`-wire provider is translated on the way out
+/// and back, the same translation the gateway does for colonies.
+async fn ask(app: &App, model: &str, prompt: &str, max_tokens: u64, timeout: Duration) -> Result<String, ModelError> {
+    // The provider's body, a URL and a transport error can all carry a credential, and this message
+    // reaches the status route and the save-time refusal, neither of which redacts on its own.
+    let fail = |kind: Kind, status: Option<u16>, provider: &str, message: String| ModelError {
+        kind,
+        status,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        message: crate::redact::redact_text(&message).into_owned(),
+    };
     let providers = app.providers();
-    let (provider, upstream) = route(model, &providers)?;
+    let (provider, upstream) = match route(model, &providers) {
+        Ok(pair) => pair,
+        Err(e) => return Err(fail(Kind::Unreachable, None, model, format!("{e:#}"))),
+    };
     let Outbound {
         url,
         headers,
         body,
         openai,
-    } = outbound_request(provider, &judge_body(&upstream, prompt))?;
-    let client = reqwest::Client::builder()
+    } = match outbound_request(provider, &judge_body_with(&upstream, prompt, max_tokens)) {
+        Ok(out) => out,
+        Err(e) => return Err(fail(Kind::Unreachable, None, &provider.id, format!("{e:#}"))),
+    };
+    let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .build()?;
+        .timeout(timeout)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => return Err(fail(Kind::Unreachable, None, &provider.id, format!("{e:#}"))),
+    };
     let mut request = client.post(url);
     for (name, value) in headers {
         request = request.header(name, value);
@@ -481,33 +647,132 @@ pub(crate) async fn ask_model(app: &App, model: &str, prompt: &str) -> Result<St
     if let Some((name, value)) = crate::gateway::credential_header(app, provider) {
         request = request.header(name, value);
     }
-    let response = request.body(body).send().await.context("the judge's model is unreachable")?;
+    let response = match request.body(body).send().await {
+        Ok(response) => response,
+        Err(e) if e.is_timeout() => return Err(fail(Kind::Timeout, None, &provider.id, "the call timed out".into())),
+        Err(e) => {
+            return Err(fail(
+                Kind::Unreachable,
+                None,
+                &provider.id,
+                format!("the judge's model is unreachable: {e}"),
+            ));
+        }
+    };
     let status = response.status();
     let bytes = response.bytes().await.unwrap_or_default();
     if !status.is_success() {
-        if openai.is_some() {
-            let (_, _, message) = crate::openai::translate_error(status, &bytes, &provider.id);
-            bail!("{model} answered {status}: {message}");
-        }
-        bail!(
-            "{model} answered {status}: {}",
-            truncate(&String::from_utf8_lossy(&bytes), 300)
-        );
+        let code = status.as_u16();
+        let kind = if code == 429 { Kind::RateLimited } else { Kind::ProviderError };
+        let message = if openai.is_some() {
+            crate::openai::translate_error(status, &bytes, &provider.id).2
+        } else {
+            truncate(&String::from_utf8_lossy(&bytes), 300).trim().to_string()
+        };
+        return Err(fail(kind, Some(code), &provider.id, message));
     }
     let value: Value = match openai {
-        Some(info) => crate::openai::translate_response(&bytes, &info)
-            .map(|(value, _)| value)
-            .map_err(|e| anyhow::anyhow!("the model's reply did not translate from the openai wire: {e}"))?,
-        None => serde_json::from_slice(&bytes).context("the model's reply was not JSON")?,
+        Some(info) => match crate::openai::translate_response(&bytes, &info) {
+            Ok((value, _)) => value,
+            Err(e) => {
+                let why = format!("the model's reply did not translate from the openai wire: {e}");
+                return Err(fail(Kind::Unreachable, None, &provider.id, why));
+            }
+        },
+        None => match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                return Err(fail(
+                    Kind::Unreachable,
+                    None,
+                    &provider.id,
+                    "the model's reply was not JSON".into(),
+                ));
+            }
+        },
     };
     value["content"]
         .as_array()
         .and_then(|blocks| blocks.iter().find_map(|b| b["text"].as_str()))
         .map(str::to_string)
-        .context("the model's reply carried no text")
+        .ok_or_else(|| {
+            fail(
+                Kind::Unreachable,
+                None,
+                &provider.id,
+                "the model's reply carried no text".into(),
+            )
+        })
 }
 
-/// Answers one colony's open question. Returns the line to log, or why the question was left alone.
+/// [`ask`] with the judge's own limits, for callers that only want the text (summaries.rs,
+/// validation.rs): a [`ModelError`] flattened to an `anyhow` error.
+pub(crate) async fn ask_model(app: &App, model: &str, prompt: &str) -> Result<String> {
+    ask(app, model, prompt, MAX_TOKENS, JUDGE_TIMEOUT)
+        .await
+        .map_err(anyhow::Error::from)
+}
+
+/// Records a judged call that produced an answer. A primary success clears the streak and re-arms the
+/// alert; a fallback answering keeps the primary's streak, because the primary is still down.
+async fn note_success(app: &Shared, model: &str, primary: bool) {
+    let mut health = app.judge_health.lock().await;
+    health.last_success = Some(Success {
+        at: Utc::now(),
+        model: model.to_string(),
+    });
+    if primary {
+        health.consecutive_failures = 0;
+        health.alerted = false;
+    }
+}
+
+/// Records a judged call that produced nothing. Only the primary's failures count: a fallback is only
+/// tried after the primary has failed, so the primary's error is the one that explains the outage. A
+/// provider-level failure advances the streak; a refusal does not.
+async fn note_failure(app: &Shared, error: &ModelError, primary: bool) {
+    if !primary {
+        return;
+    }
+    let mut health = app.judge_health.lock().await;
+    if error.kind.is_provider() {
+        health.consecutive_failures += 1;
+    }
+    health.last_error = Some(Failure {
+        at: Utc::now(),
+        model: error.model.clone(),
+        kind: error.kind,
+        status: error.status,
+        message: error.message.clone(),
+        provider: error.provider.clone(),
+    });
+}
+
+/// The one line a call's outcome leaves on the colony's harness log: the model, the classified kind
+/// and, when there was one, the HTTP status.
+async fn log_call(app: &Shared, id: &str, model: &str, outcome: &Result<String, ModelError>) {
+    match outcome {
+        Ok(_) => {
+            app.session_log_as(Origin::Autonomy, id, "info", format!("autonomous: judge call {model} ok"))
+                .await
+        }
+        Err(e) => {
+            let status = e.status.map(|s| format!(" {s}")).unwrap_or_default();
+            app.session_log_as(
+                Origin::Autonomy,
+                id,
+                "warn",
+                format!("autonomous: judge call {model} {}{status}: {}", e.kind.as_str(), e.message),
+            )
+            .await;
+        }
+    }
+}
+
+/// Answers one colony's open question, trying the primary model and then each fallback in order.
+/// A provider-level failure of one model falls through to the next; a refusal does not — the model
+/// answered, and another model is not a fix for an unusable answer. Every call's outcome is recorded
+/// on the install's health, and the model that answered is named in the line logged.
 async fn judge_one(
     app: &Shared,
     id: &str,
@@ -517,24 +782,108 @@ async fn judge_one(
     questions: &[Value],
 ) -> Result<String, JudgeError> {
     let Some(rt) = app.runtimes.lock().await.get(id).cloned() else {
-        return Err(JudgeError::Unreachable(anyhow::anyhow!("the colony is gone")));
+        return Err(JudgeError::Failed(ModelError {
+            kind: Kind::Unreachable,
+            status: None,
+            model: judge.model.clone(),
+            provider: judge.model.clone(),
+            message: "the colony is gone".into(),
+        }));
     };
     let context = event_context(&rt.events_path).await;
-    let reply = ask_model(app, &judge.model, &prompt(task, questions, &context)).await?;
-    let (answers, reason) = decide(&reply, questions, judge.free_text).map_err(JudgeError::Refused)?;
-    let chosen = answers.values().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
-    // The echo this answer will produce is the only trace of who answered, so the id goes into the
-    // runtime's set first and `handle_agent_event` spends it stamping that echo `autonomy` (§3).
-    rt.judged_questions.lock().await.insert(question_id.to_string());
-    rt.send_command(json!({
-        "type": "answer",
-        "question_id": question_id,
-        "answers": answers,
-        // The colony is told, so the agent knows it is running unattended.
-        "response": format!("Answered automatically by {} in autonomous mode, with nobody watching: {reason}", judge.model),
-    }));
-    rt.activity.lock().await.judged += 1;
-    Ok(format!("autonomous: {} answered with {chosen} — {reason}", judge.model))
+    let prompt_text = prompt(task, questions, &context);
+    let mut last: Option<ModelError> = None;
+    for (index, model) in std::iter::once(&judge.model).chain(judge.fallback_models.iter()).enumerate() {
+        let outcome = ask(app, model, &prompt_text, MAX_TOKENS, JUDGE_TIMEOUT).await;
+        log_call(app, id, model, &outcome).await;
+        match outcome {
+            Ok(reply) => {
+                note_success(app, model, index == 0).await;
+                let (answers, reason) = decide(&reply, questions, judge.free_text).map_err(JudgeError::Refused)?;
+                let chosen = answers.values().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
+                // The echo this answer will produce is the only trace of who answered, so the id goes
+                // into the runtime's set first and `handle_agent_event` spends it stamping that echo
+                // `autonomy` (§3).
+                rt.judged_questions.lock().await.insert(question_id.to_string());
+                rt.send_command(json!({
+                    "type": "answer",
+                    "question_id": question_id,
+                    "answers": answers,
+                    // The colony is told, so the agent knows it is running unattended.
+                    "response": format!("Answered automatically by {model} in autonomous mode, with nobody watching: {reason}"),
+                }));
+                rt.activity.lock().await.judged += 1;
+                return Ok(format!("autonomous: {model} answered with {chosen} — {reason}"));
+            }
+            Err(error) => {
+                note_failure(app, &error, index == 0).await;
+                last = Some(error);
+            }
+        }
+    }
+    Err(JudgeError::Failed(last.expect("the primary model is always tried")))
+}
+
+/// Raises the one alert an outage of the judge's primary model calls for: an attention item on the
+/// colony that needed the judge, the notification claim the notify loop announces from the same
+/// `alerted` edge, and a log line. Called after the attempt, so a fallback that answered this tick
+/// cannot have its colony's attention raised and then wiped by the success path in the same pass.
+async fn alert_if_due(app: &Shared, id: &str) {
+    let due = {
+        let mut health = app.judge_health.lock().await;
+        match health.last_error.clone().filter(|e| e.kind.is_provider()) {
+            Some(error) if !health.alerted && health.consecutive_failures >= MAX_TRANSPORT_FAILURES => {
+                health.alerted = true;
+                Some(error)
+            }
+            _ => None,
+        }
+    };
+    let Some(error) = due else { return };
+    let status = error.status.map(|s| format!("{s} ")).unwrap_or_default();
+    let text = format!("the autonomy judge can't reach {}: {status}{}", error.provider, error.message);
+    let provider = error.provider.clone();
+    let message = format!("{status}{}", error.message);
+    app.update_session(id, move |x| {
+        x.attention = Some(json!({"reason": ALERT_REASON, "provider": provider, "message": message}));
+    })
+    .await;
+    // The fact is claimed once per outage so neither the attention item nor the notification can
+    // fire twice. It rides the notify kind, not the judge's: an alert is an announcement, and
+    // claiming it as a judged delivery would spend one of the judge's own answer slots.
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("judge_alert:{}", error.provider),
+        class: "judge_degraded".to_string(),
+        fact: Some(format!("judge_degraded:{}", error.provider)),
+        colony: Some(id.to_string()),
+        priority: false,
+    };
+    let now = Utc::now();
+    if app.ledger.check(&candidate, now) == ledger::Verdict::Deliver
+        && !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default())
+    {
+        app.ledger.record(&candidate, &ledger::Verdict::Deliver, now).await;
+    }
+    app.session_log_as(Origin::Autonomy, id, "warn", format!("autonomous: {text}"))
+        .await;
+}
+
+/// Logs a skipped question once per colony and reason, so a state that hides a problem — a colony
+/// parked so a person can answer, one out of answers, one the judge cannot find a question on — is
+/// visible in the colony's log without the thirty-second tick repeating itself. The ordinary "not
+/// waited long enough yet" is never logged: it is the loop working, not a problem.
+async fn skip_log(app: &Shared, id: &str, key: &str, message: String) {
+    let rt = app.runtime(id).await;
+    {
+        let mut logged = rt.judge_skip_logged.lock().await;
+        if logged.as_deref() == Some(key) {
+            return;
+        }
+        *logged = Some(key.to_string());
+    }
+    app.session_log_as(Origin::Autonomy, id, "info", format!("autonomous: {message}"))
+        .await;
 }
 
 /// Every half minute, looks for a question nobody has answered.
@@ -543,133 +892,245 @@ pub async fn run(app: Shared) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
-        let modules = app.modules.read().await.clone();
-        let Some(judge) = judge(&modules, &app.agents) else { continue };
-        let sessions = app.sessions.read().await.clone();
+        tick_once(&app).await;
+    }
+}
+
+/// One pass over the sessions waiting on an answer. Extracted from [`run`] so a test can drive
+/// exactly one tick without the thirty-second interval.
+pub(crate) async fn tick_once(app: &Shared) {
+    let modules = app.modules.read().await.clone();
+    let Some(judge) = judge(&modules, &app.agents) else { return };
+    let sessions = app.sessions.read().await.clone();
+    for s in sessions {
+        if s.status != SessionStatus::WaitingForAnswer {
+            continue;
+        }
         // Suspended colonies excluded (issue #562): the question they wait on is a person's — the
         // colony was parked precisely so its slot could go while a human answers — and their link
-        // is being torn down, so an answer sent there would be dropped with it.
-        for s in sessions
-            .into_iter()
-            .filter(|s| s.status == SessionStatus::WaitingForAnswer && s.suspended.is_none())
-        {
-            let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
-                continue;
-            };
-            let (waited, judged) = {
-                let activity = rt.activity.lock().await;
-                let waited = activity
-                    .question_since
-                    .map(|since| (Utc::now() - since).num_minutes())
-                    .unwrap_or(0);
-                (waited, activity.judged)
-            };
-            if waited < judge.after_minutes as i64 {
+        // is being torn down, so an answer sent there would be dropped with it. Worth a line once,
+        // though: a colony parked on a question the judge could have answered is easy to miss.
+        if s.suspended.is_some() {
+            skip_log(
+                app,
+                &s.id,
+                "suspended",
+                "this colony is parked waiting for you, so the judge leaves its question alone".into(),
+            )
+            .await;
+            continue;
+        }
+        let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
+            continue;
+        };
+        let (waited, judged, has_since) = {
+            let activity = rt.activity.lock().await;
+            (activity.question_since, activity.judged, activity.question_since.is_some())
+        };
+        if !has_since {
+            // Waiting for an answer, but the runtime has no question it is waiting on: the status
+            // flag and the runtime disagree, which hides the question from the judge entirely.
+            skip_log(
+                app,
+                &s.id,
+                "no_question_since",
+                "this colony is waiting for an answer but has no open question on record".into(),
+            )
+            .await;
+            continue;
+        }
+        let waited = waited.map(|since| (Utc::now() - since).num_minutes()).unwrap_or(0);
+        if waited < judge.after_minutes as i64 {
+            continue; // the loop working, not a problem
+        }
+        let Some((question_id, questions, risk)) = rt.open_question().await else {
+            skip_log(
+                app,
+                &s.id,
+                "no_open_question",
+                "this colony is waiting for an answer but the judge cannot find its question".into(),
+            )
+            .await;
+            continue;
+        };
+        if judged >= judge.max_answers {
+            skip_log(
+                app,
+                &s.id,
+                &format!("max_answers:{question_id}"),
+                format!(
+                    "this colony has used all {} of its autonomous answers, so this question waits for you",
+                    judge.max_answers
+                ),
+            )
+            .await;
+            continue;
+        }
+        let announced = rt.activity.lock().await.risk_announced.clone();
+        if let Plan::Left { announce } = plan(risk, judge.risk_ceiling, announced.as_deref(), &question_id) {
+            // Above the ceiling the judge never answers, so this degrades to notify-only: the person
+            // is told once per question, through the same "left this question for you" line a refusal
+            // takes — but unlike a refusal it is not charged to the colony's answers, so the next
+            // question within the ceiling is still judged.
+            if announce {
+                rt.activity.lock().await.risk_announced = Some(question_id);
+                app.session_log_as(
+                    Origin::Autonomy,
+                    &s.id,
+                    "warn",
+                    format!(
+                        "autonomous: left this question for you (risk {} is above the {} ceiling)",
+                        risk.as_str(),
+                        judge.risk_ceiling.as_str()
+                    ),
+                )
+                .await;
+            }
+            continue;
+        }
+        // The judge is one claimant on the mothership's outbound attention, so it asks the shared
+        // ledger before it answers (issue #311). A held or dropped verdict skips the answer this
+        // tick — counted once for the question, so the thirty-second tick does not inflate the
+        // tallies — and only a real answer spends the delivery it was granted.
+        let candidate = ledger::Candidate {
+            kind: ledger::Kind::Judge,
+            topic: format!("judge:{}", s.id),
+            class: "judge".to_string(),
+            fact: Some(format!("judge:{}:{}", s.id, question_id)),
+            colony: Some(s.id.clone()),
+            priority: false,
+        };
+        let now = Utc::now();
+        match app.ledger.check(&candidate, now) {
+            ledger::Verdict::Deliver => {}
+            held => {
+                // Counted once per question, not once per tick: the ledger itself remembers the
+                // fact — entries prune after 48 h, so the lookup stays bounded and a restart does
+                // not count the question twice.
+                if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
+                    app.ledger.record(&candidate, &held, now).await;
+                }
                 continue;
             }
-            if judged >= judge.max_answers {
-                continue;
+        }
+        let task = crate::memory::task_query(&s.issue_title, None, &s.instructions);
+        match judge_one(app, &s.id, &judge, &task, &question_id, &questions).await {
+            Ok(line) => {
+                app.ledger.record(&candidate, &ledger::Verdict::Deliver, Utc::now()).await;
+                app.session_log_as(Origin::Autonomy, &s.id, "info", line).await;
+                // The success path clears a watchdog flag, but not the judge's own outage alert
+                // while the outage is still on: that one is what tells the operator the judge is
+                // down, and it is cleared by a primary success, not by a fallback answering.
+                let alerting = app.judge_health.lock().await.alerted;
+                app.update_session(&s.id, move |x| {
+                    let is_alert = x.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some(ALERT_REASON);
+                    if !(is_alert && alerting) {
+                        x.attention = None;
+                    }
+                })
+                .await;
+                rt.activity.lock().await.judge_failures = 0;
             }
-            let Some((question_id, questions, risk)) = rt.open_question().await else {
-                continue;
-            };
-            let announced = rt.activity.lock().await.risk_announced.clone();
-            if let Plan::Left { announce } = plan(risk, judge.risk_ceiling, announced.as_deref(), &question_id) {
-                // Above the ceiling the judge never answers, so this degrades to notify-only: the
-                // person is told once per question, through the same "left this question for you"
-                // line a refusal takes — but unlike a refusal it is not charged to the colony's
-                // answers, so the next question within the ceiling is still judged.
-                if announce {
-                    rt.activity.lock().await.risk_announced = Some(question_id);
+            Err(failure) => {
+                // No answer went out, but the attempt is counted: dropped, once per question (a
+                // retried tick finds the fact and stays quiet), spending nobody's quota.
+                if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
+                    app.ledger
+                        .record(&candidate, &ledger::Verdict::Drop(drop_reason(&failure)), Utc::now())
+                        .await;
+                }
+                let failures = {
+                    let mut activity = rt.activity.lock().await;
+                    activity.judge_failures += 1;
+                    activity.judge_failures
+                };
+                if escalates(&failure, failures) {
+                    // Left for the person: the watchdog's own flag is what surfaces it.
+                    rt.activity.lock().await.judged = judge.max_answers;
+                    app.session_log_as(
+                        Origin::Autonomy,
+                        &s.id,
+                        "warn",
+                        format!("autonomous: left this question for you ({})", describe(&failure)),
+                    )
+                    .await;
+                } else {
+                    // One unreachable tick is a blip, not an answer spent: try the next tick again.
+                    // The failure is the last model tried — a fallback, when the primary failed
+                    // first — so the line names that model, not the primary the streak started on.
+                    let failed = match &failure {
+                        JudgeError::Failed(error) => error.model.as_str(),
+                        JudgeError::Refused(_) => judge.model.as_str(),
+                    };
                     app.session_log_as(
                         Origin::Autonomy,
                         &s.id,
                         "warn",
                         format!(
-                            "autonomous: left this question for you (risk {} is above the {} ceiling)",
-                            risk.as_str(),
-                            judge.risk_ceiling.as_str()
+                            "autonomous: could not reach {failed} (failure {failures} of \
+                             {MAX_TRANSPORT_FAILURES}), trying again: {}",
+                            describe(&failure)
                         ),
                     )
                     .await;
                 }
-                continue;
-            }
-            // The judge is one claimant on the mothership's outbound attention, so it asks the
-            // shared ledger before it answers (issue #311). A held or dropped verdict skips the
-            // answer this tick — counted once for the question, so the thirty-second tick does not
-            // inflate the tallies — and only a real answer spends the delivery it was granted.
-            let candidate = ledger::Candidate {
-                kind: ledger::Kind::Judge,
-                topic: format!("judge:{}", s.id),
-                class: "judge".to_string(),
-                fact: Some(format!("judge:{}:{}", s.id, question_id)),
-                colony: Some(s.id.clone()),
-                priority: false,
-            };
-            let now = Utc::now();
-            match app.ledger.check(&candidate, now) {
-                ledger::Verdict::Deliver => {}
-                held => {
-                    // Counted once per question, not once per tick: the ledger itself remembers the
-                    // fact — entries prune after 48 h, so the lookup stays bounded and a restart
-                    // does not count the question twice.
-                    if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
-                        app.ledger.record(&candidate, &held, now).await;
-                    }
-                    continue;
-                }
-            }
-            let task = crate::memory::task_query(&s.issue_title, None, &s.instructions);
-            match judge_one(&app, &s.id, &judge, &task, &question_id, &questions).await {
-                Ok(line) => {
-                    app.ledger.record(&candidate, &ledger::Verdict::Deliver, Utc::now()).await;
-                    app.session_log_as(Origin::Autonomy, &s.id, "info", line).await;
-                    app.update_session(&s.id, |x| x.attention = None).await;
-                    rt.activity.lock().await.judge_failures = 0;
-                }
-                Err(failure) => {
-                    // No answer went out, but the attempt is counted: dropped, once per question (a
-                    // retried tick finds the fact and stays quiet), spending nobody's quota.
-                    if !app.ledger.has_fact(candidate.fact.as_deref().unwrap_or_default()) {
-                        app.ledger
-                            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
-                            .await;
-                    }
-                    let failures = {
-                        let mut activity = rt.activity.lock().await;
-                        activity.judge_failures += 1;
-                        activity.judge_failures
-                    };
-                    if escalates(&failure, failures) {
-                        // Left for the person: the watchdog's own flag is what surfaces it.
-                        rt.activity.lock().await.judged = judge.max_answers;
-                        app.session_log_as(
-                            Origin::Autonomy,
-                            &s.id,
-                            "warn",
-                            format!("autonomous: left this question for you ({})", describe(&failure)),
-                        )
-                        .await;
-                    } else {
-                        // One unreachable tick is a blip, not an answer spent: try the next tick again.
-                        app.session_log_as(
-                            Origin::Autonomy,
-                            &s.id,
-                            "warn",
-                            format!(
-                                "autonomous: could not reach {} (failure {failures} of \
-                                 {MAX_TRANSPORT_FAILURES}), trying again: {}",
-                                judge.model,
-                                describe(&failure)
-                            ),
-                        )
-                        .await;
-                    }
-                }
             }
         }
+        alert_if_due(app, &s.id).await;
     }
+}
+
+/// The save-time check for judge settings: every model named must route to a provider the operator
+/// has, and the primary must answer one cheap call now. Refusing the save with the provider's own
+/// error is the point — an unreachable judge otherwise fails silently for hours. The UI's
+/// `save_anyway` stores settings it means to fix up afterwards without the probe.
+pub(crate) async fn check_judge(app: &Shared, choice: &ModuleChoice) -> Result<(), String> {
+    let Some(judge) = judge_of(choice, &app.agents) else {
+        return Ok(()); // off, or no model: nothing to check
+    };
+    let providers = app.providers();
+    for model in std::iter::once(&judge.model).chain(judge.fallback_models.iter()) {
+        route(model, &providers).map_err(|e| format!("{e:#}"))?;
+    }
+    match ask(app, &judge.model, PROBE_PROMPT, PROBE_TOKENS, PROBE_TIMEOUT).await {
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!("The judge model {} failed a test call: {e}", judge.model)),
+    }
+}
+
+/// `GET /api/autonomy/status`: whether the judge is on, its model and fallbacks, and its health —
+/// honest when it is off (`enabled` false, `model` null).
+pub(crate) async fn status(State(app): State<Shared>) -> Json<Value> {
+    let modules = app.modules.read().await.clone();
+    let judge = judge(&modules, &app.agents);
+    let health = app.judge_health.lock().await.clone();
+    let last_success = health
+        .last_success
+        .map(|s| json!({"at": s.at.to_rfc3339(), "model": s.model}));
+    let last_error = health.last_error.map(|e| {
+        json!({
+            "at": e.at.to_rfc3339(),
+            "model": e.model,
+            "kind": e.kind.as_str(),
+            "status": e.status,
+            "message": e.message,
+        })
+    });
+    Json(json!({
+        "enabled": judge.is_some(),
+        "model": judge.as_ref().map(|j| j.model.clone()),
+        "fallback_models": judge.as_ref().map(|j| j.fallback_models.clone()).unwrap_or_default(),
+        "last_success": last_success,
+        "last_error": last_error,
+        "consecutive_failures": health.consecutive_failures,
+        "alerted": health.alerted,
+    }))
+}
+
+/// The API routes this module serves. `server::api_routes` merges them into the cockpit's router.
+pub(crate) fn routes() -> axum::Router<crate::Shared> {
+    use axum::routing;
+    axum::Router::new().route("/api/autonomy/status", routing::get(status))
 }
 
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
@@ -1158,12 +1619,232 @@ mod tests {
         let refused = JudgeError::Refused(Refusal::NotOffered("MySQL".into()));
         assert!(escalates(&refused, 1), "the model answered and the answer was no good");
 
-        let down = || JudgeError::Unreachable(anyhow::anyhow!("the judge's model is unreachable"));
+        let down = || {
+            JudgeError::Failed(ModelError {
+                kind: Kind::Unreachable,
+                status: None,
+                model: "fable".into(),
+                provider: "own".into(),
+                message: "the judge's model is unreachable".into(),
+            })
+        };
         assert!(!escalates(&down(), 1), "one blip is retried");
         assert!(!escalates(&down(), MAX_TRANSPORT_FAILURES - 1));
         assert!(
             escalates(&down(), MAX_TRANSPORT_FAILURES),
             "a dead provider must not spin forever"
         );
+    }
+
+    // --- issue #875: classified outcomes, fallbacks, one alert, and the save-time probe --------
+
+    /// A stub provider answering every request with one status and body.
+    async fn stub(status: u16, body: Value) -> String {
+        let router = axum::Router::new().fallback(move |_body: axum::body::Bytes| {
+            let body = body.clone();
+            async move {
+                axum::response::Response::builder()
+                    .status(status)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn judge_settings(model: &str, fallbacks: &str) -> Map<String, Value> {
+        Map::from_iter([
+            ("model".into(), json!(model)),
+            ("fallback_models".into(), json!(fallbacks)),
+            ("after_minutes".into(), json!(0)),
+            ("max_answers".into(), json!(5)),
+            ("free_text".into(), json!(false)),
+            ("risk_ceiling".into(), json!("workspace_write")),
+        ])
+    }
+
+    /// An install with two providers — `primary` at one URL, `fallback` at the other — and the judge
+    /// switched on over them, so a tick can be driven with no network beyond the stubs.
+    async fn judging_app(primary: &str, fallback: &str) -> (Shared, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-judge-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        std::fs::write(
+            root.join("config/providers.json"),
+            serde_json::to_vec(&[
+                json!({"id": "primary", "name": "Primary", "base_url": primary, "auth": "none"}),
+                json!({"id": "fallback", "name": "Fallback", "base_url": fallback, "auth": "none"}),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let app = crate::tests::test_app(&root);
+        app.modules.write().await.autonomy = Some(crate::config::ModuleChoice {
+            provider: "judge".into(),
+            enabled: true,
+            settings: judge_settings("primary/bad-model", "fallback/good-model"),
+        });
+        (app, root)
+    }
+
+    /// A colony waiting on `Which database?`, with its runtime's clock already past the wait.
+    async fn waiting_colony(app: &Shared, id: &str) {
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::WaitingForAnswer);
+        s.id = id.into();
+        s.issue_title = "Add a users table".into();
+        app.sessions.write().await.push(s);
+        std::fs::create_dir_all(app.session_dir(id)).unwrap();
+        open_question(app, id, "q").await;
+    }
+
+    async fn open_question(app: &Shared, id: &str, qid: &str) {
+        let rt = app.runtime(id).await;
+        let questions = vec![question("Which database?", &["Postgres", "SQLite"], false)];
+        *rt.open_question.lock().await = Some((qid.to_string(), questions, QuestionRisk::WorkspaceWrite));
+        rt.activity.lock().await.question_since = Some(Utc::now() - chrono::Duration::minutes(1));
+    }
+
+    async fn log_lines(app: &Shared, id: &str, needle: &str) -> usize {
+        tokio::fs::read_to_string(app.session_dir(id).join("harness.jsonl"))
+            .await
+            .unwrap_or_default()
+            .matches(needle)
+            .count()
+    }
+
+    const REPLY: &str = r#"{"answers": {"Which database?": "Postgres"}, "reason": "already a dependency"}"#;
+
+    /// Issue #875's runtime story: a 402 is classified and recorded, the fallback answers in its
+    /// place and is the model named, and [`MAX_TRANSPORT_FAILURES`] primary failures raise exactly
+    /// one alert — one attention item, one notification claim, one log line — which never repeats.
+    #[tokio::test]
+    async fn an_outage_is_classified_alerts_once_and_the_fallback_answers() {
+        let primary = stub(402, json!("Insufficient Balance")).await;
+        let fallback = stub(200, json!({"content": [{"type": "text", "text": REPLY}]})).await;
+        let (app, root) = judging_app(&primary, &fallback).await;
+        waiting_colony(&app, "j1").await;
+
+        // One fresh question per tick: a ledger-delivered question is not judged twice, so the
+        // three primary failures come from three questions.
+        for n in 0..MAX_TRANSPORT_FAILURES {
+            let qid = format!("q{n}");
+            open_question(&app, "j1", &qid).await;
+            tick_once(&app).await;
+            assert!(
+                app.runtime("j1").await.judged_questions.lock().await.contains(&qid),
+                "the fallback answered question {n}"
+            );
+        }
+
+        let health = app.judge_health.lock().await.clone();
+        assert_eq!(health.consecutive_failures, MAX_TRANSPORT_FAILURES);
+        assert!(health.alerted, "the streak raised its one alert");
+        let error = health.last_error.expect("the 402 was recorded");
+        assert_eq!(
+            (error.kind, error.status, error.model.as_str(), error.provider.as_str()),
+            (Kind::ProviderError, Some(402), "primary/bad-model", "primary")
+        );
+        assert_eq!(
+            health.last_success.expect("the fallback answered").model,
+            "fallback/good-model",
+            "the answering model is the fallback"
+        );
+
+        // The one attention item, which the fallback answering did not wipe, and one alert line
+        // however many ticks ran.
+        let attention = app.session("j1").await.unwrap().attention.expect("flagged");
+        assert_eq!(
+            (attention["reason"].as_str(), attention["provider"].as_str()),
+            (Some(ALERT_REASON), Some("primary"))
+        );
+        assert!(
+            app.ledger.has_fact("judge_degraded:primary"),
+            "the one notification was claimed"
+        );
+        assert_eq!(log_lines(&app, "j1", "can't reach").await, 1);
+
+        // The status route's shape.
+        let Json(body) = status(axum::extract::State(app.clone())).await;
+        assert_eq!(body["enabled"], true);
+        assert_eq!(body["model"], "primary/bad-model");
+        assert_eq!(body["fallback_models"], json!(["fallback/good-model"]));
+        assert_eq!(body["consecutive_failures"], MAX_TRANSPORT_FAILURES);
+        assert_eq!(body["alerted"], true);
+        assert_eq!(
+            (
+                body["last_error"]["kind"].as_str(),
+                body["last_error"]["status"].as_u64(),
+                body["last_error"]["model"].as_str()
+            ),
+            (Some("provider_error"), Some(402), Some("primary/bad-model"))
+        );
+        assert_eq!(body["last_success"]["model"], "fallback/good-model");
+
+        // A further failed tick advances the streak but raises nothing again.
+        open_question(&app, "j1", "q9").await;
+        tick_once(&app).await;
+        assert_eq!(app.judge_health.lock().await.consecutive_failures, MAX_TRANSPORT_FAILURES + 1);
+        assert_eq!(
+            log_lines(&app, "j1", "can't reach").await,
+            1,
+            "the alert is raised once per streak"
+        );
+
+        // The same route, honest with the judge off.
+        app.modules.write().await.autonomy = None;
+        let Json(off) = status(axum::extract::State(app.clone())).await;
+        assert_eq!((off["enabled"].as_bool(), off["model"].is_null()), (Some(false), true));
+        assert_eq!(off["fallback_models"], json!([]));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The save-time check: a judge whose model answers 402 is refused with the provider's own error,
+    /// and `save_anyway` stores the same settings untouched.
+    #[tokio::test]
+    async fn saving_the_judge_probes_its_model_and_save_anyway_skips_the_probe() {
+        let primary = stub(402, json!("Insufficient Balance")).await;
+        let (app, root) = judging_app(&primary, &primary).await;
+        let save = |save_anyway: bool| {
+            let req = crate::modules::UpdateModule {
+                provider: "judge".into(),
+                enabled: true,
+                settings: judge_settings("primary/bad-model", ""),
+                save_anyway,
+                confirm_content: false,
+            };
+            crate::modules::update(
+                axum::extract::State(app.clone()),
+                axum::extract::Path("autonomy".into()),
+                axum::Json(req),
+            )
+        };
+        let err = save(false).await.expect_err("the 402 refuses the save");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            err.message().contains("The judge model primary/bad-model failed a test call"),
+            "{}",
+            err.message()
+        );
+        assert!(err.message().contains("402"), "{}", err.message());
+        assert!(save(true).await.is_ok(), "save_anyway stores it without the probe");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A provider's error body can echo a credential; the message the status route and the save
+    /// refusal carry must be redacted (#761), since neither redacts on its own.
+    #[tokio::test]
+    async fn a_provider_error_body_is_redacted() {
+        let body = json!("401: bad key sk-ant-api03-AbCdEf123456_GhIjKl-789012MnOpQr");
+        let stub_url = stub(401, body).await;
+        let (app, root) = judging_app(&stub_url, &stub_url).await;
+        let err = ask(&app, "primary/bad-model", "hi", 8, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(!err.message.contains("sk-ant-api03"), "the key leaked: {}", err.message);
+        assert!(err.message.contains("[REDACTED:anthropic_key]"), "{}", err.message);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

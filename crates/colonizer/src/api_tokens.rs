@@ -468,6 +468,8 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
     match segs.as_slice() {
         // Reads: watch the install and its colonies, never drive them.
         ["api", "status" | "version"] if get => Need::Bare(Scope::Read),
+        // The judge's health (issue #875): a watch, like the status it sits beside.
+        ["api", "autonomy", "status"] if get => Need::Bare(Scope::Read),
         ["api", "sessions"] if get => Need::Bare(Scope::Read),
         ["api", "maps", owner, name] if get && !owner.is_empty() && !name.is_empty() => Need::Map { owner, name },
         ["api", "maps", owner, name, "files" | "file"] if get && !owner.is_empty() && !name.is_empty() => {

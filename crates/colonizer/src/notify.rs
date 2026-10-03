@@ -61,6 +61,10 @@ pub enum Event {
     /// A configured model provider's failure rate crossed the degraded line
     /// ([`crate::gateway::DEGRADED_PCT`]). The one event with no colony behind it.
     ProviderDegraded,
+    /// The autonomy judge could not reach its primary model for three judged calls in a row
+    /// (autonomy.rs `MAX_TRANSPORT_FAILURES`, issue #875) — the failure that used to be silent.
+    /// Like [`Event::ProviderDegraded`], host-level: no colony behind it.
+    JudgeDegraded,
     /// `rebase_orphaned` became true (issue #453): the colony behind a pull request that fell
     /// behind its base is gone, so nothing is left running that will ever rebase it or clear the
     /// flag itself — a person has to.
@@ -76,6 +80,7 @@ impl Event {
             Event::Failed => "failed",
             Event::PullRequest => "pull_request",
             Event::ProviderDegraded => "provider_degraded",
+            Event::JudgeDegraded => "judge_degraded",
             Event::NeedsRebase => "needs_rebase",
         }
     }
@@ -96,6 +101,11 @@ impl Event {
             Event::ProviderDegraded => {
                 unreachable!("provider events have no colony; build their line with Event::provider_text")
             }
+            // Same shape: the judge names no colony either, and its line is
+            // [`Event::judge_text`]'s to build.
+            Event::JudgeDegraded => {
+                unreachable!("judge events have no colony; build their line with Event::judge_text")
+            }
         };
         let subject = match issue {
             Some(number) => format!("{repo} #{number}"),
@@ -114,6 +124,13 @@ impl Event {
             &format!("{name} is failing {failure_pct:.1}% of its requests{failure}"),
             MAX_TEXT,
         )
+    }
+
+    /// The one line for [`Event::JudgeDegraded`] (issue #875): what could not be reached and what its
+    /// provider said. It carries no repository content — only the provider id the operator chose and
+    /// the error the judge already recorded.
+    pub fn judge_text(provider: &str, message: &str) -> String {
+        truncate(&format!("The autonomy judge can't reach {provider}: {message}"), MAX_TEXT)
     }
 }
 
@@ -445,6 +462,20 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
     })
 }
 
+/// The webhook payload for [`Event::JudgeDegraded`] (issue #875). One shape with [`payload`]:
+/// `colony` and `pr_url` are `null`, and `provider` carries the id and the judge's own error, which
+/// is the provider's words or a transport reason — never repository content.
+pub fn judge_payload(provider: &str, kind: &str, status: Option<u16>, message: &str, at: DateTime<Utc>) -> Value {
+    json!({
+        "event": Event::JudgeDegraded.name(),
+        "at": at.to_rfc3339(),
+        "text": Event::judge_text(provider, message),
+        "colony": None::<Value>,
+        "pr_url": None::<Value>,
+        "provider": {"id": provider, "kind": kind, "status": status, "message": message},
+    })
+}
+
 /// Whether a webhook URL is one we will POST to. Empty means off; anything set must be http(s),
 /// because the client posts nowhere else and a typo should be one clear line in the log.
 fn webhook_valid(url: &str) -> bool {
@@ -564,6 +595,9 @@ pub async fn run(app: Shared) {
     // Per provider: whether its failure rate has already been announced as degraded. A restart starts
     // empty, so providers that were already failing seed instead of announcing a backlog.
     let mut degraded: HashMap<String, bool> = HashMap::new();
+    // Whether the judge's outage has already been announced for the current streak. Mirrors
+    // `degraded`: a restart seeds from nothing, and the edge is `alerted` turning on.
+    let mut judge_alerted = false;
     let mut reasons = Reasons::default();
     loop {
         tick.tick().await;
@@ -597,6 +631,16 @@ pub async fn run(app: Shared) {
         for event in &provider_events {
             announce_provider(&app, client.as_ref(), event, &settings, &mut reasons).await;
         }
+        // The judge's own outage: host-level like a provider event, raised exactly once per streak
+        // by the `alerted` edge the autonomy module owns.
+        let judge = app.judge_health.lock().await.clone();
+        if judge.alerted
+            && !judge_alerted
+            && let Some(error) = judge.last_error.as_ref()
+        {
+            announce_judge(&app, client.as_ref(), error, &settings, &mut reasons).await;
+        }
+        judge_alerted = judge.alerted;
         // The digest (issue #311): what the soft layers held, one line an hour at most, no identities,
         // down the same channels as any announcement — and the counts it carried are subtracted only
         // once a channel actually took it, so candidates held while it was in flight stay due.
@@ -634,7 +678,7 @@ fn fact_key(event: Event, session: &str, open_question: Option<&str>) -> Option<
     match event {
         Event::Attention(reason) => Some(format!("attention:{reason}:{session}")),
         Event::Question => open_question.map(|id| format!("question:{session}:{id}")),
-        Event::Failed | Event::PullRequest | Event::NeedsRebase | Event::ProviderDegraded => None,
+        Event::Failed | Event::PullRequest | Event::NeedsRebase | Event::ProviderDegraded | Event::JudgeDegraded => None,
     }
 }
 
@@ -713,6 +757,43 @@ async fn announce_provider(
     let name = &event.provider.name;
     let text = Event::provider_text(name, event.health.failure_pct, event.health.last_failure.as_deref());
     let payload = provider_payload(&event.provider.id, name, event.usage.requests, &event.health, Utc::now());
+    if deliver(app, client, &text, &payload, None, settings, reasons).await {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+    } else {
+        app.ledger
+            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
+            .await;
+    }
+}
+
+/// Announces the judge's one outage down the same channels, and the same ledger, as
+/// [`announce_provider`]. The autonomy module raises `alerted` for exactly one streak and clears it on
+/// a primary success, so the caller's edge is the crossing, not a per-tick condition.
+async fn announce_judge(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    error: &crate::autonomy::Failure,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("judge:{}", error.provider),
+        class: Event::JudgeDegraded.name().to_string(),
+        // Nothing to claim: the raising edge fires once, and the cooldown holds a re-crossing
+        // inside ten minutes instead of losing it.
+        fact: None,
+        colony: None,
+        priority: false,
+    };
+    let verdict = app.ledger.check(&candidate, Utc::now());
+    if verdict != ledger::Verdict::Deliver {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+        return;
+    }
+    let status = error.status.map(|s| format!("{s} ")).unwrap_or_default();
+    let text = Event::judge_text(&error.provider, &format!("{status}{}", error.message));
+    let payload = judge_payload(&error.provider, error.kind.as_str(), error.status, &error.message, Utc::now());
     if deliver(app, client, &text, &payload, None, settings, reasons).await {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
     } else {

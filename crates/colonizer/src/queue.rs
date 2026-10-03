@@ -1514,6 +1514,7 @@ mod tests {
     fn judge_at(ceiling: QuestionRisk) -> crate::autonomy::Judge {
         crate::autonomy::Judge {
             model: "judge-model".into(),
+            fallback_models: Vec::new(),
             after_minutes: 0,
             max_answers: 3,
             free_text: false,

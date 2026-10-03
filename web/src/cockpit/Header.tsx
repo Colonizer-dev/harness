@@ -11,9 +11,22 @@ import { IconNetwork } from "../components/icons";
 import { sameOrg } from "../components/ui";
 import type { OrgEntry } from "../orgs";
 import type { LiveConnection } from "../liveStream";
+import type { AutonomyStatus } from "../types";
 import { NotificationsBell, type InboxActions } from "./NotificationsBell";
 
 export type { CockpitView } from "./NavRail";
+
+/** How many consecutive judge failures before the bar says so (issue #875): a couple of blips are noise. */
+export const JUDGE_ALERT_AFTER = 3;
+
+/** The judge chip's tooltip: the run length and the last error, when there is one. */
+export function judgeAlertTitle(judge: AutonomyStatus): string {
+  const error = judge.last_error;
+  const detail = error
+    ? [error.kind.replace(/_/g, " "), error.status !== null ? `HTTP ${error.status}` : null, error.message || null].filter(Boolean).join(" · ")
+    : null;
+  return `The autonomy judge has failed ${judge.consecutive_failures} times in a row${detail ? `: ${detail}` : ""}`;
+}
 
 /** The workspaces with colonies running, busiest first — the avatars the bar shows. The chosen
  *  workspace stays in the row even when it goes quiet, so its filter can always be cleared. */
@@ -43,10 +56,13 @@ export function Header(props: {
   remoteOn?: boolean;
   /** Opens Settings → Remote access from the badge. */
   onOpenRemote: () => void;
+  /** The autonomy judge's health (issue #875); a chip appears once it has failed repeatedly. */
+  judge?: AutonomyStatus | null;
   /** Opens Settings → Your cockpit: the address to bookmark (issue #867). */
   onOpenCockpit?: () => void;
 }): ReactElement {
-  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, onOpenCockpit } = props;
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit } =
+    props;
 
   return (
     <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
@@ -76,6 +92,18 @@ export function Header(props: {
           <span className="max-sm:hidden">Remote access ON</span>
           <span className="sm:hidden">Remote</span>
         </button>
+      )}
+      {/* The autonomy judge failing over and over (issue #875): a quiet warning, with the last
+          error in the tooltip, so a judge that has silently stopped answering is still visible. */}
+      {judge && judge.consecutive_failures >= JUDGE_ALERT_AFTER && (
+        <span
+          role="status"
+          title={judgeAlertTitle(judge)}
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-warn-soft px-2 py-0.5 text-[12px] font-medium text-warn"
+        >
+          <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />
+          Judge failing
+        </span>
       )}
 
       <div className="min-w-0 flex-1" />

@@ -88,6 +88,7 @@ import type {
   HunterProbe,
   Repo,
   ArchiveListing,
+  AutonomyStatus,
   RetentionPlan,
   RetentionRequest,
   SaveProviderRequest,
@@ -212,6 +213,11 @@ export interface SaveModuleRequest {
   provider: string;
   enabled: boolean;
   settings: Record<string, unknown>;
+  /**
+   * PUT /api/modules/autonomy (issue #875) refuses a save whose judge model fails a test call
+   * unless this is true: the "Save anyway" the pane offers alongside the provider's error.
+   */
+  save_anyway?: boolean;
 }
 
 /** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
@@ -246,6 +252,8 @@ export interface Api {
   hosts(): Promise<{ hosts: FleetHost[] }>;
   modules(): Promise<ModuleInfo[]>;
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
+  /** GET /api/autonomy/status (issue #875): the judge's recent health, for Settings and the header chip. */
+  autonomyStatus(): Promise<AutonomyStatus>;
   sandboxPull(): Promise<PullStatus>;
   sandboxPullStatus(): Promise<PullStatus>;
   headroom(): Promise<HeadroomStatus>;
@@ -692,6 +700,7 @@ export const httpApi: Api = {
   hosts: () => request("/api/hosts"),
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
+  autonomyStatus: () => request("/api/autonomy/status"),
   sandboxPull: () => post("/api/sandbox/pull"),
   sandboxPullStatus: () => request("/api/sandbox/pull"),
   headroom: () => request("/api/headroom"),

@@ -788,6 +788,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "A model answers a colony's questions when nobody does, choosing only among the options the agent offered",
                 json!({"type": "object", "properties": {
                     "model": {"type": "string", "title": "Judge model", "description": "Any model you have added in Model providers: provider/model, or a plain id such as fable or opus once one of those providers' base URL host is api.anthropic.com. Judging spends that provider's key, never your Claude login. A frontier model judges best — it is deciding for you, on less context than you have, and the difference shows.", "default": ""},
+                    "fallback_models": {"type": "string", "title": "Fallback models", "description": "Ordered, comma-separated provider/model ids the judge tries in turn when the model above cannot be reached — an HTTP error, a rate limit, a timeout. The first that answers wins. A refusal is not retried: only a provider-level failure falls through. Leave empty for no fallback.", "default": ""},
                     "after_minutes": {"type": "integer", "title": "Answer after minutes unanswered", "description": "How long a question waits for you first. 0 answers as soon as it is asked.", "minimum": 0, "maximum": 1440, "default": 10},
                     "max_answers": {"type": "integer", "title": "Answers per colony", "description": "A colony that keeps asking is one to look at yourself, so the judge stops here and the watchdog flags it.", "minimum": 1, "maximum": 50, "default": 5},
                     "free_text": {"type": "boolean", "title": "Answer questions that have no options", "description": "Off by default: a free-text box is where an automatic answer can do the most damage. With it off, those questions wait for you.", "default": false},
@@ -909,6 +910,10 @@ pub struct UpdateModule {
     pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) settings: Map<String, Value>,
+    /// Skip the judge's save-time test call (issue #875): an operator fixing a provider up can store
+    /// settings a probe would refuse, on purpose. Defaults off, so a normal save is checked.
+    #[serde(default)]
+    pub(crate) save_anyway: bool,
     /// Observability only: a save that turns on conversation content or thinking must also carry
     /// `"confirm_content": true`. A request field, not a setting — it is validated, never persisted.
     #[serde(default)]
@@ -961,6 +966,20 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
     }
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    // The autonomy judge is checked against the real world before it is stored (issue #875): its
+    // models must route, and the primary must answer one cheap call, or the operator gets the
+    // provider's own error back instead of a judge that fails silently for hours. `save_anyway`
+    // skips it for settings being stored ahead of a fix.
+    if kind == "autonomy" && !req.save_anyway {
+        let choice = ModuleChoice {
+            provider: req.provider.clone(),
+            enabled: req.enabled,
+            settings: settings.clone(),
+        };
+        crate::autonomy::check_judge(&app, &choice)
+            .await
+            .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    }
 
     let mut modules = app.modules.write().await;
     let choice = modules
@@ -1373,6 +1392,7 @@ mod tests {
                 provider: "claude-code".into(),
                 enabled: true,
                 settings,
+                save_anyway: false,
                 confirm_content: false,
             };
             update(State(app.clone()), Path("agent".into()), Json(req))
@@ -1395,6 +1415,7 @@ mod tests {
                 provider: "github".into(),
                 enabled: true,
                 settings,
+                save_anyway: false,
                 confirm_content: false,
             };
             update(State(app.clone()), Path("source".into()), Json(req))
