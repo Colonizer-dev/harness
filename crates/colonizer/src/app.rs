@@ -137,6 +137,9 @@ pub struct App {
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
+    /// The draining flag that holds the queue back while an update or a restart runs (drain.rs,
+    /// issue #880), plus when it was set.
+    pub drain: crate::drain::Drain,
     /// The execution seam (execution.rs): boots, removes and lists the microVMs colonies run on.
     /// Local microsandbox today; a remote outpost is a second backend behind the same trait.
     pub execution: Arc<dyn crate::execution::ExecutionBackend>,
@@ -267,6 +270,7 @@ impl App {
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             deja: crate::deja::Deja::default(),
+            drain: crate::drain::Drain::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),
             fleet_cache: crate::fleet::FleetCache::new(),
             fleet_members: crate::fleet_members::FleetStore::load(&cfg.config_dir),

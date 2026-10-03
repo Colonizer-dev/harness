@@ -249,6 +249,9 @@ pub(crate) async fn status(
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        // Issue #880: whether the queue is held back while an update, a restart or an operator
+        // drains in-flight colonies, so the cockpit can show a banner.
+        "draining": app.drain.draining(),
         "stall": stall,
         "reclaim": {"reclaimable": reclaimable, "unpushed": unpushed},
         "github": match user {

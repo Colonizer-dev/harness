@@ -430,6 +430,13 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
   quota_cards?: QuotaCard[];
+  /**
+   * A drain is holding the queue while an update or a restart waits for the colonies still booting
+   * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.
+   * The cockpit banners it. Optional so a mothership from before the drain sends nothing (reads as
+   * not draining).
+   */
+  draining?: boolean;
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
@@ -1193,7 +1200,7 @@ export interface UpdateStatus {
   /// Whether this install can update itself, and why not if it cannot.
   can_apply: { ok: boolean; reason: string | null };
   apply: {
-    phase: "idle" | "installing" | "restarting" | "failed";
+    phase: "idle" | "draining" | "installing" | "restarting" | "failed";
     version: string | null;
     started_at: string | null;
     error: string | null;

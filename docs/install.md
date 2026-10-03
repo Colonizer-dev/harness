@@ -235,6 +235,9 @@ Either way, it:
 - runs `~/.local/bin/colonizer` (or, when that link does not exist, the binary you ran `enable` with)
   with `COLONIZER_NO_BROWSER=1`
 - restarts it only after a crash
+- on a stop or a restart, asks the mothership to drain first and waits for it: `KillMode=mixed` sends
+  SIGTERM to the main process alone, and `TimeoutStopSec` (the plist's `ExitTimeOut`) is 330 s — the
+  five minute drain plus slack — before anything it left behind is killed
 - appends to `mothership.out` in the data directory
 - carries over this shell's `PATH` and `COLONIZER_*` settings, never anything whose name contains
   `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `PASS`, because the plist and unit are plain files
@@ -246,6 +249,11 @@ missing.
 
 Disabling removes the agent and never stops a running mothership, so it never interrupts a
 colony.
+
+The unit itself can change between versions — the stop timeout above is one such change, and an
+existing install keeps the old unit file until it is re-written. `enable` is idempotent: after
+updating `colonizer`, run `colonizer login-item enable` again (or switch **Settings → Desktop → Start
+Colonizer at login** off and on) to write the current definition and load it.
 
 **One mothership at a time.** A mothership binds its port before anything else. A second one,
 say one started at login while another already runs by hand, says the port is taken and stops
@@ -327,6 +335,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_RECLAIM_RETENTION_HOURS` | `12` | How long a finished colony's worktree is kept before the sweep may reclaim it |
 | `COLONIZER_FLEET_INGEST_RETENTION_DAYS` | `90` | On a fleet owner, days a member's synced colony and its logs are kept after they arrive; `0` keeps them ([fleet.md](fleet.md#reading-it-on-the-owner)) |
 | `COLONIZER_RECLAIM_MIN_FREE` | `5G` | The free-disk floor, used only when the sandbox module's `min_free_disk` setting has not been saved. Below it the queue pauses and the sweep reclaims pushed work without waiting |
+| `COLONIZER_DRAIN_TIMEOUT_SECS` | `300` | How long an update or a restart waits for colonies that are booting or publishing to finish before it goes on without them ([docs/updates.md](updates.md#updating-in-place)). Raising it above about 300 s also needs a longer `TimeoutStopSec` (systemd) or `ExitTimeOut` (launchd), or the service manager kills the mothership part-way through the drain |
 | `MSB_HOME` | `~/.microsandbox` | Where microsandbox keeps its state and image cache, for the disk figures |
 | `COLONIZER_HUNTER_INSTALL` | off | `1`, `true`, `on` or `yes` allows installing security hunters ([docs/security-hunters.md](security-hunters.md)) |
 | `COLONIZER_UPDATE_CHECK` | on | `0`, `false` or `off` keeps the update check off whatever Settings says, and then no request is made at all |
@@ -411,7 +420,11 @@ the system keychain, and the per-colony budgets.
 ## Updating
 
 A running mothership can update itself: Settings offers the newer release, installs it and restarts into
-it without losing colonies, and `colonizer update` does the same from a terminal. That, and the
+it without losing colonies, and `colonizer update` does the same from a terminal. It drains first: the
+queue admits no new boot, and a colony still booting or publishing gets up to five minutes
+(`COLONIZER_DRAIN_TIMEOUT_SECS`) to finish before the install and restart go ahead — a boot the wait
+gives up on is requeued on the next start with `interrupted_by_restart` on its log, and a publish the
+wait gives up on makes the update refuse rather than cut the push off. That, and the
 version check behind it, is [docs/updates.md](updates.md).
 
 Two builds are refused: a development build, which holds work no release contains (update it from its
@@ -426,7 +439,17 @@ git pull
 scripts/install.sh --install
 ```
 
-Either way, restart `colonizer` afterwards. Settings and colonies live outside the checkout, so a rebuild leaves them
-alone, and the colony list is read back when the harness starts. If colonies are running, prefer
-`colonizer update`: an installer run by hand removes the previous app slot straight away, and running
-colonies mount plugins from it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)).
+Either way, restart `colonizer` afterwards. The restart drains too — SIGTERM, the signal `systemctl
+--user restart colonizer` (or a `kill`) sends, makes the mothership wait for the in-flight colonies
+before it exits (Ctrl-C at a terminal stops at once instead). After a restart, check the old service
+left nothing running: `systemctl --user status colonizer` should show only the new main process in its
+CGroup tree (`systemd-cgls --user-unit colonizer.service` shows the processes). Settings and colonies
+live outside the checkout, so a rebuild leaves them alone, and the colony list is read back when the
+harness starts. If colonies are running, prefer `colonizer update`: it drains first, and it keeps the
+previous app slot until nothing is using it
+([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)). An installer run by hand
+drains nothing, but it will not stage into or delete a slot a process is still running from — it
+refuses, naming the pid, or keeps the slot for the next start to sweep. It sees a process started
+through a symlink outside the slot (the way `~/.local/bin/colonizer` starts the mothership), by
+reading the real executable behind it (`/proc/<pid>/exe` on Linux, `lsof` on macOS when installed),
+as well as its command line.

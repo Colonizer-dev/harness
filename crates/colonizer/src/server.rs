@@ -263,11 +263,18 @@ fn is_public_app_file(path: &str) -> bool {
     ) || (path.starts_with("/icons/") && !path.contains("..") && path.len() < 64)
 }
 
-async fn shutdown_signal() {
+/// Which signal asked the process to stop: Ctrl-C (an operator at the terminal) or SIGTERM (a
+/// service manager, `kill`, a deploy). Only SIGTERM drains first — see `serve`.
+enum Shutdown {
+    Interrupt,
+    Terminate,
+}
+
+async fn shutdown_signal() -> Shutdown {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => Shutdown::Interrupt,
+        _ = term.recv() => Shutdown::Terminate,
     }
 }
 
@@ -327,6 +334,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::deja::routes())
         .merge(crate::deps::routes())
         .merge(crate::docs_loop::routes())
+        .merge(crate::drain::routes())
         .merge(crate::egress::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
@@ -539,7 +547,19 @@ pub(crate) async fn serve() -> Result<()> {
     tokio::select! {
         result = async { axum::serve(listener, router).await } => result?,
         // microVMs are detached and keep running; sessions reconnect on the next start.
-        _ = shutdown_signal() => {
+        signal = shutdown_signal() => {
+            // Issue #880: a SIGTERM (systemd stop, a deploy's `kill`) must not cut a boot or a
+            // publish short, so drain first — bounded by the same timeout the update uses. Ctrl-C
+            // is the operator asking for the process to stop now, and exits promptly.
+            if matches!(signal, Shutdown::Terminate) {
+                let timeout = crate::drain::timeout();
+                println!("SIGTERM: draining in-flight colonies (up to {timeout:?}) before exit");
+                if crate::drain::drain_and_wait(&app, timeout).await {
+                    println!("drained; nothing was left booting or publishing");
+                } else {
+                    eprintln!("drain timed out; exiting with colonies still in flight — they are requeued on the next start");
+                }
+            }
             println!("shutting down; running sessions keep their microVMs");
             app.telemetry.goodbye().await;
             let mesh = app.mesh.lock().await.clone();

@@ -444,6 +444,12 @@ pub(crate) async fn start_queued(app: &Shared) {
     // start takes no slot, and leaving it Queued would stall the queue head (and all the disk the
     // tick is trying to free behind it) for as long as the floor holds.
     let paused = crate::reclaim::admission_paused(app).await;
+    // Issue #880: while draining for an update or a restart nothing new boots — a boot admitted
+    // now would be torn down mid-boot by the restart. The hold rides with the disk pause: a colony
+    // that can never start still retires below, so the queue head never sticks on the hold. This
+    // snapshot only skips work the tick can already see is pointless; the drain is read again under
+    // the admission lock below, where the claim actually happens.
+    let held = paused || app.drain.draining();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Issue #321: a waiter whose holder changed says so. `queued_behind` follows whoever
     // effectively holds its issue now, so the second waiter shows it is queued behind the first
@@ -470,7 +476,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Before the fresh launches: a suspended colony holding an undelivered answer comes back ahead
     // of them — answering it is what the user has been waiting for (issue #562). The floor above
     // holds this back with every other start.
-    if !paused {
+    if !held {
         restore_suspended(app, &modules).await;
     }
     // Several slots can free at once, so keep going until nothing else fits.
@@ -482,7 +488,7 @@ pub(crate) async fn start_queued(app: &Shared) {
         };
         let Some((next, refuse)) = next_queued(&sessions, |s| {
             let (org_limit, repo_limit) = limits(&s.org);
-            !paused && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
+            !held && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
         }) else {
             break;
         };
@@ -521,7 +527,10 @@ pub(crate) async fn start_queued(app: &Shared) {
                 }
                 match refuse.as_deref() {
                     Some(reason) => claim_refused(s, reason),
-                    None => claim_queued(s, room),
+                    // The drain is re-read here, under the lock, beside `room`: one that began
+                    // between the tick's snapshot and this claim must not let the boot through
+                    // (issue #880). The colony keeps its place for the next tick.
+                    None => claim_queued(s, room && !app.drain.draining()),
                 }
             },
         )
@@ -574,7 +583,7 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Last call on the tick, after everything holding an answer — the restores and the fresh
     // launches above — has had its say: a pre-warm request (issue #701) boots a suspended colony's
     // question with whatever slots are left, never ahead of a colony that already holds an answer.
-    if !paused {
+    if !held {
         prewarm_requested(app, &modules).await;
     }
 }
@@ -2007,6 +2016,42 @@ mod tests {
         assert!(
             !crate::providers::quota_status(&app).await.paused,
             "no exhausted provider, no pause"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_draining_mothership_admits_nothing_until_the_drain_is_cleared() {
+        let root = std::env::temp_dir().join(format!("colonizer-drain-hold-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        // The reclaim floor would otherwise pause admission on a host with less than the default 5G
+        // free, keeping the colony queued for a reason this test is not about. Turn it off through
+        // the module setting, not the process environment, so the test stays hermetic (reclaim.rs).
+        app.modules
+            .write()
+            .await
+            .sandbox
+            .settings
+            .insert("min_free_disk".into(), json!("0"));
+        let mut waiting = colony("acme", SessionStatus::Queued);
+        waiting.id = "waiting".into();
+        *app.sessions.write().await = vec![waiting];
+        // While the mothership is draining for an update or a restart, the tick boots nothing: the
+        // colony keeps its place in the queue (issue #880).
+        app.drain.enter();
+        start_queued(&app).await;
+        assert_eq!(
+            app.session("waiting").await.unwrap().status,
+            SessionStatus::Queued,
+            "a draining mothership admits nothing"
+        );
+        // Clearing the drain lets the next tick take it, as before.
+        app.drain.clear();
+        start_queued(&app).await;
+        assert_ne!(
+            app.session("waiting").await.unwrap().status,
+            SessionStatus::Queued,
+            "the queue moves again once the drain is cleared"
         );
         let _ = std::fs::remove_dir_all(root);
     }
