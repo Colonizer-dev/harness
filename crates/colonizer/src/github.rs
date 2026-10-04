@@ -1072,7 +1072,10 @@ pub fn build_prompt(
         p,
         "How to work:\n\
          1. Read the relevant code and understand the task (reproduce the problem, if there is one) before changing anything.\n\
-         2. Make a focused change that accomplishes it, following the project's existing conventions. Add or \
+         2. Make a focused change that accomplishes it, following the project's existing conventions. Before \
+            editing, claim the paths you plan to change with the coordination tool (op `claim`): if it reports \
+            another colony holds one, wait for that colony's pull request, coordinate with the `send` and \
+            `inbox` ops, or keep your edits in that file minimal and additive. Add or \
             update tests where the project has them, and run the relevant tests, linters and type checkers. When \
             the repository keeps changelog entries as one file per change (a directory such as `changelog.d/` or \
             `.changeset/`), add yours there and leave the changelog file itself alone: parallel pull requests all \
@@ -3455,6 +3458,11 @@ mod tests {
         assert!(
             prompt.contains("8. If the task is unclear"),
             "the list runs contiguously to eight steps: {prompt}"
+        );
+        assert!(
+            prompt.contains("claim the paths you plan to change with the coordination tool")
+                && prompt.contains("coordinate with the `send` and `inbox` ops"),
+            "the colony is told to claim its paths before editing and what to do on a conflict: {prompt}"
         );
     }
 

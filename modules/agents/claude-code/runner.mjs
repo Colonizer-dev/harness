@@ -21,6 +21,7 @@ import {
   loadExecPolicy,
 } from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
+import { COORDINATION_PROMPT_APPEND, COORDINATION_SERVER, createCoordinationServer } from './coordinate.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
@@ -463,13 +464,14 @@ export function backgroundRecordName(command) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
+ * @param {object} [extras.coordinateServer]  in-process colony-to-colony coordination MCP server (issue #834)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, coordinateServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -486,6 +488,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   // Both halves of the recall credential: the mothership sets them only when deja is enabled for
   // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
+  // Colony-to-colony coordination (issue #834): its own gateway URL and token, set for every colony
+  // whose gateway token exists, so it is not tied to deja the way recall is.
+  const coordinate = Boolean(env.COLONIZER_COORD_URL && env.COLONIZER_COORD_TOKEN && coordinateServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
@@ -506,6 +511,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
+  if (coordinate) appended.push(COORDINATION_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
@@ -556,6 +562,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
+  if (coordinate) mcpServers[COORDINATION_SERVER] = coordinateServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
@@ -1354,6 +1361,13 @@ async function main() {
     recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
   }
 
+  // Colony-to-colony coordination (issue #834): its own gateway URL and token, present whenever the
+  // colony has a gateway token, whether or not recall is.
+  let coordinateServer;
+  if (process.env.COLONIZER_COORD_URL && process.env.COLONIZER_COORD_TOKEN) {
+    coordinateServer = createCoordinationServer({ url: process.env.COLONIZER_COORD_URL, token: process.env.COLONIZER_COORD_TOKEN, createSdkMcpServer, tool, z });
+  }
+
   let loopServer;
   if (process.env.COLONIZER_LOOP === 'true') {
     loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
@@ -1383,6 +1397,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     recallServer,
+    coordinateServer,
     findingsServer,
     loopServer,
     waitServer,

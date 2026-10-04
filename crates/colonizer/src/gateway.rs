@@ -343,8 +343,9 @@ struct Limit {
 
 /// Writes `value` to `path` atomically (tmp + rename). The tmp path is unique per call: writers sharing
 /// one path interleave their writes and can rename a half-overwritten file into place, which
-/// `Gateway::new` would read as corrupt and silently reset.
-fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) {
+/// `Gateway::new` would read as corrupt and silently reset. `coordination` reuses it for a colony's
+/// claims ledger, so a peer reading one never sees a truncated list.
+pub(crate) fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) {
     if let Ok(data) = serde_json::to_vec_pretty(value) {
         let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
         if std::fs::write(&tmp, data).is_ok() {
@@ -719,8 +720,9 @@ impl App {
     }
 
     /// The live colony a gateway token belongs to, record and all: `proxy` needs the session itself,
-    /// not just the id, to check which providers the colony may spend on.
-    async fn colony_for_token(&self, token: &str) -> Option<crate::sessions::Session> {
+    /// not just the id, to check which providers the colony may spend on; `coordination` uses it to
+    /// authenticate `POST /coordinate` the same way.
+    pub(crate) async fn colony_for_token(&self, token: &str) -> Option<crate::sessions::Session> {
         if token.len() < 32 {
             return None;
         }
@@ -745,6 +747,7 @@ pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/providers/{id}/{*path}", any(proxy))
         .route("/recall", post(recall))
+        .route("/coordinate", post(crate::coordination::coordinate))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
 }
@@ -1388,8 +1391,8 @@ fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f64, Option<
 
 /// A colony token from `Authorization: Bearer <token>`: the same secret, in the form an OpenAI-wire
 /// runner sends by default. Not the scheme Claude Code uses, but the comparison is the same
-/// constant-time one [`Gateway::colony_for_token`] applies to either form.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+/// constant-time one [`Gateway::colony_for_token`] applies to either form. Reused by `coordination`.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
