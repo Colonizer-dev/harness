@@ -609,11 +609,13 @@ it is older than the retention window since its last update.
 | Sandbox `warn_free_disk` | 10G | The cockpit warns below this much free disk. |
 | "Keep worktree" in the colony view | off | Exempts one colony (`POST /api/sessions/{id}/retain` with `{"keep": true}`). |
 
-**Limits.** A cleaned-up colony cannot be resumed, because resume needs its worktree. That includes
-a colony whose pull request is still open. Stopped and failed colonies are never cleaned up
-automatically, because they can still be resumed. Work that was never pushed is never deleted:
-`GET /api/storage` lists it under `unpushed` for you to publish or clean up by hand. See
-[protocol.md, Automatic reclamation](protocol.md#automatic-reclamation).
+**Limits.** A cleaned-up colony is normally unresumable, because resume needs its worktree — but
+when the colony's pull request is still open, resume re-creates the worktree from the branch on the
+remote instead of refusing (issue #623). Only a colony whose pull request is no longer open, or
+whose branch was itself deleted, stays unresumable once cleaned up. Stopped and failed colonies are
+never cleaned up automatically, because they can still be resumed. Work that was never pushed is
+never deleted: `GET /api/storage` lists it under `unpushed` for you to publish or clean up by hand.
+See [protocol.md, Automatic reclamation](protocol.md#automatic-reclamation).
 
 ## Measuring Jev compaction
 
