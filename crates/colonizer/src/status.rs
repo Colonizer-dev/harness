@@ -153,6 +153,30 @@ async fn reduced_status(app: &Shared) -> Value {
     body
 }
 
+/// The `account_alerts` array for `/api/status` (issue #984): every Claude account in trouble, with
+/// how many colonies are parked waiting on it. Pure over the marks and a session list, so the shape
+/// is testable without the rest of the status body. Carries the account id and the failure's class
+/// and status — never a credential.
+pub(crate) fn account_alerts(
+    troubled: Vec<(String, crate::account_health::Trouble)>,
+    sessions: &[sessions::Session],
+) -> Vec<Value> {
+    troubled
+        .into_iter()
+        .map(|(account, t)| {
+            let waiting = crate::account_health::waiting_on(sessions, &account);
+            json!({
+                "account": account,
+                "state": t.state,
+                "class": t.class,
+                "status": t.status,
+                "since": t.since,
+                "waiting": waiting,
+            })
+        })
+        .collect()
+}
+
 pub(crate) async fn status(
     State(app): State<Shared>,
     Extension(authenticated): Extension<auth::Authenticated>,
@@ -246,6 +270,13 @@ pub(crate) async fn status(
     let stall = diagnosis::status_stall(&app).await;
     // The provider-out-of-quota cards (issue #767), so the cockpit's attention list needs no second poll.
     let quota_cards = crate::quota_cards::cards(&app).await;
+    // Claude accounts in trouble (issue #984), each with how many colonies are parked waiting on it,
+    // so the cockpit's banner and `colonizer list` need no second poll. Empty when all is well.
+    let account_alerts = {
+        let troubled = crate::account_health::snapshot(&app).await;
+        let sessions = app.sessions.read().await;
+        account_alerts(troubled, &sessions)
+    };
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
@@ -283,6 +314,7 @@ pub(crate) async fn status(
             "kind": quota.kind,
         }),
         "quota_cards": quota_cards,
+        "account_alerts": account_alerts,
         // The anti-spam ledger's tallies and limits (issue #311): counts by class, never colony ids.
         "ledger": app.ledger.snapshot(),
         "modules": {

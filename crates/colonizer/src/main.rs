@@ -9,6 +9,7 @@
 
 // One line per module, kept in alphabetical order: a module added in its own place in the list
 // does not touch the lines a parallel pull request adds for another one.
+mod account_health;
 mod activity;
 mod answer_cache;
 mod answer_tokens;

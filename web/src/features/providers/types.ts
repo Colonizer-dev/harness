@@ -33,6 +33,25 @@ export interface StatusQuota {
   kind?: "account" | "provider" | null;
 }
 
+/**
+ * GET /api/status `account_alerts` (issue #984): a Claude account that needs the owner — a token
+ * the API rejected (`needs_sign_in`) or a plan that hit its usage limit (`limited`) — with the
+ * colonies waiting on it. Empty when everything is fine.
+ */
+export interface AccountAlert {
+  /** The account's name, e.g. "default". */
+  account: string;
+  state: "needs_sign_in" | "limited";
+  /** The failure class the mothership recorded, e.g. "auth". */
+  class: string;
+  /** The upstream HTTP status that classified it, e.g. 401. */
+  status: number;
+  /** When the alert started. */
+  since: string;
+  /** How many colonies are waiting on this account. */
+  waiting: number;
+}
+
 // ---------------------------------------------------------------------------
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------

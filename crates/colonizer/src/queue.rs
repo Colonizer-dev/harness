@@ -459,6 +459,9 @@ pub(crate) async fn start_queued(app: &Shared) {
     // Colonies parked by the automatic provider-error retry (issue #980) whose backoff step is due
     // resume on this same tick, after the parks above.
     resume_provider_retry_parked(app).await;
+    // Colonies parked waiting on an unusable Claude account (issue #984) resume on this same tick
+    // once the account works again — first the re-sign-in sweep, then the resumes it unblocks.
+    resume_waiting_for_account(app).await;
     // Colonies whose question has waited past the grace period suspend on this same tick, ahead of
     // admission, for the same reason: the slots they release are visible below (issue #562).
     suspend_waiting_colonies(app, &modules).await;
@@ -507,6 +510,14 @@ pub(crate) async fn start_queued(app: &Shared) {
     if !held {
         restore_suspended(app, &modules).await;
     }
+    // A colony routed to an account in trouble (issue #984) does not boot only to fail its first
+    // turn: it holds its place in the queue until the account works again, exactly as the account's
+    // parked colonies wait. Read once for the whole pass; the resumes above have just swept.
+    let troubled_accounts: Vec<String> = crate::account_health::snapshot(app)
+        .await
+        .into_iter()
+        .map(|(account, _)| account)
+        .collect();
     // Several slots can free at once, so keep going until nothing else fits.
     loop {
         let sessions = app.sessions.read().await.clone();
@@ -516,7 +527,9 @@ pub(crate) async fn start_queued(app: &Shared) {
         };
         let Some((next, refuse)) = next_queued(&sessions, |s| {
             let (org_limit, repo_limit) = limits(&s.org);
-            !held && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
+            !held
+                && !troubled_accounts.contains(&crate::account_health::account_of(s))
+                && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
         }) else {
             break;
         };
@@ -800,6 +813,60 @@ pub(crate) async fn resume_provider_retry_parked(app: &Shared) {
                 .await;
         }
     }
+}
+
+/// Resumes every colony parked waiting on a Claude account (issue #984) on the same tick as
+/// [`resume_provider_retry_parked`]. A re-sign-in rewrites the credential file, so
+/// [`crate::account_health::sweep_credentials`] runs first: an account whose stamp moved is cleared
+/// and its colonies rejoin the queue; one still in trouble waits for the next tick.
+pub(crate) async fn resume_waiting_for_account(app: &Shared) {
+    crate::account_health::sweep_credentials(app).await;
+    let ids: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        sessions
+            .iter()
+            // Issue #673: a merge covered this colony's work — it stays parked until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
+            .filter(|s| waiting_for_account(s))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in ids {
+        // Re-checked under the lock right before resuming, as `resume_provider_retry_parked` does: a
+        // colony no longer parked for this reason, or an operator who just stopped it, is left alone.
+        let still_waiting = app
+            .update_session(&id, |x| waiting_for_account(x))
+            .await
+            .is_some_and(|(_, waiting)| waiting);
+        if !still_waiting {
+            continue;
+        }
+        let Some(s) = app.session(&id).await else { continue };
+        let account = crate::account_health::account_of(&s);
+        if crate::account_health::troubled(app, &account).await.is_some() {
+            continue;
+        }
+        if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
+            .await
+            .is_ok()
+        {
+            app.session_log(
+                &id,
+                "info",
+                format!("resuming automatically: Claude account `{account}` works again"),
+            )
+            .await;
+        }
+    }
+}
+
+/// Whether this colony is parked waiting on a Claude account (issue #984), the park shape
+/// [`resume_waiting_for_account`] owns. Pure, so the filter is testable apart from the tick.
+pub(crate) fn waiting_for_account(s: &Session) -> bool {
+    s.status == SessionStatus::Parked
+        && s.parked
+            .as_ref()
+            .is_some_and(|p| p.reason == crate::account_health::WAITING_FOR_ACCOUNT_REASON)
 }
 
 // ---------------------------------------------------------------------------
@@ -3621,5 +3688,61 @@ mod tests {
             1,
             "the old record stands ahead by its suspension time"
         );
+    }
+
+    /// A colony parked waiting on a Claude account (issue #984): parked with the account reason and
+    /// a kept worktree, routed to `account`.
+    fn account_waiting_colony(id: &str, account: &str) -> Session {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.id = id.into();
+        s.claude_account = Some(account.into());
+        s.git_admin_dir = Some("git".into());
+        s.attention = Some(json!({"reason": crate::account_health::WAITING_FOR_ACCOUNT_REASON, "nudges": 0}));
+        s.parked = Some(crate::sessions::Park {
+            at: Utc::now(),
+            reason: crate::account_health::WAITING_FOR_ACCOUNT_REASON.into(),
+            resets_at: None,
+            vm_kept: false,
+            question_risk: None,
+        });
+        s
+    }
+
+    /// Issue #984: a colony parked waiting on an account stays parked while the account is broken and
+    /// rejoins the queue once it works again — the record of trouble is what gates the resume.
+    #[tokio::test]
+    async fn a_colony_waiting_on_an_account_resumes_only_once_the_account_works() {
+        let root = std::env::temp_dir().join(format!("colonizer-account-wait-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut sessions = vec![account_waiting_colony("waiting", "default")];
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            sessions.push(f);
+        }
+        *app.sessions.write().await = sessions;
+        tokio::fs::create_dir_all(app.session_dir("waiting")).await.unwrap();
+        assert_eq!(crate::account_health::waiting_on(&app.sessions.read().await, "default"), 1);
+
+        assert!(
+            crate::account_health::record_failure(&app, "default", 401).await,
+            "the account is marked"
+        );
+        resume_waiting_for_account(&app).await;
+        assert_eq!(
+            app.session("waiting").await.unwrap().status,
+            SessionStatus::Parked,
+            "still broken, still parked"
+        );
+
+        assert!(
+            crate::account_health::record_ok(&app, "default").await,
+            "the account works again"
+        );
+        resume_waiting_for_account(&app).await;
+        let resumed = app.session("waiting").await.unwrap();
+        assert_eq!(resumed.status, SessionStatus::Queued, "the colony rejoins the queue");
+        assert!(resumed.parked.is_none(), "the park goes with the resume");
+        let _ = std::fs::remove_dir_all(root);
     }
 }
