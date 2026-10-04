@@ -414,6 +414,7 @@ pub(crate) fn router(app: &Shared) -> Router {
 async fn start_tasks(app: &Shared, router: &Router) {
     crate::autonomy::start_tasks(app);
     crate::burn_down::start_tasks(app);
+    crate::claude_login::start_tasks(app);
     crate::docs_loop::start_tasks(app);
     // The migrated features' background work (`features.rs`); each feature keeps its own.
     for feature in crate::features::ALL {

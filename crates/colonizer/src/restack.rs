@@ -22,7 +22,8 @@ use anyhow::{Context, Result, bail};
 /// old rule holds ([`stack::stacked_on`], unchanged): the child branches from the parent's branch
 /// as soon as it is pushed. Without it the child queues for the parent's merge instead —
 /// pre-publish and open pull requests wait, a merge sends the child to the default branch, and a
-/// parent that can never merge the child onto anything refuses it.
+/// parent that can never merge the child onto anything refuses it. A paused parent (stopped or
+/// parked, issue #982) is not finished, so it waits rather than refusing.
 pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: bool) -> Stacked {
     if stack {
         return stack::stacked_on(parent_id, parent);
@@ -40,6 +41,9 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
         | SessionStatus::Idle
         | SessionStatus::Publishing
         | SessionStatus::PrOpened => Stacked::Wait,
+        // Issue #982: a stopped or parked parent is paused, not over — it may be resumed and its
+        // pull request may still merge — so the child waits for it rather than being refused.
+        SessionStatus::Stopped | SessionStatus::Parked => Stacked::Wait,
         // The parent's work is already in the default branch: the queue resolved itself, and the
         // child starts from the default branch like any other colony.
         SessionStatus::Merged => Stacked::Ready(None),
@@ -50,15 +54,13 @@ pub(crate) fn queue_decision(parent_id: &str, parent: Option<&Session>, stack: b
              pass `stack: true` to build on its branch anyway"
         )),
         // No branch to queue for and none to stack on either: the stacked rule's own refusal.
-        SessionStatus::NoChanges | SessionStatus::Failed | SessionStatus::Stopped | SessionStatus::Parked => {
-            match stack::stacked_on(parent_id, Some(parent)) {
-                Stacked::Refuse(reason) => Stacked::Refuse(reason),
-                other => panic!(
-                    "a {status} parent has no branch to lend: {other:?}",
-                    status = parent.status.as_str()
-                ),
-            }
-        }
+        SessionStatus::NoChanges | SessionStatus::Failed => match stack::stacked_on(parent_id, Some(parent)) {
+            Stacked::Refuse(reason) => Stacked::Refuse(reason),
+            other => panic!(
+                "a {status} parent has no branch to lend: {other:?}",
+                status = parent.status.as_str()
+            ),
+        },
     }
 }
 
@@ -238,10 +240,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_or_parked_parent_makes_the_child_wait() {
+        // Issue #982: paused, not over — the parent may be resumed and its pull request may still
+        // merge, so the child waits rather than being refused out of the queue.
+        for status in [SessionStatus::Stopped, SessionStatus::Parked] {
+            assert!(
+                matches!(queue_decision("parent", Some(&parent(status)), false), Stacked::Wait),
+                "a {} parent has not finished with the child's stack",
+                status.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn a_parent_with_no_branch_to_lend_refuses_by_name_and_reason() {
         for (status, why) in [
             (SessionStatus::Failed, "failed"),
-            (SessionStatus::Stopped, "was stopped"),
             (SessionStatus::NoChanges, "made no changes"),
         ] {
             let reason = refuses(queue_decision("parent", Some(&parent(status)), false));

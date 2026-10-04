@@ -117,6 +117,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 node --test scripts/test/*.test.mjs
 node scripts/check-doc-links.mjs                    # every relative link and #anchor in the Markdown resolves
+node scripts/doc-index.mjs check                    # the docs/protocol/ and docs/loops/ indexes match their directories
 node scripts/changelog.mjs check                    # the changelog.d/ fragments are well-formed
 sh scripts/ci/check-exec-bits.sh
 sh scripts/ci/check-rust-file-size.sh               # non-test Rust files stay under 2,000 lines
@@ -128,6 +129,11 @@ node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.j
 
 `check-doc-links.mjs` takes file names to check only those (`node scripts/check-doc-links.mjs
 docs/cli.md`). If you rename a heading, search for its old anchor: other pages may link to it.
+
+The protocol is split by area — a page under `docs/protocol/`, indexed from `docs/protocol.md` — and
+each built-in loop is a page under `docs/loops/`, indexed from `docs/loops.md`. A new area or loop is
+a new file there plus `node scripts/doc-index.mjs write`, which refreshes the index; never edit the
+generated list by hand.
 
 CI wraps each test command in `scripts/ci/retry-flaky.mjs`: a failure is run once more, and one that
 passes on the retry is a flake — the job stays green but the run is reported, with a warning

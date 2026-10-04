@@ -386,6 +386,29 @@ async fn check_all(app: &Shared) {
         let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
             continue;
         };
+        // A `waiting_for_answer` record with no question actually tracked is stuck (issue #981):
+        // the question was answered — or an answer to an earlier question took its slot — and no
+        // later runner status came to move the record on. The cockpit's "needs you" list and
+        // `colonizer ask` both read that question, so leaving it is a colony that looks like it
+        // wants an answer it cannot give. Reconcile on every tick, before any nudge decision:
+        // nothing is pending, and `idle` is the quiet choice — a mid-turn colony's next `working`
+        // promotes it, while an idle one is not nudged as though it had stalled. Ungated by
+        // `settings.enabled`: this is correctness, not the attention feature that setting governs.
+        if s.status == SessionStatus::WaitingForAnswer && rt.open_question().await.is_none() {
+            app.update_session(&s.id, |x| {
+                x.status = SessionStatus::Idle;
+                x.attention = None;
+            })
+            .await;
+            app.session_log_as(
+                Origin::Watchdog,
+                &s.id,
+                "info",
+                "watchdog: still waiting_for_answer but no question is pending; set back to idle".to_string(),
+            )
+            .await;
+            continue;
+        }
         let settings = effective_watchdog(&modules, &app.org_settings(&s.org));
         // A turn the runner said was over but never ended is finished first (issue #878): the agent
         // is done, so it must not also be nudged as though it had stalled.
@@ -701,6 +724,50 @@ mod tests {
             app.session("w1").await.unwrap().attention.unwrap()["reason"],
             "nudges_exhausted",
             "the flag stays up"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #981: a `waiting_for_answer` record with no question tracked is stuck — the answer was
+    /// taken and no runner status followed. The watchdog reconciles it to `idle`, on the record and
+    /// in the log, rather than leaving a colony the cockpit flags as needing you while `ask` can
+    /// answer nothing on it.
+    #[tokio::test]
+    async fn a_waiting_for_answer_with_no_question_is_reconciled_to_idle() {
+        let (app, root) = stalled_app("reconcile", SessionStatus::WaitingForAnswer).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().status,
+            SessionStatus::WaitingForAnswer,
+            "starts stuck"
+        );
+        check_all(&app).await;
+        let s = app.session("w1").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Idle, "the stale wait is reconciled");
+        assert!(s.attention.is_none(), "and its stale attention flag cleared");
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("no question is pending"))),
+            "the log says why: {logs:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The reconciliation must leave a colony whose question is genuinely open: its wait is real,
+    /// and `ask` can answer it.
+    #[tokio::test]
+    async fn a_waiting_for_answer_with_an_open_question_is_left_alone() {
+        let (app, root) = stalled_app("keep", SessionStatus::WaitingForAnswer).await;
+        *app.runtime("w1").await.open_question.lock().await = Some((
+            "q1".into(),
+            vec![json!({"question": "Push now?"})],
+            crate::protocol::QuestionRisk::WorkspaceWrite,
+        ));
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().status,
+            SessionStatus::WaitingForAnswer,
+            "a real question keeps its status"
         );
         let _ = std::fs::remove_dir_all(root);
     }

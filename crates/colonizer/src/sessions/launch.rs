@@ -729,6 +729,7 @@ pub async fn create(
         run_end_cause: None,
         parked: None,
         hold_resumes: 0,
+        provider_retries: 0,
         agent_session: None,
         pending_answer: None,
         switch_note: None,
