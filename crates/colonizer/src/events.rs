@@ -518,14 +518,32 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             *rt.open_question.lock().await = Some((question_id, questions, risk));
             rt.activity.lock().await.question_since = Some(Utc::now());
         }
-        AgentEvent::QuestionAnswered { .. } => {
-            *rt.open_question.lock().await = None;
-            rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+        AgentEvent::QuestionAnswered { question_id, .. } => {
+            // Only the question we are actually tracking closes here (issue #981). The slot holds one
+            // question, and a subagent's ask can arrive after the lead's and replace it; an answer to
+            // that earlier question — echoed back now — must not take the tracked, still-open one down
+            // with it. Clearing it left the colony's live question untracked, so `ask`/`answer` saw
+            // nothing pending while the status still read `waiting_for_answer`. The replay in
+            // `Runtime::load` already pairs by id; this mirrors it.
+            let matched = {
+                let mut open = rt.open_question.lock().await;
+                if open.as_ref().is_some_and(|(open_id, ..)| open_id == &question_id) {
+                    *open = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if matched {
+                rt.question_holds_tool_call.store(false, std::sync::atomic::Ordering::SeqCst);
+                let mut activity = rt.activity.lock().await;
+                activity.question_since = None;
+                // The question is resolved either way, so an unanswered-provider streak behind it is over.
+                activity.judge_failures = 0;
+            }
+            // The notification answer tokens are keyed by the session, not the question: any of its
+            // questions being answered retires them, whether or not it is the one we are tracking.
             app.answer_tokens.revoke(id).await;
-            let mut activity = rt.activity.lock().await;
-            activity.question_since = None;
-            // The question is resolved either way, so an unanswered-provider streak behind it is over.
-            activity.judge_failures = 0;
         }
         AgentEvent::AgentSession { session_id } => {
             // The runner's own session id (issue #562), kept so a colony suspended while it waits

@@ -415,6 +415,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #981: the slot holds one question. A subagent's ask (here an exec-policy one, blocking)
+    /// arriving after the lead's replaces it; when the lead's answer is echoed back it must not close
+    /// the tracked subagent question — doing so left `ask` with nothing to show while the status still
+    /// read `waiting_for_answer`, the runner still blocked on a question the mothership had forgotten.
+    #[tokio::test]
+    async fn an_answer_to_an_earlier_question_does_not_close_a_later_subagent_question() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+
+        // The lead asks; the subagent's exec-policy ask then takes the slot.
+        handle_agent_event(
+            &app,
+            "abc",
+            &rt,
+            r#"{"seq":1,"type":"question","question_id":"lead-1","questions":[{"question":"Which file?"}]}"#,
+        )
+        .await;
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":2,"type":"status","state":"waiting_for_answer"}"#).await;
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":3,"type":"question","question_id":"sub-1","questions":[{"question":"Run rm?"}],"kind":"exec_policy","blocking":true,"risk":"workspace_write"}"#).await;
+        assert!(
+            rt.question_holds_tool_call.load(Ordering::SeqCst),
+            "the subagent's call is held"
+        );
+
+        // The lead's answer arrives: it is not the tracked question, so it must not close `sub-1`.
+        handle_agent_event(
+            &app,
+            "abc",
+            &rt,
+            r#"{"seq":4,"type":"question_answered","question_id":"lead-1","answers":{}}"#,
+        )
+        .await;
+        assert_eq!(
+            rt.open_question().await.map(|(id, ..)| id).as_deref(),
+            Some("sub-1"),
+            "the subagent's still-open question is untouched"
+        );
+        assert!(
+            rt.question_holds_tool_call.load(Ordering::SeqCst),
+            "and it still holds its call"
+        );
+
+        // Its own answer does close it, and the runner settles to working.
+        handle_agent_event(
+            &app,
+            "abc",
+            &rt,
+            r#"{"seq":5,"type":"question_answered","question_id":"sub-1","answers":{}}"#,
+        )
+        .await;
+        assert!(rt.open_question().await.is_none(), "its own answer closes it");
+        assert!(!rt.question_holds_tool_call.load(Ordering::SeqCst));
+        handle_agent_event(&app, "abc", &rt, r#"{"seq":6,"type":"status","state":"working"}"#).await;
+        assert_ne!(
+            app.session("abc").await.unwrap().status,
+            SessionStatus::WaitingForAnswer,
+            "the answered subagent approval leaves the parent running, not waiting"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn an_event_log_torn_inside_a_multibyte_character_keeps_the_last_good_seq() {
         let (app, root) = app_with_colony("abc", SessionStatus::Starting).await;

@@ -318,9 +318,24 @@ pub fn diagnose(session: &Session, tail: &[Value], now: DateTime<Utc>) -> Option
             if session.status != Running || matches!(reason, Some("waiting_for_answer" | "autopilot_held")) {
                 let question = tail
                     .iter()
+                    .enumerate()
                     .rev()
-                    .find(|e| e.get("type").and_then(Value::as_str) == Some("question"))
-                    .and_then(question_text);
+                    .find(|(_, e)| e.get("type").and_then(Value::as_str) == Some("question"))
+                    .and_then(|(i, e)| {
+                        // A question is pending only if nothing later in the tail answered it
+                        // (issue #981). The slot pairing lives in `Runtime`, but the tail is what
+                        // the diagnosis reads, and a `question` whose matching `question_answered`
+                        // follows read as still open — the stale text the cockpit showed. The tail
+                        // is short, so a forward scan for the id is enough; no replay needed.
+                        let id = e.get("question_id").and_then(Value::as_str);
+                        let answered = id.is_some_and(|id| {
+                            tail[i + 1..].iter().any(|a| {
+                                a.get("type").and_then(Value::as_str) == Some("question_answered")
+                                    && a.get("question_id").and_then(Value::as_str) == Some(id)
+                            })
+                        });
+                        (!answered).then(|| question_text(e)).flatten()
+                    });
                 let text = match (question, reason, session.status) {
                     (Some(asked), _, _) => format!("waiting for an answer: {asked}"),
                     (None, Some("autopilot_held"), _) => "autopilot held, waiting for the next message".into(),
@@ -595,6 +610,43 @@ mod tests {
         let recent = recent_events(&tail).unwrap();
         assert_eq!((recent.len(), recent[0].seq), (20, 10));
         assert!(recent_events(&[]).is_none());
+    }
+
+    /// Issue #981: a `question` whose matching `question_answered` follows it in the tail is not
+    /// pending, so the diagnosis must not keep naming its stale text — the cockpit read that as a
+    /// question still waiting on the person.
+    #[test]
+    fn an_answered_question_is_not_diagnosed_as_pending() {
+        let session = with(SessionStatus::Idle, |s| {
+            s.attention = Some(serde_json::json!({"reason": "autopilot_held"}));
+        });
+        let answered = vec![
+            serde_json::json!({"seq": 1, "type": "question", "question_id": "q1", "questions": [{"question": "Ship it?"}]}),
+            serde_json::json!({"seq": 2, "type": "question_answered", "question_id": "q1", "answers": {}}),
+        ];
+        let got = diagnose(&session, &answered, now()).unwrap();
+        assert!(
+            !got.text.contains("Ship it?"),
+            "the answered question is not pending: {}",
+            got.text
+        );
+        assert!(
+            got.text.contains("autopilot held"),
+            "it falls through to the held line: {}",
+            got.text
+        );
+
+        // An answer to a different id leaves this question pending, text and all.
+        let other = vec![
+            serde_json::json!({"seq": 1, "type": "question", "question_id": "q1", "questions": [{"question": "Ship it?"}]}),
+            serde_json::json!({"seq": 2, "type": "question_answered", "question_id": "q2", "answers": {}}),
+        ];
+        let got = diagnose(&session, &other, now()).unwrap();
+        assert!(
+            got.text.contains("Ship it?"),
+            "an unrelated answer does not resolve it: {}",
+            got.text
+        );
     }
 
     #[test]
