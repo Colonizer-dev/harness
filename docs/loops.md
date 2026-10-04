@@ -155,7 +155,9 @@ Each run follows the rules an operator would follow by hand:
    rebase, and then needs fresh CI before it can merge. If that rebase conflicts, nothing is guessed:
    the pull request is marked `needs_redo`, and — only with `redo_on_conflict` on — one redo colony
    is dispatched for it, ever, with the pull request as its reference (`git fetch origin
-   pull/N/head`, `allow_duplicate`). The redo supersedes the original.
+   pull/N/head`, `allow_duplicate`). The redo supersedes the original. With `resolve_conflicts`
+   on, a conflicted pull request is [resolved by its own colony](#resolving-conflicts-with-a-colony)
+   instead — a merge, never a rebase.
 6. **Self-heal main — off by default.** When main goes red and its tip is the train's own merge, the
    repository is **paused** until main is green again. With `self_heal` on, the failed jobs are
    re-run once (a flake), and if main is still red on the next run a small fix colony is sent with
@@ -170,6 +172,42 @@ Each run follows the rules an operator would follow by hand:
    plus what was done about a red main — kept in the loop's history (the last 20 runs), written to
    the activity log (one `publish.merge_train` line per repository) and to each colony's own log.
    The card shows the last report.
+
+### Resolving conflicts with a colony
+
+With dozens of colonies on one repository, most pull requests go DIRTY within the hour. With
+`resolve_conflicts` on (`colonizer loop merge-train set --resolve on`; off by default), the loop
+does not rebase a conflicted pull request (issue #968). It merges the base into the colony's own
+kept worktree on the host — `git merge origin/<base>`, a merge commit; nothing is rewritten and
+nothing is ever force-pushed:
+
+- **A clean merge** is pushed to the branch as it is (a plain push: anything but a fast-forward is
+  refused) and the pull request merges after fresh CI.
+- **Conflicts** resume the pull request's colony on that worktree with a one-shot brief: resolve
+  every conflict keeping both sides' intent, rerun the generators the repository documents instead
+  of hand-merging their output (route snapshots, lockfiles, compatibility or error docs, translation
+  catalogs), run the checks, and rewrite `pr.md`. Its publish commits the merge and pushes it to the
+  same pull request; the report shows **resolving conflicts** meanwhile. A conflict that needs a
+  product or security decision is asked with choices, the normal question flow, and the pull
+  request is labelled `needs-human` while it waits.
+- **One at a time**: one resolve per pull request (it is the colony's own), one per repository at
+  once, one attempt per base commit, and at most `resolve_attempts` (default 3) per pull request.
+  A resolve that stops or fails without publishing has its merge aborted and its pull request put
+  back in the train. Past the limit — or when the colony's worktree is gone — the pull request is
+  labelled `needs-human` and left open with the reason.
+
+The repository can steer it from its base branch's `.colonizer/merge.toml`:
+
+```toml
+[resolve]
+never = ["migrations/**", "SECURITY.md"]          # a conflict here goes to a person, never a colony
+
+[[resolve.generators]]
+files = "crates/colonizer/routes.snap"            # when this conflicts, rerun its generator
+run = "UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table"
+```
+
+A resolved colony keeps autopilot on afterwards, so its later fixes publish to the same pull request.
 
 ### When GitHub CI cannot run
 
@@ -215,6 +253,7 @@ colonizer loop merge-train never acme/upstream     # never merge here
 colonizer loop merge-train set --every 120 --max-merges 2 --repo-cap acme/web=1 --flaky 'e2e*,lint'
 colonizer loop merge-train set --self-heal on --redo on
 colonizer loop merge-train set --local-checks acme # run acme's checks locally when GitHub CI cannot run
+colonizer loop merge-train set --resolve on --resolve-attempts 3   # resolve DIRTY pull requests with their colony
 colonizer loop merge-train run --dry-run           # what it would do, and why
 colonizer loop merge-train on                      # switch it on; `off` switches it off
 ```

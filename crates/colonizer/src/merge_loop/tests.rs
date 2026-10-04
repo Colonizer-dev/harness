@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
 mod local;
+mod resolve;
 
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 30, 9, 0, 0).unwrap()
@@ -37,6 +38,8 @@ struct Fake {
     /// Issue #969: the repository's local-check settings (off when unset) and the local runs' answers.
     local: RefCell<Option<LocalChecks>>,
     local_runs: RefCell<VecDeque<LocalRun>>,
+    /// Issue #968: what starting a resolve answers (resuming on `src/shared.rs` when unset).
+    resolves: RefCell<VecDeque<super::resolve::Started>>,
 }
 
 impl Fake {
@@ -150,6 +153,22 @@ impl Ops for Fake {
     }
     async fn post_status(&self, _repo: &str, sha: &str, state: &str, _description: &str) -> Result<(), String> {
         self.say(format!("status {sha} {state}"));
+        Ok(())
+    }
+    async fn resolve(&self, s: &Session, base: &str) -> super::resolve::Started {
+        self.say(format!("resolve {} onto {base}", s.id));
+        let mut q = self.resolves.borrow_mut();
+        if q.is_empty() {
+            return super::resolve::Started::Resuming(vec!["src/shared.rs".into()]);
+        }
+        next(&mut q)
+    }
+    async fn reset_resolve(&self, s: &Session) -> Result<(), String> {
+        self.say(format!("reset {}", s.id));
+        Ok(())
+    }
+    async fn label_needs_human(&self, s: &Session) -> Result<(), String> {
+        self.say(format!("label {} needs-human", s.id));
         Ok(())
     }
 }

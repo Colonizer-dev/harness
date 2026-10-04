@@ -82,6 +82,7 @@ const AI_ATTRIBUTION: &[&str] = &[
 const GH_LIMIT: Duration = Duration::from_secs(60);
 
 mod local_checks;
+mod resolve;
 use local_checks::{LocalChecks, LocalRun};
 
 // ---------------------------------------------------------------------------------------------
@@ -128,6 +129,11 @@ pub(crate) struct Settings {
     /// Issue #969: `owner` or `owner/repo` entries where, when GitHub CI cannot run at all, the loop
     /// runs the stack's checks itself (`.colonizer/merge.toml`'s `local_checks` wins, anywhere).
     pub local_checks: Vec<String>,
+    /// Issue #968: a conflicted pull request gets the base merged in (never a rebase) and its colony
+    /// resumed to resolve the conflicts, instead of the mechanical rebase and `needs_redo`.
+    pub resolve_conflicts: bool,
+    /// Resolve attempts per pull request before it is left to a person (labelled `needs-human`).
+    pub resolve_attempts: u32,
 }
 
 impl Default for Settings {
@@ -150,6 +156,8 @@ impl Default for Settings {
             min_call_gap_ms: 1000,
             held: Vec::new(),
             local_checks: Vec::new(),
+            resolve_conflicts: false,
+            resolve_attempts: 3,
         }
     }
 }
@@ -202,6 +210,7 @@ pub(crate) fn normalize(mut s: Settings) -> Result<Settings, String> {
     bound(s.ci_poll_secs, 30, 600, "ci_poll_secs")?;
     bound(u64::from(s.max_api_calls), 20, 2000, "max_api_calls")?;
     bound(s.min_call_gap_ms, 200, 10_000, "min_call_gap_ms")?;
+    bound(u64::from(s.resolve_attempts), 1, 10, "resolve_attempts")?;
     s.flaky_checks = parse_list(&s.flaky_checks.join(","));
     s.held = parse_list(&s.held.join(","));
     if s.revert_on_red && !s.self_heal {
@@ -279,6 +288,24 @@ pub(crate) struct RepoMemory {
     /// Issue #969: pull requests whose local checks failed, as `head@base sha`: not run again until
     /// either moves.
     pub local_failed: BTreeMap<String, String>,
+    /// Issue #968: conflicted pull requests a resolve colony was sent for, by URL.
+    pub resolving: BTreeMap<String, Resolving>,
+}
+
+/// One pull request's resolve attempts (issue #968).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Resolving {
+    /// The colony resumed to resolve it: the pull request's own.
+    pub colony: String,
+    pub attempts: u32,
+    /// The base tip the last attempt merged in: one attempt per base commit.
+    pub base_sha: Option<String>,
+    pub at: Option<DateTime<Utc>>,
+    /// The pull request carries `needs-human` (a question was asked, or the loop gave up).
+    pub labeled: bool,
+    /// Why the loop stopped trying; a person takes it from there.
+    pub gave_up: Option<String>,
 }
 
 /// What a run did (or, in a dry run, would do) with one pull request.
@@ -292,6 +319,8 @@ pub(crate) enum Action {
     Rerun,
     NeedsRedo,
     RedoDispatched,
+    /// Issue #968: a resolve colony is merging the base in and resolving the conflicts.
+    Resolving,
     Waiting,
     Skipped,
 }
@@ -311,6 +340,8 @@ impl Action {
             (Action::NeedsRedo, _) => "needs redo",
             (Action::RedoDispatched, false) => "redo dispatched",
             (Action::RedoDispatched, true) => "would dispatch a redo",
+            (Action::Resolving, false) => "resolving conflicts",
+            (Action::Resolving, true) => "would resolve conflicts",
             (Action::Waiting, _) => "waiting",
             (Action::Skipped, _) => "skipped",
         }
@@ -378,6 +409,7 @@ pub(crate) fn summary(r: &Report) -> String {
     ];
     for (action, word) in [
         (Action::Rebased, if dry { "would rebase" } else { "rebased" }),
+        (Action::Resolving, if dry { "would resolve" } else { "resolving conflicts" }),
         (Action::Rerun, if dry { "would re-run" } else { "re-ran flaky" }),
         (Action::NeedsRedo, "needs redo"),
         (Action::Waiting, "waiting"),
@@ -794,6 +826,11 @@ trait Ops {
     /// Runs them on `head` merged with the base's tip, in a microVM.
     async fn local_run(&self, s: &Session, head: &str, base: &str, commands: &[String]) -> LocalRun;
     async fn post_status(&self, repo: &str, sha: &str, state: &str, description: &str) -> Result<(), String>;
+    /// Issue #968: merges the base into the colony's worktree, then pushes it or resumes the colony.
+    async fn resolve(&self, s: &Session, base: &str) -> resolve::Started;
+    /// Aborts a resolve that ended without publishing and puts the colony back to `pr_opened`.
+    async fn reset_resolve(&self, s: &Session) -> Result<(), String>;
+    async fn label_needs_human(&self, s: &Session) -> Result<(), String>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -930,6 +967,19 @@ impl<'a, O: Ops> Engine<'a, O> {
         let mut local: Option<LocalChecks> = None;
         let mut queue: Vec<&Session> = group.to_vec();
         queue.sort_by(|a, b| a.pr_opened_at.cmp(&b.pr_opened_at).then(a.id.cmp(&b.id)));
+        // Resolves whose colony is gone or done with its pull request are forgotten.
+        mem.resolving.retain(|_, r| {
+            self.sessions
+                .iter()
+                .any(|x| x.id == r.colony && !matches!(x.status, SessionStatus::Merged | SessionStatus::Closed))
+        });
+        let (working, rest): (Vec<&Session>, Vec<&Session>) =
+            queue.into_iter().partition(|s| s.status != SessionStatus::PrOpened);
+        queue = rest;
+        for s in working {
+            let (action, why) = self.resolving(s, &base, mem).await?;
+            items.add(s, &s.issue_title, action, why);
+        }
         queue.retain(|s| match eligibility(self.sessions, s, self.cfg) {
             Ok(()) => true,
             Err(why) => {
@@ -1006,7 +1056,12 @@ impl<'a, O: Ops> Engine<'a, O> {
                     }
                 };
                 let title = title_of(s, Some(&reading));
-                match self.plan(&reading) {
+                let plan = self.plan(&reading);
+                if plan != Plan::Rebase {
+                    // No longer conflicted: whatever resolved it, its resolve record is done.
+                    mem.resolving.remove(s.pr_url.as_deref().unwrap_or_default());
+                }
+                match plan {
                     Plan::Skip(why) => items.add(s, &title, Action::Skipped, why),
                     Plan::Wait(why) => items.add(s, &title, Action::Waiting, why),
                     Plan::Red(_) => {
@@ -1014,7 +1069,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                         items.add(s, &title, action, why);
                     }
                     Plan::Rebase => {
-                        let (action, why) = self.conflict(s, &base, mem).await?;
+                        let (action, why) = self.conflict(s, &base, &main_sha, mem).await?;
                         items.add(s, &title, action, why);
                     }
                     plan @ (Plan::Merge | Plan::LocalMerge(_) | Plan::Update(_) | Plan::WaitCi) => {
@@ -1417,8 +1472,17 @@ impl<'a, O: Ops> Engine<'a, O> {
 
     /// Rule 5: a conflicted pull request gets the host's mechanical rebase; a conflicting rebase is
     /// never resolved by guessing — it becomes `needs_redo`.
-    async fn conflict(&mut self, s: &Session, base: &str, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
+    async fn conflict(
+        &mut self,
+        s: &Session,
+        base: &str,
+        base_sha: &str,
+        mem: &mut RepoMemory,
+    ) -> Result<(Action, String), Stop> {
         let url = s.pr_url.clone().unwrap_or_default();
+        if self.cfg.resolve_conflicts {
+            return self.resolve(s, &url, base, base_sha, mem).await;
+        }
         if let Some(why) = mem.needs_redo.get(&url).cloned() {
             return self.redo(s, &url, base, mem, why).await;
         }
@@ -1448,6 +1512,167 @@ impl<'a, O: Ops> Engine<'a, O> {
             RebaseResult::Failed(e) => Ok((
                 Action::Waiting,
                 format!("conflicts with {base}; the host rebase could not run ({e}), tried again next run"),
+            )),
+        }
+    }
+
+    /// Whether a colony is busy with a resolve right now.
+    fn working(&self, colony: &str) -> bool {
+        self.sessions
+            .iter()
+            .any(|x| x.id == colony && (x.status.busy() || x.status == SessionStatus::Queued))
+    }
+
+    /// Issue #968: a conflicted pull request gets one resolve per base commit, one at a time per
+    /// repository, and at most `resolve_attempts`; past that, or for a conflict the repository
+    /// keeps for people, it is labelled `needs-human` and left open.
+    async fn resolve(
+        &mut self,
+        s: &Session,
+        url: &str,
+        base: &str,
+        base_sha: &str,
+        mem: &mut RepoMemory,
+    ) -> Result<(Action, String), Stop> {
+        let max = self.cfg.resolve_attempts;
+        let mut entry = mem.resolving.get(url).cloned().unwrap_or_else(|| Resolving {
+            colony: s.id.clone(),
+            ..Resolving::default()
+        });
+        if let Some(why) = &entry.gave_up {
+            return Ok((Action::NeedsRedo, format!("conflicts with {base} and needs a person: {why}")));
+        }
+        if entry.attempts >= max {
+            return self
+                .give_up(s, url, mem, entry, format!("{max} resolve attempts did not land"))
+                .await;
+        }
+        if entry.attempts > 0 && entry.base_sha.as_deref() == Some(base_sha) {
+            return Ok((
+                Action::Waiting,
+                format!(
+                    "conflicts with {base} after a resolve onto this same base; the next attempt ({}/{max}) waits for {base} to move",
+                    entry.attempts + 1
+                ),
+            ));
+        }
+        if let Some(other) = mem
+            .resolving
+            .iter()
+            .find(|(u, r)| u.as_str() != url && self.working(&r.colony))
+        {
+            return Ok((
+                Action::Waiting,
+                format!(
+                    "conflicts with {base}; colony {} is resolving another pull request here, and resolves go one at a time",
+                    other.1.colony
+                ),
+            ));
+        }
+        let n = format!("attempt {}/{max}", entry.attempts + 1);
+        if self.dry {
+            return Ok((
+                Action::Resolving,
+                format!("conflicts with {base}; would merge {base} in and resume the colony to resolve the conflicts ({n})"),
+            ));
+        }
+        self.pace().await?;
+        entry.attempts += 1;
+        entry.base_sha = Some(base_sha.to_string());
+        entry.at = Some(self.ops.now());
+        let out = match self.ops.resolve(s, base).await {
+            resolve::Started::Resuming(files) => {
+                let shown: Vec<&str> = files.iter().take(5).map(String::as_str).collect();
+                let more = files.len().saturating_sub(shown.len());
+                let more = if more > 0 {
+                    format!(" and {more} more")
+                } else {
+                    String::new()
+                };
+                (
+                    Action::Resolving,
+                    format!(
+                        "conflicts with {base} in {}{more}: merged {base} in and resumed the colony to resolve them ({n})",
+                        shown.join(", ")
+                    ),
+                )
+            }
+            resolve::Started::Clean => (
+                Action::Updated,
+                format!(
+                    "merged {base} in without a conflict and pushed (no rebase, no force-push); it merges after fresh CI ({n})"
+                ),
+            ),
+            resolve::Started::NeedsHuman(why) => return self.give_up(s, url, mem, entry, why).await,
+            resolve::Started::Failed(e) => (
+                Action::Waiting,
+                format!("conflicts with {base}; the resolve could not start: {e} ({n})"),
+            ),
+        };
+        mem.resolving.insert(url.to_string(), entry);
+        Ok(out)
+    }
+
+    async fn give_up(
+        &mut self,
+        s: &Session,
+        url: &str,
+        mem: &mut RepoMemory,
+        mut entry: Resolving,
+        why: String,
+    ) -> Result<(Action, String), Stop> {
+        if !entry.labeled && !self.dry && gh!(self, self.ops.label_needs_human(s)).is_ok() {
+            entry.labeled = true;
+        }
+        entry.gave_up = Some(why.clone());
+        mem.resolving.insert(url.to_string(), entry);
+        Ok((
+            Action::NeedsRedo,
+            format!(
+                "conflicts that need a person: {why}; labelled {} and left open",
+                resolve::NEEDS_HUMAN
+            ),
+        ))
+    }
+
+    /// A colony resumed to resolve its conflicts, as this run finds it.
+    async fn resolving(&mut self, s: &Session, base: &str, mem: &mut RepoMemory) -> Result<(Action, String), Stop> {
+        let url = s.pr_url.clone().unwrap_or_default();
+        let mut entry = mem.resolving.get(&url).cloned().unwrap_or_default();
+        let n = format!("attempt {}/{}", entry.attempts, self.cfg.resolve_attempts);
+        match s.status {
+            SessionStatus::WaitingForAnswer => {
+                if !entry.labeled && !self.dry && gh!(self, self.ops.label_needs_human(s)).is_ok() {
+                    entry.labeled = true;
+                    mem.resolving.insert(url, entry);
+                }
+                Ok((
+                    Action::Resolving,
+                    format!(
+                        "its resolve colony asked a question ({n}); labelled {} until it is answered",
+                        resolve::NEEDS_HUMAN
+                    ),
+                ))
+            }
+            SessionStatus::Stopped | SessionStatus::Failed if !self.dry => {
+                self.pace().await?;
+                let status = s.status.as_str();
+                match self.ops.reset_resolve(s).await {
+                    Ok(()) => Ok((
+                        Action::Waiting,
+                        format!(
+                            "its resolve colony ended {status} without publishing; the merge was aborted and the pull request is back in the train ({n})"
+                        ),
+                    )),
+                    Err(e) => Ok((
+                        Action::Waiting,
+                        format!("its resolve colony ended {status}; putting it back failed ({e})"),
+                    )),
+                }
+            }
+            _ => Ok((
+                Action::Resolving,
+                format!("a resolve colony is merging {base} in and resolving the conflicts ({n})"),
             )),
         }
     }
@@ -1629,9 +1854,15 @@ async fn run_all<O: Ops>(
         ..Report::default()
     };
     let mut by_repo: BTreeMap<String, Vec<&Session>> = BTreeMap::new();
+    // A colony resumed to resolve its conflicts (issue #968) is not `pr_opened` while it works, and
+    // still the loop's to report on.
+    let resolving: HashSet<String> = memory
+        .values()
+        .flat_map(|m| m.resolving.values().map(|r| r.colony.clone()))
+        .collect();
     for s in sessions
         .iter()
-        .filter(|s| s.status == SessionStatus::PrOpened && s.pr_url.is_some())
+        .filter(|s| (s.status == SessionStatus::PrOpened || resolving.contains(&s.id)) && s.pr_url.is_some())
     {
         by_repo.entry(s.repo.to_ascii_lowercase()).or_default().push(s);
     }
@@ -1972,6 +2203,36 @@ impl Ops for GhOps<'_> {
             return Err(crate::publish::BLOCKED.to_string());
         }
         local_checks::post_status(self.app, repo, sha, state, description).await
+    }
+
+    async fn resolve(&self, s: &Session, base: &str) -> resolve::Started {
+        if authority::external_writes_blocked() {
+            return resolve::Started::Failed(crate::publish::BLOCKED.to_string());
+        }
+        let started = resolve::start(self.app, &s.id, base).await;
+        let line = match &started {
+            resolve::Started::Resuming(files) => format!(
+                "merge-train loop: merged {base} in; resumed to resolve {} conflicted file(s)",
+                files.len()
+            ),
+            resolve::Started::Clean => format!("merge-train loop: merged {base} in without a conflict and pushed"),
+            resolve::Started::NeedsHuman(why) => format!("merge-train loop: conflicts need a person: {why}"),
+            resolve::Started::Failed(e) => format!("merge-train loop: the resolve could not start: {e}"),
+        };
+        self.app.session_log(&s.id, "info", line).await;
+        started
+    }
+
+    async fn reset_resolve(&self, s: &Session) -> Result<(), String> {
+        resolve::reset(self.app, &s.id).await
+    }
+
+    async fn label_needs_human(&self, s: &Session) -> Result<(), String> {
+        if authority::external_writes_blocked() {
+            return Err(crate::publish::BLOCKED.to_string());
+        }
+        let n = pr_number(s.pr_url.as_deref().unwrap_or_default()).ok_or("no pull request number")?;
+        resolve::label(self.app, &s.repo, n).await
     }
 }
 
