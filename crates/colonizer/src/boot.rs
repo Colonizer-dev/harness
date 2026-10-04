@@ -1277,6 +1277,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
         runner_env.insert("COLONIZER_RECALL_TOKEN".into(), Value::String(gateway_token.clone()));
     }
+    // Colony-to-colony coordination (issue #834): the /coordinate route and this colony's gateway
+    // token, set for every colony the gateway token exists for — it needs no deja index, unlike
+    // recall above.
+    runner_env.insert(
+        "COLONIZER_COORD_URL".into(),
+        Value::String(format!(
+            "http://host.microsandbox.internal:{}/coordinate",
+            app.cfg.gateway_bind.port()
+        )),
+    );
+    runner_env.insert("COLONIZER_COORD_TOKEN".into(), Value::String(gateway_token.clone()));
     // What the colony can and cannot run is part of the agent's brief (runner.mjs), so it names the
     // image this colony actually boots — the resolved stack's, not the configured one — or an agent
     // in a repository detected as Rust would brief itself for a Node machine.

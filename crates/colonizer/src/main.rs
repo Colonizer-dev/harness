@@ -33,6 +33,7 @@ mod colonize;
 mod colony_secrets;
 mod commit_links;
 mod config;
+mod coordination;
 mod decide;
 mod deja;
 mod deps;
