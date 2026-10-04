@@ -22,6 +22,7 @@ import {
 } from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
+import { createGithubServer, GITHUB_PROMPT_APPEND, GITHUB_SERVER, githubDecision } from './github.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
@@ -463,13 +464,14 @@ export function backgroundRecordName(command) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
+ * @param {object} [extras.githubServer]  in-process host-proxied GitHub write MCP server (issue #778)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -488,6 +490,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
+  // Only a GitHub-needing loop's colony (loop_github.rs): the mothership sets the flag when it wrote
+  // the read-only context, and the tools only ever ask the host for a call on this colony's repo.
+  const github = Boolean(env.COLONIZER_GITHUB === 'true' && githubServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
   // to plan, ask and delegate, and a PreToolUse hook refuses the rest.
   // Enforced unless someone chose otherwise: an unset or unrecognised value delegates, and only an
@@ -508,6 +513,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (recall) appended.push(RECALL_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
+  if (github) appended.push(GITHUB_PROMPT_APPEND);
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
   // Only under enforce: encourage has no gate, so a list of allowed tools would be false there.
   if (delegate === 'enforce') appended.push(ENFORCE_PROMPT_APPEND);
@@ -558,6 +564,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
+  if (github) mcpServers[GITHUB_SERVER] = githubServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
   const preToolUse = [];
   if (delegate === 'enforce') {
@@ -599,6 +606,22 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
       hooks: [
         async (input) => {
           const reason = findingDecision(input.tool_name, input);
+          if (!reason) return { continue: true };
+          return {
+            continue: true,
+            hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason },
+          };
+        },
+      ],
+    });
+  }
+  if (github) {
+    // GitHub writes stay with the orchestrator too: a subagent's call carries `agent_id`, and is
+    // refused with a reason that tells it to report what it found instead.
+    preToolUse.push({
+      hooks: [
+        async (input) => {
+          const reason = githubDecision(input.tool_name, input);
           if (!reason) return { continue: true };
           return {
             continue: true,
@@ -1354,6 +1377,13 @@ async function main() {
     recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
   }
 
+  // Host-proxied GitHub writes (issue #778): only for a loop that asked for GitHub, which is
+  // exactly when the mothership set COLONIZER_GITHUB and wrote /colonizer/github.
+  let githubServer;
+  if (process.env.COLONIZER_GITHUB === 'true') {
+    githubServer = createGithubServer({ emit, createSdkMcpServer, tool, z });
+  }
+
   let loopServer;
   if (process.env.COLONIZER_LOOP === 'true') {
     loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
@@ -1385,6 +1415,7 @@ async function main() {
     recallServer,
     findingsServer,
     loopServer,
+    githubServer,
     waitServer,
     hiddenEnv: plan.routes.map((route) => route.key_env).filter(Boolean),
     routes: plan.routes,

@@ -214,6 +214,14 @@ export interface Guide {
 }
 
 const GUIDES: Record<string, Guide> = {
+  cockpit: {
+    icon: "globe",
+    blurb: "The address to bookmark for this cockpit — on this computer, your network, or anywhere.",
+    flow: [
+      { icon: "globe", label: "Address" },
+      { icon: "lock", label: "No token" },
+    ],
+  },
   setup: {
     icon: "check",
     blurb: "A short checklist to get your first colony running.",

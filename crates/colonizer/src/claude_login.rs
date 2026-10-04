@@ -4,7 +4,7 @@
 
 use crate::{
     ApiResult, App, ClaudeCred, Shared, client_error, resolve_host_claude_bin,
-    util::{fingerprint, shell_quote, truncate, write_secret},
+    util::{fingerprint, shell_quote, truncate},
 };
 use anyhow::Context;
 use axum::{Json, extract::State, http::StatusCode};
@@ -196,7 +196,7 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
     };
     session.stdin = None;
     session.view = match outcome {
-        Ok(token) => match write_secret(&app.claude_token_file(), &token) {
+        Ok(token) => match crate::claude_accounts::save_default_token(&app, &token).await {
             Ok(()) => LoginView {
                 state: "done",
                 url: None,
@@ -205,7 +205,7 @@ async fn drive(app: Shared, id: u64, mut child: Child, mut stdout: ChildStdout, 
             Err(e) => LoginView {
                 state: "error",
                 url: None,
-                message: Some(format!("could not save the token: {e:#}")),
+                message: Some(format!("could not save the token: {}", e.message())),
             },
         },
         Err(message) => LoginView {
@@ -615,13 +615,26 @@ fn profile_expires_at(profile: &Value) -> Option<String> {
         .map(String::from)
 }
 
-/// When this harness saved the credential: the token file's mtime. The token itself carries no dates,
-/// and a credential from the environment has no file, so there is nothing to show for one.
+/// When this harness saved the credential: the mtime of the default account's secret file, or of
+/// its `.enc` sibling when the secret is envelope-encrypted (the plaintext file is absent then).
+/// The token itself carries no dates, and a credential from the environment — or one the secret
+/// store keeps in the keychain — has no file, so there is nothing to show for one.
 fn saved_at(app: &App, cred: &ClaudeCred) -> Option<DateTime<Utc>> {
     if !matches!(cred.source, "saved API key" | "Claude subscription") {
         return None;
     }
-    let modified = std::fs::metadata(app.claude_token_file()).ok()?.modified().ok()?;
+    let meta = crate::claude_accounts::load_meta(&app.cfg.config_dir);
+    let id = if meta.default.is_empty() {
+        "default".to_string()
+    } else {
+        meta.default.clone()
+    };
+    let secret = crate::claude_accounts::account_file(&app.cfg.config_dir, &id);
+    let modified = std::fs::metadata(&secret)
+        .or_else(|_| std::fs::metadata(crate::util::enc_path(&secret)))
+        .ok()?
+        .modified()
+        .ok()?;
     Some(DateTime::from(modified))
 }
 

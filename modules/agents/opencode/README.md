@@ -35,7 +35,7 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `COLONIZER_MODEL` | required | Agent model as `<provider>/<model>` from Settings → Providers, e.g. `local/deepseek-v4-flash` |
+| `COLONIZER_MODEL` | required | Agent model as `<provider>/<model>` from Settings → Model providers, e.g. `local/deepseek-v4-flash` |
 | `COLONIZER_SMALL_MODEL` | main model | Model for titles and summaries, same `<provider>/<model>` form |
 | `COLONIZER_DISABLED_TOOLS` | none | OpenCode tool ids every call of is denied (`permission` deny on top of the allow-all), e.g. `bash`, `webfetch`; `edit` covers write, edit and apply_patch as one, and MCP tools are not covered |
 | `COLONIZER_MODEL_ROUTES` | none | JSON provider routes (`docs/protocol.md` §6.5) |
@@ -45,7 +45,7 @@ yet. CI runs only the fake-child tests (`node --test modules/agents/opencode/tes
 | `COLONIZER_OPENCODE_BIN` | none | Use this binary instead of downloading the pinned one |
 
 Models are reached through the mothership's provider gateway, which holds the keys (§6.5): for a
-LAN/tailnet endpoint add the `local` preset in Settings → Providers (`base_url`
+LAN/tailnet endpoint add the `local` preset in Settings → Model providers (`base_url`
 `http://<tailnet-ip>:8000`, `auth` none), pick the OpenCode agent module, and set the model to
 `local/<model>`. The mothership host reaches the tailnet; the colony only reaches the gateway.
 

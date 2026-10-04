@@ -60,6 +60,16 @@ describe("FleetPanel", () => {
     expect(markup).toContain("unreachable");
   });
 
+  it("says a stalled host's colonies are not re-run elsewhere (issue #688)", () => {
+    const markup = renderToStaticMarkup(<FleetPanel hosts={[SELF, PEER_DOWN]} />);
+    expect(markup).toContain("1 colony last seen running — not re-run elsewhere");
+  });
+
+  it("says nothing when the stalled host was idle", () => {
+    const markup = renderToStaticMarkup(<FleetPanel hosts={[SELF, { ...PEER_DOWN, slots_in_use: 0 }]} />);
+    expect(markup).not.toContain("last seen running");
+  });
+
   it("still shows a never-reached peer's placeholder row without crashing", () => {
     const placeholder: FleetHost = {
       id: "https://ghost.example",
