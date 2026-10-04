@@ -145,6 +145,7 @@ mod upload;
 mod usage;
 mod util;
 mod validation;
+mod vault;
 mod verify;
 mod verify_focus;
 mod version;
