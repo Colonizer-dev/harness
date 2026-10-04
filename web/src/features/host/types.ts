@@ -1,5 +1,5 @@
 import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
-import type { ModelProviderStatus, StatusQuota } from "../providers/types";
+import type { AccountAlert, ModelProviderStatus, StatusQuota } from "../providers/types";
 
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
@@ -50,6 +50,8 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
   quota_cards?: QuotaCard[];
+  /** Claude accounts that need the owner (issue #984): a rejected sign-in or an exhausted plan, with the colonies waiting on each. Empty when everything is fine; older mothership builds omit it. */
+  account_alerts?: AccountAlert[];
   /**
    * A drain is holding the queue while an update or a restart waits for the colonies still booting
    * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.

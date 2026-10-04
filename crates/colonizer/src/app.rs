@@ -115,6 +115,10 @@ pub struct App {
 
     // ---- Module state: one field per module, in alphabetical order. A module adds its field here and
     // its constructor to the same place in `App::new`, so parallel additions land on different lines.
+    /// The Claude accounts currently in trouble (issue #984, account_health.rs): one entry per
+    /// account whose sign-in expired or was revoked, never a credential. Read by the
+    /// queue's waiting-for-account resume, the notify loop and `GET /api/status`.
+    pub account_health: crate::account_health::AccountHealth,
     /// The activity log behind `GET /api/activity` and History (activity.rs).
     pub activity: crate::activity::ActivityLog,
     /// Slow read-only answers (`/api/repos`, `/api/storage`) kept so a page load does not wait on
@@ -272,6 +276,7 @@ impl App {
             mesh: Mutex::new(None),
 
             // ---- Module state: one line per module, in alphabetical order.
+            account_health: crate::account_health::AccountHealth::default(),
             activity: crate::activity::ActivityLog::new(),
             answer_cache: AnswerCache::persistent(cfg.data_dir.join("cache/answers")),
             answer_tokens: crate::answer_tokens::Registry::default(),

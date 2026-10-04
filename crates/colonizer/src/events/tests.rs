@@ -1171,3 +1171,118 @@ fn model_router_log_lines_reach_the_mothership_log() {
         None
     );
 }
+
+/// Issue #984: a run of router auth failures on the same account marks it once — the state change,
+/// not the failure count, is what the log line and the notify loop key on. Ten colonies failing one
+/// account is one mark, and one notification.
+#[tokio::test]
+async fn ten_router_auth_failures_on_one_account_mark_it_once() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    for seq in 1..=10 {
+        let line = format!(
+            "{{\"seq\":{seq},\"type\":\"log\",\"level\":\"error\",\"source\":\"model_router\",\
+             \"message\":\"upstream failure: provider=anthropic class=auth status=401 elapsed=0.3s\"}}"
+        );
+        handle_agent_event(&app, "abc", &rt, &line).await;
+    }
+    let marks = crate::account_health::snapshot(&app).await;
+    assert_eq!(marks.len(), 1, "one account marked, not ten");
+    assert_eq!(marks[0].0, "default");
+    assert_eq!(marks[0].1.state, crate::account_health::State::NeedsSignIn);
+    assert_eq!(marks[0].1.status, 401);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #984: a live colony whose account is unusable is parked waiting on it — the slot released,
+/// the reason distinct from the autopilot hold — instead of being held or retried.
+#[tokio::test]
+async fn a_turn_on_a_broken_account_parks_the_colony_waiting() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| {
+        x.autopilot = true;
+        x.claude_account = Some("default".into());
+        x.git_admin_dir = Some("git".into());
+    })
+    .await;
+    assert!(
+        crate::account_health::record_failure(&app, "default", 401).await,
+        "the account is marked"
+    );
+    let rt = app.runtime("abc").await;
+    let end = r#"{"seq":1,"type":"turn_end","is_error":true,"result":"API Error: 401 authentication_error","cost_usd":0.0,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Parked, "the colony parks instead of holding");
+    assert_eq!(
+        s.parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::account_health::WAITING_FOR_ACCOUNT_REASON)
+    );
+    assert_eq!(
+        s.attention.as_ref().and_then(|a| a["reason"].as_str()),
+        Some(crate::account_health::WAITING_FOR_ACCOUNT_REASON),
+        "the attention flag is the account wait, not autopilot_held"
+    );
+    assert_eq!(s.provider_retries, 0, "no provider retries are spent on an account wait");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #984: a usage limit (429) is not a sign-in failure — a router `rate_limit` log and the turn
+/// it ends must mark no account and park no colony as `waiting_for_account`; the existing retry and
+/// quota paths keep them, exactly as before this feature.
+#[tokio::test]
+async fn a_rate_limit_does_not_mark_the_account_or_park_it_waiting() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    app.update_session("abc", |x| {
+        x.autopilot = true;
+        x.git_admin_dir = Some("git".into());
+    })
+    .await;
+    let rt = app.runtime("abc").await;
+    let log = r#"{"seq":1,"type":"log","level":"error","source":"model_router",
+        "message":"upstream failure: provider=anthropic class=rate_limit status=429 elapsed=0.3s"}"#;
+    handle_agent_event(&app, "abc", &rt, log).await;
+    assert!(
+        crate::account_health::snapshot(&app).await.is_empty(),
+        "a rate limit does not mark the account"
+    );
+    let end =
+        r#"{"seq":2,"type":"turn_end","is_error":true,"result":"API Error: 429 rate limit","cost_usd":0.0,"duration_ms":1.0}"#;
+    handle_agent_event(&app, "abc", &rt, end).await;
+    assert_ne!(
+        app.session("abc").await.unwrap().parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::account_health::WAITING_FOR_ACCOUNT_REASON),
+        "a usage limit keeps the retry/quota paths, not the sign-in wait"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #984: the credential is never read, so it can never leak — the router log line, the
+/// notification text and the status JSON all name the account and the failure, never the secret.
+#[tokio::test]
+async fn the_account_credential_never_reaches_a_line_or_the_status() {
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let secret = "sk-ant-oat-SENTINEL-aBcD1234eFgH";
+    let cred = crate::claude_accounts::account_file(&root.join("config"), "default");
+    std::fs::create_dir_all(cred.parent().unwrap()).unwrap();
+    std::fs::write(&cred, secret).unwrap();
+    assert!(crate::account_health::record_failure(&app, "default", 401).await);
+
+    let event = json!({"type": "log", "source": "model_router",
+        "message": "upstream failure: provider=anthropic class=auth status=401 elapsed=0.3s"});
+    let line = model_router_line("abc", Some("default"), &event).expect("the router line formats");
+    let marks = crate::account_health::snapshot(&app).await;
+    let text = crate::account_health::trouble_text(&marks[0].0, 10);
+    let sessions = app.sessions.read().await;
+    let alerts = crate::status::account_alerts(marks, &sessions);
+    let body = serde_json::to_string(&alerts).unwrap();
+    assert!(
+        body.contains("needs_sign_in") && body.contains("default"),
+        "the shape is there: {body}"
+    );
+    for part in [line, text, body] {
+        assert!(!part.contains(secret), "the credential leaked: {part}");
+        assert!(!part.contains("sk-ant-oat"), "nothing of the secret leaks: {part}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}

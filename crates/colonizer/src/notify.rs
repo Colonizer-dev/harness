@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use ring::hmac;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 /// The most characters one notification carries: repository, issue number and a few words. A desktop
 /// popup has no use for more, and neither does a webhook note.
@@ -238,6 +238,51 @@ pub fn decide_provider(
         // Holding, on either side of the line, is not an edge.
         (true, true) | (false, false) => (false, health.degraded),
     }
+}
+
+/// One Claude-account edge between two notify ticks (issue #984). Host-level like a provider
+/// crossing: one account serves many colonies, so no single colony is named.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AccountEdge {
+    /// The account entered trouble — its sign-in expired or was revoked. What a person has to hear
+    /// about, once.
+    Entered {
+        account: String,
+        state: crate::account_health::State,
+        waiting: usize,
+    },
+    /// The account works again.
+    Cleared { account: String },
+}
+
+/// The account-trouble edges between two ticks, and the state to keep. Pure, like [`decide`]: an
+/// account entering trouble announces once, a repeat of the same state is silent, and a cleared one
+/// announces its resolution.
+pub fn account_edges(
+    last: &BTreeMap<String, crate::account_health::State>,
+    now: &[(String, crate::account_health::Trouble)],
+    waiting: impl Fn(&str) -> usize,
+) -> (Vec<AccountEdge>, BTreeMap<String, crate::account_health::State>) {
+    let mut next = BTreeMap::new();
+    let mut edges = Vec::new();
+    for (account, trouble) in now {
+        if last.get(account) != Some(&trouble.state) {
+            edges.push(AccountEdge::Entered {
+                account: account.clone(),
+                state: trouble.state,
+                waiting: waiting(account),
+            });
+        }
+        next.insert(account.clone(), trouble.state);
+    }
+    for account in last.keys() {
+        if !next.contains_key(account) {
+            edges.push(AccountEdge::Cleared {
+                account: account.clone(),
+            });
+        }
+    }
+    (edges, next)
 }
 
 /// Diffs the session list against what was last seen: the events to announce, and the state to keep.
@@ -598,6 +643,9 @@ pub async fn run(app: Shared) {
     // Whether the judge's outage has already been announced for the current streak. Mirrors
     // `degraded`: a restart seeds from nothing, and the edge is `alerted` turning on.
     let mut judge_alerted = false;
+    // Per Claude account: its last-seen trouble state, so an account that entered, changed or left
+    // trouble announces once (issue #984).
+    let mut account_states: BTreeMap<String, crate::account_health::State> = BTreeMap::new();
     let mut reasons = Reasons::default();
     loop {
         tick.tick().await;
@@ -605,6 +653,7 @@ pub async fn run(app: Shared) {
         if !modules.notify.as_ref().is_some_and(|c| c.enabled) {
             seen.clear();
             degraded.clear();
+            account_states.clear();
             continue;
         }
         let sessions = app.sessions.read().await.clone();
@@ -641,6 +690,18 @@ pub async fn run(app: Shared) {
             announce_judge(&app, client.as_ref(), error, &settings, &mut reasons).await;
         }
         judge_alerted = judge.alerted;
+        // Claude-account trouble (issue #984): host-level like a provider crossing, but one account
+        // serves many colonies — the edge names the account and how many wait on it, once per state
+        // change, never once per colony. The per-colony path stays quiet for `waiting_for_account`
+        // (see `decide`), so ten waiting colonies are one line, not ten.
+        let accounts_troubled = crate::account_health::snapshot(&app).await;
+        let (account_edges, next_account_states) = account_edges(&account_states, &accounts_troubled, |account| {
+            crate::account_health::waiting_on(&sessions, account)
+        });
+        account_states = next_account_states;
+        for edge in &account_edges {
+            announce_account(&app, client.as_ref(), edge, &settings, &mut reasons).await;
+        }
         // The digest (issue #311): what the soft layers held, one line an hour at most, no identities,
         // down the same channels as any announcement — and the counts it carried are subtracted only
         // once a channel actually took it, so candidates held while it was in flight stay due.
@@ -729,9 +790,34 @@ async fn announce(
     }
 }
 
-/// Announces one provider event down the same channels as [`announce`], against the same ledger. A
-/// provider has no colony, so there is no colony log to record a failed channel in and the line goes
-/// to stderr instead.
+/// The shared tail of a host-level announcement — a provider's, the judge's or a Claude account's
+/// (issue #984): the ledger's verdict, the delivery, and the record, so a held or dropped candidate
+/// is counted, never silent. A host-level event has no colony, so a failed channel goes to stderr.
+async fn announce_host(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    candidate: ledger::Candidate,
+    text: String,
+    payload: Value,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let verdict = app.ledger.check(&candidate, Utc::now());
+    if verdict != ledger::Verdict::Deliver {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+        return;
+    }
+    let text = truncate(&text, MAX_TEXT);
+    if deliver(app, client, &text, &payload, None, settings, reasons).await {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+    } else {
+        app.ledger
+            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
+            .await;
+    }
+}
+
+/// Announces one provider event down the same channels as [`announce`], against the same ledger.
 async fn announce_provider(
     app: &App,
     client: Option<&reqwest::Client>,
@@ -749,21 +835,10 @@ async fn announce_provider(
         colony: None,
         priority: false,
     };
-    let verdict = app.ledger.check(&candidate, Utc::now());
-    if verdict != ledger::Verdict::Deliver {
-        app.ledger.record(&candidate, &verdict, Utc::now()).await;
-        return;
-    }
     let name = &event.provider.name;
     let text = Event::provider_text(name, event.health.failure_pct, event.health.last_failure.as_deref());
     let payload = provider_payload(&event.provider.id, name, event.usage.requests, &event.health, Utc::now());
-    if deliver(app, client, &text, &payload, None, settings, reasons).await {
-        app.ledger.record(&candidate, &verdict, Utc::now()).await;
-    } else {
-        app.ledger
-            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
-            .await;
-    }
+    announce_host(app, client, candidate, text, payload, settings, reasons).await;
 }
 
 /// Announces the judge's one outage down the same channels, and the same ledger, as
@@ -786,21 +861,53 @@ async fn announce_judge(
         colony: None,
         priority: false,
     };
-    let verdict = app.ledger.check(&candidate, Utc::now());
-    if verdict != ledger::Verdict::Deliver {
-        app.ledger.record(&candidate, &verdict, Utc::now()).await;
-        return;
-    }
     let status = error.status.map(|s| format!("{s} ")).unwrap_or_default();
     let text = Event::judge_text(&error.provider, &format!("{status}{}", error.message));
     let payload = judge_payload(&error.provider, error.kind.as_str(), error.status, &error.message, Utc::now());
-    if deliver(app, client, &text, &payload, None, settings, reasons).await {
-        app.ledger.record(&candidate, &verdict, Utc::now()).await;
-    } else {
-        app.ledger
-            .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
-            .await;
-    }
+    announce_host(app, client, candidate, text, payload, settings, reasons).await;
+}
+
+/// Announces one Claude-account edge down the same channels as [`announce_judge`] (issue #984). The
+/// fact key `account:<id>:<state>` makes a flap inside the dedup window one fact, so ten colonies
+/// failing an account cost the operator a single line. Host-level, so a failed channel goes to stderr.
+async fn announce_account(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    edge: &AccountEdge,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let (account, event, text, fact) = match edge {
+        AccountEdge::Entered { account, state, waiting } => (
+            account.clone(),
+            "account_needs_sign_in",
+            crate::account_health::trouble_text(account, *waiting),
+            format!("account:{account}:{}", state.as_str()),
+        ),
+        AccountEdge::Cleared { account } => (
+            account.clone(),
+            "account_resolved",
+            format!("Claude account `{account}` works again; its colonies are resuming."),
+            format!("account:{account}:resolved"),
+        ),
+    };
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("account:{account}"),
+        class: event.to_string(),
+        fact: Some(fact),
+        colony: None,
+        priority: false,
+    };
+    let payload = json!({
+        "event": event,
+        "at": Utc::now().to_rfc3339(),
+        "text": text,
+        "colony": None::<Value>,
+        "pr_url": None::<Value>,
+        "provider": None::<Value>,
+    });
+    announce_host(app, client, candidate, text, payload, settings, reasons).await;
 }
 
 /// A host-level line from another module (issue #972: the merge-train loop's CI-unavailable edges),
@@ -827,11 +934,6 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         colony: None,
         priority: false,
     };
-    let verdict = app.ledger.check(&candidate, Utc::now());
-    if verdict != ledger::Verdict::Deliver {
-        app.ledger.record(&candidate, &verdict, Utc::now()).await;
-        return;
-    }
     let text = truncate(line, MAX_TEXT);
     let payload = json!({
         "event": event,
@@ -841,22 +943,16 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         "pr_url": None::<Value>,
         "provider": None::<Value>,
     });
-    let delivered = deliver(
+    announce_host(
         app,
         client.as_ref(),
-        &text,
-        &payload,
-        None,
+        candidate,
+        text,
+        payload,
         &settings,
         &mut Reasons::default(),
     )
     .await;
-    let verdict = if delivered {
-        verdict
-    } else {
-        ledger::Verdict::Drop("undelivered")
-    };
-    app.ledger.record(&candidate, &verdict, Utc::now()).await;
 }
 
 /// The channels themselves: the desktop popup, the signed webhook POST, and Web Push. Nothing here
@@ -1648,5 +1744,54 @@ mod tests {
                 "{event:?} claims nothing: the edge fires once"
             );
         }
+    }
+
+    /// Issue #984: an account entering trouble is one notification however many colonies are on it,
+    /// a repeat is quiet, and clearing announces the resolution once.
+    #[test]
+    fn an_account_entering_trouble_announces_once_per_state_change() {
+        let trouble = |state| crate::account_health::Trouble {
+            state,
+            class: "auth".into(),
+            status: 401,
+            since: Utc::now(),
+            cred_stamp: None,
+        };
+        let now = vec![("default".to_string(), trouble(crate::account_health::State::NeedsSignIn))];
+        let (edges, states) = account_edges(&BTreeMap::new(), &now, |_| 10);
+        assert_eq!(
+            edges,
+            vec![AccountEdge::Entered {
+                account: "default".into(),
+                state: crate::account_health::State::NeedsSignIn,
+                waiting: 10,
+            }],
+            "ten colonies on one account is one line"
+        );
+        let (again, states) = account_edges(&states, &now, |_| 10);
+        assert!(again.is_empty(), "the same state is not an edge");
+        let (cleared, _) = account_edges(&states, &[], |_| 0);
+        assert_eq!(
+            cleared,
+            vec![AccountEdge::Cleared {
+                account: "default".into()
+            }]
+        );
+    }
+
+    /// Issue #984: the per-colony path stays quiet for a colony parked waiting on an account — the
+    /// host-level account edge is the one line, so ten waiting colonies are not ten notifications.
+    #[test]
+    fn a_colony_waiting_on_an_account_does_not_notify_per_colony() {
+        let s = settings();
+        assert!(
+            decide(
+                &s,
+                Some(&seen(SessionStatus::Running, None)),
+                &seen(SessionStatus::Parked, Some(crate::account_health::WAITING_FOR_ACCOUNT_REASON)),
+            )
+            .is_empty(),
+            "the account wait is announced once, host-level, not per colony"
+        );
     }
 }
