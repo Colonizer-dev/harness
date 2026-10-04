@@ -133,6 +133,31 @@ pub(crate) const ALWAYS_BLOCKED: &[&str] = &[
 /// `Any` (`evaluate_dns_query`), so a bare `deny@host` would otherwise answer every lookup.
 pub(crate) const DNS_ALLOW: &str = "allow@dns";
 
+/// The package mirrors every colony image preset's toolbox fetches from (apt, pip, npm/pnpm,
+/// cargo, go), unioned into an `allowlist` policy by [`resolve`] so the operator does not have to
+/// enumerate them for their own build to work. `open` is untouched — its `public` profile already
+/// reaches them. Named here rather than left to the running module because the module lists only
+/// cover a tool when that agent happens to ship it: `registry.npmjs.org` is declared by `acp` and
+/// `opencode`, not by `claude-code`/`codex`, and no module declares the Debian, PyPI, crates.io or
+/// Go mirrors at all. An entry the operator or a module already listed is not repeated.
+pub(crate) const TOOLBOX_ALLOW: &[&str] = &[
+    // Debian apt: the toolbox packages themselves, and anything `apt-get` run by hand.
+    "deb.debian.org",
+    "security.debian.org",
+    // pip / PyPI.
+    "pypi.org",
+    "files.pythonhosted.org",
+    // npm / pnpm.
+    "registry.npmjs.org",
+    // cargo / crates.io.
+    "crates.io",
+    "static.crates.io",
+    "index.crates.io",
+    // go modules.
+    "proxy.golang.org",
+    "sum.golang.org",
+];
+
 /// One validated entry, split the way the msb token needs it. IPv6 targets keep their brackets in
 /// the token: unbracketed colons collide with the grammar's field separator, and `net_rule.rs`
 /// routes only `[...]` targets to the IPv6 parser.
@@ -429,6 +454,16 @@ pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentM
     if module.is_some() {
         sources.allow.push("module".to_string());
     }
+    // The toolbox baseline ([`TOOLBOX_ALLOW`]). Appended after the configured entries so an entry
+    // the operator already listed keeps its place and the union never repeats one; `contains`
+    // guards that. Only `allowlist` needs it: `open`'s `public` profile reaches these already.
+    if mode == EgressMode::Allowlist {
+        for mirror in TOOLBOX_ALLOW {
+            if !policy.allow.iter().any(|e| e == mirror) {
+                policy.allow.push((*mirror).to_string());
+            }
+        }
+    }
     Resolved {
         policy,
         sources,
@@ -524,6 +559,19 @@ mod tests {
             allow: allow.iter().map(|s| s.to_string()).collect(),
             block: block.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// The allow list `resolve` should hand back for a configured `allow`: the configured entries in
+    /// order, then every [`TOOLBOX_ALLOW`] mirror not among them (it keeps the operator's copy and
+    /// never repeats one). Exact, so junk appended after the configured entries fails the test.
+    fn expected_allow(configured: &[&str]) -> Vec<String> {
+        let mut out: Vec<String> = configured.iter().map(|s| s.to_string()).collect();
+        for mirror in TOOLBOX_ALLOW {
+            if !out.iter().any(|e| e == mirror) {
+                out.push((*mirror).to_string());
+            }
+        }
+        out
     }
 
     #[test]
@@ -729,7 +777,11 @@ mod tests {
             None,
         );
         assert_eq!(resolved.policy.mode, EgressMode::Allowlist);
-        assert_eq!(resolved.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
+        // The operator's entries keep their place; the toolbox baseline ([`TOOLBOX_ALLOW`]) follows.
+        assert_eq!(
+            resolved.policy.allow,
+            expected_allow(&["deb.debian.org", "registry.npmjs.org:443"])
+        );
         assert_eq!(resolved.policy.block, vec!["10.0.0.0/8", "240.0.0.0/4"]);
         assert_eq!(resolved.sources.mode, "org");
         assert_eq!(resolved.sources.allow, vec!["global", "org"]);
@@ -797,13 +849,13 @@ mod tests {
         let booted = resolve(&modules, &org, Some(&claude));
         assert_eq!(
             booted.policy.allow,
-            vec![
+            expected_allow(&[
                 "deb.debian.org",
                 "registry.npmjs.org:443",
                 "api.anthropic.com",
                 "platform.claude.com",
                 "api.typesafe.ai",
-            ]
+            ])
         );
         assert_eq!(booted.sources.allow, vec!["global", "module"]);
         assert_eq!(
@@ -831,14 +883,17 @@ mod tests {
         let booted = resolve(&modules, &org, Some(&opencode));
         assert_eq!(
             booted.policy.allow,
-            vec!["deb.debian.org", "registry.npmjs.org:443", "registry.npmjs.org", "models.dev"]
+            expected_allow(&["deb.debian.org", "registry.npmjs.org:443", "registry.npmjs.org", "models.dev"])
         );
         assert_eq!(booted.module.as_ref().unwrap().agent, "opencode");
         // The declared hosts compile into real rules, after the operator's — a module's word
         // cannot precede the deny set any more than the operator's can.
         let compiled = compile(&booted.policy, &[]);
-        assert_eq!(compiled.rules.last().unwrap(), "allow@models.dev");
+        assert!(compiled.rules.contains(&"allow@models.dev".to_string()));
         assert!(compiled.rules.contains(&"allow@registry.npmjs.org".to_string()));
+        let deny = compiled.rules.iter().position(|r| r == "deny@meta").unwrap();
+        let models = compiled.rules.iter().position(|r| r == "allow@models.dev").unwrap();
+        assert!(models > deny, "a module allow must not precede the deny set");
         // The record a boot files carries the same contribution, so `GET /api/sessions/{id}/egress`
         // can say which module widened the fence and with what.
         let recorded = serde_json::to_value(record(&booted, &compiled, 0)).unwrap();
@@ -868,11 +923,14 @@ mod tests {
         // A module whose every host the operator already listed adds nothing of its own.
         let booted = resolve(&modules, &org, Some(&module("acp", &["deb.debian.org"], &[], &[], &[])));
         assert_eq!(booted.module, None);
-        assert_eq!(booted.policy.allow, vec!["deb.debian.org", "registry.npmjs.org:443"]);
+        assert_eq!(
+            booted.policy.allow,
+            expected_allow(&["deb.debian.org", "registry.npmjs.org:443"])
+        );
         // No module at all (a boot before one was picked) leaves the operator's word alone.
         assert_eq!(
             resolve(&modules, &org, None).policy.allow,
-            vec!["deb.debian.org", "registry.npmjs.org:443"]
+            expected_allow(&["deb.debian.org", "registry.npmjs.org:443"])
         );
     }
 
@@ -901,5 +959,33 @@ mod tests {
         let compiled = compile(&policy(EgressMode::Open, &[], &[]), &infra);
         assert_eq!(compiled.profiles, vec!["public".to_string()]);
         assert_eq!(compiled.rules[0], DNS_ALLOW);
+    }
+
+    /// #753: the toolbox every preset ships fetches from a fixed set of mirrors, so an `allowlist`
+    /// colony reaches them without the operator enumerating them, and an entry the operator already
+    /// listed is kept once, in its place. `open` takes none of this — the `public` profile already
+    /// reaches them.
+    #[test]
+    fn allowlist_adds_the_toolbox_mirrors_and_open_does_not() {
+        let configured = |mode: &str, allow: Option<&str>| {
+            let mut sandbox = ModulesConfig::default().sandbox;
+            sandbox.settings.insert("egress".into(), serde_json::json!(mode));
+            if let Some(allow) = allow {
+                sandbox.settings.insert("egress_allow".into(), serde_json::json!(allow));
+            }
+            ModulesConfig {
+                sandbox,
+                ..ModulesConfig::default()
+            }
+        };
+        let resolved = resolve(&configured("allowlist", None), &OrgSettings::default(), None);
+        assert_eq!(resolved.policy.allow, expected_allow(&[]), "every mirror, exactly once");
+        // An operator entry is not repeated: the union keeps one copy, the operator's first.
+        let resolved = resolve(&configured("allowlist", Some("pypi.org")), &OrgSettings::default(), None);
+        assert_eq!(resolved.policy.allow, expected_allow(&["pypi.org"]));
+        assert_eq!(resolved.policy.allow.first().map(String::as_str), Some("pypi.org"));
+        // `open` keeps the `public` profile and takes no baseline.
+        let resolved = resolve(&configured("open", None), &OrgSettings::default(), None);
+        assert!(resolved.policy.allow.is_empty(), "{:?}", resolved.policy.allow);
     }
 }

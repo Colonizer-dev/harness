@@ -32,7 +32,21 @@ const MAX_INVALID_LINE: usize = 500;
 pub struct Runner {
     commands: mpsc::UnboundedSender<String>,
     running: watch::Receiver<bool>,
+    /// Flipped by [`Runner::shutdown`] before or after launch: it makes a launch that has not
+    /// happened yet a no-op, and wakes the daemon's setup-hook race.
+    stopped: watch::Sender<bool>,
     kill: Mutex<Option<oneshot::Sender<()>>>,
+    /// The other ends of the channels above, held until [`Runner::launch`] hands them to the child
+    /// supervisor. `None` once launched.
+    launch: Mutex<Option<Launch>>,
+}
+
+/// The receiving ends of a [`Runner`]'s channels — what the child supervisor needs — kept aside
+/// until the brief is final and [`Runner::launch`] starts the child.
+struct Launch {
+    commands: mpsc::UnboundedReceiver<String>,
+    running: watch::Sender<bool>,
+    kill: oneshot::Receiver<()>,
 }
 
 impl Runner {
@@ -40,13 +54,33 @@ impl Runner {
         *self.running.borrow()
     }
 
-    /// Queues a command for the runner's stdin; false when no runner is alive to receive it.
+    /// Queues a command for the runner's stdin; false when no runner can still receive it. Before
+    /// launch it queues until the child starts, so commands that arrive during the setup hook are
+    /// delivered rather than dropped; after the child exits (or a shutdown) it is refused.
     pub fn send(&self, command: &Value) -> bool {
-        self.is_running() && self.commands.send(command.to_string()).is_ok()
+        self.takes_commands() && self.commands.send(command.to_string()).is_ok()
     }
 
-    /// Asks the runner to exit, then kills it if it hasn't within 10 s.
+    fn takes_commands(&self) -> bool {
+        !self.is_stopped() && (self.is_running() || self.launch.lock().unwrap().is_some())
+    }
+
+    /// Whether a shutdown has been requested, before or after launch. A launch after this is a
+    /// no-op, so a shutdown during the setup hook cannot still start the agent.
+    pub fn is_stopped(&self) -> bool {
+        *self.stopped.borrow()
+    }
+
+    /// Resolves once [`Runner::shutdown`] is called; the daemon races it against the setup hook, so
+    /// a shutdown mid-hook kills the hook instead of orphaning it.
+    pub async fn stopped(&self) {
+        let _ = self.stopped.subscribe().wait_for(|stopped| *stopped).await;
+    }
+
+    /// Asks the runner to exit, then kills it if it hasn't within 10 s. Before launch there is no
+    /// child to ask, and this only records the stop (see [`Runner::stopped`]).
     pub async fn shutdown(&self) {
+        self.stopped.send_replace(true);
         if !self.is_running() {
             return;
         }
@@ -67,102 +101,123 @@ impl Runner {
     }
 }
 
-pub fn start(config: &SessionConfig, store: Arc<EventStore>) -> Arc<Runner> {
+impl Runner {
+    /// Starts the agent child on the final brief. Split from [`create`] so the daemon can serve
+    /// /v1/health and /v1/events while the repository's setup hook runs (issue #753): a long hook is
+    /// then a delay to the agent, not to the mothership's boot wait. A second call does nothing.
+    pub fn launch(&self, config: &SessionConfig, store: Arc<EventStore>) {
+        if self.is_stopped() {
+            return;
+        }
+        let Some(Launch { commands, running, kill }) = self.launch.lock().unwrap().take() else {
+            return;
+        };
+        let Some((program, args)) = config.agent.command.split_first() else {
+            store.append(status_event("error", Some("agent.command is empty".into())));
+            return;
+        };
+        let mut command = Command::new(program);
+        command
+            .args(args)
+            .current_dir(&config.workspace)
+            .envs(&config.agent.env)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // The runner child runs the agent's untrusted code, so it is spawned hardened (harden.rs): the
+        // capability bounding set trimmed, no core dumps, no_new_privs, and a seccomp denylist whose
+        // denials surface as ordinary EPERM tool failures. Fail closed: a failed hardening fails the
+        // spawn, through the same error path as any other spawn failure below.
+        let hardening = harden::Hardening::prepare();
+        store.append(log_event("info", format!("hardening: {}", hardening.describe())));
+        unsafe { command.pre_exec(hardening.guard()) };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                store.append(log_event("error", format!("cannot start agent runner `{program}`: {e}")));
+                store.append(status_event("error", Some(spawn_failure_detail(program, &e))));
+                return;
+            }
+        };
+        running.send_replace(true);
+        // Queue the brief before `feed_stdin` starts draining, so it is delivered ahead of any
+        // command that arrived during the setup hook and was buffered in the same channel.
+        if let Some(prompt) = config.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+            self.send(&json!({"type": "user_message", "id": "initial", "text": prompt}));
+        }
+
+        let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+            unreachable!("runner stdio is piped");
+        };
+        tokio::spawn(feed_stdin(stdin, commands));
+        let stdout_task = tokio::spawn({
+            let store = store.clone();
+            for_each_line(stdout, move |line| match serde_json::from_str::<Value>(line) {
+                Ok(Value::Object(event)) if event.get("type").is_some_and(Value::is_string) => {
+                    store.append(event);
+                }
+                _ => {
+                    store.append(log_event(
+                        "warn",
+                        format!("agent runner wrote a non-event line: {}", truncate(line, MAX_INVALID_LINE)),
+                    ));
+                }
+            })
+        });
+        let stderr_task = tokio::spawn({
+            let store = store.clone();
+            for_each_line(stderr, move |line| {
+                store.append(log_event("warn", line));
+            })
+        });
+
+        tokio::spawn(async move {
+            let status = tokio::select! {
+                status = child.wait() => status,
+                Ok(()) = kill => {
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+            };
+            // Let the runner's last events land before announcing the exit.
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+            })
+            .await;
+            running.send_replace(false);
+            let detail = match status {
+                Ok(status) => match (status.code(), status.signal()) {
+                    (Some(code), _) => format!("exit code {code}"),
+                    (None, Some(signal)) => format!("killed by signal {signal}"),
+                    _ => "exited".into(),
+                },
+                Err(e) => format!("wait failed: {e}"),
+            };
+            store.append(status_event("exited", Some(detail)));
+        });
+    }
+}
+
+/// A runner whose child has not started yet, so the HTTP server can serve /v1/health and /v1/events
+/// (the mothership's boot wait) while the repository's setup hook runs. [`Runner::launch`] starts it.
+pub fn create() -> Arc<Runner> {
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (running_tx, running) = watch::channel(false);
+    let (stopped, _) = watch::channel(false);
     let (kill_tx, kill_rx) = oneshot::channel();
-    let runner = Arc::new(Runner {
+    Arc::new(Runner {
         commands,
         running,
+        stopped,
         kill: Mutex::new(Some(kill_tx)),
-    });
-
-    let Some((program, args)) = config.agent.command.split_first() else {
-        store.append(status_event("error", Some("agent.command is empty".into())));
-        return runner;
-    };
-    let mut command = Command::new(program);
-    command
-        .args(args)
-        .current_dir(&config.workspace)
-        .envs(&config.agent.env)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // The runner child runs the agent's untrusted code, so it is spawned hardened (harden.rs): the
-    // capability bounding set trimmed, no core dumps, no_new_privs, and a seccomp denylist whose
-    // denials surface as ordinary EPERM tool failures. Fail closed: a failed hardening fails the
-    // spawn, through the same error path as any other spawn failure below.
-    let hardening = harden::Hardening::prepare();
-    store.append(log_event("info", format!("hardening: {}", hardening.describe())));
-    unsafe { command.pre_exec(hardening.guard()) };
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            store.append(log_event("error", format!("cannot start agent runner `{program}`: {e}")));
-            store.append(status_event("error", Some(spawn_failure_detail(program, &e))));
-            return runner;
-        }
-    };
-    running_tx.send_replace(true);
-
-    let (Some(stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
-        unreachable!("runner stdio is piped");
-    };
-    tokio::spawn(feed_stdin(stdin, command_rx));
-    let stdout_task = tokio::spawn({
-        let store = store.clone();
-        for_each_line(stdout, move |line| match serde_json::from_str::<Value>(line) {
-            Ok(Value::Object(event)) if event.get("type").is_some_and(Value::is_string) => {
-                store.append(event);
-            }
-            _ => {
-                store.append(log_event(
-                    "warn",
-                    format!("agent runner wrote a non-event line: {}", truncate(line, MAX_INVALID_LINE)),
-                ));
-            }
-        })
-    });
-    let stderr_task = tokio::spawn({
-        let store = store.clone();
-        for_each_line(stderr, move |line| {
-            store.append(log_event("warn", line));
-        })
-    });
-
-    if let Some(prompt) = config.initial_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
-        runner.send(&json!({"type": "user_message", "id": "initial", "text": prompt}));
-    }
-
-    tokio::spawn(async move {
-        let status = tokio::select! {
-            status = child.wait() => status,
-            Ok(()) = kill_rx => {
-                let _ = child.start_kill();
-                child.wait().await
-            }
-        };
-        // Let the runner's last events land before announcing the exit.
-        let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            let _ = stdout_task.await;
-            let _ = stderr_task.await;
-        })
-        .await;
-        running_tx.send_replace(false);
-        let detail = match status {
-            Ok(status) => match (status.code(), status.signal()) {
-                (Some(code), _) => format!("exit code {code}"),
-                (None, Some(signal)) => format!("killed by signal {signal}"),
-                _ => "exited".into(),
-            },
-            Err(e) => format!("wait failed: {e}"),
-        };
-        store.append(status_event("exited", Some(detail)));
-    });
-
-    runner
+        launch: Mutex::new(Some(Launch {
+            commands: command_rx,
+            running: running_tx,
+            kill: kill_rx,
+        })),
+    })
 }
 
 async fn feed_stdin(mut stdin: ChildStdin, mut commands: mpsc::UnboundedReceiver<String>) {
@@ -208,6 +263,21 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_shutdown_before_launch_buffers_commands_then_stops_the_runner() {
+        let runner = create();
+        // Before launch a command is accepted and buffered (delivered once the child starts,
+        // runner.rs `takes_commands`) rather than dropped as it was when send gated on `running`.
+        assert!(runner.send(&json!({"type": "user_message"})));
+        assert!(!runner.is_stopped());
+        runner.shutdown().await;
+        assert!(runner.is_stopped());
+        // The daemon's setup-hook race awaits exactly this.
+        runner.stopped().await;
+        // Once stopped, nothing more is accepted, so a shutdown mid-hook cannot start the agent.
+        assert!(!runner.send(&json!({"type": "user_message"})));
+    }
 
     #[test]
     fn spawn_failure_detail_names_the_binary() {

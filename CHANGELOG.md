@@ -18,6 +18,106 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.5] - 2026-10-04
+
+### Added
+
+- **A colony — and you — can search the conversations of earlier colonies.** Every colony's
+  `events.jsonl` is now searchable for the prompts and replies carrying the query terms, so a colony
+  can ask "has someone hit this before?" instead of redoing work. The Claude Code runner adds a
+  read-only `colony_history_search` tool (a query, at most 50 hits) that posts to `POST /history` on
+  the colony gateway; the gateway scopes the answer to the colony's own org — org-less colonies of
+  its repository when it has no org — never itself, and shows a colony whose sensitivity is
+  `restricted`, missing or unparseable to a `restricted` caller only. Hits are other colonies' words,
+  framed as untrusted data. The cockpit's History view
+  gains a search panel with repo, org, agent, status and date filters, backed by the owner-only
+  `GET /api/history/search`; clicking a hit opens the colony and scrolls to and highlights that turn.
+  Always on with memory, and a plain scan of the event logs rather than an index. ([#739])
+- **A repository can preinstall its own tools, and every colony image carries a small toolbox.** A
+  colony's image now ships `python3` (with pip and venv), `python3-yaml` (PyYAML), `jq`, `ripgrep`,
+  `curl`, `git`, `make`, `unzip` and `ca-certificates` — built for the Python, Rust and Go presets
+  too by a new generic `colony-<preset>` image in `.github/workflows/colony-image.yml`. On every
+  boot the agent daemon runs `.colonizer/setup.sh` from the repository's worktree, as root with the
+  VM's full capabilities (no seccomp or capability hardening, so `apt-get install` works), and
+  without failing the boot when it fails; output lands in `/tmp/colonizer-setup.log` in the VM, the
+  result is a `log` event, and a failure is named in the agent's first prompt. On the Debian-based
+  presets `pip3 install` works despite PEP 668 (`PIP_BREAK_SYSTEM_PACKAGES=1`). In `allowlist` egress
+  mode the package mirrors those installs fetch from are always allowed. The presets still boot the
+  stock images until the published digests are pinned in `images.lock`. ([#753])
+- **Colonies in GitHub loops can comment on and label pull requests, and request merges.** Alongside
+  the existing issue tools, a colony in a GitHub-needing loop may now ask the mothership to comment on
+  or label a pull request of its own repository (`pr_comment`, `pr_label`), and to merge one
+  (`pr_merge`, pinned to the head it read). Merges are **off until the operator lists the repository**
+  in the org's new `merge_prs` setting (`PUT /api/orgs/{org}`, no cockpit control yet), and even then
+  the mothership gathers its own facts and refuses unless the pull request is open, not a draft, not
+  from a fork, still at the requested head, clean and mergeable with green checks, based on the
+  default branch, and touches nothing under `.github/` or that looks like a credential — capped at five
+  merges per colony. Every attempt, refusals included, is a `github.jsonl` ledger line, so refusals also
+  count against the per-colony action cap. `pr_update` tooling is not part of this change. ([#807])
+- **CI retries a failing test command once and reports the flake instead of hiding it.** Every test step in `ci.yml` now runs through `scripts/ci/retry-flaky.mjs`: a failure is run once more, and a retry that passes leaves the job green but recorded — a `::warning` annotation, a line on the job summary, and a `flakes-<job>` artifact naming the job, command, failing tests and the run URL. A test already known to flake goes in `scripts/flaky-tests.txt` as `name  #<issue number>` (the issue is required, and CI fails an entry without one); listing it marks its flake as known, without skipping the test. ([#829])
+- **`colonizer update --check` says whether a newer release exists without a mothership, and a
+  release-health workflow watches every release after it ships.** `--check` asks the release feed
+  directly and prints one line — `v0.2.3 is the newest release.`, `v0.2.4 is available (this is
+  v0.2.3); run \`colonizer update\` to install it.`, or `this is a development build; the newest
+  release is v0.2.4.` — needing no token and ignoring `--host`/`--token-file`, so a machine that has
+  never run a mothership can ask. The new `release-health` workflow runs after `Release` and nightly
+  and checks the GitHub release has every asset and a matching `SHA256SUMS`, that crates.io serves
+  both crates at the tag's version, that the installer installs that version on Linux and macOS and
+  `update --check` calls it the latest, and that colonizer.dev names it. A failing check keeps a
+  single `release-health` issue open — updated in place, never duplicated — and the first passing run
+  closes it. ([#830])
+- **`cargo install colonizer-harness` is now a real install path.** The crate builds only the
+  `colonizer` binary, with none of the app assets it needs beside it, so a new `colonizer setup`
+  fetches the release's own `install.sh` for the version that was installed (tagged
+  `v<crate version>`, or `COLONIZER_RELEASE_URL` for a mirror), checks it against the release's
+  `SHA256SUMS`, and only then runs it — the installer still does the tarball checksum, the Sigstore
+  attestation and the atomic swap, so the cargo path gets the same checks as `curl -fsSL
+  https://colonizer.dev/install.sh | sh`. A `colonizer` started from a binary with no assets hands
+  over to the installed app when it finds one, and `colonizer update` now points a cargo build at
+  `colonizer setup`; the installer test also covers a tarball that does not match `SHA256SUMS` and
+  proves nothing is installed. ([#905])
+- **A repository can opt out of Colonizer, and its owner can still launch there.** A maintainer who does not want colonies can now refuse them with any one of three signals, checked
+  before every launch: a `.colonizer-ignore` file at the repo root, a `colonizer: ignore` label (any
+  case) on the issue, or `enabled = false` under `[colonizer]` in `.colonizer/config.toml`. A launch
+  against such a repo is refused with a 409 that names which signal was found. The repo's own owner —
+  the `owner` of `owner/repo`, matching the signed-in GitHub user in any case — can always launch
+  anyway, so the opt-out does not lock a maintainer out of their own repo. Like the epic guard, the
+  check is best effort: a lookup that fails lets the launch through, and a missing file or label is
+  not logged. ([#909])
+
+### Changed
+
+- **GitHub token scopes are documented, and a token missing write access gets a clear prompt instead
+  of a `gh` error.** `docs/install.md` now lists the minimum GitHub token scope per feature — read-only
+  for issue intake and scouting, `Issues: write` to file an issue, and `Contents: write` with
+  `Pull requests: write` to publish — and the Settings connection card steers a fine-grained token to a
+  read-only start. ([#906])
+
+### Fixed
+
+- **`colonizer update` no longer reports a stale "latest release".** The release check ran once at mothership start and then every six hours, so a release published in between stayed invisible until the next tick — and `--force` would act on that stale value even when it was older than the release the running build already contains. `/api/update` now refreshes the cache itself once it is more than a few minutes old, and `--force` now always refuses a `latest` older than the build's own base release, rather than installing it. ([#820])
+- **A model request no longer fails when the router reuses a connection the server had already
+  closed.** The model router now replays the request once, straight away, on a new connection when the
+  connection is closed or reset under it before any of the answer arrives (`UND_ERR_SOCKET` "other side
+  closed", `ECONNRESET`, `EPIPE`). This is the keep-alive race behind the 0.1 s `class=connection
+  detail=UND_ERR_SOCKET` failures. The retry is logged as `class=connection_retry`. A failure is
+  answered only if the retry fails too. Nothing is replayed after a timeout, an HTTP answer or any
+  response byte. Idle pooled sockets are also reused for at most 4 s (or the server's keep-alive hint
+  less 2 s, capped at 30 s). ([#1001])
+
+### Security
+
+- **Publishing now refuses a commit that would add a credential-looking file.** The path policy
+  masks the credential files it names (`.env`, `.npmrc` and the rest), but a colony that wrote one
+  the policy did not cover — a `.env.local` or a nested `.env.production`, an SSH key
+  `id_rsa`/`id_ed25519` under a subdirectory, or a `git mv` into such a name — had it committed
+  into the pull request all the same. Staging now checks the files the commit would *add* against
+  those names (any directory depth, the `.example`/`.sample`/`.template`/`.dist` templates and
+  public keys exempt) and fails the publish with the paths it found; the flagged files are left in
+  the worktree but unstaged, so deleting them or adding them to `.gitignore` and publishing again
+  clears the refusal. A credential file the repository already tracks is the repository's own
+  decision: editing it is untouched, and only a new one trips the check. ([#780])
+
 ## [v0.2.4] - 2026-10-04
 
 ### Added
@@ -2277,6 +2377,7 @@ Macs. ([#74])
 [#728]: https://github.com/Colonizer-dev/harness/issues/728
 [#736]: https://github.com/Colonizer-dev/harness/issues/736
 [#737]: https://github.com/Colonizer-dev/harness/issues/737
+[#739]: https://github.com/Colonizer-dev/harness/issues/739
 [#742]: https://github.com/Colonizer-dev/harness/issues/742
 [#743]: https://github.com/Colonizer-dev/harness/issues/743
 [#744]: https://github.com/Colonizer-dev/harness/issues/744
@@ -2284,6 +2385,7 @@ Macs. ([#74])
 [#746]: https://github.com/Colonizer-dev/harness/issues/746
 [#750]: https://github.com/Colonizer-dev/harness/issues/750
 [#751]: https://github.com/Colonizer-dev/harness/issues/751
+[#753]: https://github.com/Colonizer-dev/harness/issues/753
 [#754]: https://github.com/Colonizer-dev/harness/issues/754
 [#756]: https://github.com/Colonizer-dev/harness/issues/756
 [#759]: https://github.com/Colonizer-dev/harness/issues/759
@@ -2296,7 +2398,12 @@ Macs. ([#74])
 [#767]: https://github.com/Colonizer-dev/harness/issues/767
 [#774]: https://github.com/Colonizer-dev/harness/issues/774
 [#778]: https://github.com/Colonizer-dev/harness/issues/778
+[#780]: https://github.com/Colonizer-dev/harness/issues/780
+[#807]: https://github.com/Colonizer-dev/harness/issues/807
 [#818]: https://github.com/Colonizer-dev/harness/issues/818
+[#820]: https://github.com/Colonizer-dev/harness/issues/820
+[#829]: https://github.com/Colonizer-dev/harness/issues/829
+[#830]: https://github.com/Colonizer-dev/harness/issues/830
 [#831]: https://github.com/Colonizer-dev/harness/issues/831
 [#834]: https://github.com/Colonizer-dev/harness/issues/834
 [#840]: https://github.com/Colonizer-dev/harness/issues/840
@@ -2307,6 +2414,9 @@ Macs. ([#74])
 [#878]: https://github.com/Colonizer-dev/harness/issues/878
 [#880]: https://github.com/Colonizer-dev/harness/issues/880
 [#881]: https://github.com/Colonizer-dev/harness/issues/881
+[#905]: https://github.com/Colonizer-dev/harness/issues/905
+[#906]: https://github.com/Colonizer-dev/harness/issues/906
+[#909]: https://github.com/Colonizer-dev/harness/issues/909
 [#915]: https://github.com/Colonizer-dev/harness/issues/915
 [#927]: https://github.com/Colonizer-dev/harness/issues/927
 [#932]: https://github.com/Colonizer-dev/harness/issues/932
@@ -2321,6 +2431,8 @@ Macs. ([#74])
 [#969]: https://github.com/Colonizer-dev/harness/issues/969
 [#972]: https://github.com/Colonizer-dev/harness/issues/972
 [#983]: https://github.com/Colonizer-dev/harness/issues/983
+[#1001]: https://github.com/Colonizer-dev/harness/issues/1001
+[v0.2.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.5
 [v0.2.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.4
 [v0.2.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.3
 [v0.2.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.2

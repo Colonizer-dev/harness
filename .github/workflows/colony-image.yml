@@ -3,21 +3,28 @@
 # check unverifiable (crates/colonizer/src/verify.rs). Yarn classic and corepack already ship in the
 # stock image and are left alone.
 #
-# On every pull request and push to main this checks the Dockerfile's base digest against the node
-# row in crates/colonizer/images.lock (the two pins must not drift), builds the amd64 image, runs the
-# verifier's exact commands for bun and pnpm against the fixtures in images/colony-node/test/,
-# produces a CycloneDX SBOM and scans the image with Grype.
+# It also builds the toolbox image for the other presets (images/colony-toolbox/Dockerfile, one
+# generic file for python, rust and go, whose pinned base arrives as the BASE build-arg read from
+# crates/colonizer/images.lock) and runs images/toolbox-test.sh against both — the small,
+# language-agnostic tool set every preset promises (#753).
+#
+# On every pull request and push to main this checks the colony-node Dockerfile's base digest against
+# the node row in images.lock (the two pins must not drift), builds the amd64 images, runs the
+# verifier's exact commands for bun and pnpm against the fixtures in images/colony-node/test/ and the
+# toolbox test against every image, produces a CycloneDX SBOM and scans colony-node with Grype.
 #
 # Only a push to main or a manual dispatch publishes, as ghcr.io/colonizer-dev/colony-node:24-bookworm
-# for linux/amd64 and linux/arm64; the pushed index digest is printed to the job summary for the
-# follow-up that pins it in images.lock and switches the node preset. This workflow never edits the
-# lock or the preset itself.
+# and ghcr.io/colonizer-dev/colony-<preset>:<tag> for linux/amd64 and linux/arm64; each pushed index
+# digest is printed to the job summary for the follow-up that pins it in images.lock and switches the
+# preset. This workflow never edits the lock or the preset itself.
 name: Colony image
 
 on:
   pull_request:
     paths:
       - images/colony-node/**
+      - images/colony-toolbox/**
+      - images/toolbox-test.sh
       - .github/workflows/colony-image.yml
       # The base digest is checked against this file, so a change to it (a runtime-pin update) must
       # run the drift check on its pull request. Only the PR trigger carries it: a lock-only merge to
@@ -27,6 +34,8 @@ on:
     branches: [main]
     paths:
       - images/colony-node/**
+      - images/colony-toolbox/**
+      - images/toolbox-test.sh
       - .github/workflows/colony-image.yml
   workflow_dispatch:
 
@@ -84,6 +93,13 @@ jobs:
         run: |
           docker run --rm -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 colony-node:test \
             sh -euc 'yarn --version && corepack pnpm --version'
+
+      # The toolbox every preset, node included, promises (#753). The script is mounted from the
+      # checkout rather than baked in, so the same file the other presets are checked with runs here.
+      - name: Smoke-test toolbox
+        run: |
+          docker run --rm -v "$PWD/images/toolbox-test.sh:/toolbox-test.sh:ro" colony-node:test \
+            sh /toolbox-test.sh
 
       # SBOM: a record of what went into the image, the same CycloneDX JSON a release is traced with
       # in supply-chain.yml. Uploaded here rather than by the action so retention matches the repo.
@@ -182,4 +198,105 @@ jobs:
             echo "Index digest: \`${{ steps.push.outputs.digest }}\`"
             echo
             echo "A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the node preset to this image. This workflow does not edit the lock."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The toolbox images for the other presets (#753): one generic Dockerfile built once per preset,
+  # with that preset's pinned base read from images.lock and passed as BASE, and the toolbox test run
+  # against the result. Mirrors the `image` job's build-and-test shape, without the SBOM and scan
+  # colony-node carries.
+  toolbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [python, rust, go]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The generic Dockerfile carries no digest of its own: this preset's images.lock row supplies
+      # the whole reference (name:tag@sha256:…), so the lock stays the single pin.
+      - name: Read the pinned base
+        id: base
+        run: |
+          ref=$(awk -v p="${{ matrix.preset }}" '$1 !~ /^#/ && $1 == p && $4 == "image" { print $6 "@sha256:" $5; exit }' crates/colonizer/images.lock)
+          if [ -z "$ref" ]; then
+            echo "no images.lock row for preset ${{ matrix.preset }}" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          # The preset's tag, for the push: python:3.13-bookworm -> 3.13-bookworm.
+          echo "tag=${ref%@*}" | sed 's/tag=[^:]*:/tag=/' >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build (amd64)
+        run: |
+          docker buildx build --platform linux/amd64 --load \
+            --build-arg BASE="${{ steps.base.outputs.ref }}" \
+            -t colony-toolbox:test images/colony-toolbox
+
+      - name: Smoke-test toolbox
+        run: |
+          docker run --rm -v "$PWD/images/toolbox-test.sh:/toolbox-test.sh:ro" colony-toolbox:test \
+            sh /toolbox-test.sh
+
+  toolbox-publish:
+    if: github.event_name != 'pull_request'
+    needs: toolbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [python, rust, go]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The BASE arg is passed to a multi-arch build, whose arm64 half needs binfmt_misc on this x64
+      # runner, same as colony-node's publish job.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read the pinned base
+        id: base
+        run: |
+          ref=$(awk -v p="${{ matrix.preset }}" '$1 !~ /^#/ && $1 == p && $4 == "image" { print $6 "@sha256:" $5; exit }' crates/colonizer/images.lock)
+          if [ -z "$ref" ]; then
+            echo "no images.lock row for preset ${{ matrix.preset }}" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "tag=${ref%@*}" | sed 's/tag=[^:]*:/tag=/' >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (multi-arch)
+        id: push
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 \
+            --build-arg BASE="${{ steps.base.outputs.ref }}" \
+            --metadata-file "$RUNNER_TEMP/metadata.json" \
+            -t "ghcr.io/colonizer-dev/colony-${{ matrix.preset }}:${{ steps.base.outputs.tag }}" \
+            --push images/colony-toolbox
+          echo "digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Published colony-${{ matrix.preset }}"
+            echo
+            echo "Pushed \`ghcr.io/colonizer-dev/colony-${{ matrix.preset }}:${{ steps.base.outputs.tag }}\` for linux/amd64 and linux/arm64."
+            echo
+            echo "Index digest: \`${{ steps.push.outputs.digest }}\`"
+            echo
+            echo "A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the preset to this image. This workflow does not edit the lock."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -223,9 +223,12 @@ async fn boot_to_health_events_message_replay_and_clean_shutdown() {
         has(&opening, |e| e["type"] == "status" && e["state"] == "idle"),
         "the runner's own stdout came through"
     );
+    // Issue #753: the prompt carries the brief then the toolbox note, so the stub sees both.
     assert!(has(&opening, |e| e["type"] == "user_message"
         && e["id"] == "initial"
-        && e["text"] == "boot check"));
+        && e["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("boot check\n\nPreinstalled in this VM:"))));
     assert!(has(&opening, |e| {
         e["type"] == "question"
             && e["question_id"] == "q-smoke"

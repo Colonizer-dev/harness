@@ -26,7 +26,7 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
               <p>
                 Uses your <Code>gh auth login</Code> session when there is one, or a token you save here.
               </p>
-              <p className="text-muted">A fine-grained token needs Contents, Issues and Pull requests, read and write.</p>
+              <p className="text-muted">A fine-grained token can start read-only (Contents, Issues and Pull requests, read). Add write to Contents and Pull requests once you're ready to publish.</p>
             </>
           }
         >

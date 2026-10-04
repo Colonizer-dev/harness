@@ -292,6 +292,13 @@ The same breakdown is written to the colony's log as one line
 (`boot 12345 ms: issue 240, git 810, …`), so it survives in the event stream whether or not anyone
 reads the API.
 
+The repository's `.colonizer/setup.sh`, when it has one, runs inside the `agentd` phase: once
+agentd's HTTP listener is up (so `/v1/health` answers, with `running: false`, and `/v1/events`
+streams its `log` events live) and before the coding agent starts. It adds no phase of its own — a
+boot with no hook pays only a file-existence check, and one with a hook pays its own runtime, logged
+per colony, capped at 600 s and never failing the boot. A shutdown while the hook runs kills it and
+skips the agent ([colonies.md](../colonies.md#tools-in-the-colony-image-and-the-setup-hook)).
+
 Warm-start contract: what a second boot reuses, and what it cannot. The bare clone per repository
 under the data dir persists, so `git` only runs `fetch --prune origin` — the colony must branch off
 current upstream, not yesterday's. The colony image is pinned by digest (`presets::pinned()`

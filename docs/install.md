@@ -137,9 +137,11 @@ Two options:
   in CI.
 
 The image is the stock `node:24-bookworm`. A colony-node image — that base plus bun and pnpm, each
-pinned and checksum-verified at build time — is built and scanned by
-`.github/workflows/colony-image.yml`; the node preset keeps using the stock image until the built one
-is published to `ghcr.io` and its digest is pinned in `crates/colonizer/images.lock`.
+pinned and checksum-verified at build time, and a small shared toolbox (python3, jq, ripgrep, …) — is
+built and scanned by `.github/workflows/colony-image.yml`, along with a matching `colony-<preset>`
+toolbox image for the Python, Rust and Go presets; the presets keep using the stock images until the
+built ones are published to `ghcr.io` and their digests are pinned in
+`crates/colonizer/images.lock`.
 
 A third option, `--bundle`, is what the release workflow uses to build a release tarball; you don't
 need it.
@@ -167,6 +169,7 @@ this machine and read the same environment the mothership does:
 | `colonizer open` | Prints the cockpit sign-in link and opens it in a browser. It reads the token file `<config dir>/api-token`, creating it if there is none, so it works whether or not the mothership is running |
 | `colonizer version` | Prints the build: tag, commit, build time, and whether it is a development build ([docs/updates.md](updates.md)) |
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
+| `colonizer update --check` | Asks GitHub (or `COLONIZER_RELEASES_URL`) whether a newer release exists and prints one line; no mothership needed ([docs/updates.md](updates.md#checking-without-a-mothership)) |
 | `colonizer setup` | Installs this build's own release over a `cargo install` binary, which has no app assets beside it ([Install a release](#install-a-release)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
@@ -401,6 +404,20 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
 
 A login item does not carry any of these ([above](#desktop-install-the-cockpit-as-an-app-start-at-login)).
+
+### GitHub token scopes
+
+Colonizer asks for only as much GitHub access as the feature in front of it needs. Start with a
+read-only token, or a plain `gh auth login` session. The first time a feature needs write access,
+Colonizer prompts for the exact scope to add instead of failing with a raw `gh` error.
+
+| Feature | Minimum scope |
+| :--- | :--- |
+| Issue intake and scouting (reading issues, browsing repositories) | Read-only: `Issues: read`, `Contents: read`. A classic PAT needs no scopes at all for public repositories |
+| Filing an issue | `Issues: write` |
+| Publishing a pull request | `Contents: write`, `Pull requests: write` |
+
+A token that is missing a scope gets a message naming exactly what to add, not a stack trace.
 
 ### Client commands
 

@@ -59,6 +59,7 @@ On this machine:
 colonizer version             # what this build is, and whether it is a release (also --version)
 colonizer update              # install the newest release against a running mothership, restart into it
 colonizer update --force      # also over a development build, or a build newer than the latest release
+colonizer update --check      # say whether a newer release exists and stop; no mothership needed
 colonizer setup               # install this version's release over a cargo install (no app assets beside it)
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)

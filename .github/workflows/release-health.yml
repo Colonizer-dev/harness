@@ -1,0 +1,191 @@
+# Checks a release is healthy after it ships: the GitHub release's assets and SHA256SUMS, both crates
+# on crates.io at the tag's version, an install on Linux and macOS with `colonizer update --check`,
+# and colonizer.dev naming the tag (scripts/release-health.mjs does the remote three). Runs when
+# Release finishes, nightly, and by hand. On failure it keeps a single `release-health` issue open —
+# created once, then edited in place — and closes it on the first run where every check passes. A
+# Release run that itself failed still runs the checks: a broken release should raise the issue.
+name: Release health
+
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check (default: the latest release)"
+        required: false
+      force_failure:
+        description: "Add a failing check, to test that the issue opens and a later pass closes it"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# gh reads this, so the issue commands work in a job that never checks the repository out.
+env:
+  GH_REPO: ${{ github.repository }}
+
+concurrency:
+  group: release-health
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # A Release pull request or manual run is not a release; only a tag push is, and its tag is the
+    # triggering run's head branch. Skipping here skips the rest, report included.
+    if: github.event_name != 'workflow_run' || startsWith(github.event.workflow_run.head_branch, 'v')
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A fork branch name can reach HEAD_BRANCH, so these are env vars, never interpolated into run:.
+      INPUT_TAG: ${{ inputs.tag }}
+      HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - name: Resolve the tag
+        id: tag
+        run: |
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ] && [ "$EVENT_NAME" = workflow_run ]; then
+            tag="$HEAD_BRANCH"
+          fi
+          [ -n "$tag" ] || tag=$(gh release view --json tagName --jq .tagName)
+          # A real release tag, so nothing stray can become an empty version or a bad release URL.
+          printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' ||
+            { echo "not a release tag: '$tag'" >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+  remote:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    outputs:
+      summary: ${{ steps.check.outputs.summary }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      # Fails on any failed check, but the summary is passed on either way for the issue body.
+      - name: Check the release, crates.io and the site
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_HEALTH_FORCE_FAILURE: ${{ inputs.force_failure }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set +e
+          report=$(node scripts/release-health.mjs --tag "$TAG")
+          status=$?
+          set -e
+          { echo "summary<<RELEASE_HEALTH"; printf '%s\n' "$report"; echo "RELEASE_HEALTH"; } >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$report"
+          exit "$status"
+
+  install:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      # The installer refuses a Linux host that cannot write /dev/kvm, which hosted runners keep from
+      # the runner user (release.yml does the same for its own test).
+      - name: Let the runner user use /dev/kvm
+        if: runner.os == 'Linux'
+        run: sudo chmod 0666 /dev/kvm
+      - name: Install the release and check it
+        env:
+          # Authenticates the installer's `gh attestation verify`; without it that check errors and
+          # the install aborts, so this token does real work here.
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          app="$RUNNER_TEMP/colonizer-app"
+          curl -fsSL "https://github.com/$GH_REPO/releases/download/$TAG/install.sh" -o "$RUNNER_TEMP/install.sh"
+          COLONIZER_VERSION="$TAG" COLONIZER_APP="$app" sh "$RUNNER_TEMP/install.sh"
+
+          # `colonizer --version` prints `colonizer v0.2.3 (commit, built ...)`.
+          "$app/bin/colonizer" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -qF "$TAG" "$RUNNER_TEMP/version.txt" || { echo "the installed build does not report $TAG" >&2; exit 1; }
+
+          # `update --check` is the release's word that it is latest. A tag predating the flag has no
+          # such argument (a note, not a failure). It also hits api.github.com unauthenticated, which
+          # can 403 on a shared runner IP, so a failed attempt is retried before being called real.
+          attempt=1
+          while :; do
+            set +e
+            out=$("$app/bin/colonizer" update --check 2>&1)
+            status=$?
+            set -e
+            echo "$out"
+            if [ "$status" -eq 0 ]; then
+              printf '%s' "$out" | grep -qF "$TAG is the newest release." || {
+                echo "update --check does not report $TAG as the newest release" >&2; exit 1; }
+              break
+            fi
+            if printf '%s' "$out" | grep -qiE "unexpected argument|unrecognized|unknown argument"; then
+              echo "note: this release predates 'update --check'; skipping"
+              break
+            fi
+            [ "$attempt" -lt 3 ] || { echo "colonizer update --check failed (exit $status)" >&2; exit 1; }
+            echo "update --check failed (exit $status); retrying in 20s ($attempt/3)"
+            sleep 20
+            attempt=$((attempt + 1))
+          done
+
+  report:
+    needs: [resolve, remote, install]
+    # always() however the checks went; the result guard keeps it out of a skipped (non-release) run.
+    if: always() && needs.resolve.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      REMOTE: ${{ needs.remote.result }}
+      INSTALL: ${{ needs.install.result }}
+      SUMMARY: ${{ needs.remote.outputs.summary }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open, update or close the release-health issue
+        run: |
+          body="$RUNNER_TEMP/body.md"
+          pass=false
+          if [ "$REMOTE" = success ] && [ "$INSTALL" = success ]; then pass=true; fi
+          {
+            echo "Release health for \`$TAG\` on $(date -u +%Y-%m-%d)."
+            echo; echo "- remote checks: **$REMOTE**"; echo "- install: **$INSTALL**"; echo
+            printf '%s\n' "$SUMMARY"; echo; echo "Run: $RUN_URL"
+          } > "$body"
+
+          gh label create release-health --color B60205 \
+            --description "A release failed the automated release-health checks" 2>/dev/null || true
+          # One issue however many failing runs: an open one is edited or commented, never duplicated.
+          issue=$(gh issue list --label release-health --state open \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$pass" = true ]; then
+            if [ -n "$issue" ]; then
+              gh issue close "$issue" --comment "Every release-health check passes for \`$TAG\`. $RUN_URL"
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue edit "$issue" --body-file "$body"
+            gh issue comment "$issue" --body "Still failing for \`$TAG\`. $RUN_URL"
+          else
+            gh issue create --title "release-health: $TAG" \
+              --label release-health --body-file "$body"
+          fi

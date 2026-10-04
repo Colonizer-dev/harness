@@ -104,6 +104,10 @@ becomes a proposal. `.github/workflows/runtime-pin-updates.yml` runs it daily, p
 and opens a pull request, or keeps an issue open with a link, the way the vendored plugins do. It never
 merges: a pin bump changes what every release runs.
 
+The `colony-node` and `colony-<preset>` toolbox images (#753) are built and published by
+`.github/workflows/colony-image.yml`, and their index digests are pinned here the same way; until a
+digest lands, that preset boots its stock upstream image.
+
 **Skillsets are switches, off by default except `archify`.** Settings shows the `claude-code` module's
 `plugins` setting (schema `"format": "plugin-dirs"`) as one switch per plugin directory from
 `GET /api/plugins` (plus the downloadable graft skillset, listed under `downloadable`), and writes the

@@ -8,6 +8,7 @@ mod pty;
 mod runner;
 mod seal;
 mod services;
+mod setup;
 mod store;
 mod watch;
 
@@ -226,26 +227,16 @@ async fn run(args: Args) -> Result<(), BoxError> {
     // checkouts as they appear, before the runner exists to act on them. Best effort — a miss is
     // still reported at publish (watch.rs); it never stops the daemon.
     watch::start(&config.workspace, &args.path_policy, store.clone());
-    // Issue #700: on a resume boot the declared services come back before the agent reads its
-    // brief, and the relaunch report prefixes the first user message. Nothing is served while the
-    // probes run — the HTTP server starts below — so the mothership's boot health-wait carries a
-    // deadline extended by their timeouts (boot.rs). Without `restore` — every fresh boot — this
-    // is a no-op.
-    if let Some(prefix) = services::relaunch(&config, &store).await {
-        config.initial_prompt = Some(
-            match config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
-                Some(prompt) => format!("{prefix}\n\n{prompt}"),
-                None => prefix,
-            },
-        );
-    }
-
-    let runner = runner::start(&config, store.clone());
+    // Issue #753: the runner is created before the server, but its child does not start until the
+    // brief is final — so the listener below answers /v1/health (the mothership's boot wait) and
+    // streams /v1/events while the repository's setup hook runs, its `log` events going out live. A
+    // long hook then delays only the agent, never the boot.
+    let runner = runner::create();
     let state = AppState {
-        store,
+        store: store.clone(),
         runner: runner.clone(),
         token: Arc::from(token),
-        workspace: config.workspace,
+        workspace: config.workspace.clone(),
     };
     let app = Router::new()
         .route("/v1/health", get(health))
@@ -254,9 +245,54 @@ async fn run(args: Args) -> Result<(), BoxError> {
         .route("/v1/shutdown", post(shutdown))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state);
+    // Serving from a task, so the hook below runs with the listener already up. A serve failure
+    // (there is none after a successful bind) ends the daemon through the select at the end.
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+    // Issue #753: the repository's setup hook runs before the runner and before a resume's services
+    // (so the tooling it installs is there for both), on every boot — a colony's microVM rootfs does
+    // not survive a suspend, so no earlier install lasts. It never fails the boot; its outcome is a
+    // log event and, on a first launch, a note on the brief below. A shutdown can arrive while it
+    // runs — the server is already up — so the hook is raced against both the HTTP shutdown and
+    // SIGTERM: whichever wins kills the hook's process group and stops the daemon here, before the
+    // agent could start.
+    let stopped = async {
+        tokio::select! {
+            _ = runner.stopped() => {}
+            _ = shutdown_signal() => {}
+        }
+    };
+    let hook = setup::run(&config.workspace, &store, stopped).await;
+    if matches!(hook, setup::Outcome::Cancelled) {
+        eprintln!("colonizer-agentd: stopping during the setup hook");
+        return Ok(());
+    }
+    // Issue #700: on a resume boot the declared services come back before the agent reads its brief,
+    // and the relaunch report prefixes the first user message. Without `restore` — every fresh boot —
+    // this is a no-op.
+    if let Some(prefix) = services::relaunch(&config, &store).await {
+        config.initial_prompt = Some(
+            match config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+                Some(prompt) => format!("{prefix}\n\n{prompt}"),
+                None => prefix,
+            },
+        );
+    }
+    // Issue #753: tell the agent what the hook did and which tools are on PATH — but only on the
+    // first launch of its prompt. A resumed agent session (COLONIZER_RESUME_SESSION) already carries
+    // the notes in its transcript, and the prompt a resume sends is the held answer, not the brief.
+    if !config.agent.env.contains_key("COLONIZER_RESUME_SESSION")
+        && let Some(prompt) = config.initial_prompt.as_deref().filter(|prompt| !prompt.trim().is_empty())
+    {
+        let (present, missing) = setup::probe_toolbox();
+        config.initial_prompt = Some(format!("{prompt}\n\n{}", setup::note(&hook, &present, &missing)));
+    }
+
+    // The brief is final now that the hook and the resume report have shaped it; start the agent.
+    runner.launch(&config, store.clone());
 
     tokio::select! {
-        result = async { axum::serve(listener, app).await } => result?,
+        result = server => result??,
         _ = shutdown_signal() => {
             eprintln!("colonizer-agentd: stopping the agent runner");
             runner.shutdown().await;

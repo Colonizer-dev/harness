@@ -101,6 +101,9 @@ enum Command {
         /// Install over a development build, or one newer than the latest release
         #[arg(long)]
         force: bool,
+        /// Print whether a newer release exists and stop; no mothership needed
+        #[arg(long, conflicts_with = "force")]
+        check: bool,
     },
     /// Install this version's release over a `cargo install` build, which has no app beside it
     Setup,
@@ -1322,8 +1325,12 @@ fn await_local(result: Result<()>) -> i32 {
 }
 
 /// `update`: resolve the mothership it should ask (this one unless `--host` names another) and the
-/// token to ask with, then hand the work over.
-async fn update_command(cli: &Cli, force: bool) -> Result<()> {
+/// token to ask with, then hand the work over. `--check` asks the release feed directly instead, so
+/// it resolves neither and ignores both flags.
+async fn update_command(cli: &Cli, force: bool, check: bool) -> Result<()> {
+    if check {
+        return crate::update::check().await;
+    }
     let host = resolve_host(cli)?;
     let token = update_token(cli)?;
     crate::update::command(force, &host, &token).await
@@ -1337,7 +1344,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             println!("{}", crate::version::build().line());
             EXIT_OK
         }
-        Command::Update { force } => await_local(update_command(cli, force).await),
+        Command::Update { force, check } => await_local(update_command(cli, force, check).await),
         Command::Setup => await_local(crate::setup::command().await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
@@ -3023,6 +3030,7 @@ mod tests {
             &["version"][..],
             &["update"][..],
             &["update", "--force"][..],
+            &["update", "--check"][..],
             &["open"][..],
             &["login-item", "enable"][..],
             &["login-item", "disable"][..],
@@ -3139,6 +3147,14 @@ mod tests {
         for args in [&["--json", "list"][..], &["list", "--json"][..]] {
             assert!(parse(args).unwrap().json, "{args:?} should carry --json");
         }
+    }
+
+    /// `--check` only reports, so it cannot be combined with `--force`, which applies.
+    #[test]
+    fn check_conflicts_with_force() {
+        let err = parse(&["update", "--check", "--force"]).unwrap_err();
+        assert_eq!(err.exit_code(), EXIT_USAGE);
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
     }
 
     /// The rendered `--help` of a subcommand, through the same parse the binary uses.
