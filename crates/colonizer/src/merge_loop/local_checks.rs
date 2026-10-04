@@ -103,6 +103,8 @@ pub(crate) fn actions_off(permissions: &Value, workflows: &Value) -> Option<Stri
 pub(crate) struct MergeToml {
     /// The commands to run when GitHub CI cannot; `[]` keeps local checks off here.
     pub local_checks: Option<Vec<String>>,
+    /// Issue #968: how conflicts are resolved (`merge_loop/resolve.rs`).
+    pub resolve: Option<super::resolve::ResolveToml>,
 }
 
 /// Whether, and with what, a repository's local checks run.
