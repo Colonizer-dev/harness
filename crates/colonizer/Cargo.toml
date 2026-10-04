@@ -8,10 +8,21 @@ license = "MIT"
 repository = "https://github.com/Colonizer-dev/harness"
 homepage = "https://colonizer.dev"
 readme = "README.md"
+# `src/main.rs` is the lib root below, so cargo's binary auto-discovery must not also build it as
+# a bin.
+autobins = false
+
+# The library root is `src/main.rs` on purpose: sibling pull requests each add a `mod` line to it,
+# so it stays the crate root. The checks that need the whole repository live in the unpublished
+# `crates/repo-contracts`, which links this crate as a library; the `colonizer` binary below is a
+# thin wrapper over `main`.
+[lib]
+name = "colonizer_harness"
+path = "src/main.rs"
 
 [[bin]]
 name = "colonizer"
-path = "src/main.rs"
+path = "src/bin/colonizer.rs"
 
 [dependencies]
 anyhow = "1.0.104"

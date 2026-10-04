@@ -157,6 +157,7 @@ mothership's saved key for the provider is injected.
 | :--- | :--- | :--- |
 | [`crates/colonizer`](../crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
 | [`crates/colonizer-agentd`](../crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`crates/repo-contracts`](../crates/repo-contracts) | Test-only access to the repository's own files — docs, schemas, module manifests, shared fixtures — so an in-place test reads them without the published crates reaching outside themselves | `UNPUBLISHED` |
 | [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
@@ -865,7 +866,10 @@ real binary as a host process on loopback against a stub agent runner and assert
 behaviour (docs/protocol.md §2–§3): the bearer-token wall, the initial prompt, events stamped with a
 gap-free `seq` and an RFC 3339 `ts`, `user_message` and `answer` frames reaching the runner's stdin,
 replay from `since`, the PTY roundtrip, and clean shutdown. `cargo test -p colonizer-agentd --test
-smoke` runs just the single boot-path pass of those.
+smoke` runs just the single boot-path pass of those. A test that needs something the repository
+holds outside its own crate — a doc, a schema, a module manifest, a shared fixture — reads it
+through `crates/repo-contracts` rather than the filesystem: CI runs each published crate's tests
+from its packaged tarball, where nothing outside the crate exists.
 
 What it does not cover is the colony around agentd: the `msb run` boot itself, the session directory
 the mothership writes (plugin mounts, `boot.sh`, the mesh key), subagent model resolution and cost

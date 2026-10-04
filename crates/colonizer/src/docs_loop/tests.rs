@@ -901,8 +901,15 @@ fn settings_and_history_survive_a_round_trip_and_old_files_read() {
 async fn this_repository() {
     let dir = root("self");
     let app = crate::tests::test_app(&dir);
-    let repo = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let git_dir = git_in(&repo, &["rev-parse", "--absolute-git-dir"], None);
+    // This scan needs the repository itself, which lives outside the crate. The root comes from
+    // COLONIZER_REPO_ROOT, which the workspace .cargo/config.toml sets; the published crate ships
+    // no such config, so there the variable is unset and this skips.
+    let Some(root) = std::env::var_os("COLONIZER_REPO_ROOT") else {
+        eprintln!("skipping the docs-loop self-scan: COLONIZER_REPO_ROOT is unset (run it from the repository)");
+        return;
+    };
+    let repo = FsPath::new(&root);
+    let git_dir = git_in(repo, &["rev-parse", "--absolute-git-dir"], None);
     let s = scan(&app, FsPath::new(&git_dir), None, 24 * 7, Utc::now()).await.unwrap();
     let mut by_kind: BTreeMap<Kind, usize> = BTreeMap::new();
     for f in &s.findings {

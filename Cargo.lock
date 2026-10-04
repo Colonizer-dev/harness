@@ -2218,6 +2218,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "repo-contracts"
+version = "0.1.11"
+dependencies = [
+ "colonizer-harness",
+ "serde_json",
+]
+
+[[package]]
 name = "reqwest"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

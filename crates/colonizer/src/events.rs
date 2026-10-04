@@ -159,7 +159,7 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 /// off the line is handed in — the session's launch tag as `launch`, and, for a `question_answered`,
 /// whether the judge is the one who answered as `judged`. Anything unrecognisable stays a runner
 /// line (`agent`): an origin is provenance, never a contract a line can fail.
-pub(crate) fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
+pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
     // A subagent's events carry the `agent` ref (§2 rules); the ref is the tell, whatever the type.
     if event.get("agent").is_some() {
         return Origin::Subagent;

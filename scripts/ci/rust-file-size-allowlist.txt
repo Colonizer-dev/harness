@@ -10,7 +10,6 @@ crates/colonizer/src/docs_loop.rs
 crates/colonizer/src/github.rs
 crates/colonizer/src/lifecycle.rs
 crates/colonizer/src/merge_loop.rs
-crates/colonizer/src/modules.rs
 crates/colonizer/src/orgs.rs
 crates/colonizer/src/prescan.rs
 crates/colonizer/src/providers.rs

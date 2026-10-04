@@ -1818,7 +1818,8 @@ mod tests {
 
     /// Spawns the harness and returns it with its port; it prints one line, `listening <port>`,
     /// to stdout, and exits when stdin closes or the returned `Child` is dropped. `None` skips:
-    /// `node` is not on PATH, which only CI counts as a failure.
+    /// `node` is not on PATH, which only CI counts as a failure, or the repository is not at hand
+    /// (see below), which skips even under CI.
     async fn spawn_local_relay() -> Option<(tokio::process::Child, u16)> {
         if tokio::process::Command::new("node").arg("--version").output().await.is_err() {
             if std::env::var_os("CI").is_some() {
@@ -1827,9 +1828,16 @@ mod tests {
             eprintln!("skipping the local-relay e2e: node is not on PATH");
             return None;
         }
+        // The relay harness lives outside this crate (services/relay). The repository root comes
+        // from COLONIZER_REPO_ROOT, which the workspace .cargo/config.toml sets; the published
+        // crate ships no such config, so there the variable is unset and this skips.
+        let Some(root) = std::env::var_os("COLONIZER_REPO_ROOT") else {
+            eprintln!("skipping the local-relay e2e: COLONIZER_REPO_ROOT is unset (run it from the repository)");
+            return None;
+        };
         let mut relay = Command::new("node")
             .arg("scripts/local-relay.mjs")
-            .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../services/relay"))
+            .current_dir(Path::new(&root).join("services/relay"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::inherit())
