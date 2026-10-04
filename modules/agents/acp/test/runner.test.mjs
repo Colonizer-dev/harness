@@ -133,15 +133,15 @@ test('the pure helpers: command split, risk, content text, option clamp, command
   assert.equal(confine(root, '/etc/hostname'), null, 'an absolute path outside escapes');
   // An outside target that exists on every OS (macOS has no /etc/hostname): a dangling link would
   // resolve through its parent instead, which is a different case.
-  const outside = join(mkdtempSync(join(tmpdir(), 'acp-outside-')), 'target.txt');
+  const outside = join(realpathSync(mkdtempSync(join(tmpdir(), 'acp-outside-'))), 'target.txt');
   writeFileSync(outside, 'x');
   symlinkSync(outside, join(root, 'escape'));
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
 });
 
 test('confine refuses a dangling symlink out of the tree, which a write would follow out of it', () => {
-  const root = mkdtempSync(join(tmpdir(), 'acp-dangle-'));
-  const outside = mkdtempSync(join(tmpdir(), 'acp-outside-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'acp-dangle-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'acp-outside-')));
   const target = join(outside, 'outside.txt');
   symlinkSync(target, join(root, 'link'));
   symlinkSync(join(outside, 'deeper', 'x.txt'), join(root, 'link-deep'));
