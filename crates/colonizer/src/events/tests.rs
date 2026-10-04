@@ -2,13 +2,96 @@ use super::*;
 
 #[test]
 fn autopilot_publishes_only_a_clean_turn_that_wrote_the_pr_description() {
-    // (errored, interrupted, open_question, pr_written)
-    assert_eq!(autopilot_step(false, false, false, true), Autopilot::Publish);
-    assert!(matches!(autopilot_step(false, false, false, false), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(false, false, true, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, true, false, true), Autopilot::Wait(_)));
-    assert!(matches!(autopilot_step(true, false, false, true), Autopilot::Hold(_)));
-    assert!(matches!(autopilot_step(true, false, false, false), Autopilot::Hold(_)));
+    // (errored, transient, interrupted, open_question, pr_written)
+    assert_eq!(autopilot_step(false, false, false, false, true), Autopilot::Publish);
+    assert!(matches!(
+        autopilot_step(false, false, false, false, false),
+        Autopilot::Wait(_)
+    ));
+    assert!(matches!(autopilot_step(false, false, false, true, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, false, true, false, true), Autopilot::Wait(_)));
+    assert!(matches!(autopilot_step(true, false, false, false, true), Autopilot::Hold(_)));
+    assert!(matches!(autopilot_step(true, false, false, false, false), Autopilot::Hold(_)));
+}
+
+/// Issue #980: a turn that ended with an error the retry classifier calls transient schedules an
+/// automatic continue instead of holding, while a permanent error still holds.
+#[test]
+fn a_transient_provider_error_schedules_a_retry_instead_of_holding() {
+    let transient = "API Error: 502 model router: Anthropic is unreachable";
+    assert_eq!(
+        crate::retry::classify(transient),
+        crate::retry::FailureClass::TransientInfra,
+        "the fixture is what the classifier calls transient"
+    );
+    let holds = autopilot_step(true, false, false, false, false);
+    assert!(matches!(holds, Autopilot::Hold(_)), "a permanent error still holds");
+    let retries = autopilot_step(true, true, false, false, false);
+    assert!(
+        matches!(retries, Autopilot::Retry(_)),
+        "a transient provider error schedules a retry, got {retries:?}"
+    );
+    assert_ne!(retries, holds, "and it is not the hold");
+}
+
+/// Issue #980: a turn that ends with a transient provider error parks the colony for an automatic
+/// retry — releasing its slot — rather than holding it, and the retry counter advances.
+#[tokio::test]
+async fn a_transient_error_parks_for_an_automatic_retry() {
+    let error_text = "API Error: 502 model router: Anthropic is unreachable";
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    app.update_session("abc", |x| x.autopilot = true).await;
+    finish_turn(&app, "abc", &rt, true, Some(error_text.into()), None, None).await;
+
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(s.status, SessionStatus::Parked, "the slot is released while it backs off");
+    assert_eq!(
+        s.parked.as_ref().map(|p| p.reason.as_str()),
+        Some(crate::queue::PROVIDER_RETRY_REASON),
+        "parked for the retry, not a hold"
+    );
+    assert_eq!(s.provider_retries, 1, "the first attempt is recorded");
+    assert_ne!(
+        s.attention.as_ref().and_then(|a| a["reason"].as_str()),
+        Some("autopilot_held"),
+        "a retry is not a hold"
+    );
+    let logged = rt.logs.lock().await.clone();
+    let text = serde_json::to_string(&logged).unwrap();
+    assert!(text.contains("retrying automatically"), "{text}");
+    assert!(!text.contains("press Create PR"), "{text}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #980: once the attempts are spent, a transient provider error holds the colony — the log
+/// names the provider's own error, and it never tells the operator to press Create PR over work that
+/// does not exist. Drives the real give-up branch through `finish_turn`.
+#[tokio::test]
+async fn spent_provider_retries_hold_naming_the_error() {
+    let error_text = "API Error: 502 model router: Anthropic is unreachable";
+    let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+    let rt = app.runtime("abc").await;
+    // Every attempt already spent: the next transient error gives up (the default budget is four).
+    app.update_session("abc", |x| {
+        x.autopilot = true;
+        x.provider_retries = 4;
+    })
+    .await;
+    finish_turn(&app, "abc", &rt, true, Some(error_text.into()), None, None).await;
+
+    let s = app.session("abc").await.unwrap();
+    assert_eq!(
+        s.attention.as_ref().and_then(|a| a["reason"].as_str()),
+        Some("autopilot_held"),
+        "the exhausted retry holds the colony"
+    );
+    assert_eq!(s.provider_retries, 0, "and the sequence resets for a later error");
+    let logged = rt.logs.lock().await.clone();
+    let text = serde_json::to_string(&logged).unwrap();
+    assert!(text.contains(error_text), "the hold names the provider's error: {text}");
+    assert!(!text.contains("press Create PR"), "no Create PR over no work: {text}");
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// Issue #328: only a contradicted claim holds — unverifiable is infra noise, not the

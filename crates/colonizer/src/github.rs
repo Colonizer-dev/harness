@@ -5694,6 +5694,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #980: a worktree whose only changes are the boot's empty path-policy placeholders has
+    /// nothing to publish. `stage_all` strips them, nothing is left staged and the branch is not
+    /// ahead of its base, so the publish is a genuine no-op — never a pull request of placeholder
+    /// files, and never a Create PR offered over an empty diff.
+    #[tokio::test]
+    async fn a_placeholder_only_diff_is_not_publishable() {
+        use crate::verify::tests::{git, git_commit, materialise_incident_policy};
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Stopped).await;
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".env"), "SECRET=real\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "base");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "colonizer/work"]);
+        // The boot's empty placeholders land in the worktree; nothing else changes.
+        let vm_dir = app.session_dir("abc").join("vm");
+        materialise_incident_policy(&vm_dir, &repo, true);
+
+        let s = app.session("abc").await.unwrap();
+        let log = app.logger("abc");
+        let ops = GitPublishOps {
+            app: &app,
+            s: &s,
+            log: &log,
+            admin: repo.join(".git"),
+            wt: repo.clone(),
+            bare: repo.join(".git"),
+            base: Mutex::new("main".into()),
+            lease: Mutex::new(None),
+            pending_base: Mutex::new(None),
+            session_dir: app.session_dir("abc"),
+        };
+        let published = run_publish(&ops).await.unwrap();
+        assert!(
+            matches!(published, Published::NoChanges),
+            "a placeholder-only diff must be a no-change publish"
+        );
+        let logged = app.runtime("abc").await.logs.lock().await.clone();
+        let text = serde_json::to_string(&logged).unwrap();
+        assert!(text.contains("nothing to publish"), "{text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Colony worktree at publish with new credential files the policy does not name (issue
     /// #780): an untracked `config/.env.local` and a `git mv` into `config/.env.moved` (a rename
     /// the `--no-renames` read still catches as an add) would ride along with the colony's own

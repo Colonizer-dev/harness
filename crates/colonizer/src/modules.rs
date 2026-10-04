@@ -763,7 +763,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
             json!({"type": "object", "properties": {
                 "stall_minutes": {"type": "integer", "title": "Nudge after minutes without progress", "minimum": 1, "maximum": 1440, "default": 15},
                 "max_nudges": {"type": "integer", "title": "Nudges before flagging", "minimum": 0, "maximum": 20, "default": 3},
-                "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30}
+                "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30},
+                "provider_retry_max_attempts": {"type": "integer", "title": "Automatic retries for a provider error before holding", "minimum": 0, "maximum": 4, "default": 4}
             }}),
         )],
         "resume" => vec![p(

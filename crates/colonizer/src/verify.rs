@@ -1429,8 +1429,8 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
             })
             .await;
         }
-        // verdict_step never waits on a verdict.
-        Autopilot::Wait(_) => {}
+        // verdict_step never waits on a verdict, nor schedules a provider-error retry.
+        Autopilot::Wait(_) | Autopilot::Retry(_) => {}
     }
 }
 

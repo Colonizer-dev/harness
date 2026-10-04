@@ -26,6 +26,9 @@ pub(crate) enum Autopilot {
     Wait(&'static str),
     /// Flags the colony for the maintainer.
     Hold(&'static str),
+    /// Schedule an automatic continue after a transient provider error (issue #980), releasing the
+    /// slot while it backs off; only when the retries run out does it become a [`Autopilot::Hold`].
+    Retry(&'static str),
 }
 
 /// The attention reason set when the agent runner never started: the colony stays live (Idle)
@@ -46,11 +49,13 @@ fn runner_start_failure_attention(error: Option<&str>) -> Option<Value> {
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
-fn autopilot_step(errored: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
+fn autopilot_step(errored: bool, transient: bool, interrupted: bool, open_question: bool, pr_written: bool) -> Autopilot {
     if open_question {
         Autopilot::Wait("a question is open")
     } else if interrupted {
         Autopilot::Wait("the turn was interrupted")
+    } else if errored && transient {
+        Autopilot::Retry("the agent's turn ended with a transient provider error")
     } else if errored {
         Autopilot::Hold("the agent's turn ended with an error")
     } else if !pr_written {
@@ -649,8 +654,20 @@ pub(crate) async fn finish_turn(
         };
         let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
         let errored = is_error;
+        // Issue #980: a turn that died on a blip the retry classifier calls transient is retried
+        // automatically rather than held. Anything else keeps the old hold. The turn's own free-text
+        // result carries the provider's message ("API Error: 502 model router: ...").
+        let transient = errored
+            && result
+                .as_deref()
+                .is_some_and(|r| matches!(crate::retry::classify(r), crate::retry::FailureClass::TransientInfra));
+        // A turn that ends cleanly clears any backoff from an earlier error, so a later unrelated
+        // one starts its own sequence instead of inheriting spent attempts.
+        if !errored && s.provider_retries != 0 {
+            app.update_session(id, |x| x.provider_retries = 0).await;
+        }
         let open_question = rt.open_question.lock().await.is_some();
-        let step = autopilot_step(errored, interrupted, open_question, pr_written);
+        let step = autopilot_step(errored, transient, interrupted, open_question, pr_written);
         // #761: a description that redaction changed is published only after a person has
         // looked — the colony had a secret in hand, and the diff is not redacted.
         let secret_note = (step == Autopilot::Publish)
@@ -691,6 +708,53 @@ pub(crate) async fn finish_turn(
                 Autopilot::Wait(reason) => {
                     app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
                         .await
+                }
+                // Issue #980: a transient provider error is retried automatically instead of held.
+                // Each attempt parks the colony — releasing its parallel slot — until the backoff
+                // step passes (queue.rs). Once the attempts run out it is held like any other error,
+                // naming the provider's own message rather than telling the operator to press
+                // Create PR when there is no work behind the failure.
+                Autopilot::Retry(reason) => {
+                    let modules = app.modules.read().await.clone();
+                    let max_attempts = crate::orgs::provider_retry_max_attempts(&modules);
+                    let error_text = result.clone().unwrap_or_default();
+                    if (s.provider_retries as u64) < max_attempts {
+                        let attempt = s.provider_retries + 1;
+                        let idx = (s.provider_retries as usize).min(PROVIDER_RETRY_SCHEDULE_MINUTES.len() - 1);
+                        let delay_minutes = PROVIDER_RETRY_SCHEDULE_MINUTES[idx];
+                        app.session_log(
+                            id,
+                            "warn",
+                            format!(
+                                "autopilot: {reason} ({error_text}); retrying automatically — attempt {attempt}/{max_attempts}, next in {delay_minutes} min"
+                            ),
+                        )
+                        .await;
+                        app.update_session(id, |x| x.provider_retries = attempt).await;
+                        crate::lifecycle::park_colony(
+                            app,
+                            &s,
+                            PROVIDER_RETRY_REASON,
+                            None,
+                            format!("provider error, retrying automatically (attempt {attempt}/{max_attempts})"),
+                            format!("provider error, retrying in {delay_minutes} min (attempt {attempt}/{max_attempts})"),
+                        )
+                        .await;
+                    } else {
+                        app.session_log(
+                            id,
+                            "warn",
+                            format!(
+                                "autopilot: not publishing, {reason} after {max_attempts} automatic retries; last error: {error_text}"
+                            ),
+                        )
+                        .await;
+                        app.update_session(id, |x| {
+                            x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            x.provider_retries = 0;
+                        })
+                        .await;
+                    }
                 }
                 Autopilot::Hold(reason) => {
                     // The recovery point (issue #586): holding for a person is the rule, and

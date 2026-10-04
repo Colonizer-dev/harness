@@ -522,6 +522,12 @@ pub struct Session {
     /// and a colony that parks again must not start the schedule over.
     #[serde(default)]
     pub hold_resumes: u32,
+    /// How many automatic continues have been scheduled after a transient provider error
+    /// (issue #980): the 1-based attempt the colony is backing off for, so the delay already
+    /// spent is `provider_retries - 1` into the schedule. Reset to 0 on a successful turn and
+    /// when the attempts run out, so a later unrelated error starts a fresh backoff sequence.
+    #[serde(default)]
+    pub provider_retries: u32,
     /// The agent runner's own session id, as last reported by the `agent_session` event: what a
     /// resumed boot continues. `None` until the first report, and permanently unknown to agents
     /// whose module declares no `session_resume`.
@@ -683,6 +689,7 @@ impl Default for Session {
             run_end_cause: None,
             parked: None,
             hold_resumes: 0,
+            provider_retries: 0,
             agent_session: None,
             pending_answer: None,
             switch_note: None,
