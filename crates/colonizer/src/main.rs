@@ -58,6 +58,7 @@ mod gateway_audit;
 mod github;
 mod graft;
 mod headroom;
+mod hotspots;
 mod hunters;
 mod img_proxy;
 mod jev;
