@@ -908,8 +908,10 @@ reclaimed only once it is finished and pushed (`pr_opened`, `merged` or `closed`
 ended with nothing to push (`no_changes`), **and** is older than `COLONIZER_RECLAIM_RETENTION_HOURS`
 (default 12 h) past its last update. `stopped` and `failed` colonies are never reclaimed, since they can
 be resumed. The sweep runs every five minutes and also removes microVMs no colony owns. Reclaiming removes the worktree and local branch exactly like manual
-cleanup — and carries the same trade-off: a reclaimed colony is unresumable, because resume boots a
-fresh microVM on the kept worktree and there is no worktree left. A `parked` colony ([#213]) is
+cleanup. A reclaimed colony is still resumable while its pull request is open: `resume` re-creates the
+worktree from the branch on the remote — a fetch and the same checkout a first boot makes — before it
+boots ([#623]). Only a colony whose pull request is no longer open, or whose branch was itself deleted,
+is unresumable once reclaimed, because there is nothing left to re-create the worktree from. A `parked` colony ([#213]) is
 never reclaimed: it is paused, not finished, and its worktree is the run it may yet resume.
 
 What the sweeper never takes: a colony with no `pr_url` (other than `no_changes`, which has nothing to lose). Unpushed work may be the only copy of the
@@ -3153,6 +3155,44 @@ verdict?, pr?, behind_by?}`, `state` one of
 `validated|rejected|filed|duplicate|fix_colony|review|automerge|blocked|merged|error`. A
 good run is `validated → filed → fix_colony → review → merged`; rejections and failures stay too —
 append-only, one line per stage transition, folded by title in the UI.
+
+### 6.6b Colony-to-colony coordination
+
+Parallel colonies of one repository have no channel to each other, so two can append to the same file
+and one pull request conflicts the other. Coordination is that channel, over the colony gateway
+(`POST /coordinate`), authenticated exactly like recall (§6.5) with the colony's per-colony gateway
+token; a token that names no live colony is a `401`. The mothership sets `COLONIZER_COORD_URL` (the
+gateway's `/coordinate` URL) and `COLONIZER_COORD_TOKEN` for every colony its gateway token exists
+for — like `COLONIZER_IMAGE`, not tied to deja the way recall's are — and the runner exposes one
+in-process MCP server, `colonizer_coord`, with four tools (`claim`, `claims`, `send`, `inbox`), each
+posting one JSON object; the reply is JSON, and a bad op or input is a `4xx`.
+
+- `{"op":"claim","paths":["crates/colonizer/src/server.rs",…],"reason":"adding a route"}` — merges
+  the caller's paths into `sessions/<id>/claims.json` (each with its reason and a timestamp; capped at
+  200; trimmed and collapsed to one form — leading `./` or `/`, interior `/./` and duplicate slashes
+  gone, a `..` segment refused with a `400`; the reason redacted, since a colony's output is
+  untrusted). The reply names every other live same-repo colony whose non-expired claims (idle TTL
+  12 h) or pull-request file list overlap the claim — same path, or one a directory prefix of the
+  other:
+
+  ```jsonc
+  {"ok":true,"colony":"ab12cd34","claimed":["crates/colonizer/src/server.rs"],"total_claims":1,
+   "conflicts":[{"colony":"ef56gh78","issue":831,"paths":["crates/colonizer/src/server.rs"],
+                 "reason":"changed in its pull request"}],
+   "advice":"Another live colony …"}
+  ```
+
+  `advice` is present only when `conflicts` is non-empty. Both colonies' logs get a line naming the
+  other colony and its issue.
+- `{"op":"claims"}` — every live same-repo colony's paths, explicit and derived from its pull
+  request: `{ok, repo, colonies:[{colony, issue, self, paths:[{path, reason, at}]}]}`.
+- `{"op":"send","to":"<colony id | its prefix | 831 | #831>","text":"…"}` — delivers a redacted
+  message (≤ 4000 chars) to one live same-repo colony: `sessions/<recipient>/inbox.jsonl` gets
+  `{from, from_issue, text, at}`, and the sender's `sessions/<id>/sent.jsonl` records it. At most 20
+  sends per colony per rolling hour (`429` past that). `404` when `to` matches no live colony, `409`
+  when it matches more than one.
+- `{"op":"inbox"}` — the caller's messages, newest first, at most 50:
+  `{ok, colony, count, messages:[{from, from_issue, text, at}]}`.
 
 ### 6.7 Red-team runs
 

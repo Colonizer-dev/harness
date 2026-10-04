@@ -773,6 +773,34 @@ pub async fn create_worktree(app: &App, bare: &FsPath, wt: &FsPath, branch: &str
     Ok(admin)
 }
 
+/// Re-creates the worktree for a colony whose worktree was reclaimed while its pull request was
+/// still open (issue #623): `remove_worktree` deleted the local branch, so a fetch to catch up
+/// with the remote followed by a checkout of the colony's own branch at the remote tip brings it
+/// straight back. This mirrors `create_worktree` but force-creates (`-B`) the branch rather than
+/// creating it (`-b`), so a retry works even when a partial teardown left the local branch behind:
+/// `-b` fails permanently with "branch already exists", `-B` resets and proceeds.
+pub(crate) async fn recreate_worktree(app: &App, s: &Session) -> Result<PathBuf> {
+    let bare = app.bare_repo(&s.repo);
+    let wt = PathBuf::from(&s.worktree);
+    exec(app.git_authed(&bare).args(["fetch", "--quiet", "--prune", "origin"])).await?;
+    if let Some(parent) = wt.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    exec(
+        app.git(&bare)
+            .args(["worktree", "add", "--quiet", "-B"])
+            .arg(&s.branch)
+            .arg(&wt)
+            .arg(format!("refs/remotes/origin/{}", s.branch)),
+    )
+    .await?;
+    let admin = read_gitdir(&wt)?;
+    if !admin.starts_with(&bare) {
+        bail!("unexpected worktree admin dir {}", admin.display());
+    }
+    Ok(admin)
+}
+
 pub async fn remove_worktree(app: &App, s: &Session) -> Result<()> {
     let bare = app.bare_repo(&s.repo);
     let wt = PathBuf::from(&s.worktree);
@@ -1072,7 +1100,10 @@ pub fn build_prompt(
         p,
         "How to work:\n\
          1. Read the relevant code and understand the task (reproduce the problem, if there is one) before changing anything.\n\
-         2. Make a focused change that accomplishes it, following the project's existing conventions. Add or \
+         2. Make a focused change that accomplishes it, following the project's existing conventions. Before \
+            editing, claim the paths you plan to change with the coordination tool (op `claim`): if it reports \
+            another colony holds one, wait for that colony's pull request, coordinate with the `send` and \
+            `inbox` ops, or keep your edits in that file minimal and additive. Add or \
             update tests where the project has them, and run the relevant tests, linters and type checkers. When \
             the repository keeps changelog entries as one file per change (a directory such as `changelog.d/` or \
             `.changeset/`), add yours there and leave the changelog file itself alone: parallel pull requests all \
@@ -3456,6 +3487,11 @@ mod tests {
             prompt.contains("8. If the task is unclear"),
             "the list runs contiguously to eight steps: {prompt}"
         );
+        assert!(
+            prompt.contains("claim the paths you plan to change with the coordination tool")
+                && prompt.contains("coordinate with the `send` and `inbox` ops"),
+            "the colony is told to claim its paths before editing and what to do on a conflict: {prompt}"
+        );
     }
 
     #[test]
@@ -4708,6 +4744,106 @@ mod tests {
         let minted = approval_candidate_tree(&app, &s).await.expect("approval tree");
         let committed = commit_tree(&app, &s).await;
         assert_eq!(minted, committed, "the approval must survive publish's nested-git strip");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Issue #623: a colony's worktree is reclaimed while its pull request is still open — its
+    /// local branch is deleted by `remove_worktree` — and resume has to bring it back from the
+    /// branch still on the remote. `recreate_worktree` re-fetches, then checks the colony's own
+    /// branch out again, restoring both the worktree and the local branch at the remote tip.
+    #[tokio::test]
+    async fn recreate_worktree_restores_a_reclaimed_colony_from_its_pushed_branch() {
+        async fn git_in(dir: &FsPath, args: &[&str]) {
+            let mut c = tokio::process::Command::new("git");
+            c.args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            let out = c.output().await.expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        async fn git_out(dir: &FsPath, args: &[&str]) -> String {
+            let mut c = tokio::process::Command::new("git");
+            c.args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            let out = c.output().await.expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+
+        let root = std::env::temp_dir().join(format!("colonizer-github-recreate-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+
+        // The "remote": a seed repository with a commit on `main` and a colony branch pushed past
+        // it, as a colony's branch is once its work is published.
+        let branch = "colonizer/issue-623-abc12345";
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_in(&seed, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(&seed, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await;
+        git_in(&seed, &["checkout", "-q", "-b", branch]).await;
+        std::fs::write(seed.join("work.txt"), "the colony's work\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(
+            &seed,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "colony work"],
+        )
+        .await;
+        let tip = git_out(&seed, &["rev-parse", "HEAD"]).await;
+
+        // The mothership's bare repo for the repository, with origin pointed at the seed and the
+        // fetch refspec `sync_repo` sets, then a fetch so `refs/remotes/origin/*` exists.
+        let bare = app.bare_repo("acme/repo");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git_in(&root, &["init", "--quiet", "--bare", bare.to_str().unwrap()]).await;
+        git_in(&bare, &["config", "remote.origin.url", seed.to_str().unwrap()]).await;
+        git_in(
+            &bare,
+            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        )
+        .await;
+        git_in(&bare, &["fetch", "--quiet", "origin"]).await;
+
+        // The colony's worktree as a first boot made it, then reclaimed: `remove_worktree` takes the
+        // worktree and deletes the local branch, leaving the branch on the remote.
+        let wt = root.join("worktrees/acme/repo/issue-623-abc12345");
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.id = "abc".into();
+        s.branch = branch.into();
+        s.worktree = wt.display().to_string();
+        let admin = create_worktree(&app, &bare, &wt, &s.branch, &s.branch)
+            .await
+            .expect("first boot's worktree");
+        s.git_admin_dir = Some(admin.display().to_string());
+        remove_worktree(&app, &s).await.expect("the reclaim removes the worktree");
+        assert!(!wt.exists(), "the reclaim leaves no worktree on disk");
+
+        // Resume re-creates it from the branch still on the remote.
+        let admin = recreate_worktree(&app, &s).await.expect("resume re-creates the worktree");
+        assert!(wt.join("work.txt").exists(), "the colony's work is back");
+        assert!(admin.starts_with(&bare), "the admin dir lives in the bare repo");
+        assert_eq!(git_out(&wt, &["symbolic-ref", "HEAD"]).await, format!("refs/heads/{branch}"));
+        assert_eq!(
+            git_out(&wt, &["rev-parse", "HEAD"]).await,
+            tip,
+            "back at the pushed branch tip"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

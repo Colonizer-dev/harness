@@ -343,8 +343,9 @@ struct Limit {
 
 /// Writes `value` to `path` atomically (tmp + rename). The tmp path is unique per call: writers sharing
 /// one path interleave their writes and can rename a half-overwritten file into place, which
-/// `Gateway::new` would read as corrupt and silently reset.
-fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) {
+/// `Gateway::new` would read as corrupt and silently reset. `coordination` reuses it for a colony's
+/// claims ledger, so a peer reading one never sees a truncated list.
+pub(crate) fn write_json_atomic(path: &std::path::Path, value: &impl Serialize) {
     if let Ok(data) = serde_json::to_vec_pretty(value) {
         let tmp = path.with_extension(format!("json.{}.tmp", uuid::Uuid::new_v4()));
         if std::fs::write(&tmp, data).is_ok() {
@@ -721,7 +722,8 @@ impl App {
     }
 
     /// The live colony a gateway token belongs to, record and all: `proxy` needs the session itself,
-    /// not just the id, to check which providers the colony may spend on.
+    /// not just the id, to check which providers the colony may spend on; `coordination` uses it to
+    /// authenticate `POST /coordinate` and `history` to authenticate `POST /history` the same way.
     pub(crate) async fn colony_for_token(&self, token: &str) -> Option<crate::sessions::Session> {
         if token.len() < 32 {
             return None;
@@ -748,6 +750,7 @@ pub fn router(app: Shared) -> Router {
         .route("/providers/{id}/{*path}", any(proxy))
         .route("/recall", post(recall))
         .route("/history", post(crate::history::history))
+        .route("/coordinate", post(crate::coordination::coordinate))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
 }
@@ -810,6 +813,9 @@ mod tests;
 use self::{proxy::*, stream::*};
 
 // Re-exported so the `crate::gateway::X` paths the rest of the crate calls keep resolving: the probe
-// surface (boot, providers, server) whole, plus the two single items the other children export.
+// surface (boot, providers, server) whole, plus the single items the other children export.
 pub(crate) use self::probe::*;
-pub(crate) use self::{proxy::MODEL_ERROR_REASON, stream::credential_header};
+pub(crate) use self::{
+    proxy::{MODEL_ERROR_REASON, bearer_token},
+    stream::credential_header,
+};

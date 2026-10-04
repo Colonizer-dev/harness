@@ -150,8 +150,8 @@ pub(super) fn estimate_request_cost_usd(provider: &Provider, body: &Bytes) -> (f
 
 /// A colony token from `Authorization: Bearer <token>`: the same secret, in the form an OpenAI-wire
 /// runner sends by default. Not the scheme Claude Code uses, but the comparison is the same
-/// constant-time one [`Gateway::colony_for_token`] applies to either form.
-fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+/// constant-time one [`Gateway::colony_for_token`] applies to either form. Reused by `coordination`.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
