@@ -175,3 +175,18 @@ fn the_requires_section_parses_binaries_pins_and_the_runner_fetched_marker() {
     let pi: Value = serde_json::from_str(PI).unwrap();
     assert_eq!(parse_requires(&pi).unwrap(), Requires::default());
 }
+
+/// The boot reads `relaunch_subagents` with `unwrap_or(true)`, and boot.rs's own test reads a schema
+/// with that default: the shipped manifest must say the same (moved from `boot.rs`, #756).
+#[test]
+fn the_claude_code_manifest_ships_relaunch_subagents_on() {
+    let manifest: Value = serde_json::from_str(include_str!("../../../modules/agents/claude-code/module.json")).unwrap();
+    assert_eq!(
+        manifest["settings"]["properties"]["relaunch_subagents"]["type"],
+        json!("boolean")
+    );
+    assert_eq!(
+        manifest["settings"]["properties"]["relaunch_subagents"]["default"],
+        json!(true)
+    );
+}

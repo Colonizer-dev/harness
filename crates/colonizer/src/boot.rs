@@ -2386,17 +2386,13 @@ mod tests {
     }
 
     /// Auto-relaunch is the shipped default; off, the brief asks the user instead. The setting is
-    /// read the way the boot reads it — `config::setting` over the module's own schema — so an
-    /// explicit `relaunch_subagents: false` reaches the wording.
+    /// read the way the boot reads it — `config::setting` over the module's schema — so an explicit
+    /// `relaunch_subagents: false` reaches the wording. The schema here is the setting as the
+    /// claude-code manifest ships it; that the manifest really says so is checked in
+    /// `repo-contracts` (this crate's tests run from its packaged tarball, without `modules/`).
     #[test]
     fn auto_relaunch_is_the_default_and_switching_it_off_asks_instead() {
-        let manifest: Value = serde_json::from_str(include_str!("../../../modules/agents/claude-code/module.json")).unwrap();
-        assert_eq!(
-            manifest["settings"]["properties"]["relaunch_subagents"]["default"],
-            json!(true),
-            "the setting ships on, so the boot's unwrap_or(true) matches the manifest"
-        );
-        let schema = json!({ "properties": manifest["settings"]["properties"].clone() });
+        let schema = json!({ "properties": { "relaunch_subagents": { "type": "boolean", "default": true } } });
         let choice = |settings: Value| crate::config::ModuleChoice {
             provider: "claude-code".into(),
             enabled: true,
