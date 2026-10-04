@@ -170,8 +170,6 @@ nothing stages.
   cockpit's Secrets view, as a colony secret for that host) — the runner refuses to boot the preset
   without it (`ACP_CREDENTIAL_MISSING`). The runner hardens the child the way the grok-build runner
   does: a fresh `GROK_HOME`, `GROK_FOLDER_TRUST=1` (the workspace resolves untrusted, so
-  project-scope `.grok/` config is skipped), `GROK_TELEMETRY_ENABLED=0`,
-  does: a fresh `GROK_HOME`, `GROK_FOLDER_TRUST=1` (the workspace resolves untrusted, so
   project-scope `.grok/` config is skipped), `GROK_MEMORY=0`, `GROK_TELEMETRY_ENABLED=0`,
   `GROK_DISABLE_AUTOUPDATER=1` and `BROWSER=/bin/false`. That last one matters because the key is
   the only credential a colony can use: grok's ACP advertises one auth method, browser OAuth

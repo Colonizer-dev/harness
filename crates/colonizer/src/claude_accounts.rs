@@ -5,8 +5,8 @@
 //! moves into the `default` account on first use.
 
 use crate::{
-    ApiResult, Shared, client_error,
-    util::{delete_secret, read_trimmed, short_id, write_secret},
+    ApiResult, App, AppError, Shared, client_error,
+    util::{delete_secret, read_secret, short_id, write_secret},
 };
 use axum::{
     Json,
@@ -130,14 +130,15 @@ fn publish_meta_no_clobber(config_dir: &FsPath, meta: &AccountsMeta) -> anyhow::
 
 /// Moves a pre-accounts `<config>/claude-token` into the `default` account. Idempotent: when the
 /// metadata file already exists there is nothing to migrate, and the publish is create-if-absent,
-/// so a record that appears mid-migration is not written over either. Returns true only when it
-/// migrated.
+/// so a record that appears mid-migration is not written over either. Reads and removes the legacy
+/// token through the secret store, so one held in the keychain or as `<config>/claude-token.enc`
+/// moves (and is cleared) too, not just a plaintext file. Returns true only when it migrated.
 pub fn migrate_legacy(config_dir: &FsPath) -> anyhow::Result<bool> {
     if meta_file(config_dir).exists() {
         return Ok(false);
     }
     let legacy = config_dir.join("claude-token");
-    let Some(token) = read_trimmed(&legacy) else {
+    let Some(token) = read_secret(&legacy).map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else {
         return Ok(false);
     };
     let now = Utc::now();
@@ -155,7 +156,7 @@ pub fn migrate_legacy(config_dir: &FsPath) -> anyhow::Result<bool> {
     if !publish_meta_no_clobber(config_dir, &meta)? {
         return Ok(false);
     }
-    let _ = std::fs::remove_file(&legacy);
+    delete_secret(&legacy);
     Ok(true)
 }
 
@@ -357,12 +358,43 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     let mut meta = meta;
     meta.accounts.remove(&id);
     save_meta(&app.cfg.config_dir, &meta)?;
-    let _ = std::fs::remove_file(account_file(&app.cfg.config_dir, &id));
+    // Through the secret store, so a copy in the keychain or as `<id>.enc` goes with the record.
+    delete_secret(&account_file(&app.cfg.config_dir, &id));
     Ok(Json(json!({"ok": true})))
 }
 
+/// Saves `token` as the default account's secret, creating an account named `default` and making it
+/// the default when there is none yet. Both the settings token route and the claude-login success
+/// path save here: a token saved after accounts exist lands in the account every colony resolves to
+/// by default, rather than a legacy file the resolver only falls back to. Runs under the
+/// config-write lock and calls `migrate_legacy` first, so a pre-accounts legacy token is moved
+/// before it is replaced; the legacy `<config>/claude-token` is removed afterwards, leaving one
+/// source of truth.
+pub(crate) async fn save_default_token(app: &App, token: &str) -> Result<(), AppError> {
+    let _config = app.config_write.lock().await;
+    let _ = migrate_legacy(&app.cfg.config_dir);
+    let mut meta =
+        read_meta_strict(&app.cfg.config_dir).map_err(|e| crate::config_unreadable(&meta_file(&app.cfg.config_dir), &e))?;
+    let id = if meta.default.is_empty() {
+        "default".to_string()
+    } else {
+        meta.default.clone()
+    };
+    write_secret(&account_file(&app.cfg.config_dir, &id), token)?;
+    meta.accounts.entry(id.clone()).or_insert_with(|| AccountMeta {
+        label: id.clone(),
+        added_at: Utc::now(),
+    });
+    if meta.default.is_empty() {
+        meta.default = id;
+    }
+    save_meta(&app.cfg.config_dir, &meta)?;
+    delete_secret(&app.claude_token_file());
+    Ok(())
+}
+
 /// `POST /api/settings/claude-token`: saves a `claude setup-token` token or an API key as the
-/// install's single-token credential.
+/// install's default Claude account (see [`save_default_token`]).
 async fn set_claude_token(State(app): State<Shared>, Json(body): Json<Value>) -> ApiResult<Value> {
     let token = body["token"].as_str().unwrap_or_default().trim();
     if !token.starts_with("sk-ant-") || token.contains(char::is_whitespace) {
@@ -371,12 +403,24 @@ async fn set_claude_token(State(app): State<Shared>, Json(body): Json<Value>) ->
             "expected a token from `claude setup-token` (sk-ant-oat…) or an API key (sk-ant-api…)",
         ));
     }
-    write_secret(&app.claude_token_file(), token)?;
+    save_default_token(&app, token).await?;
     Ok(Json(json!({"ok": true})))
 }
 
-/// `DELETE /api/settings/claude-token`: removes that credential.
+/// `DELETE /api/settings/claude-token`: clears the default account's stored secret and any
+/// pre-accounts legacy copy, keeping the account record (the answer to "the default has no
+/// secret", as [`cred_for`] gives it, is the account simply resolving to nothing).
 async fn delete_claude_token(State(app): State<Shared>) -> ApiResult<Value> {
+    let _config = app.config_write.lock().await;
+    let _ = migrate_legacy(&app.cfg.config_dir);
+    let meta =
+        read_meta_strict(&app.cfg.config_dir).map_err(|e| crate::config_unreadable(&meta_file(&app.cfg.config_dir), &e))?;
+    let id = if meta.default.is_empty() {
+        "default".to_string()
+    } else {
+        meta.default.clone()
+    };
+    delete_secret(&account_file(&app.cfg.config_dir, &id));
     delete_secret(&app.claude_token_file());
     Ok(Json(json!({"ok": true})))
 }
@@ -677,5 +721,167 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "the refused temp is cleaned up: {leftovers:?}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An in-memory keychain, as `secrets.rs`'s own tests use, so the migration and delete paths
+    /// can be exercised against a keychain without a session bus.
+    #[derive(Default)]
+    struct FakeKeychain {
+        items: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl crate::secrets::Backend for std::sync::Arc<FakeKeychain> {
+        fn name(&self) -> &'static str {
+            "fake"
+        }
+        fn get(&self, account: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.items.lock().unwrap().get(account).cloned())
+        }
+        fn set(&self, account: &str, value: &str) -> anyhow::Result<()> {
+            self.items.lock().unwrap().insert(account.into(), value.into());
+            Ok(())
+        }
+        fn delete(&self, account: &str) -> anyhow::Result<()> {
+            self.items.lock().unwrap().remove(account);
+            Ok(())
+        }
+    }
+
+    /// A token saved after accounts already exist must land in the account `claude_cred_for(None)`
+    /// resolves to (the default), not the legacy file the resolver only falls back to (#621).
+    #[tokio::test]
+    async fn saving_the_token_updates_the_default_account_not_the_legacy_file() {
+        let (app, root) = account_app();
+        let Json(_) = create(
+            State(app.clone()),
+            Json(CreateAccount {
+                id: Some("work".into()),
+                label: None,
+                token: Some("sk-ant-oat-old".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            load_meta(&app.cfg.config_dir).default,
+            "work",
+            "the first account is the default"
+        );
+
+        save_default_token(&app, "sk-ant-oat-new").await.unwrap();
+        assert_eq!(
+            app.claude_cred_for(None).map(|c| c.value),
+            Some("sk-ant-oat-new".into()),
+            "the saved token is the one the default resolves to"
+        );
+        assert_eq!(
+            cred_for(&app.cfg.config_dir, "work").map(|(_, t)| t),
+            Some("sk-ant-oat-new".into()),
+            "it was written to the default account, not the legacy file"
+        );
+        assert!(!app.claude_token_file().exists(), "no legacy copy is left behind");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn saving_the_first_token_creates_the_default_account() {
+        let (app, root) = account_app();
+        save_default_token(&app, "sk-ant-oat-first").await.unwrap();
+        let meta = load_meta(&app.cfg.config_dir);
+        assert_eq!(meta.default, "default");
+        assert!(meta.accounts.contains_key("default"), "the account is created");
+        assert_eq!(
+            cred_for(&app.cfg.config_dir, "default").map(|(_, t)| t),
+            Some("sk-ant-oat-first".into())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `migrate_legacy` runs before the save, so a pre-accounts token it moves is then replaced by
+    /// the new one — the later save wins, and the legacy file does not survive to shadow it.
+    #[tokio::test]
+    async fn a_pre_accounts_legacy_token_yields_to_the_saved_one() {
+        let (app, root) = account_app();
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(app.claude_token_file(), "sk-ant-oat-legacy").unwrap();
+
+        save_default_token(&app, "sk-ant-oat-first").await.unwrap();
+        assert_eq!(
+            cred_for(&app.cfg.config_dir, "default").map(|(_, t)| t),
+            Some("sk-ant-oat-first".into()),
+            "the saved token replaces what the migration moved aside"
+        );
+        assert!(!app.claude_token_file().exists(), "the legacy copy is removed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `DELETE /api/settings/claude-token` clears the default account's secret and any legacy copy,
+    /// but keeps the account record — the account simply resolves to nothing.
+    #[tokio::test]
+    async fn deleting_the_settings_token_clears_the_default_secret_and_keeps_the_account() {
+        let (app, root) = account_app();
+        save_default_token(&app, "sk-ant-oat-x").await.unwrap();
+        std::fs::write(app.claude_token_file(), "sk-ant-oat-stale").unwrap();
+
+        let Json(_) = delete_claude_token(State(app.clone())).await.unwrap();
+        assert!(
+            load_meta(&app.cfg.config_dir).accounts.contains_key("default"),
+            "the account record stays"
+        );
+        assert_eq!(cred_for(&app.cfg.config_dir, "default"), None, "the secret is gone");
+        assert!(!app.claude_token_file().exists(), "the legacy copy is gone too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A legacy token held in the keychain must migrate (no file left behind), and a deleted
+    /// account must clear its keychain copy: both go through the secret store, not a bare file
+    /// read/remove (#621).
+    #[tokio::test]
+    async fn keychain_tokens_migrate_and_deletes_clear_the_keychain_copy() {
+        let root = std::env::temp_dir().join(format!("colonizer-accounts-keychain-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let dir = app.cfg.config_dir.clone();
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = std::sync::Arc::new(FakeKeychain::default());
+        let store = crate::secrets::Store::new(&dir, Some(Box::new(fake.clone())));
+        store.probe();
+        assert!(store.health().available, "the fake keychain answers the probe");
+        // `migrate_legacy`/`cred_for`/`create`/`delete` read and write through
+        // `util::{read,write,delete}_secret`, which use the process-global store, so this test has
+        // to install it — and must be the only test in this binary that does.
+        crate::secrets::install(store);
+
+        // A pre-accounts token that an older version saved straight to the keychain.
+        let legacy = dir.join("claude-token");
+        write_secret(&legacy, "sk-ant-oat-legacy").unwrap();
+        assert!(!legacy.exists(), "with the keychain available it is not a file");
+        assert!(migrate_legacy(&dir).unwrap(), "the keychain copy migrates");
+        assert_eq!(cred_for(&dir, "default").map(|(_, t)| t), Some("sk-ant-oat-legacy".into()));
+        assert!(
+            !fake.items.lock().unwrap().contains_key("claude-token"),
+            "the legacy keychain entry is cleared"
+        );
+
+        // An account whose secret lives in the keychain is cleared by its delete.
+        let Json(_) = create(
+            State(app.clone()),
+            Json(CreateAccount {
+                id: Some("work".into()),
+                label: None,
+                token: Some("sk-ant-oat-work".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(
+            fake.items.lock().unwrap().contains_key("claude-accounts/work"),
+            "the new secret went to the keychain"
+        );
+        let Json(_) = delete(State(app.clone()), Path("work".into())).await.unwrap();
+        assert!(
+            !fake.items.lock().unwrap().contains_key("claude-accounts/work"),
+            "the delete clears the keychain copy"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

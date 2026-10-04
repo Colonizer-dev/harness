@@ -10,7 +10,7 @@ pinned v0.7.3 binaries. [#303](https://github.com/Colonizer-dev/harness/issues/3
 - **Provenance.** `vendor/vendor.lock:5-7` pins prebuilt v0.7.3 release tarballs by sha256, not
   source. Nobody has verified that those binaries were built from `fa3e439`.
 - **Which `msb` runs.** `COLONIZER_MSB` wins, then the vendored binary, then a host install, then
-  `msb` on `PATH` (`crates/colonizer/src/config.rs:55-61`). This page describes the 0.7.3 pin.
+  `msb` on `PATH` (`crates/colonizer/src/config.rs:60-67`). This page describes the 0.7.3 pin.
 - **Verified or inferred.** Claims read from source are stated plainly. Claims reasoned from source
   but not tested on a running colony are marked **(inferred)**.
 
@@ -19,10 +19,11 @@ pinned v0.7.3 binaries. [#303](https://github.com/Colonizer-dev/harness/issues/3
 - **Boot only.** `crates/colonizer/src/sandbox.rs:68-76` passes one `--net` with the profiles joined
   by `,` (open mode), `--net-default-egress deny` when the mode names no profile, and one
   `--net-rule` per rule. They go only to the two `msb run` invocations — detached with `--replace`
-  (`boot` in `crates/colonizer/src/sandbox.rs`), called from `crates/colonizer/src/boot.rs:1144`,
+  (`boot` in `crates/colonizer/src/sandbox.rs`), called from `crates/colonizer/src/boot.rs:1751`
+  through `LocalBackend` in `crates/colonizer/src/execution.rs`,
   and the attached one-shot (`run_once` in `crates/colonizer/src/sandbox.rs`), called from
-  `crates/colonizer/src/verify.rs:428`. The other `msb` calls (`rm`, `ls`, `image list`, `pull`,
-  `--version`) take no network flags (`crates/colonizer/src/sandbox.rs:87-88` and `:151-203`,
+  `crates/colonizer/src/verify.rs:633`. The other `msb` calls (`rm`, `ls`, `image list`, `pull`,
+  `--version`) take no network flags (`crates/colonizer/src/sandbox.rs:87-118` and `:186-240`,
   `crates/colonizer/src/status.rs`).
 - **No other policy flags.** The harness passes no `--dns-nameserver`,
   `--no-dns-rebind-protection`, pool or `--deployment-profile` flag. Besides `--net` and
@@ -45,7 +46,7 @@ pinned v0.7.3 binaries. [#303](https://github.com/Colonizer-dev/harness/issues/3
   Headscale become unreachable, and published ports are dropped ([`network.rs:523-583`][dp-ports]).
   The result is stricter: colonies break rather than gain reach.
 - **Out of scope.** The Claude credential's `--secret`, passed when the agent needs Claude
-  (`crates/colonizer/src/boot.rs:981-985`), is not covered here. The egress policy is built from
+  (`crates/colonizer/src/boot.rs:1551-1567`), is not covered here. The egress policy is built from
   `--net`, `--net-rule` and, in allowlist mode, `--net-default-egress` alone
   ([`common.rs:848-967`][cli-netpolicy]).
 - **TLS interception.** A `--secret` also turns on TLS interception
@@ -85,27 +86,27 @@ metrics/gRPC, and any other service on loopback). The two ports that are opened:
 
 - **Provider gateway.** It binds `127.0.0.1:41750` by default (`COLONIZER_GATEWAY_BIND`,
   parsed once as an IP:port socket address; a malformed value — a hostname included — refuses
-  startup rather than falling back, `crates/colonizer/src/config.rs:65`). The guest gets
+  startup rather than falling back, `crates/colonizer/src/config.rs:70`). The guest gets
   `http://host.microsandbox.internal:<gateway port>/providers/<id>`
   (`colony_routes` in `crates/colonizer/src/providers.rs`) in `COLONIZER_MODEL_ROUTES`
-  (`crates/colonizer/src/boot.rs:586-590`).
-- **Headscale control.** It listens on `127.0.0.1:<control>` (`crates/colonizer/src/mesh.rs:246`),
-  default 41740 (`crates/colonizer/src/modules.rs:332`). The guest logs in to
-  `http://host.microsandbox.internal:<control>` (`crates/colonizer/src/mesh.rs:115-116`).
+  (`crates/colonizer/src/boot.rs:1089-1094`).
+- **Headscale control.** It listens on `127.0.0.1:<control>` (`crates/colonizer/src/mesh.rs:256`),
+  default 41740 (`crates/colonizer/src/modules.rs:687`). The guest logs in to
+  `http://host.microsandbox.internal:<control>` (`crates/colonizer/src/mesh.rs:124-126`).
 
-The WireGuard rules (`direct_path_rules`, `crates/colonizer/src/mesh.rs:426-450`) are
+The WireGuard rules (`direct_path_rules`, `crates/colonizer/src/mesh.rs:469-493`) are
 `allow@<ip>:udp:<udp_port>`, with `udp_port` defaulting to 41743
-(`crates/colonizer/src/modules.rs:333`), the port the harness node listens on
-(`crates/colonizer/src/mesh.rs:188-189`).
+(`crates/colonizer/src/modules.rs:688`), the port the harness node listens on
+(`crates/colonizer/src/mesh.rs:198-199`).
 
 - **Addresses.** One rule for every IPv4 that `ip -4 -o addr show scope global` lists. If that
   yields nothing, every `inet` address `ifconfig` lists is used instead. Both skip `127.*`,
-  `tailscale*` and `utun*` (`crates/colonizer/src/mesh.rs:496-557`). This is one rule per address,
+  `tailscale*` and `utun*` (`crates/colonizer/src/mesh.rs:559-620`). This is one rule per address,
   not one rule overall.
 - **Order.** Explicit rules go before the profile rules ([`common.rs:920-922`][cli-order]). Profile
   rules only allow, so these rules open that UDP port even on private-range host addresses, which
   `public` leaves to the default deny.
-- **Read once.** The list is taken at each boot (`crates/colonizer/src/boot.rs:1032`) and fixed
+- **Read once.** The list is taken at each boot (`crates/colonizer/src/boot.rs:1624`) and fixed
   for the life of the microVM (see [Runtime changes](#runtime-changes)).
 
 ## How microsandbox enforces policy
@@ -309,6 +310,12 @@ groups, not hostnames. An org may pin its own `mode` and add to both lists in it
 mode when it set one and unions the lists, adds the running agent module's declared hosts in
 `allowlist` mode (see [below](#hosts-an-agent-module-declares)), and drops entries a hand-edited
 file let in that do not parse: an invalid entry can only shrink a colony's reach, never widen it.
+A fleet member is clamped on top of this: when its owner has set a [fleet network
+policy](fleet.md#network-policy) ([#690](https://github.com/Colonizer-dev/harness/issues/690)), the
+fleet, org and repo levels union into a floor the colony may tighten but never loosen, and each
+refused loosening is listed in the colony's egress record. The dev-server
+[previews](fleet.md#dev-server-previews) that reach a colony's guest ports ride the mesh, not this
+policy.
 
 | Mode | Flags | Behaviour |
 | :--- | :--- | :--- |
@@ -368,8 +375,8 @@ A colony's profile is `public` alone (`colony_network` in `crates/colonizer/src/
 profile at all in allowlist mode. Besides the
 profile's port-53 DNS rule, which the forwarder answers ([`types.rs:827-835`][allow-dns]), its only
 Host-group allows are the Headscale control port when the mesh is on
-(`crates/colonizer/src/boot.rs:178`) and the gateway port when providers are configured
-(`crates/colonizer/src/boot.rs:182-184`). A `host` rule names the Host group
+(`crates/colonizer/src/boot.rs:473`) and the gateway port when providers are configured
+(`crates/colonizer/src/boot.rs:477-479`). A `host` rule names the Host group
 ([`net_rule.rs:563-574`][rule-host]), so it covers the gateway's IPv4 and IPv6, and TCP to either is
 dialled to host loopback ([`poll.rs:817-835`][tcp-host]). Every other Host port falls to the default
 deny. The table lists what the harness host has on loopback, at default ports. Its `.rs` paths are
@@ -377,14 +384,14 @@ under `crates/colonizer/src/` unless given in full.
 
 | Port | Default bind | Serves | Auth | Reachable from a colony |
 | :--- | :--- | :--- | :--- | :--- |
-| 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:47`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`api_routes` and `router` in `server.rs`) | Per-install API token in `Authorization: Bearer` or the `colonizer_token` cookie (`auth.rs`), or a scoped `col_…` API token as a Bearer header only (`api_tokens.rs`). `host_guard` checks `Host`, and since #375 rejects a cookie-authenticated write or upgrade whose `Origin` is missing or does not match (`host_guard` in `server.rs`) | Default deny since #375 |
-| 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:65`) | Provider gateway, `/providers/{id}/{*path}` (`router` in `gateway/mod.rs`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`COLONY_HEADER` and `colony_for_token` in `gateway/mod.rs`) | Allowed when providers are configured |
-| 41740 | `127.0.0.1`, mesh `control_port` (`mesh.rs:246`, `modules.rs:332`) | Headscale control server | Joining needs the pre-auth key minted per VM (`mesh.rs:352-362`); other routes not verified | Allowed when the mesh is on |
-| 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:247`, `mesh.rs:291`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
-| 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:248-249`, `mesh.rs:292`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
-| 41744 | `127.0.0.1`, mesh `socks_port` (`mesh.rs:190-191`, `modules.rs:334`) | Harness `tailscaled` SOCKS5, which the harness uses to dial colonies (`mesh.rs:418-422`) | None (tailscale v1.102.4 [`proxy.go:98-101`][ts-socks-server], [`socks5.go:158-172`][ts-socks-auth]) | Default deny since #375 |
-| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:77-79`, `boot.rs:1042`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`boot.rs:382`, `sessions/agentd.rs` `agentd_token`, `crates/colonizer-agentd/src/main.rs:217-223`) | Default deny since #375 |
-| Any | The operator's, such as the `local` provider preset's `127.0.0.1:8080` (`web/src/components/SettingsDialog.tsx:2646`) | Anything else on host loopback | Its own | Default deny since #375; the gateway still proxies to a configured provider |
+| 7878 | `127.0.0.1`, `COLONIZER_BIND` (`config.rs:52`) | Cockpit: every `/api/*` route, including the session terminal WebSocket, and the web UI (`api_routes` and `router` in `server.rs`) | Per-install API token in `Authorization: Bearer` or the `colonizer_token` cookie (`auth.rs`), or a scoped `col_…` API token as a Bearer header only (`api_tokens.rs`). `host_guard` checks `Host`, and since #375 rejects a cookie-authenticated write or upgrade whose `Origin` is missing or does not match (`host_guard` in `server.rs`) | Default deny since #375 |
+| 41750 | `127.0.0.1`, `COLONIZER_GATEWAY_BIND` (`config.rs:70`) | Provider gateway, `/providers/{id}/{*path}` (`router` in `gateway/mod.rs`) | Per-colony token in `x-colonizer-colony`, matched against live colonies (`COLONY_HEADER` and `colony_for_token` in `gateway/mod.rs`) | Allowed when providers are configured |
+| 41740 | `127.0.0.1`, mesh `control_port` (`mesh.rs:256`, `modules.rs:687`) | Headscale control server | Joining needs the pre-auth key minted per VM (`mesh.rs:374-403`); other routes not verified | Allowed when the mesh is on |
+| 41741 | `127.0.0.1`, control port + 1 (`mesh.rs:257`, `mesh.rs:301`) | Headscale metrics | None set by the harness; not verified | Default deny since #375 |
+| 41742 | `127.0.0.1`, control port + 2 (`mesh.rs:258-259`, `mesh.rs:302`) | Headscale gRPC | `grpc_allow_insecure: false` and no TLS configured; not verified | Default deny since #375 |
+| 41744 | `127.0.0.1`, mesh `socks_port` (`mesh.rs:200-201`, `modules.rs:689`) | Harness `tailscaled` SOCKS5, which the harness uses to dial colonies (`mesh.rs:461-465`) | None (tailscale v1.102.4 [`proxy.go:98-101`][ts-socks-server], [`socks5.go:158-172`][ts-socks-auth]) | Default deny since #375 |
+| Random, per colony (mesh off) | `127.0.0.1`, published to guest port 7070 (`sandbox.rs:77-79`, `boot.rs:1633-1634`) | Another colony's `colonizer-agentd`: health, events, PTY, shutdown | Per-colony bearer token (`boot.rs:782`, `sessions/agentd.rs` `agentd_token`, `crates/colonizer-agentd/src/main.rs:185-191`) | Default deny since #375 |
+| Any | The operator's, such as the `local` provider preset's `127.0.0.1:8080` (`web/src/components/SettingsDialog.tsx:2679`) | Anything else on host loopback | Its own | Default deny since #375; the gateway still proxies to a configured provider |
 
 Still open, all **(inferred)** and untested:
 
@@ -397,7 +404,7 @@ Still open, all **(inferred)** and untested:
 - **Headscale.** The control-port allow exposes Headscale's whole HTTP surface on that port, not
   just node registration. Auth on its other routes is not verified.
 - **WireGuard.** The WireGuard rules name the host's LAN or public IPv4s
-  (`crates/colonizer/src/mesh.rs:424-450`), not the gateway, so they open no loopback port.
+  (`crates/colonizer/src/mesh.rs:469-493`), not the gateway, so they open no loopback port.
 
 ## Open risks
 
@@ -436,7 +443,7 @@ Still open, all **(inferred)** and untested:
    to published ports ([`publisher.rs:569`][ingress-tcp], [`publisher.rs:614`][ingress-udp]), and
    the harness adds no ingress rules. It publishes one port, on host `127.0.0.1`, only when the
    mesh is off (`crates/colonizer/src/sandbox.rs:77-79`,
-   `crates/colonizer/src/boot.rs:1042`). Since
+   `crates/colonizer/src/boot.rs:1633-1634`). Since
    [#375](https://github.com/Colonizer-dev/harness/issues/375) other colonies no longer reach that
    port through host loopback, and, as before, direct guest-to-guest traffic is denied, because
    other sandboxes' addresses fall in `172.16/12` or `fd42:6d73:62::/48`, both Private
@@ -444,7 +451,7 @@ Still open, all **(inferred)** and untested:
    ([`destination.rs:65-70`][host-match]) (inferred).
 6. **Binary provenance.** The pinned tarballs are checked by digest, but no one has tied them to
    `fa3e439`, and a non-vendored `msb` can be picked up instead
-   (`crates/colonizer/src/config.rs:55-61`).
+   (`crates/colonizer/src/config.rs:60-67`).
 
 [tag]: https://github.com/superradcompany/microsandbox/tree/fa3e43902e9bc49e1d85cc0a7298e13fe2374026
 [cli-flag]: https://github.com/superradcompany/microsandbox/blob/fa3e43902e9bc49e1d85cc0a7298e13fe2374026/crates/cli/lib/commands/common.rs#L342-L358

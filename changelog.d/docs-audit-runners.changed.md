@@ -1,0 +1,1 @@
+**Agent module docs match the code again.** The Pi and OpenCode READMEs name the Settings tab by its real label (Model providers), the ACP README drops a duplicated sentence in its Grok Build notes, the Claude Code README points at the Exec policy section below its table, and the runner-authoring checklist cites the codex `preflight` function instead of a stale line range.

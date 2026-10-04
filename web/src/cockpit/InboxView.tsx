@@ -1,23 +1,29 @@
-// The inbox: what is waiting on a person, then everything else the colonies have to say.
+// The inbox: what is waiting on a person, then what the colonies have said — the events from the
+// activity log that need or needed you, each at its own time, answered or resolved ones marked.
 //
 // The cards stop at "this colony is waiting, here is the way in". The question itself and its
 // options live in the colony's chat, which is the only place that has them — the mothership streams
 // a question to one open colony, not to the list. Sending someone to the question beats showing a
 // hollow copy of it here.
-import { useState, type ReactElement } from "react";
+import { useContext, useEffect, useState, type ReactElement } from "react";
 import { Page } from "./Page";
 
+import { ApiContext } from "../context";
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
+import type { ActivityEntry, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
 import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
-import { feedEntries, type FeedKind } from "./feed";
+import { inboxEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
 import { LoopBadge } from "./LoopsView";
 
 /** The local "read up to" mark, shared by the inbox and the header's notifications panel. */
 export const READ_AT = "colonizer.inboxReadAt";
+
+/** How many activity-log lines the notifications list reads, and how often it re-reads them. */
+const FETCH_LIMIT = 500;
+const REFRESH_MS = 15_000;
 
 /** The dot beside a line. Kept in step with the timeline's, so one colony reads the same in both. */
 export const KIND_DOT: Record<FeedKind, string> = {
@@ -60,7 +66,32 @@ export function InboxView({
   const waiting = needing.filter((session) => !onCards.has(session.id));
   const needCount = new Set([...needing.map((session) => session.id), ...onCards]).size;
   const questions = useOpenQuestions(sessions);
-  const entries = feedEntries(sessions);
+
+  // The activity log, one line per event at its own time. Read through the context directly, not
+  // useApi, so the panel still renders where there is none (a static render, a test); a log that
+  // will not load leaves the inbox reading the colony list, as it always did.
+  const api = useContext(ApiContext);
+  const [log, setLog] = useState<ActivityEntry[]>([]);
+  useEffect(() => {
+    if (!api) return;
+    let stop = false;
+    const refresh = async () => {
+      try {
+        const page = await api.activity({ limit: FETCH_LIMIT });
+        if (!stop) setLog(page.entries);
+      } catch {
+        if (!stop) setLog([]);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), REFRESH_MS);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+    };
+  }, [api]);
+
+  const entries = inboxEntries(log, sessions);
 
   const markAllRead = () => {
     const now = Date.now();
@@ -145,25 +176,32 @@ export function InboxView({
 
           {entries.length === 0 ? (
             <div className="border-y border-border py-3.5 text-[13px] text-muted">
-              no colonies in this workspace yet
+              {sessions.length === 0 ? "no colonies in this workspace yet" : "nothing else from your colonies"}
             </div>
           ) : (
             <div className="overflow-hidden border-y border-border">
               {entries.map((entry) => {
-                const unread = Date.parse(entry.at) > readAt;
+                // A handled entry is never "unread": it wants nothing from you any more.
+                const unread = entry.handled == null && Date.parse(entry.at) > readAt;
                 return (
                   <button
                     key={entry.id}
                     type="button"
-                    onClick={() => onOpenColony(entry.id)}
-                    className={`-mt-px grid w-full cursor-pointer grid-cols-[10px_minmax(0,1fr)_auto] items-center gap-3 border-0 border-t border-solid border-border bg-transparent py-3 text-left text-text hover:bg-panel-2 ${
-                      unread ? "opacity-100" : "opacity-60"
-                    }`}
+                    disabled={!entry.colonyId}
+                    onClick={() => entry.colonyId && onOpenColony(entry.colonyId)}
+                    className={`-mt-px grid w-full grid-cols-[10px_minmax(0,1fr)_auto] items-center gap-3 border-0 border-t border-solid border-border bg-transparent py-3 text-left text-text ${
+                      entry.colonyId ? "cursor-pointer hover:bg-panel-2" : "cursor-default"
+                    } ${unread ? "opacity-100" : "opacity-60"}`}
                   >
                     <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: KIND_DOT[entry.kind] }} />
                     <span className="min-w-0">
                       <span className={`block truncate text-[13.5px] ${unread ? "font-semibold" : "font-normal"}`}>{entry.text}</span>
-                      <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">{entry.label}</span>
+                      <span className="mt-0.5 flex items-center gap-2 font-mono text-[11px] text-faint">
+                        <span className="truncate">{entry.label}</span>
+                        {entry.handled && (
+                          <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] leading-4 text-muted">{entry.handled}</span>
+                        )}
+                      </span>
                     </span>
                     <span className="whitespace-nowrap font-mono text-[11px] text-faint">{relative(entry.at)}</span>
                   </button>

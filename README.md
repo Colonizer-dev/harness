@@ -52,8 +52,11 @@ curl -fsSL https://colonizer.dev/install.sh | sh
 
 ## Run it
 
-You need `git` and `gh`. The install command at the top installs the latest
-[release](https://github.com/Colonizer-dev/harness/releases); then:
+You need `git`, `gh`, `curl` and `tar`. On Linux, give your user `/dev/kvm`
+(`sudo usermod -aG kvm "$USER"`, then log out and back in) and install native Claude Code, which
+colonies run. The install command at the top installs the latest
+[release](https://github.com/Colonizer-dev/harness/releases) and links `~/.local/bin/colonizer` (if
+`~/.local/bin` is not on your `PATH`, run that path); then:
 
 ```sh
 colonizer          # starts the mothership, prints a sign-in link and opens it
@@ -61,7 +64,7 @@ colonizer open     # reprints the link
 colonizer --help   # the rest
 ```
 
-To build from source (Node.js 20+ and Rust 1.88+):
+To build from source (Node.js 20.19+ or 22.12+, and Rust 1.98+):
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness && cd harness

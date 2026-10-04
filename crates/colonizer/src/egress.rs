@@ -93,6 +93,9 @@ pub struct Resolved {
     pub sources: Sources,
     /// The running module's contribution, when one widened the allow list.
     pub module: Option<ModuleAllow>,
+    /// What the fleet floor (#690) refused to let this colony loosen, each named for the record.
+    /// Empty everywhere but a member whose local policy tried to widen past its owner's floor.
+    pub fleet_refused: Vec<String>,
 }
 
 /// Destinations every colony is denied, whatever the mode and whoever configured what. Emitted as
@@ -426,7 +429,12 @@ pub fn resolve(modules: &ModulesConfig, org: &OrgSettings, agent: Option<&AgentM
     if module.is_some() {
         sources.allow.push("module".to_string());
     }
-    Resolved { policy, sources, module }
+    Resolved {
+        policy,
+        sources,
+        module,
+        fleet_refused: Vec::new(),
+    }
 }
 
 fn union(global: Vec<String>, org: Option<Vec<String>>) -> Vec<String> {
@@ -454,6 +462,10 @@ pub struct Record {
     /// `open` mode and for a module that declared no host of its own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<ModuleAllow>,
+    /// What the fleet floor (#690) refused to let this colony loosen, each named. Omitted when the
+    /// colony is not a member under a floor, or its local policy loosened nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fleet_refused: Vec<String>,
     /// The deny rules every colony carries, whatever the configuration said.
     pub always_blocked: Vec<String>,
     /// The `--net-rule` tokens, in evaluation order.
@@ -470,6 +482,7 @@ pub(crate) fn record(resolved: &Resolved, compiled: &Compiled, applied_at: u64) 
         block: resolved.policy.block.clone(),
         sources: resolved.sources.clone(),
         module: resolved.module.clone(),
+        fleet_refused: resolved.fleet_refused.clone(),
         always_blocked: ALWAYS_BLOCKED.iter().map(|t| format!("deny@{t}")).collect(),
         rules: compiled.rules.clone(),
         profiles: compiled.profiles.clone(),

@@ -226,6 +226,13 @@ jobs:
       - name: Test the build scripts
         run: sh scripts/test/build-scripts.test.sh
 
+      # The provenance step of scripts/install-release.sh, in isolation: a stub gh on PATH drives
+      # verify_provenance, so a gh that is not logged in is a skip (fatal only under
+      # COLONIZER_REQUIRE_ATTESTATION=1) while a logged-in gh that rejects the attestation stays fatal.
+      # It needs no /dev/kvm, so it runs here rather than in release.yml beside the full installer test.
+      - name: Test the install provenance check
+        run: sh scripts/test/install-attestation.test.sh
+
       # scripts/ci/check-exec-bits.sh scans the index (not the worktree) for shebang scripts that
       # lost their +x bit — the colony-commit failure of issue #455 — and its own test drives it
       # against throwaway repos, so neither needs cargo nor the network.
@@ -244,6 +251,12 @@ jobs:
 
       - name: Test the Rust file size check
         run: sh scripts/test/check-rust-file-size.test.sh
+
+      # Two tracked paths that differ only in letter case (or script modules whose names do, once
+      # the extension is dropped) pass every Linux job and break a macOS or Windows checkout: the
+      # macOS release build of v0.2.0 failed that way (issue #915). This catches it on the PR.
+      - name: Check case-only path collisions
+        run: sh scripts/ci/check-case-collisions.sh
 
   # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
   # so there is nothing to install and `npm test` is plain `node --test`.

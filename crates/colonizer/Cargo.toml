@@ -1,7 +1,7 @@
 [package]
 # Published as colonizer-harness: `colonizer` on crates.io is another project. The command is still `colonizer`.
 name = "colonizer-harness"
-version = "0.1.11"
+version = "0.2.1"
 edition = "2024"
 description = "The Colonizer harness: coding agents in private microVMs, linked by a private mesh, returning pull requests"
 license = "MIT"
@@ -25,10 +25,10 @@ clap_mangen = "0.3"
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10"
 # Cratefield's module-telemetry (Cratefield/harness#413): the payload grammar the usage batch is
-# validated with (`payload::Batch::parse`) and the consent helpers. Not on crates.io, so a git
-# dependency pinned to a rev; the wire contract is docs/usage-data.md. The collector half runs on
+# validated with (`payload::Batch::parse`) and the consent helpers. Published on crates.io, so
+# colonizer can publish too (#741); the wire contract is docs/usage-data.md. The collector half runs on
 # the venture's side; this crate composes the client half only (docs/usage-data.md).
-cratefield-module-telemetry = "0.2"
+cratefield-module-telemetry = "0.2.1"
 futures-util = "0.3.34"
 # Response body frame iteration, so tunnelled answers stream back to the relay in chunks (remote.rs).
 http-body-util = "0.1"
@@ -56,6 +56,10 @@ toml = "1.1.6"
 # (remote.rs); the auth tests drive it the same way.
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
+# Native agent session transcripts (issue #736, transcript.rs): read a colony's own Claude Code,
+# Codex, OpenCode, Grok or Hermes session off disk and normalize it to one shape. Minimal feature
+# set — the file-backed readers plus the two SQLite ones; no live HTTP sources or WASM.
+txcript = { version = "=0.14.4", default-features = false, features = ["opencode", "hermes"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 
 # The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service
@@ -68,3 +72,6 @@ keyring = { version = "3.6.3", features = ["sync-secret-service", "crypto-rust",
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
+# The OpenCode transcript fixture (transcript.rs tests) is loaded from SQL: the same rusqlite
+# txcript already pulls (bundled SQLite), so it unifies rather than building a second copy.
+rusqlite = { version = "0.40.1", features = ["bundled"] }
