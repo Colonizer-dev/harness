@@ -1,0 +1,4 @@
+/api/tokens                                          GET    unauth=401    token=owner            activity=-
+/api/tokens                                          POST   unauth=401    token=owner            activity=-
+/api/tokens/self                                     GET    unauth=401    token=read             activity=-
+/api/tokens/{id}                                     DELETE unauth=401    token=owner            activity=-

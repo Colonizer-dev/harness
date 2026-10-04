@@ -1,0 +1,3 @@
+/api/update                                          GET    unauth=401    token=owner            activity=-
+/api/update                                          PUT    unauth=401    token=owner            activity=settings.save
+/api/version                                         GET    unauth=401    token=read             activity=-

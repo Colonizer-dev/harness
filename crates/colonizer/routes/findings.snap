@@ -1,0 +1,2 @@
+/api/findings                                        GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/findings                          GET    unauth=401    token=owner            activity=-

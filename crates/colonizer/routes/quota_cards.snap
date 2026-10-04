@@ -1,0 +1,2 @@
+/api/attention                                       GET    unauth=401    token=owner            activity=-
+/api/providers/{id}/quota-action                     POST   unauth=401    token=owner            activity=settings.save
