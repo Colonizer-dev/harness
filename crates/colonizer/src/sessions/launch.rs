@@ -507,6 +507,20 @@ pub async fn create(
     if let Some(message) = crate::epic::launch_refusal(&crate::epic::gh_fetch(&app), &repo, req.issue, req.allow_epic).await {
         return Err(client_error(StatusCode::CONFLICT, &message));
     }
+    // A maintainer can opt a repo out of Colonizer entirely: a `.colonizer-ignore` file, a
+    // `colonizer: ignore` label on the issue, or `enabled = false` under `[colonizer]` in
+    // `.colonizer/config.toml` (ignore.rs). The repo's own owner can launch there anyway, so the
+    // viewer is only fetched when a signal was actually found.
+    if let Some(message) = crate::ignore::launch_refusal(&crate::epic::gh_fetch(&app), &repo, req.issue).await {
+        let overridden = crate::github::viewer(&app)
+            .await
+            .ok()
+            .and_then(|v| v["login"].as_str().map(|login| crate::ignore::is_owner(&repo, login)))
+            .unwrap_or(false);
+        if !overridden {
+            return Err(client_error(StatusCode::CONFLICT, &message));
+        }
+    }
     // Issue #321: a launch that asks to `queue_behind_holder` waits for a local holder instead of
     // being refused. GitHub is checked either way: a conflict attributable to one of this
     // mothership's own colonies on the issue is the holder being queued behind, while a merged PR

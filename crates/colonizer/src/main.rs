@@ -65,6 +65,7 @@ mod headroom;
 mod history;
 mod hotspots;
 mod hunters;
+mod ignore;
 mod img_proxy;
 mod jev;
 mod jev_ladder;

@@ -134,6 +134,24 @@ It is not an access control. The CLI (`--allow-epic`) and MCP (`allow_epic`) tak
 override (see above). Details are in
 [protocol.md](protocol.md#duplicate-colony-prevention-and-issue-claims), under "Epics".
 
+## A repo can opt out
+
+A maintainer can say their repository does not want colonies. A launch on such a repo is refused
+with a 409, and the message names which opt-out was found. Any one of these signals is enough:
+
+- a `.colonizer-ignore` file at the repo's root — its presence alone is the signal;
+- a `colonizer: ignore` label (any case) on the issue being launched against;
+- `enabled = false` under a `[colonizer]` table in `.colonizer/config.toml` at the repo's root.
+
+**How to override.** The repo's own owner (the `owner` of `owner/repo`, in any case) can always
+launch there: the opt-out is checked against the signed-in GitHub user, and the owner's launches are
+let through. Nobody else can, and there is no request flag for it.
+
+**Limits.** If the GitHub lookup fails, the launch goes ahead. The opt-out is a guard that respects
+a maintainer's wishes. It is not an access control. Like the epic guard, it is best effort: a
+missing file or label is simply no signal, and only a config file that exists but cannot be read is
+logged and ignored.
+
 ## Questions, and who answers them
 
 An agent asks you something with a multiple-choice question. The colony's status becomes
