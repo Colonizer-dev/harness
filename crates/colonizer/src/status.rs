@@ -119,6 +119,12 @@ async fn reduced_status(app: &Shared) -> Value {
             host_value[key] = value;
         }
     }
+    // The same `kvm_ok` verdict the full body's host object carries, read back by a peer's placement
+    // policy (issue #688). A Mac has no `/dev/kvm` to check and omits it, as `runtime.kvm` is null
+    // there, so a peer reads "unknown" rather than "cannot".
+    if let Some(kvm) = &runtime.kvm {
+        host_value["kvm_ok"] = json!(kvm.ok);
+    }
     // The storage message names files, so only its verdict crosses over.
     let storage_ok = storage_status(app.shown_storage_alert().await, &reclaim::FreeSpaceVerdict::default())
         .get("ok")
@@ -243,6 +249,9 @@ pub(crate) async fn status(
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "queue_depth": queue_depth,
+        // Issue #880: whether the queue is held back while an update, a restart or an operator
+        // drains in-flight colonies, so the cockpit can show a banner.
+        "draining": app.drain.draining(),
         "stall": stall,
         "reclaim": {"reclaimable": reclaimable, "unpushed": unpushed},
         "github": match user {
@@ -407,7 +416,8 @@ mod tests {
         let root = temp_root();
         let path = root.join("data/sessions.json");
         std::fs::write(&path, b"this is not json").unwrap();
-        let (_, damage) = load_sessions(&path).unwrap();
+        let store = crate::store::LocalDirStore::new(root.join("data"));
+        let (_, damage) = load_sessions(&store, &path).await.unwrap();
         let mut app = test_app(&root);
         Arc::get_mut(&mut app).unwrap().load_damage = damage;
 

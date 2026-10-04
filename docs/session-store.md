@@ -95,30 +95,42 @@ Moving a colony between stores is copy-then-switch, and the copy only ever reads
 rollback is pointing the mothership back at the old store, which never changed:
 
 1. Stop the mothership, so the single-writer rule holds while copying.
-2. Dry run: `migrate(src, dst, true)` counts what would move — colonies, files, bytes — and writes
-   nothing.
-3. Migrate: `migrate(src, dst, false)` copies each session's files and the index last, so every
-   failure before the index lands leaves the destination index-less — visibly unfinished, not
-   half-written. The destination must be empty; a store that already holds an index or sessions is
-   refused (`AlreadyExists`) before anything is written.
+2. Dry run: `colonizer migrate-store --to <new store> --dry-run` counts what would move — colonies,
+   files, bytes — and writes nothing.
+3. Migrate: `colonizer migrate-store --to <new store>` copies each session's files and the index
+   last, so every failure before the index lands leaves the destination index-less — visibly
+   unfinished, not half-written. The destination must be empty; a store that already holds an index
+   or sessions is refused (`AlreadyExists`) before anything is written.
 4. Verification is part of the call: the session listing, every per-session file listing, and every
    file's bytes are read back out of the destination and compared *before* the index is written;
    the index's own bytes are compared after it lands. A migration that cannot prove itself returns
    an error — the one exception being that final index check, where the destination is left
    holding a written index that says so in the error.
 5. Spot-check the destination (open a colony in the UI, resume one), then point the mothership at
-   the new store.
+   the new store — set `COLONIZER_DATA_DIR` to it (the switch the command prints) and start it.
 
-A failed migration leaves the source untouched and, short of that final index check, the
-destination without an index; just point back, or fix the destination and run `migrate` again —
+`colonizer migrate-store` runs locally off the settings, with no mothership and no token; `--from`
+defaults to the configured data dir, and when the source is that data dir it refuses to run while
+something is listening on `COLONIZER_BIND` — most likely a running mothership — because an in-flight
+colony would be lost from the copy. A failed migration leaves the source untouched and, short of that final index check, the
+destination without an index; just point back, or fix the destination and run the command again —
 it is a copy, not a move.
 
-There is no CLI entry point yet. Two callers go through the default `LocalDirStore` today:
-`persist_sessions` (`sessions/persist.rs`) writes the index through it, and the log archive
-(`archive.rs`) reads a finished colony's files through `list_files` and `read_file`. Startup still
-reads `sessions.json` straight from disk (`app.rs`, `load_sessions`), and the per-session writes
-still use the file helpers. The migration procedure is exercised in tests
+Where each operation goes today. Startup reads the index through the store: `load_sessions`
+(`app.rs`) calls `read_index`, and an index a store cannot read or parse is quarantined through
+`quarantine_index` — the same move-aside to `sessions.json.corrupt-<unix-ts>`, with the same fault
+seam, as before. The salvage *copy* stays a local file op (`copy_corrupt_aside`): the store has no
+copy, and moving the original would destroy what the copy is meant to keep. Saves write the index
+through it, and the per-session appends go through `append`: the agent event log and the host
+chain's events (`events.rs`, `validation.rs`), the findings ledger (`validation.rs`) and the
+harness log (`sessions/persist.rs`), all landing at the same `sessions/<id>/<name>` paths the file
+helpers wrote. The log archive (`archive.rs`) reads a finished colony's files through `list_files`
+and `read_file`. What still stays local, deliberately: the `vm/` files, whose `write_private` 0600
+secrets the store API cannot carry (the mode is in the table above); `Runtime::load`'s initial
+reads of a colony's event and harness logs at startup; event rotation; and the archive's own copy.
+Tests cover the endpoint here
 (`store::tests::a_migration_round_trips_local_to_memory_and_back_byte_for_byte`,
 `a_dry_run_migration_counts_without_writing`, `a_migration_refuses_a_destination_that_already_holds_colonies`,
-`a_failed_migration_leaves_the_source_whole_and_the_destination_without_an_index`), with the
-startup read, the per-session file writes and a command still to follow.
+`a_failed_migration_leaves_the_source_whole_and_the_destination_without_an_index`,
+`the_migrate_store_command_dry_runs_then_copies`), the startup read through the store
+(`app::tests::startup_loads_the_index_through_the_store`) and the per-session appends.

@@ -25,7 +25,7 @@ close codes, the header pair format, the 101 accept — it says so.
 
 On first enable the mothership generates an Ed25519 key pair and stores it under
 `<config_dir>/remote/`: the directory 0700, the key file 0600, written the way `auth.rs` writes the
-api-token (through `util::write_private`, `crates/colonizer/src/util.rs:328`). The exact file names
+api-token (through `util::write_private`, `crates/colonizer/src/util.rs:366`). The exact file names
 are #533's choice; it chose `<config_dir>/remote/key` (PKCS#8) and `<config_dir>/remote/state.json`
 (the switch, `install_id` and `host`). The seed is never logged and never leaves the mothership.
 
@@ -228,7 +228,7 @@ rejects any `Host` that is not `localhost`, `127.0.0.1`, `[::1]`, the bind host 
 as `Authorization: Bearer` or the `colonizer_token` cookie (or a scoped `col_…` API token, Bearer
 only); cookie-authenticated writes and WebSocket upgrades must also carry an `Origin` that matches
 the `Host` header (#375, `server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/` with a
-one-year `Max-Age`, host-only, and carries no `Secure` today (`auth.rs:134–136`).
+one-year `Max-Age`, host-only, and carries no `Secure` today (`auth.rs:197-199`).
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the
 cockpit auth run unchanged; the relay does not bypass either. The tunnel client marks each request
@@ -245,7 +245,7 @@ separate from the localhost one; over the tunnel it MUST also carry `Secure`.
 ## Cockpit API
 
 For #533 to implement and #535 to consume, following the existing toggle pattern
-(`GET`/`PUT /api/telemetry`, `crates/colonizer/src/telemetry.rs:299–319`). Both routes sit behind
+(`GET`/`PUT /api/telemetry`, `crates/colonizer/src/telemetry.rs:305-315`). Both routes sit behind
 `host_guard` like every `/api/*` route:
 
 ```
@@ -279,7 +279,7 @@ As built (#558), the API differs from this sketch. `GET` and `PUT /api/remote` a
 `connected` boolean rather than a `state`, and no `error` field — and a third route,
 `POST /api/remote/reset`, replaces the key and the link. A failed registration is a `502` on the
 `PUT` and the switch stays off. [protocol.md §6.10](protocol.md#610-remote-access-tunnel) has the
-details (`crates/colonizer/src/remote.rs:150-165`, `:1137-1143`).
+details (`crates/colonizer/src/remote.rs:161-172`, `:1377-1382`).
 
 ## Pairing and the owner
 
@@ -364,28 +364,28 @@ amendment to the contract; none is decided here.
 **Handshake**
 
 - The relay sends the nonce as base64url without padding (`randomToken(32)`,
-  `services/relay/src/tunnel.js:70`), not standard padded base64.
+  `services/relay/src/tunnel.js:72`), not standard padded base64.
 - Both sides sign and verify the nonce *as the text it arrived in*, not its decoded 32 bytes:
-  the message is the UTF-8 string `nonce + install_id + ts` (`protocol.js:80-82`,
-  `remote.rs:465`). The test vector above follows the contract, so it does not match what the
+  the message is the UTF-8 string `nonce + install_id + ts` (`protocol.js:107-109`,
+  `remote.rs:746`). The test vector above follows the contract, so it does not match what the
   code signs. The client also refuses a nonce longer than 1 KiB (`remote.rs:78`).
 - The relay accepts a `ts` within ±300 s, not ±60 s (`TS_SKEW`, `protocol.js:21`).
 - There is no `ready` frame. The relay sends nothing after a good hello; the client counts the
   relay's first frame of any kind (normally the first `ping`, up to 20 s later) as acceptance
-  (`remote.rs:615-640`).
+  (`remote.rs:908-935`).
 - The close codes are not the ones pinned. The relay closes a missing, wrong or late hello and an
   unknown `version` with `1008`, a 17th concurrent pending handshake with `1013`, a replaced
-  tunnel with `4000` and an idle one with `1000` (`tunnel.js:62-120`). An unknown `install_id` is
+  tunnel with `4000` and an idle one with `1000` (`tunnel.js:58-116`). An unknown `install_id` is
   an HTTP `404` before the upgrade, and a dial without `Upgrade: websocket` a `426`
-  (`worker.js:116-118`). The client treats a replaced close — the `4000` above or the pinned
+  (`worker.js:111-123`). The client treats a replaced close — the `4000` above or the pinned
   `4409` — as final: it does not redial, but parks waiting on the switch/reset signal, reports
   `"replaced": true` on `GET /api/remote`, and dials again only when the operator re-enables or
-  resets. Every other close is still redialed with the 1–60 s backoff (`remote.rs:368-425`).
+  resets. Every other close is still redialed with the 1–60 s backoff (`remote.rs:602-660`).
 
 **Registration**
 
 - `POST /api/installs` is not idempotent: every call answers `201` with a new `install_id`, even
-  for a key already registered, and there is no `200` (`worker.js:61-87`). A body over 1 KiB is a
+  for a key already registered, and there is no `200` (`worker.js:66-91`). A body over 1 KiB is a
   `413`. The id is always 20 characters.
 
 **Frames and streams**
@@ -393,29 +393,29 @@ amendment to the contract; none is decided here.
 - Neither side implements `cancel`; both ignore it.
 - The client does not answer `ws_open` with a `101` `res`. It starts sending `ws_msg` at once, and
   refuses with `ws_close` instead of a `res`: `1013` when all 32 slots are busy, `1008` for a
-  duplicate id or a bad path, `1014` when the inner upgrade fails (`remote.rs:830-895`). The relay
-  accepts the browser's socket before the mothership has answered (`tunnel.js:293-300`).
+  duplicate id or a bad path, `1014` when the inner upgrade fails (`remote.rs:1126-1190`). The relay
+  accepts the browser's socket before the mothership has answered (`tunnel.js:303-305`).
 - The relay treats a request as a WebSocket only when `upgrade` is exactly `websocket`
-  (case-insensitive), not when it merely contains the token (`tunnel.js:247`).
+  (case-insensitive), not when it merely contains the token (`tunnel.js:256`).
 - The client strips every `sec-websocket-*` header from `ws_open`, `sec-websocket-protocol`
-  included, so subprotocols cannot be negotiated (`remote.rs:1045-1048`; review note L4).
+  included, so subprotocols cannot be negotiated (`remote.rs:1323-1347`; review note L4).
 - Neither side closes the tunnel on an oversized chunk or text frame. The relay fails just that
   stream when a body chunk decodes to more than 49152 bytes, and closes the browser socket `1009`
   on an oversized binary `ws_msg`; text `ws_msg` has no size check on either side, and the client
   keeps tungstenite's default 64 MiB message limit (review finding R5). The client caps a whole
   request body at 10 MiB (`413`) and waits at most 60 s per body frame (`408`).
 - When the tunnel closes, the relay closes browser WebSockets with `1012`, not `1001`
-  (`tunnel.js:133`).
+  (`tunnel.js:136`).
 - The relay also limits each install to a 120-request burst refilled at 20 per second, answering
-  `429` past it, and answers a response head that takes over 60 s with `504` (`tunnel.js:12-20`,
-  `:241`, `:266`).
+  `429` past it, and answers a response head that takes over 60 s with `504` (`tunnel.js:11-20`,
+  `:250`, `:275`).
 
 **Headers**
 
 - The relay does not strip `Domain` from `set-cookie` (review finding R4).
 - The mothership never answers `400` for a wrong or repeated `host`: it drops whatever `host` the
-  relay sent and sets its own tunnel host (`remote.rs:786`, `:1047`).
-- The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:134-136`;
+  relay sent and sets its own tunnel host (`remote.rs:1082`, `:1343`).
+- The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:197-199`;
   review finding R4).
 
 ## What is not colony work

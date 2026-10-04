@@ -82,5 +82,8 @@ Each ask also writes one activity line (`GET /api/activity`): `decision.shadow` 
 
 Jev **compaction** (the token-saving pass over a transcript) is a separate feature with its own switch
 (`jev_compaction`) and ledger (`jev_ladder.jsonl`); see
-[colonies.md, Measuring Jev compaction](colonies.md#measuring-jev-compaction). A Settings UI showing
+[colonies.md, Measuring Jev compaction](colonies.md#measuring-jev-compaction). Jev **brief picks**
+(`jev_brief_shadow`, `crates/colonizer/src/brief_pick.rs`) are also separate: a shadow-only
+measurement of which shared-memory notes and skill packs a colony would need, logged to
+`brief_picks.jsonl`, that does not go through the decision layer yet. A Settings UI showing
 each point's agreement rate is a follow-up.
