@@ -1,0 +1,12 @@
+# Known-flaky tests, one per line:
+#
+#   <test name>  #<issue number>
+#
+# The name must be exactly what the test runner prints for the failing test (cargo/libtest:
+# `module::test`, node:test and vitest: the reported test name) and the issue number is required —
+# scripts/ci/retry-flaky.mjs marks a retried run `quarantined: true` when a failing name is on this
+# list, and CI's scripts job fails an entry without one. Listing a test does NOT skip it: it still
+# runs, and a flake in it is still reported, just as a known one. An entry comes off the list when
+# the flake is fixed.
+#
+# (empty: no test is quarantined right now)

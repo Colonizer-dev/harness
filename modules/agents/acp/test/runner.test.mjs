@@ -453,7 +453,10 @@ test('resume falls back to a fresh session: an agent without loadSession, or one
   assert.match(note.message, /could not resume session sess-gone/);
   await fallback.waitRecord((r) => r.some((x) => x.method === 'session/new'), 'the fresh session in place of the failed load');
   assert.deepEqual(fallback.records().filter((x) => x.method).map((x) => x.method), ['initialize', 'session/load', 'session/new']);
-  assert.deepEqual(first('agent_session')(fallback.events), { type: 'agent_session', session_id: 'sess-fake-1' }, 'the fresh session is announced instead');
+  // The record above only says the fake received session/new; wait for the event the runner emits
+  // once it has processed the reply, so the announcement is not raced.
+  const announced = await fallback.waitUntil(first('agent_session'), 'the fresh session to be announced');
+  assert.deepEqual(announced, { type: 'agent_session', session_id: 'sess-fake-1' }, 'the fresh session is announced instead');
   assertSchema(fallback.events);
   await stop(fallback);
 });

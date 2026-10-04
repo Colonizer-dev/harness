@@ -62,8 +62,9 @@ jobs:
       # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
       # stock runners have it; no KVM is involved anywhere in this job. --locked, like the release
       # build: a lockfile cargo would have to change fails here instead of being silently re-resolved.
+      # Wrapped: a flake is retried once and recorded; a real failure still ends the step non-zero.
       - name: Test
-        run: cargo test --workspace --locked
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- cargo test --workspace --locked
 
       # The crates the release publishes (release.yml `crates`), in the order it publishes them, built
       # from their own packaged source the way crates.io gets it. A workspace build reads the whole
@@ -82,6 +83,16 @@ jobs:
       # Last, so a formatting nit never hides a failing test or a real lint.
       - name: Format
         run: cargo fmt --all --check
+
+      # The retry wrapper's flake records, uploaded so a run a flake turned green is still visible.
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The Mac build: every other job is Linux, so a Linux-only `cfg` import once broke
   # colonizer-agentd on macOS (#771) while main stayed green. Compile and lint only — no tests, no
@@ -135,7 +146,7 @@ jobs:
 
       - name: Test the Claude Code runner
         working-directory: modules/agents/claude-code
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
 
       - name: Install the Pi runner's dependencies
         working-directory: modules/agents/pi
@@ -143,37 +154,46 @@ jobs:
 
       - name: Test the Pi runner
         working-directory: modules/agents/pi
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
 
       # The OpenCode runner has no dependencies (its MCP server is hand-rolled), so there is
       # nothing to install: plain `node --test` from the repository root.
       - name: Test the OpenCode runner
-        run: node --test modules/agents/opencode/test/*.test.mjs
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test modules/agents/opencode/test/*.test.mjs
 
       # The Grok Build runner has no dependencies either: its tests drive the real runner.mjs over
       # stdio against a stub grok CLI, so `npm test` is a bare `node --test`.
       - name: Test the Grok Build runner
         working-directory: modules/agents/grok-build
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
 
       # The Hermes runner has no dependencies (its package-lock.json exists only because install.sh
       # runs `npm ci` on every module with a package.json); its tests drive the real runner.mjs
       # against a stub of the hermes CLI — no hermes install, no network, no microVM.
       - name: Test the Hermes runner
         working-directory: modules/agents/hermes
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
 
       # The Codex runner is shaped like the Grok Build and Hermes runners: no dependencies, the
       # real runner.mjs driven over stdio against a stub codex CLI — no OpenAI, no network.
       - name: Test the Codex runner
         working-directory: modules/agents/codex
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
 
       # The ACP runner is shaped the same way: no dependencies, the real runner.mjs driven over
       # stdio against a scriptable fake ACP agent — no gemini install, no network.
       - name: Test the ACP runner
         working-directory: modules/agents/acp
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The measuring scripts (the colony report, the bench) and the build scripts. No dependencies
   # either, and none of the tests touch a mothership, a colony or the network; the job's one
@@ -194,7 +214,7 @@ jobs:
           node-version: 24
 
       - name: Test
-        run: node --test scripts/test/*.test.mjs
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test scripts/test/*.test.mjs
 
       # Every relative link and #anchor in the tracked Markdown must resolve, so a renamed doc or a
       # reworded heading fails the pull request that did it instead of a reader's click later.
@@ -235,6 +255,15 @@ jobs:
       - name: Test the exec-bit check
         run: sh scripts/test/check-exec-bits.test.sh
 
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
+
   # No lockfile and no dependencies: the receiver's tests import node's own modules and ../src only,
   # so there is nothing to install and `npm test` is plain `node --test`.
   telemetry:
@@ -251,7 +280,16 @@ jobs:
           node-version: 24
 
       - name: Test
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Same shape as telemetry: the tests are bare `node --test` on the Node the repo pins, and the one
   # devDependency (wrangler, for the manual deploy) is never imported by src or test, so there is
@@ -270,7 +308,16 @@ jobs:
           node-version: 24
 
       - name: Test
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       # Validates wrangler.toml and the bundle without touching Cloudflare: a malformed config
       # (e.g. `[[durable_objects]]` where wrangler wants a table) fails here, not at deploy time.
@@ -306,7 +353,16 @@ jobs:
         run: npm run build:demo
 
       - name: Test
-        run: npm test
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- npm test
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The colony report's tests import node's own modules and ../colony-report.mjs only; the repository
   # root has no package.json or lockfile, so there is nothing to install and `node --test` is the job.
@@ -321,7 +377,16 @@ jobs:
           node-version: 24
 
       - name: Test
-        run: node --test scripts/test/colony-report.test.mjs
+        run: node "$GITHUB_WORKSPACE/scripts/ci/retry-flaky.mjs" -- node --test scripts/test/colony-report.test.mjs
+
+      - name: Upload the flake report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: flakes-${{ github.job }}
+          path: ${{ runner.temp }}/flakes.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   # A real colony, end to end, on every pull request (issue #368): a real mothership (`colonizer
   # serve`), a real microVM through the vendored msb, real agentd, the real claude-code runner module

@@ -441,12 +441,36 @@ mod tests {
     /// A stand-in `msb` running `body` on every call (the pattern of the recover tests in
     /// lifecycle.rs): an executable script in a throwaway directory, returned as the path a
     /// backend would be given. The caller removes the directory when done.
+    ///
+    /// The script is written through a child `sh` (`cat`, fed on stdin) and not with `fs::write`.
+    /// These tests run on many threads at once, and `fs::write` holds the file open for writing
+    /// while it writes: a `fork` in another thread — any test spawning a child — inherits that
+    /// write descriptor, and an `execve` of the script inside that window then fails with
+    /// `ETXTBSY`, "Text file busy". `O_CLOEXEC` closes the descriptor only once the forked child
+    /// itself execs, which is the very window being raced, so the descriptor must never live in
+    /// this process at all. Writing in a child keeps it out, and waiting for that child means the
+    /// file is complete and closed before any caller can run it.
     fn stand_in_msb(body: &str) -> (String, std::path::PathBuf) {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("colonizer-remove-confirm-{}", short_id()));
         std::fs::create_dir_all(&root).unwrap();
         let msb = root.join("msb");
-        std::fs::write(&msb, format!("#!/bin/sh\n{body}")).unwrap();
+        let mut writer = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("cat > \"$1\"")
+            .arg("sh")
+            .arg(&msb)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("#!/bin/sh\n{body}").as_bytes())
+            .unwrap();
+        assert!(writer.wait().unwrap().success(), "writing the stand-in msb failed");
         std::fs::set_permissions(&msb, std::fs::Permissions::from_mode(0o755)).unwrap();
         (msb.display().to_string(), root)
     }
@@ -519,8 +543,9 @@ mod tests {
     #[tokio::test]
     async fn a_wedged_removal_is_killed_and_still_judged_by_the_listing() {
         // `rm` hangs: the deadline kills it, and the listing decides. Gone, so confirmed — with
-        // the sandbox still listed it would not be.
-        let (msb, root) = stand_in_msb("if [ \"$1\" = rm ]; then sleep 30; fi\nexit 0\n");
+        // the sandbox still listed it would not be. `exec` makes the wedged `sleep` itself the
+        // process the deadline kills, rather than a `sleep` forked off and left behind.
+        let (msb, root) = stand_in_msb("if [ \"$1\" = rm ]; then exec sleep 30; fi\nexit 0\n");
         let started = std::time::Instant::now();
         remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
             .await
@@ -532,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn a_wedged_removal_with_the_sandbox_still_listed_is_refused() {
         let (msb, root) = stand_in_msb(
-            "if [ \"$1\" = rm ]; then sleep 30; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' colonizer-abc; fi\nexit 0\n",
+            "if [ \"$1\" = rm ]; then exec sleep 30; fi\nif [ \"$1\" = ls ]; then printf '%s\\n' colonizer-abc; fi\nexit 0\n",
         );
         let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
             .await
@@ -543,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_listing_that_never_answers_leaves_the_removal_unconfirmed() {
-        let (msb, root) = stand_in_msb("if [ \"$1\" = ls ]; then sleep 30; fi\nexit 0\n");
+        let (msb, root) = stand_in_msb("if [ \"$1\" = ls ]; then exec sleep 30; fi\nexit 0\n");
         let e = remove_confirmed(&msb, "colonizer-abc", Duration::from_millis(200))
             .await
             .unwrap_err();
