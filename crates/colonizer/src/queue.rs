@@ -248,6 +248,11 @@ enum Claim {
     /// The colony keeps its place: a `claim_wait` waiter still held at the lock was re-pointed
     /// (issue #321), and the next candidate is looked at now rather than on a later tick.
     Wait,
+    /// The colony keeps its place but moves onto a different parent (issue #982): the one it was
+    /// stacked on failed, so it re-parents onto that parent's own parent — one generation per tick —
+    /// rather than being retired. Nothing failed, so the colony stays `Queued`; the caller persists
+    /// and broadcasts the moved record.
+    Reparent(Session),
 }
 
 /// What holds a queued colony back before the slot rules even apply, decided on the snapshot: the
@@ -261,6 +266,12 @@ enum Gate {
     Hold,
     /// Its parent can never provide a branch; the message names the parent and says why.
     Retire(String),
+    /// Its parent failed, but that parent's own parent — the colony one rung up the stack — might
+    /// still provide a branch (issue #982). The child re-parents onto it rather than failing, one
+    /// generation per 5 s tick, converging onto a live ancestor. A failed parent with no parent of
+    /// its own has nothing to move onto and yields `Hold` instead — the child waits forever rather
+    /// than failing, since the record is gone only when the parent itself is.
+    Reparent(String),
 }
 
 fn gate(s: &Session, sessions: &[Session]) -> Gate {
@@ -307,6 +318,20 @@ fn gate(s: &Session, sessions: &[Session]) -> Gate {
         return Gate::Admit;
     };
     let parent = sessions.iter().find(|p| p.id == parent_id);
+    // Issue #982: a failed parent can never provide a branch, but its own parent — one rung up the
+    // stack — might still. Re-parent the child onto it rather than failing the child (which would
+    // cascade the failure down every colony stacked on it), one generation per tick until it lands
+    // on a live ancestor. A failed parent with no parent of its own has nothing to move onto, and
+    // failing the child for it would be the same cascade with no way out: it waits instead. This
+    // sits ahead of `restack::queue_decision`, which still refuses a `Failed` parent on its own.
+    if let Some(parent) = parent
+        && parent.status == SessionStatus::Failed
+    {
+        return match parent.parent.clone() {
+            Some(grandparent) => Gate::Reparent(grandparent),
+            None => Gate::Hold,
+        };
+    }
     match restack::queue_decision(parent_id, parent, s.stack) {
         Stacked::Ready(_) => Gate::Admit,
         Stacked::Wait => Gate::Hold,
@@ -420,21 +445,36 @@ fn claim_refused(s: &mut Session, reason: &str) -> Option<Claim> {
     Some(Claim::Retire(s.clone(), message))
 }
 
+/// Issue #982: a queued colony whose parent failed moves onto that parent's own parent instead of
+/// being retired for a branch nobody could lend. It stays `Queued` — nothing failed — and the next
+/// tick decides afresh against its new parent, walking up the stack one rung at a time. Guarded on
+/// the status like [`claim_refused`]: a colony claimed between the snapshot and the lock is left be.
+fn claim_reparent(s: &mut Session, new_parent_id: &str) -> Option<Claim> {
+    if s.status != SessionStatus::Queued {
+        return None; // claimed by something else between the snapshot and the lock
+    }
+    s.parent = Some(new_parent_id.to_string());
+    s.updated_at = Utc::now();
+    Some(Claim::Reparent(s.clone()))
+}
+
 /// The queued colony this tick acts on, oldest first: the first one nothing holds back and that fits.
 /// A colony still waiting for its stacked-on parent's branch is looked past, so a slow parent cannot
 /// stall the colonies behind it, and the first one whose parent can never provide a branch stops the
-/// walk — it is retired where it stands, which needs no slot. `None` when nothing in the queue can
-/// move this tick.
-fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<(&Session, Option<String>)> {
+/// walk — it is retired where it stands, which needs no slot — as does the first one whose parent
+/// failed and can be re-parented up the stack (issue #982), which likewise takes no slot. `Hold` is
+/// filtered here and never returned; `None` when nothing in the queue can move this tick.
+fn next_queued(sessions: &[Session], room: impl Fn(&Session) -> bool) -> Option<(&Session, Gate)> {
     let mut waiting: Vec<&Session> = sessions.iter().filter(|s| s.status == SessionStatus::Queued).collect();
     waiting.sort_by_key(|s| s.created_at);
     for candidate in waiting {
         match gate(candidate, sessions) {
             Gate::Hold => continue,
-            Gate::Retire(reason) => return Some((candidate, Some(reason))),
+            Gate::Retire(reason) => return Some((candidate, Gate::Retire(reason))),
+            Gate::Reparent(new_parent) => return Some((candidate, Gate::Reparent(new_parent))),
             Gate::Admit => {
                 if room(candidate) {
-                    return Some((candidate, None));
+                    return Some((candidate, Gate::Admit));
                 }
             }
         }
@@ -514,7 +554,7 @@ pub(crate) async fn start_queued(app: &Shared) {
             let settings = app.org_settings(org);
             (orgs::org_max_parallel(&settings), repo_limit(&modules, &settings))
         };
-        let Some((next, refuse)) = next_queued(&sessions, |s| {
+        let Some((next, gate_result)) = next_queued(&sessions, |s| {
             let (org_limit, repo_limit) = limits(&s.org);
             !held && has_room(&sessions, &s.org, &s.repo, max_parallel, org_limit, repo_limit)
         }) else {
@@ -523,11 +563,14 @@ pub(crate) async fn start_queued(app: &Shared) {
         // A waiter the gate called ready is checked against the forge before its promotion: the holder's
         // PR may have merged, or the claim may have moved to someone else, and the check is a gh call, so
         // it runs here rather than under the admission lock (issue #321). A failure falls back to the
-        // local guard, the same as admission does.
-        let refuse = match refuse {
-            Some(reason) => Some(reason),
-            None if next.claim_wait => waiter_remote_conflict(app, next, &sessions).await,
-            None => None,
+        // local guard, the same as admission does. A conflict retires the waiter, exactly as the gate's
+        // own refusal would; every other decision is carried through untouched.
+        let gate_result = match gate_result {
+            Gate::Admit if next.claim_wait => match waiter_remote_conflict(app, next, &sessions).await {
+                Some(reason) => Gate::Retire(reason),
+                None => Gate::Admit,
+            },
+            other => other,
         };
         // Re-checked and claimed under one write lock, so neither another tick nor a concurrent create or
         // resume can take the slot in between.
@@ -553,12 +596,17 @@ pub(crate) async fn start_queued(app: &Shared) {
                     s.queued_behind = Some(holder);
                     return Some(Claim::Wait);
                 }
-                match refuse.as_deref() {
-                    Some(reason) => claim_refused(s, reason),
+                match gate_result {
+                    Gate::Retire(reason) => claim_refused(s, &reason),
+                    // Issue #982: the parent failed and its own parent may still lend a branch; move
+                    // the child up the stack rather than retiring it.
+                    Gate::Reparent(new_parent) => claim_reparent(s, &new_parent),
                     // The drain is re-read here, under the lock, beside `room`: one that began
                     // between the tick's snapshot and this claim must not let the boot through
                     // (issue #880). The colony keeps its place for the next tick.
-                    None => claim_queued(s, room && !app.drain.draining()),
+                    Gate::Admit => claim_queued(s, room && !app.drain.draining()),
+                    // `next_queued` filters `Hold` out of its result, so a held colony never reaches here.
+                    Gate::Hold => unreachable!("next_queued never returns a held colony"),
                 }
             },
         )
@@ -584,6 +632,20 @@ pub(crate) async fn start_queued(app: &Shared) {
                 if let Some(updated) = app.session(&next.id).await {
                     app.persist_and_broadcast(&updated).await;
                 }
+                continue;
+            }
+            Some(Claim::Reparent(updated)) => {
+                // Issue #982: the failed parent's own parent is who the child waits on now. Nothing
+                // failed, so it stays Queued — journal and broadcast the move, then keep looking for
+                // a candidate that can go this tick. The next tick decides afresh on the new parent,
+                // so a chain walks up one rung at a time and converges on a live ancestor.
+                app.persist_and_broadcast(&updated).await;
+                app.session_log(
+                    &updated.id,
+                    "info",
+                    "its parent failed; moved onto that parent's own parent instead of failing".into(),
+                )
+                .await;
                 continue;
             }
             Some(Claim::Start(starting)) => {
@@ -1919,7 +1981,7 @@ mod tests {
         let sessions = vec![first.clone(), second.clone()];
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("the oldest waiter's turn has come");
         assert_eq!(picked.id, "first");
-        assert!(refuse.is_none());
+        assert!(matches!(refuse, Gate::Admit));
         // The promotion, re-checked under the lock: nothing holds the issue against it any more.
         assert!(matches!(claim_queued(&mut first, true), Some(Claim::Start(_))));
         assert!(!first.claim_wait, "promoted: the wait is over");
@@ -2003,7 +2065,10 @@ mod tests {
         ];
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("something in the queue can move");
         assert_eq!(picked.id, "unrelated", "the child waiting on its parent is looked past");
-        assert!(refuse.is_none(), "the unrelated colony starts, it is not retired");
+        assert!(
+            matches!(refuse, Gate::Admit),
+            "the unrelated colony starts, it is not retired"
+        );
     }
 
     #[test]
@@ -2015,7 +2080,7 @@ mod tests {
         let (picked, refuse) =
             next_queued(&sessions, |_| true).expect("the parent's branch is on the remote, so the child starts");
         assert_eq!(picked.id, "child");
-        assert!(refuse.is_none());
+        assert!(matches!(refuse, Gate::Admit));
         // But it still waits for a slot like everyone else.
         assert!(next_queued(&sessions, |_| false).is_none(), "no room, nothing moves");
     }
@@ -2042,22 +2107,77 @@ mod tests {
         ];
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("the parent's work is merged, so the child starts");
         assert_eq!(picked.id, "child");
-        assert!(refuse.is_none());
+        assert!(matches!(refuse, Gate::Admit));
     }
 
     #[test]
-    fn a_child_whose_parent_failed_is_retired_with_a_message_naming_the_parent() {
+    fn a_child_whose_parent_failed_moves_onto_the_parents_own_parent() {
+        // Issue #982: the child's parent failed, but that parent's own parent — the grandparent —
+        // may still lend a branch. The child re-parents onto it rather than being retired, one rung
+        // up the stack per tick.
+        let mut grandparent = parent_colony("grandparent", SessionStatus::PrOpened, "colonizer/issue-1-grandparent");
+        grandparent.id = "grandparent".into();
+        let mut failed = parent_colony("parent", SessionStatus::Failed, "");
+        failed.parent = Some("grandparent".into());
+        let sessions = vec![queued_child("child", "parent", Utc::now()), failed, grandparent];
+        let Some((picked, gate)) = next_queued(&sessions, |_| true) else {
+            panic!("the child is acted on, not left sitting at the head of the queue");
+        };
+        assert_eq!(picked.id, "child", "the child is what this tick acts on");
+        let Gate::Reparent(new_parent) = gate else {
+            panic!("the failed parent's own parent is what the child moves onto");
+        };
+        assert_eq!(new_parent, "grandparent", "one rung up the stack");
+
+        // The claim moves the link and nothing else: it stays Queued, nothing failed.
+        let mut queued = queued_child("child", "parent", Utc::now());
+        let claim = claim_reparent(&mut queued, &new_parent);
+        assert!(matches!(claim, Some(Claim::Reparent(_))), "re-parented, not retired");
+        assert_eq!(queued.parent.as_deref(), Some("grandparent"));
+        assert_eq!(queued.status, SessionStatus::Queued, "still in the queue, nothing failed");
+        assert!(
+            queued.error.is_none() && !queued.unseen_failure,
+            "no failure was recorded against a colony that only moved"
+        );
+        // A colony claimed in the meantime is left alone.
+        let mut starting = colony("acme", SessionStatus::Starting);
+        assert!(claim_reparent(&mut starting, "grandparent").is_none());
+        assert_eq!(starting.status, SessionStatus::Starting);
+    }
+
+    #[test]
+    fn a_child_whose_failed_parent_has_no_parent_of_its_own_keeps_waiting() {
+        // Nothing to move onto: the failed parent sits at the bottom of the stack, so there is no
+        // grandparent and no branch to borrow. The child waits rather than failing (issue #982).
         let sessions = vec![
             queued_child("child", "parent", Utc::now()),
-            parent_colony("parent", SessionStatus::Failed, "colonizer/issue-1-parent"),
+            parent_colony("parent", SessionStatus::Failed, ""),
         ];
-        let Some((picked, refuse)) = next_queued(&sessions, |_| true) else {
+        assert!(
+            next_queued(&sessions, |_| true).is_none(),
+            "the child waits; there is nobody further up the stack to build on"
+        );
+        // And the gate says so directly: held, never retired.
+        assert!(matches!(gate(&sessions[0], &sessions), Gate::Hold));
+    }
+
+    #[test]
+    fn a_parent_that_made_no_changes_still_retires_the_child_by_name_and_reason() {
+        // Issue #982 stopped a failed parent from failing the child, but a parent whose work made no
+        // changes still has no branch anywhere to build on: the child is retired as before.
+        let sessions = vec![
+            queued_child("child", "parent", Utc::now()),
+            parent_colony("parent", SessionStatus::NoChanges, "colonizer/issue-1-parent"),
+        ];
+        let Some((picked, gate)) = next_queued(&sessions, |_| true) else {
             panic!("the child is retired, not left sitting at the head of the queue");
         };
         assert_eq!(picked.id, "child", "the child is what this tick acts on");
-        let reason = refuse.expect("the retirement says why");
+        let Gate::Retire(reason) = gate else {
+            panic!("a parent that made no changes can never lend a branch");
+        };
         assert!(reason.contains("parent"), "the parent is named: {reason}");
-        assert!(reason.contains("failed"), "and the reason is named: {reason}");
+        assert!(reason.contains("made no changes"), "and the reason is named: {reason}");
 
         // The claim takes the child out of the queue with that reason as its error.
         let mut queued = queued_child("child", "parent", Utc::now());
@@ -2099,7 +2219,7 @@ mod tests {
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("a resume-capable colony moves whatever its parent did");
         assert_eq!(picked.id, "child");
         assert!(
-            refuse.is_none(),
+            matches!(refuse, Gate::Admit),
             "the parent's failure is not this colony's: it starts, it is not retired"
         );
     }
@@ -2114,7 +2234,7 @@ mod tests {
         ];
         let (picked, refuse) = next_queued(&sessions, |_| true).expect("the resume does not wait on its parent");
         assert_eq!(picked.id, "child");
-        assert!(refuse.is_none());
+        assert!(matches!(refuse, Gate::Admit));
     }
 
     #[tokio::test]
@@ -2639,11 +2759,13 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let mut waiting = queued_child("waits", "live-parent", Utc::now());
         waiting.created_at = Utc::now() - chrono::Duration::minutes(2);
+        // This child's parent had its record deleted outright, so there is nothing left to re-parent
+        // onto and it is retired. A *failed* parent is treated quite differently (issue #982): that
+        // child re-parents onto the grandparent, or waits when there is none — never this.
         let mut doomed = queued_child("doomed", "dead-parent", Utc::now());
         doomed.created_at = Utc::now() - chrono::Duration::minutes(1);
         let sessions = vec![
             parent_colony("live-parent", SessionStatus::Running, "colonizer/issue-1-live"),
-            parent_colony("dead-parent", SessionStatus::Failed, ""),
             waiting,
             doomed,
         ];
@@ -2654,9 +2776,9 @@ mod tests {
         let held = sessions.iter().find(|s| s.id == "waits").unwrap();
         assert_eq!(held.status, SessionStatus::Queued, "its parent is still running");
         let retired = sessions.iter().find(|s| s.id == "doomed").unwrap();
-        assert_eq!(retired.status, SessionStatus::Failed, "its parent can never provide a branch");
+        assert_eq!(retired.status, SessionStatus::Failed, "its parent's record is gone");
         let error = retired.error.as_deref().unwrap_or_default();
-        assert!(error.contains("dead-parent") && error.contains("failed"), "{error}");
+        assert!(error.contains("dead-parent") && error.contains("no colony"), "{error}");
         drop(sessions);
         let _ = std::fs::remove_dir_all(root);
     }
