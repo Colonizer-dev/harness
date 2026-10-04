@@ -53,6 +53,11 @@ pub(crate) const HOLD_TIMEOUT_REASON: &str = "hold_timeout";
 /// backoff step (issue #876): the question was abandoned and the worktree is kept.
 pub(crate) const ABANDONED_QUESTION_REASON: &str = "abandoned_question";
 
+/// The park reason a colony gets while it backs off a transient provider error (issue #980): the
+/// slot is released and [`resume_provider_retry_parked`] owns this reason alone, bringing the colony
+/// back once the attempt's delay has passed.
+pub(crate) const PROVIDER_RETRY_REASON: &str = "provider_retry";
+
 /// The attention reason stamped on a hold-parked colony whose question is above the judge's ceiling
 /// (issue #876): the backoff never resumes it, so the queue raises this once for `notify` to read as
 /// "a person has to answer this". Distinct from [`HOLD_TIMEOUT_REASON`] so [`hold_park_action`] still
@@ -66,6 +71,11 @@ pub(crate) const HOLD_RESUME_SCHEDULE: [chrono::Duration; 3] = [
     chrono::Duration::hours(3),
     chrono::Duration::hours(9),
 ];
+
+/// The delay before each automatic retry after a transient provider error (issue #980), indexed by
+/// the attempt already spent (`provider_retries - 1`) and measured from the park's `at`: 2, 5, 10
+/// then 20 minutes. Four entries, so at most four retries before the colony is held for a person.
+pub(crate) const PROVIDER_RETRY_SCHEDULE_MINUTES: [i64; 4] = [2, 5, 10, 20];
 
 /// The one-shot note a backoff resume hands the agent (issue #876): the question timed out unanswered,
 /// so it should pick the safe option itself and say what it chose.
@@ -112,6 +122,21 @@ pub(crate) fn hold_expired(session: &Session, now: DateTime<Utc>, timeout: chron
 /// record.
 pub(crate) fn hold_parked(s: &Session) -> bool {
     s.status == SessionStatus::Parked && s.parked.as_ref().is_some_and(|p| p.reason == HOLD_TIMEOUT_REASON)
+}
+
+/// Whether a colony parked by the automatic provider-error retry (issue #980) is due to resume at
+/// `now`: it is parked for [`PROVIDER_RETRY_REASON`] and the delay for the attempt it is backing off
+/// (`provider_retries - 1` into [`PROVIDER_RETRY_SCHEDULE_MINUTES`]) has passed since the park's
+/// `at`. Pure, so the backoff is testable apart from the tick that acts on it.
+pub(crate) fn provider_retry_due(s: &Session, now: DateTime<Utc>) -> bool {
+    if s.status != SessionStatus::Parked {
+        return false;
+    }
+    let Some(park) = s.parked.as_ref().filter(|p| p.reason == PROVIDER_RETRY_REASON) else {
+        return false;
+    };
+    let idx = (s.provider_retries.saturating_sub(1) as usize).min(PROVIDER_RETRY_SCHEDULE_MINUTES.len() - 1);
+    now >= park.at + chrono::Duration::minutes(PROVIDER_RETRY_SCHEDULE_MINUTES[idx])
 }
 
 /// What the queue does with a hold-parked colony on one tick (issue #876), decided as a pure function
@@ -431,6 +456,9 @@ pub(crate) async fn start_queued(app: &Shared) {
     // the parks above so a colony just parked is not yet due; the resumes queue behind the slot
     // rules like any other.
     resume_hold_parked(app).await;
+    // Colonies parked by the automatic provider-error retry (issue #980) whose backoff step is due
+    // resume on this same tick, after the parks above.
+    resume_provider_retry_parked(app).await;
     // Colonies whose question has waited past the grace period suspend on this same tick, ahead of
     // admission, for the same reason: the slots they release are visible below (issue #562).
     suspend_waiting_colonies(app, &modules).await;
@@ -728,6 +756,48 @@ pub(crate) async fn resume_hold_parked(app: &Shared) {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Resumes every colony parked by the automatic provider-error retry (issue #980) whose backoff step
+/// is due, on the same tick as [`resume_hold_parked`]: the colony is brought back through
+/// `lifecycle::resume`, queuing behind the slot rules like any other resume. `provider_retries` is the
+/// 1-based attempt the park was taken for and is indexed by [`provider_retry_due`]; nothing here bumps
+/// it — events.rs owns the counter, and only a successful turn or the final give-up resets it.
+pub(crate) async fn resume_provider_retry_parked(app: &Shared) {
+    let now = Utc::now();
+    let ids: Vec<String> = {
+        let sessions = app.sessions.read().await;
+        sessions
+            .iter()
+            // Issue #673: a merge covered this colony's work — it stays parked until it is kept.
+            .filter(|s| !crate::supersede::blocks_start(s))
+            .filter(|s| provider_retry_due(s, now))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    for id in ids {
+        // The id came from an earlier read snapshot, so re-check it under the lock right before
+        // resuming, exactly as `resume_hold_parked` does above: an operator may have stopped or
+        // answered the colony in between, and `can_resume` still admits a `Stopped` colony
+        // (lifecycle.rs), so without this the sweep would boot one the operator just stopped. A
+        // colony no longer parked for the retry, or no longer due, is left alone — `resume` on its
+        // own does not know this reason. A refusal (a race, a supersession, a failed rotation)
+        // leaves it parked; the next tick looks again.
+        let still_due = app
+            .update_session(&id, |x| provider_retry_due(x, now))
+            .await
+            .is_some_and(|(_, due)| due);
+        if !still_due {
+            continue;
+        }
+        if crate::lifecycle::resume(State(app.clone()), Path(id.clone()), None)
+            .await
+            .is_ok()
+        {
+            app.session_log(&id, "info", "resuming automatically after a transient provider error".into())
+                .await;
         }
     }
 }
@@ -1510,6 +1580,24 @@ mod tests {
         s
     }
 
+    /// A colony parked by the automatic provider-error retry (issue #980): parked with the retry
+    /// reason, a kept worktree, and `attempts` retries already recorded.
+    fn provider_retry_parked_colony(id: &str, attempts: u32, at: chrono::DateTime<chrono::Utc>) -> Session {
+        let mut s = colony("acme", SessionStatus::Parked);
+        s.id = id.into();
+        s.git_admin_dir = Some("git".into());
+        s.attention = Some(json!({"reason": PROVIDER_RETRY_REASON, "nudges": 0}));
+        s.parked = Some(crate::sessions::Park {
+            at,
+            reason: PROVIDER_RETRY_REASON.into(),
+            resets_at: None,
+            vm_kept: false,
+            question_risk: None,
+        });
+        s.provider_retries = attempts;
+        s
+    }
+
     /// An autonomy judge with `ceiling` as its risk ceiling.
     fn judge_at(ceiling: QuestionRisk) -> crate::autonomy::Judge {
         crate::autonomy::Judge {
@@ -1605,6 +1693,40 @@ mod tests {
             s.attention = Some(attention);
             assert!(!hold_expired(&s, now, timeout), "an ambiguous hold keeps its slot");
         }
+    }
+
+    /// Issue #980: a colony parked by the provider-error retry resumes only once the backoff step for
+    /// the attempt it is on has elapsed — 2, 5, 10 then 20 minutes from the park — and no other park
+    /// or live colony is swept up by the retry resume.
+    #[test]
+    fn a_provider_retry_park_is_due_only_after_its_backoff_step() {
+        let now = Utc::now();
+        for (attempt, minutes) in [(1u32, 2i64), (2, 5), (3, 10), (4, 20)] {
+            let just_parked = provider_retry_parked_colony("abc", attempt, now);
+            assert!(
+                !provider_retry_due(&just_parked, now),
+                "attempt {attempt} is not due the moment it parks"
+            );
+            assert!(
+                !provider_retry_due(&just_parked, now + chrono::Duration::minutes(minutes - 1)),
+                "attempt {attempt} is not due a minute early"
+            );
+            assert!(
+                provider_retry_due(&just_parked, now + chrono::Duration::minutes(minutes)),
+                "attempt {attempt} is due after {minutes} min"
+            );
+        }
+        let other = hold_parked_colony("abc", None, 0, now);
+        assert!(
+            !provider_retry_due(&other, now + chrono::Duration::hours(1)),
+            "a hold park is not a retry park"
+        );
+        let mut idle = colony("acme", SessionStatus::Idle);
+        idle.provider_retries = 1;
+        assert!(
+            !provider_retry_due(&idle, now + chrono::Duration::hours(1)),
+            "a live colony is never due"
+        );
     }
 
     #[test]
@@ -2471,6 +2593,43 @@ mod tests {
             p.git_admin_dir.is_some() && !p.cleaned_up,
             "the worktree is kept for a person to resume"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #980: the sweep itself (not just the `provider_retry_due` predicate) resumes a due
+    /// provider-retry park — queuing behind the fillers — and leaves a not-yet-due one parked with
+    /// its attempt count untouched.
+    #[tokio::test]
+    async fn a_due_provider_retry_park_resumes_and_a_pending_one_is_left() {
+        let root = std::env::temp_dir().join(format!("colonizer-provider-retry-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let due_at = Utc::now() - chrono::Duration::minutes(3);
+        let mut sessions = vec![
+            provider_retry_parked_colony("due", 1, due_at),
+            // Attempt 1's 2-minute step has not passed for this one.
+            provider_retry_parked_colony("pending", 1, Utc::now()),
+        ];
+        for i in 0..3 {
+            let mut f = colony("acme", SessionStatus::Running);
+            f.id = format!("filler-{i}");
+            sessions.push(f);
+        }
+        *app.sessions.write().await = sessions;
+        for id in ["due", "pending"] {
+            tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();
+        }
+        resume_provider_retry_parked(&app).await;
+        let due = app.session("due").await.unwrap();
+        assert_eq!(
+            due.status,
+            SessionStatus::Queued,
+            "the due retry resumes (queues behind the fillers)"
+        );
+        assert!(due.parked.is_none(), "the park goes with the resume");
+        assert_eq!(due.provider_retries, 1, "the sweep never changes the attempt count");
+        let pending = app.session("pending").await.unwrap();
+        assert_eq!(pending.status, SessionStatus::Parked, "a not-yet-due retry stays parked");
+        assert!(pending.parked.is_some(), "its park record is untouched");
         let _ = std::fs::remove_dir_all(root);
     }
 

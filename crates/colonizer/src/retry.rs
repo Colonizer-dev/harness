@@ -106,6 +106,10 @@ pub fn classify(message: &str) -> FailureClass {
         "connection timed out",
         "timed out",
         "timeout",
+        // A provider the router cannot reach is a blip, whatever 5xx it came in on: the agent
+        // runner's own wording for it is "502 model router: <provider> is unreachable" (issue #980),
+        // which carries no "network" and so is not `github::is_transient`'s "network is unreachable".
+        "unreachable",
     ];
     if TRANSIENT.iter().any(|m| text.contains(m)) || crate::github::is_transient(message) {
         return FailureClass::TransientInfra;
@@ -134,6 +138,8 @@ mod tests {
             "HTTP 503 service unavailable",
             "upstream gateway returned HTTP 529",
             "the model is overloaded, please try again",
+            // Issue #980: the agent runner's own wording for a provider the router could not reach.
+            "API Error: 502 model router: Anthropic is unreachable",
             "boot interrupted by restart",
             // `github::is_transient`'s own network shapes.
             "error connecting to api.github.com",

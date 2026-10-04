@@ -460,6 +460,17 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
     chrono::Duration::minutes(setting_u64(&modules.sandbox, &schema, "hold_timeout_minutes").clamp(1, 1440) as i64)
 }
 
+/// How many times autopilot retries automatically after a turn dies on a *transient* provider error
+/// before it holds the colony for a person (issue #980), from the watchdog module. Zero turns the
+/// automatic retry off: the first transient error holds at once, the pre-#980 behaviour. Clamped
+/// where read, into the range the save path enforces: modules.json is not re-validated on load and a
+/// provider this build doesn't ship resolves to no schema at all, so the clamp is literal and an
+/// absent value the minimum.
+pub(crate) fn provider_retry_max_attempts(modules: &ModulesConfig) -> u64 {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    setting_u64(&modules.watchdog, &schema, "provider_retry_max_attempts").min(4)
+}
+
 /// Whether colonies waiting on a user answer are suspended once the grace period below passes, from
 /// the sandbox module. On by default: the suspension keeps the question answerable, so it only frees
 /// a slot early. A module config written before the setting existed reads the schema default.
@@ -1461,6 +1472,30 @@ mod tests {
         // A hand-edited 0 is no timeout at all, so it reads as the smallest real one.
         configured.sandbox.settings.insert("hold_timeout_minutes".into(), json!(0));
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
+    }
+
+    /// Issue #980: the automatic-retry budget reads the watchdog setting, defaults to four, and a
+    /// hand-edited value never exceeds the schema's range.
+    #[test]
+    fn the_provider_retry_budget_reads_the_watchdog_setting_with_a_default_of_four() {
+        let modules = ModulesConfig::default();
+        assert_eq!(provider_retry_max_attempts(&modules), 4, "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_max_attempts".into(), json!(1));
+        assert_eq!(provider_retry_max_attempts(&configured), 1, "the operator's word wins");
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_max_attempts".into(), json!(0));
+        assert_eq!(provider_retry_max_attempts(&configured), 0, "zero turns the retry off");
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_max_attempts".into(), json!(99));
+        assert_eq!(provider_retry_max_attempts(&configured), 4, "clamped to the schema range");
     }
 
     /// Parking discards the microVM unless the operator said otherwise, and a value the schema
