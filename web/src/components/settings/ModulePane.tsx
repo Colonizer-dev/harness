@@ -16,6 +16,44 @@ import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestR
 
 const MODEL_KEYS = new Set(["model", "subagent_model", "background_model"]);
 
+// The risk classes above `workspace_write`: saving autonomy that answers them is worth one more
+// look, because the model is then settling what other people see, or something near a key.
+const RISKY_CEILINGS = new Set(["publish_affecting", "credential_adjacent"]);
+
+/**
+ * The confirm a save needs when autonomy would answer questions above `workspace_write` (issue
+ * #776), or `null` when nothing needs confirming. An autonomy that is off does not: there is no
+ * answer to make. Pure, so the test pins the wording and the one case that matters — the ceiling.
+ */
+export function riskConfirmation(provider: string, enabled: boolean, settings: Record<string, unknown>): string | null {
+  if (!enabled || (provider !== "judge" && provider !== "full_autonomy")) return null;
+  const ceiling = String(settings.risk_ceiling ?? "");
+  if (!RISKY_CEILINGS.has(ceiling)) return null;
+  const risk = ceiling.replace(/_/g, " ");
+  return provider === "full_autonomy"
+    ? `Full autonomy will answer every question up to ${risk}, with no answer limit, for as long as a colony runs. Continue?`
+    : `The judge will answer questions up to ${risk} — what other people see, or something near a key. Continue?`;
+}
+
+/**
+ * The warning shown when Full autonomy (YOLO) is picked (issue #776): what it does, and the
+ * guardrails that still hold. Loud on purpose — it is the one autonomy setting that never stops to
+ * ask a person.
+ */
+export function FullAutonomyWarning() {
+  return (
+    <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+      <p className="font-medium">Full autonomy: a model answers every question, with no answer limit.</p>
+      <p className="mt-1 [overflow-wrap:anywhere]">
+        Every question a colony stops to ask, at or below the risk ceiling, is settled by the model you name — however many it
+        takes, so a long task runs to the end without you. It still never overrides a denial, never picks a label the agent did
+        not offer, and the sandbox, egress and path policies hold. Every answer is logged as the judge's. Needs a model from a
+        Model provider: the Claude login cannot be used.
+      </p>
+    </div>
+  );
+}
+
 function ImagePullRow({ pull }: { pull: ImagePull }) {
   const { status, error, start } = pull;
   // Re-render once a second while pulling so the elapsed time moves.
@@ -139,6 +177,10 @@ export function ModulePane({
   }, [module.kind, loadJudge]);
 
   const save = async (anyway = false) => {
+    // Autonomy above workspace_write asks the operator once before it runs (#776). Turning a save
+    // into a no-op when they decline is the whole point: nothing is sent.
+    const confirm = riskConfirmation(draft.provider, draft.enabled, draft.settings);
+    if (confirm !== null && !window.confirm(confirm)) return;
     setSaving(true);
     try {
       const saved = await api.saveModule(module.kind, {
@@ -237,8 +279,9 @@ export function ModulePane({
           <ImagePullRow pull={pull} />
         </div>
       )}
-      {module.kind === "autonomy" && (judge !== null || saveError !== null) && (
+      {module.kind === "autonomy" && (judge !== null || saveError !== null || draft.provider === "full_autonomy") && (
         <div className="mb-3 flex flex-col gap-2">
+          {draft.provider === "full_autonomy" && <FullAutonomyWarning />}
           {judge && <AutonomyHealth status={judge} />}
           {saveError && (
             <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">

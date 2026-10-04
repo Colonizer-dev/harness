@@ -30,7 +30,11 @@ use anyhow::{Context, Result};
 use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 /// How long a judged reply may be: a label and a sentence, not an essay.
 const MAX_TOKENS: u64 = 1_024;
@@ -167,11 +171,35 @@ pub struct Judge {
     pub fallback_models: Vec<String>,
     /// Minutes a question waits for a person first. Zero answers as soon as it is seen.
     pub after_minutes: u64,
-    pub max_answers: u64,
+    /// Judged answers allowed per colony. `None` is full autonomy: no cap, so every question at or
+    /// below the ceiling is answered until a person is needed for another reason.
+    pub max_answers: Option<u64>,
     pub free_text: bool,
     /// The highest risk class the judge may answer (protocol.rs `QuestionRisk`): anything above it
     /// waits for the person however long.
     pub risk_ceiling: QuestionRisk,
+}
+
+/// The `judged` mark that means "leave this colony's questions for a person": past any cap, and —
+/// for a judge with no cap at all (`max_answers: None`, full autonomy) — the value the transport
+/// give-up stamps, so three unreachable calls still hand the colony back to a person.
+const NO_MORE_ANSWERS: u64 = u64::MAX;
+
+impl Judge {
+    /// Whether a colony has spent its autonomous answers: past the cap, or, with no cap, stamped by
+    /// the transport give-up (`NO_MORE_ANSWERS`), which is the only stop a full-autonomy judge has.
+    pub fn answers_spent(&self, judged: u64) -> bool {
+        match self.max_answers {
+            Some(max) => judged >= max,
+            None => judged == NO_MORE_ANSWERS,
+        }
+    }
+
+    /// The value a colony's `judged` is stamped with when it is left to a person: its cap, or
+    /// [`NO_MORE_ANSWERS`] for a judge with none.
+    pub fn spent_mark(&self) -> u64 {
+        self.max_answers.unwrap_or(NO_MORE_ANSWERS)
+    }
 }
 
 /// The judge this install is configured with, or `None` when autonomous mode is off or has no model.
@@ -182,10 +210,13 @@ pub fn judge(modules: &ModulesConfig, agents: &[crate::modules::AgentModule]) ->
 /// The judge one module choice describes, or `None` when it is off or has no model. Split from
 /// [`judge`] so the save-time check can describe a choice that is not stored yet.
 pub(crate) fn judge_of(choice: &ModuleChoice, agents: &[crate::modules::AgentModule]) -> Option<Judge> {
-    if !choice.enabled || choice.provider != "judge" {
+    // `full_autonomy` is the judge with no answer cap (issue #776): same decision path, same
+    // ceiling, no `max_answers`.
+    let full = choice.provider == "full_autonomy";
+    if !choice.enabled || (choice.provider != "judge" && !full) {
         return None;
     }
-    let schema = schema_for("autonomy", "judge", agents);
+    let schema = schema_for("autonomy", &choice.provider, agents);
     let model = setting_str(choice, &schema, "model").trim().to_string();
     if model.is_empty() {
         return None;
@@ -195,11 +226,28 @@ pub(crate) fn judge_of(choice: &ModuleChoice, agents: &[crate::modules::AgentMod
         model,
         fallback_models: model_list(&setting_str(choice, &schema, "fallback_models")),
         after_minutes: setting_u64(choice, &schema, "after_minutes"),
-        max_answers: setting_u64(choice, &schema, "max_answers"),
+        max_answers: (!full).then(|| setting_u64(choice, &schema, "max_answers")),
         free_text: choice.settings.get("free_text").and_then(Value::as_bool).unwrap_or(false),
         risk_ceiling: QuestionRisk::from_wire(risk_ceiling),
     })
 }
+
+/// Whether autonomous mode is switched on but has no model. [`judge`] is `None` for this exactly as
+/// for off, so a question would wait with no word about why — the status endpoint and the tick's
+/// one log line both read it through here (issue #776).
+pub(crate) fn missing_model(modules: &ModulesConfig, agents: &[crate::modules::AgentModule]) -> bool {
+    modules.autonomy.as_ref().is_some_and(|choice| {
+        choice.enabled && matches!(choice.provider.as_str(), "judge" | "full_autonomy") && judge_of(choice, agents).is_none()
+    })
+}
+
+/// The one way "autonomy on" can still be silent: no model. Plain enough to be the whole message in
+/// the cockpit's status line and in the log's single line.
+const MISSING_MODEL: &str = "Autonomous mode is on but has no model: add a Model provider in Settings → Model providers and name one of its models here — the judge can't use the Claude login.";
+
+/// Set once the "on with no model" line has been logged, so the thirty-second tick says it once, not
+/// every thirty seconds.
+static MISSING_MODEL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// A comma-separated list of model ids as the ordered list it means: whitespace trimmed, empty
 /// entries dropped. The stored shape is a string because it sits beside `model`, a string.
@@ -900,7 +948,15 @@ pub async fn run(app: Shared) {
 /// exactly one tick without the thirty-second interval.
 pub(crate) async fn tick_once(app: &Shared) {
     let modules = app.modules.read().await.clone();
-    let Some(judge) = judge(&modules, &app.agents) else { return };
+    let Some(judge) = judge(&modules, &app.agents) else {
+        // On with no model reads as `judge() == None`, exactly like off, and the question then waits
+        // with no word about why. The cockpit shows it in the status line; the log says it once, not
+        // every thirty seconds (issue #776).
+        if missing_model(&modules, &app.agents) && !MISSING_MODEL_LOGGED.swap(true, Ordering::Relaxed) {
+            eprintln!("autonomy: {MISSING_MODEL}");
+        }
+        return;
+    };
     let sessions = app.sessions.read().await.clone();
     for s in sessions {
         if s.status != SessionStatus::WaitingForAnswer {
@@ -953,15 +1009,19 @@ pub(crate) async fn tick_once(app: &Shared) {
             .await;
             continue;
         };
-        if judged >= judge.max_answers {
+        if judge.answers_spent(judged) {
+            let used = match judge.max_answers {
+                Some(max) => format!("all {max} of its autonomous answers"),
+                // With no cap a person is reached only once the colony is left to them — by the
+                // transport give-up or by a refusal, both of which stamp `judged` (issue #776) — so
+                // name the cause neither way.
+                None => "up its autonomy".to_string(),
+            };
             skip_log(
                 app,
                 &s.id,
                 &format!("max_answers:{question_id}"),
-                format!(
-                    "this colony has used all {} of its autonomous answers, so this question waits for you",
-                    judge.max_answers
-                ),
+                format!("this colony has used {used}, so this question waits for you"),
             )
             .await;
             continue;
@@ -1046,7 +1106,7 @@ pub(crate) async fn tick_once(app: &Shared) {
                 };
                 if escalates(&failure, failures) {
                     // Left for the person: the watchdog's own flag is what surfaces it.
-                    rt.activity.lock().await.judged = judge.max_answers;
+                    rt.activity.lock().await.judged = judge.spent_mark();
                     app.session_log_as(
                         Origin::Autonomy,
                         &s.id,
@@ -1099,7 +1159,8 @@ pub(crate) async fn check_judge(app: &Shared, choice: &ModuleChoice) -> Result<(
 }
 
 /// `GET /api/autonomy/status`: whether the judge is on, its model and fallbacks, and its health —
-/// honest when it is off (`enabled` false, `model` null).
+/// honest when it is off (`enabled` false, `model` null), and when it is on with no model
+/// (`problem`, issue #776).
 pub(crate) async fn status(State(app): State<Shared>) -> Json<Value> {
     let modules = app.modules.read().await.clone();
     let judge = judge(&modules, &app.agents);
@@ -1120,6 +1181,9 @@ pub(crate) async fn status(State(app): State<Shared>) -> Json<Value> {
         "enabled": judge.is_some(),
         "model": judge.as_ref().map(|j| j.model.clone()),
         "fallback_models": judge.as_ref().map(|j| j.fallback_models.clone()).unwrap_or_default(),
+        // On with no model is a judge that can never answer, and reads as off everywhere else;
+        // say it here so the cockpit's status line does not stay silent (issue #776).
+        "problem": missing_model(&modules, &app.agents).then_some(MISSING_MODEL),
         "last_success": last_success,
         "last_error": last_error,
         "consecutive_failures": health.consecutive_failures,
@@ -1263,6 +1327,41 @@ mod tests {
             settings,
         });
         assert!(judge(&modules, &[]).is_none(), "switched off");
+    }
+
+    #[test]
+    fn full_autonomy_is_the_judge_with_no_answer_cap_and_still_needs_a_model() {
+        use crate::config::ModuleChoice;
+        let modules = |c: ModuleChoice| ModulesConfig {
+            autonomy: Some(c),
+            ..ModulesConfig::default()
+        };
+        let choice = |model: &str, ceiling: &str| ModuleChoice {
+            provider: "full_autonomy".into(),
+            enabled: true,
+            settings: Map::from_iter([("model".into(), json!(model)), ("risk_ceiling".into(), json!(ceiling))]),
+        };
+
+        // A model is required exactly as for the judge, and the status endpoint says which way.
+        let bare = modules(choice("", "workspace_write"));
+        assert!(judge(&bare, &[]).is_none(), "no model picked yet");
+        assert!(missing_model(&bare, &[]), "on with no model, for the status line and the log");
+
+        let full = judge(&modules(choice("fable", "workspace_write")), &[]).expect("configured");
+        assert_eq!(full.max_answers, None, "no cap");
+        // Past the judge's own 5/50 the answers keep going; only the transport give-up stops it.
+        assert!(!full.answers_spent(50));
+        assert!(!full.answers_spent(u64::MAX - 1));
+        assert!(full.answers_spent(full.spent_mark()));
+
+        // The ceiling is the judge's, unchanged: what it never answered before it still leaves.
+        assert_eq!(full.risk_ceiling, QuestionRisk::WorkspaceWrite);
+        assert!(within_ceiling(QuestionRisk::WorkspaceWrite, full.risk_ceiling));
+        assert!(!within_ceiling(QuestionRisk::PublishAffecting, full.risk_ceiling));
+        assert_eq!(
+            plan(QuestionRisk::PublishAffecting, full.risk_ceiling, None, "q1"),
+            Plan::Left { announce: true }
+        );
     }
 
     #[test]

@@ -1666,7 +1666,7 @@ mod tests {
             model: "judge-model".into(),
             fallback_models: Vec::new(),
             after_minutes: 0,
-            max_answers: 3,
+            max_answers: Some(3),
             free_text: false,
             risk_ceiling: ceiling,
         }

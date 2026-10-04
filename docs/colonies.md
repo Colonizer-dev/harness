@@ -234,6 +234,17 @@ an unknown risk class counts as above every ceiling. The judge also answers to t
 [rate limits](#rate-limits-on-notifications-and-the-judge) that notifications use. The full
 contract is in [protocol.md, §6.2b Autonomous mode](protocol.md#62b-autonomous-mode-mothership).
 
+**Full autonomy (YOLO).** The second autonomy choice is the judge with no answer limit. It takes
+the same settings — `model`, `fallback_models`, `after_minutes` (default 1), `free_text` and
+`risk_ceiling` — but has no `max_answers`, so every `ask` question at or below the ceiling is
+answered for as long as the colony runs, however many that is. Everything that bounds the judge
+still bounds this: it answers only `ask` questions, only among the options the agent offered,
+never overrides a deny, and leaves anything above the ceiling for you. The sandbox, egress and
+path policies hold unchanged, and every answer is logged as the judge's. It needs a model from a
+provider under **Model providers** — the judge cannot use your Claude login — and saving a ceiling
+above `workspace_write` asks you to confirm once in the cockpit. If three judged calls in a row
+cannot reach the model, the colony still falls back to waiting for a person.
+
 ## Suspending a colony that waits for you
 
 A colony waiting for your answer keeps a microVM and a parallel slot while it does nothing. After
