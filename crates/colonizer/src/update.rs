@@ -361,10 +361,11 @@ async fn install(app: &Shared, version: &str) -> Result<String> {
     // `App::github_token` uses, so an exported-but-empty name counts as absent
     // here too. `script` is the installer in this install's own assets directory,
     // not a fresh download, so the token is not handed to anything unverified.
-    if util::env_nonempty("GH_TOKEN").is_none() && util::env_nonempty("GITHUB_TOKEN").is_none() {
-        if let Some(token) = app.github_token() {
-            command.env("GH_TOKEN", token);
-        }
+    if util::env_nonempty("GH_TOKEN").is_none()
+        && util::env_nonempty("GITHUB_TOKEN").is_none()
+        && let Some(token) = app.github_token()
+    {
+        command.env("GH_TOKEN", token);
     }
 
     let output = tokio::time::timeout(INSTALL_TIMEOUT, command.output())
