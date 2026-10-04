@@ -17,7 +17,7 @@ import shannonLogo from "../assets/hunters/shannon.jpg";
 type Step = 0 | 1 | 2;
 const STEPS = ["Hunter", "Models", "Review"] as const;
 
-/** The hunters a run can name. Only the swarm runs today; the external ones say why they cannot. */
+/** The hunters a run can name. The swarm and Shannon run today; Strix says why it cannot. */
 const HUNTERS = [
   {
     id: "swarm",
@@ -28,6 +28,8 @@ const HUNTERS = [
   { id: "strix", name: "Strix", blurb: "Open-source AI pentesting agents that validate findings with working PoCs.", logo: strixLogo },
   { id: "shannon", name: "Shannon", blurb: "Keygraph's AI pentester for web apps and APIs.", logo: shannonLogo },
 ] as const;
+
+type HunterId = (typeof HUNTERS)[number]["id"];
 
 /** What a red team is, in three lines, at the top of the wizard's first step. */
 function RedTeamIntro() {
@@ -98,6 +100,7 @@ export function WizardBody({
   onStart,
   initialStep = 0,
   initialPreset = "general",
+  initialHunter = "swarm",
 }: {
   org: string;
   onStart?: (body: StartRedTeamRunRequest) => Promise<void>;
@@ -110,6 +113,8 @@ export function WizardBody({
   initialStep?: Step;
   /** Tests pin the preset the same way. */
   initialPreset?: RedTeamPreset;
+  /** Tests pin the selected hunter the same way. */
+  initialHunter?: "swarm" | "shannon";
 }) {
   const api = useApi();
   const toast = useToast();
@@ -121,6 +126,7 @@ export function WizardBody({
   const [model, setModel] = useState("");
   const [subagentModel, setSubagentModel] = useState("");
   const [swarm, setSwarm] = useState(3);
+  const [hunter, setHunter] = useState<HunterId>(initialHunter);
   const [autofix, setAutofix] = useState(false);
   const [preset, setPreset] = useState<RedTeamPreset>(initialPreset);
   const [schedule, setSchedule] = useState<ScheduleChoice>({ every: "once" });
@@ -153,15 +159,17 @@ export function WizardBody({
     };
   }, [api, org]);
 
-  const estimate = useMemo(() => estimateCost(runs, sessions, swarm, Math.max(1, picked.length)), [runs, sessions, swarm, picked.length]);
-  const hunters = swarm * picked.length;
+  // Shannon runs one colony per repository whatever the picker says, so its swarm size is always one.
+  const swarmSize = hunter === "shannon" ? 1 : swarm;
+  const estimate = useMemo(() => estimateCost(runs, sessions, swarmSize, Math.max(1, picked.length)), [runs, sessions, swarmSize, picked.length]);
+  const hunters = swarmSize * picked.length;
   const canNext = step === 0 ? picked.length > 0 : true;
 
   const submit = async () => {
     setBusy(true);
     try {
       const cadence = toUtcCadence(schedule);
-      const shared = { hunter: "swarm", preset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarm, autofix };
+      const shared = { hunter, preset, model: model || null, subagent_model: subagentModel || null, swarm_size: swarmSize, autofix };
       if (cadence) {
         await api.createRedTeamSchedule({ org, repos: picked, cadence, ...shared });
         toast(`Red team scheduled for ${picked.length} ${picked.length === 1 ? "repository" : "repositories"} in ${org}`);
@@ -221,25 +229,30 @@ export function WizardBody({
             <Field label="Who hunts">
               <div className="grid gap-2 sm:grid-cols-3">
                 {HUNTERS.map((h) => {
-                  const runnable = h.id === "swarm";
+                  const selectable = h.id === "swarm" || h.id === "shannon";
                   const probe = probes[h.id];
-                  const note = runnable
-                    ? "Ready"
-                    : h.id === "shannon" || probe?.manifest.available === false
-                      ? "Coming soon"
-                      : probe?.installed
-                        ? "Installed · runs coming soon"
-                        : "Coming soon";
+                  const note = h.id === "shannon"
+                    ? "Ready · runs in a colony"
+                    : selectable
+                      ? "Ready"
+                      : probe?.manifest.available === false || !probe?.installed
+                        ? "Coming soon"
+                        : "Installed · runs coming soon";
                   return (
                     <button
                       key={h.id}
                       type="button"
-                      aria-pressed={runnable}
-                      disabled={!runnable}
-                      title={runnable ? undefined : `${h.name} installs and probes, but red-team runs do not drive its scans yet${probe ? ` — ${probe.probe.detail}` : ""}`}
+                      aria-pressed={selectable && hunter === h.id}
+                      disabled={!selectable}
+                      onClick={() => selectable && setHunter(h.id)}
+                      title={selectable ? undefined : `${h.name} installs and probes, but red-team runs do not drive its scans yet${probe ? ` — ${probe.probe.detail}` : ""}`}
                       className={cx(
                         "flex flex-col gap-1 rounded-xl border p-3 text-left",
-                        runnable ? "cursor-default border-accent bg-accent-soft" : "cursor-not-allowed border-border bg-panel-2 opacity-70",
+                        !selectable
+                          ? "cursor-not-allowed border-border bg-panel-2 opacity-70"
+                          : hunter === h.id
+                            ? "cursor-pointer border-accent bg-accent-soft"
+                            : "cursor-pointer border-border bg-panel-2 hover:border-text/30",
                       )}
                     >
                       <span className="flex items-center justify-between gap-2 text-[13.5px] font-semibold">
@@ -253,7 +266,7 @@ export function WizardBody({
                           )}
                           <span className="truncate">{h.name}</span>
                         </span>
-                        <span className={cx("rounded-full px-1.5 py-px text-[10.5px] font-medium", runnable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
+                        <span className={cx("rounded-full px-1.5 py-px text-[10.5px] font-medium", selectable ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{note}</span>
                       </span>
                       <span className="text-[12px] leading-snug text-muted">{h.blurb}</span>
                     </button>
@@ -319,9 +332,13 @@ export function WizardBody({
             <Field label="Subagent model" hint="What the hunters delegate reading and reproduction to.">
               <ModelPicker value={subagentModel} onChange={setSubagentModel} models={models} emptyLabel="Agent default" ariaLabel="Subagent model" />
             </Field>
-            <Field label={`Hunters per repository: ${swarm}`} hint="Each hunter is a full colony with its own microVM and focus area.">
-              <input type="range" min={1} max={8} value={swarm} onChange={(e) => setSwarm(Number(e.target.value))} aria-label="Hunters per repository" className="w-full accent-[var(--accent)]" />
-            </Field>
+            {hunter === "shannon" ? (
+              <p className="text-[12.5px] leading-snug text-muted">Shannon runs one colony per repository; there is no swarm size to set.</p>
+            ) : (
+              <Field label={`Hunters per repository: ${swarm}`} hint="Each hunter is a full colony with its own microVM and focus area.">
+                <input type="range" min={1} max={8} value={swarm} onChange={(e) => setSwarm(Number(e.target.value))} aria-label="Hunters per repository" className="w-full accent-[var(--accent)]" />
+              </Field>
+            )}
           </div>
         )}
 
@@ -330,7 +347,7 @@ export function WizardBody({
             <div role="note" className="rounded-xl border border-warn/40 bg-warn/10 p-3.5 text-[13px] leading-snug">
               <p className="font-semibold text-warn">Red-team runs are expensive</p>
               <p className="mt-1 text-text">
-                This starts {hunters} autonomous {hunters === 1 ? "colony" : "colonies"} ({swarm} per repository × {picked.length}), each in long sessions reading and reproducing code
+                This starts {hunters} autonomous {hunters === 1 ? "colony" : "colonies"} ({swarmSize} per repository × {picked.length}), each in long sessions reading and reproducing code
                 {schedule.every === "once" ? "" : `, and repeats ${schedule.every === "weekly" ? "every week" : "every month"} until you switch the schedule off`}.
               </p>
               <p className="mt-1 text-muted">

@@ -242,7 +242,9 @@ pub async fn handle(
     let (used, nudges, last) = match &rt {
         Some(rt) => {
             let activity = rt.activity.lock().await;
-            (activity.recoveries, activity.nudges, activity.last)
+            // `progress_reference`, not `last`: a hint loop's retries keep `last` moving, and
+            // "how long since progress" must not report the retry time (issue #609).
+            (activity.recoveries, activity.nudges, activity.progress_reference())
         }
         None => (0, 0, Utc::now()),
     };

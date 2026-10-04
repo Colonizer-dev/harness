@@ -1825,6 +1825,7 @@ mod tests {
             reason: "provider_quota_exhausted".into(),
             resets_at: None,
             vm_kept: false,
+            question_risk: None,
         });
         let (allowed, was_live) = claim_publish(&mut s);
         assert!(allowed && !was_live, "a parked colony publishes cold, like a stopped one");

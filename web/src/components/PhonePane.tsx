@@ -8,15 +8,15 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 
 import { errorMessage, useApi, useToast } from "../context";
+import { chosenOrigin } from "../phoneOrigins";
 import type { PhoneInvite, PhoneOrigin, Phones } from "../types";
 import { QrCode, expiryText } from "./RemoteAccessPane";
 import { Pane } from "./SettingsDialog";
 import { Button, Spinner, inputClass, timeAgo } from "./ui";
 
-/** The origin the QR names: the first reachable one, else the first origin at all — the warnings below explain an unreachable pick. */
-export function chosenOrigin(origins: readonly PhoneOrigin[]): PhoneOrigin | null {
-  return origins.find((origin) => origin.reachable) ?? origins[0] ?? null;
-}
+// Re-exported for the callers that import it from here; the pick itself lives in ../phoneOrigins so
+// the Your cockpit card can share it without importing this pane.
+export { chosenOrigin };
 
 /** The url a phone camera gets: the invite in the query, on the origin's base. */
 export function inviteUrl(origin: Pick<PhoneOrigin, "url">, code: string): string {

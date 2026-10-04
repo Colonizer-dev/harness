@@ -284,7 +284,7 @@ pub(crate) async fn record(app: &App, entry: Entry) {
     record_with_limit(app, entry, ROTATE_BYTES).await;
 }
 
-async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
+pub(crate) async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
     let data_dir = app.cfg.data_dir.clone();
     let mut next = app.activity.next_seq.lock().await;
     let seq = match *next {

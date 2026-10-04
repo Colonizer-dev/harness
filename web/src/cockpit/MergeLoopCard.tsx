@@ -15,6 +15,7 @@ const TONE: Record<MergeLoopAction, Tone> = {
   rebased: "info",
   rerun: "info",
   redo_dispatched: "accent",
+  resolving: "accent",
   red: "err",
   needs_redo: "warn",
   waiting: "neutral",
@@ -150,6 +151,7 @@ export function MergeLoopPanel({
               ["self_heal", "Self-heal a red main (re-run once, then a fix colony)"],
               ["revert_on_red", "…by reverting the train's own merge instead"],
               ["redo_on_conflict", "Redo colony for a conflicting rebase"],
+              ["resolve_conflicts", "Resolve conflicts with the colony (merge main in, never rebase)"],
             ] as const
           ).map(([key, text]) => (
             <label key={key} className="flex items-center gap-2">

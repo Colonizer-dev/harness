@@ -127,8 +127,36 @@ main() {
   previous=$(readlink "$app" || true)
   slot=$name-a
   [ "$previous" != "$name-a" ] || slot=$name-b
+  inuse=$(slot_pids "$dir/$slot")
+  [ -z "$inuse" ] ||
+    fail "$dir/$slot is in use by pid(s) $inuse; restart colonizer (or wait for 'colonizer update') then install again"
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
+
+  # The macOS Keychain ties each saved secret to the binary that wrote it, so an ad-hoc signed app
+  # loses that access the moment an update replaces it — and a mothership updating in place passes its
+  # own environment, which a cockpit-started update usually does not carry COLONIZER_CODESIGN_IDENTITY
+  # in. When an identity is known — the variable, or the one a previous install recorded beside the
+  # app — the new binary is signed before the switch, so the Keychain grant survives. A signing
+  # failure removes the new slot and stops before the switch: the old version, which the Keychain
+  # knows, stays installed and $app keeps pointing at it.
+  identity=${COLONIZER_CODESIGN_IDENTITY:-}
+  from_env=0
+  if [ -n "$identity" ]; then
+    from_env=1
+  elif [ -f "$dir/codesign-identity" ]; then
+    identity=$(cat "$dir/codesign-identity" 2>/dev/null || true)
+  fi
+  signed=0
+  if [ -n "$identity" ] && [ "$(uname -s)" = Darwin ]; then
+    say "signing colonizer as $identity"
+    if ! codesign --force --sign "$identity" --identifier dev.colonizer.mothership \
+         --timestamp=none "$dir/$slot/bin/colonizer"; then
+      rm -rf "${dir:?}/$slot"
+      fail "codesign failed for '$identity'; without it the macOS Keychain would ask for every saved secret again. Nothing was changed: the previous version is still installed."
+    fi
+    signed=1
+  fi
 
   if [ -L "$app" ] || [ ! -e "$app" ]; then
     relink "$slot" "$app"
@@ -141,16 +169,37 @@ main() {
     parked=
     rm -rf "$app.old"
   fi
+
+  # Remember an identity that came in the environment, so an update started from the cockpit — whose
+  # installer child has no environment of its own — re-signs too. Written beside the app and renamed
+  # into place, so a reader never sees a half-written name. An identity that was only read back from
+  # this file is already in it. Delete the file to stop re-signing.
+  if [ "$from_env" = 1 ] && [ "$signed" = 1 ]; then
+    printf '%s\n' "$identity" > "$dir/codesign-identity.new"
+    mv -f "$dir/codesign-identity.new" "$dir/codesign-identity"
+  fi
+
   # Colonies mount vendored plugins straight out of the slot the mothership was
   # started from (sessions.rs resolves its assets through current_exe, which
   # canonicalises the symlink away), so removing it under a running colony takes
   # its plugins with it. An update applied by a running mothership sets
   # COLONIZER_KEEP_PREVIOUS=1 and cleans the slot up itself, once nothing is
-  # using it. A person running the installer by hand keeps today's behaviour.
+  # using it. A person running the installer by hand keeps today's behaviour,
+  # except that a slot a process is still running from is never removed either:
+  # the mothership's own sweep knows when colonies have let go of it.
   if [ "${COLONIZER_KEEP_PREVIOUS:-0}" = 1 ]; then
     case "$previous" in "$name-a" | "$name-b") say "keeping the previous version at $dir/$previous" ;; esac
   else
-    case "$previous" in "$name-a" | "$name-b") rm -rf "${dir:?}/$previous" ;; esac
+    case "$previous" in
+      "$name-a" | "$name-b")
+        prev_inuse=$(slot_pids "$dir/$previous")
+        if [ -n "$prev_inuse" ]; then
+          say "keeping the previous version at $dir/$previous: pid(s) $prev_inuse still run from it (swept on the next start)"
+        else
+          rm -rf "${dir:?}/$previous"
+        fi
+        ;;
+    esac
   fi
 
   mkdir -p "$HOME/.local/bin"
@@ -222,6 +271,38 @@ relink() {
     { rm -f "$2.new"; ln -sfn "$1" "$2"; }
 }
 
+# The pids whose command line, or whose real executable, lives under $1 (used as a path prefix, so
+# pass the slot directory). A slot is only safe to delete when nothing executes from it — the
+# mothership, or a boot's msb. The mothership is started through a symlink outside the slot
+# (~/.local/bin/colonizer, the unit's ExecStart, or $dir/app/bin/colonizer after an update restarts
+# itself), so `ps` shows the symlink, not the slot: on Linux every /proc/<pid>/exe link is resolved
+# with readlink, and on macOS the text segment lsof reports is mapped back to pids when lsof is
+# installed. Errors (a vanished pid, a kernel thread, another user's process) are ignored. The argv
+# match stays, for anything that execs from the slot directly. Both use a trailing-slash prefix so
+# `app-a` does not match `app-ab`; our own shell is dropped so the walk cannot report the installer
+# itself. `ps -ww -axo` is Linux and macOS. Mirrors the same helper in scripts/install.sh.
+slot_pids() {
+  slot=${1%/}/
+  # The ps table is read before awk matches it, so awk is not in its own snapshot.
+  ps_out=$(ps -ww -axo pid=,command= 2>/dev/null || true)
+  argv_pids=$(printf '%s\n' "$ps_out" | awk -v p="$slot" 'index($0, p) { print $1 }')
+  exe_pids=
+  if [ -d /proc ]; then
+    exe_pids=$(for link in /proc/[0-9]*/exe; do
+      real=$(readlink "$link" 2>/dev/null) || continue
+      case "$real" in
+        ("$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
+      esac
+    done)
+  elif command -v lsof >/dev/null 2>&1; then
+    exe_pids=$(lsof -nP -d txt -Fpn 2>/dev/null | awk -v p="$slot" '
+      /^p/ { pid = substr($0, 2) }
+      /^n/ { if (index(substr($0, 2), p) == 1) print pid }')
+  fi
+  printf '%s\n%s\n' "$argv_pids" "$exe_pids" |
+    awk -v self="$$" 'NF && $1 != self && !seen[$1]++ { printf "%s%s", (n++ ? " " : ""), $1 }'
+}
+
 # The checksums say the archive matches SHA256SUMS, and SHA256SUMS comes from the same release as the
 # archive, so together they only rule out a corrupted download: whoever can rewrite the release assets
 # can rewrite both. The release workflow also signs SHA256SUMS itself with Sigstore and logs that in a
@@ -231,14 +312,15 @@ relink() {
 #
 # Plain sh cannot verify a Sigstore bundle, so this needs gh, and when the check cannot reach a
 # verdict it is skipped with a note and the checksum-verified install goes on: gh missing, a gh from
-# before `gh attestation verify` existed, a COLONIZER_RELEASE_URL download, which the official repo's
-# attestation says nothing about, or a release that carries no attestation at all — every release
-# published before this check existed, which gh answers with "no attestations found".
+# before `gh attestation verify` existed, a gh installed but not logged in (the common case on a
+# headless host, which would otherwise fail every update), a COLONIZER_RELEASE_URL download, which the
+# official repo's attestation says nothing about, or a release that carries no attestation at all —
+# every release published before this check existed, which gh answers with "no attestations found".
 # COLONIZER_REQUIRE_ATTESTATION=1 turns those skips into failures. A check that ran and found
-# something wrong is a different thing and is fatal whatever the variable says: gh answered, and its
-# answer is that these checksums are not the ones the workflow signed. The downloads only just
-# succeeded over this network, so any other gh failure here is read as that answer, not as the
-# network being down.
+# something wrong is a different thing and is fatal whatever the variable says: a logged-in gh
+# answered, and its answer is that these checksums are not the ones the workflow signed. The downloads
+# only just succeeded over this network, so any other gh failure the auth probe below does not explain
+# is read as that answer, not as the network being down.
 #
 # "No attestations found" is a skip, not that failure: it means gh found no provenance to check, not
 # that the provenance is wrong — the state of every release published before this step existed. Nor
@@ -275,6 +357,13 @@ verify_provenance() {
       # An unattested release, not a wrong one — see the comment above the function for why this is
       # not a downgrade an attacker can steer a tampered file into.
       why="$(basename "$file") carries no build provenance; that is expected for releases published before the release workflow began signing, and would mean something was wrong on a current one"
+    elif printf '%s\n' "$out" | grep -qi 'gh auth login' || ! gh auth status >/dev/null 2>&1; then
+      # gh ran but could not reach a verdict because it has no credentials — the common case on a
+      # headless host, and a skip, not a rejection: it never fetched the attestation to reject it. gh
+      # points at `gh auth login` when it is not logged in; `gh auth status` confirms it when a gh
+      # words the failure differently. Only a gh that could have looked and disagreed — the branch
+      # below — is the wrong-signature failure.
+      why="gh is not logged in, so it cannot fetch the attestation; run 'gh auth login' or set GH_TOKEN to verify provenance"
     else
       printf '%s\n' "$out" >&2
       fail "the build attestation over $(basename "$file") does not verify: gh checked, and it is wrong — these checksums are not what $release_workflow signed; nothing was installed"

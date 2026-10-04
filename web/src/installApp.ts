@@ -48,16 +48,41 @@ export function isSafari(): boolean {
   return /Safari\//.test(ua) && !/Chrome\/|Chromium\/|Edg\//.test(ua);
 }
 
-export function setupInstallApp(): void {
-  window.addEventListener("beforeinstallprompt", (event) => {
+/**
+ * Keeps the browser's install prompt (`beforeinstallprompt`) and retires it once installed.
+ * Exported so a test can dispatch a fake event on its own EventTarget: the three pieces below are
+ * all the module state behind `useInstallPrompt`.
+ */
+export function attachInstallPrompt(target: EventTarget = window): void {
+  target.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     deferred = event as InstallPromptEvent;
     notify();
   });
-  window.addEventListener("appinstalled", () => {
+  target.addEventListener("appinstalled", () => {
     deferred = null;
     notify();
   });
+}
+
+/** Whether a deferred install prompt is waiting. */
+export function installPromptAvailable(): boolean {
+  return deferred !== null;
+}
+
+/** Shows the deferred prompt and answers how it went; false when there was none waiting. */
+export async function showInstallPrompt(): Promise<boolean> {
+  if (!deferred) return false;
+  const event = deferred;
+  await event.prompt();
+  const { outcome } = await event.userChoice;
+  deferred = null;
+  notify();
+  return outcome === "accepted";
+}
+
+export function setupInstallApp(): void {
+  attachInstallPrompt(window);
   // The service worker only in a real build served by the mothership: the dev server, the
   // in-browser mock (?mock=1) and the hosted demo have no stable /assets to cache.
   const mock = new URLSearchParams(window.location.search).has("mock");
@@ -120,18 +145,24 @@ export function useInstallPrompt(): { available: boolean; install: () => Promise
       listeners.delete(l);
     };
   }, []);
-  return {
-    available: deferred !== null,
-    install: async () => {
-      if (!deferred) return false;
-      const event = deferred;
-      await event.prompt();
-      const { outcome } = await event.userChoice;
-      deferred = null;
-      notify();
-      return outcome === "accepted";
-    },
-  };
+  return { available: installPromptAvailable(), install: showInstallPrompt };
+}
+
+/** Whether this page is running as the installed app, kept live across a display-mode change. */
+export function useStandalone(): boolean {
+  const [standalone, setStandalone] = useState(() => runningStandalone());
+  useEffect(() => {
+    let mq: MediaQueryList;
+    try {
+      mq = window.matchMedia("(display-mode: standalone)");
+    } catch {
+      return;
+    }
+    const onChange = () => setStandalone(runningStandalone());
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return standalone;
 }
 
 /** Whether an updated build is waiting to take over, a token that changes whenever the waiting

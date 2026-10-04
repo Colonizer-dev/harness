@@ -17,6 +17,7 @@
 use crate::{
     ApiResult, App, Shared, client_error, github,
     sessions::{self, Session, SessionStatus},
+    stale,
     util::{exec_within, valid_repo, write_atomic},
 };
 use anyhow::{Context, Result, bail};
@@ -595,6 +596,7 @@ pub fn merge_touched(uncommitted: Vec<String>, committed: Vec<String>) -> Vec<St
 
 async fn touched_for(app: &App, s: &Session) -> Option<Vec<String>> {
     let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let base = base_ref(app, admin, s).await;
     let mut status = app.git(admin);
     status
         .arg("--work-tree")
@@ -607,7 +609,7 @@ async fn touched_for(app: &App, s: &Session) -> Option<Vec<String>> {
     let mut diff = app.git(admin);
     diff.arg("--work-tree")
         .arg(&s.worktree)
-        .args(["diff", "--name-only", "-z", &format!("{}...HEAD", base_ref(s))]);
+        .args(["diff", "--name-only", "-z", &format!("{base}...HEAD")]);
     let committed = exec_within(PROBE_LIMIT, &mut diff)
         .await
         .map(|out| name_only_paths(&out))
@@ -802,11 +804,20 @@ fn new_file_diff(path: &str, text: &str) -> String {
     out
 }
 
-/// The branch a colony's changes are measured against: `origin/<base>`, else `origin/HEAD`.
-fn base_ref(s: &Session) -> String {
-    match s.base.as_deref().filter(|b| !b.is_empty()) {
-        Some(b) => format!("origin/{b}"),
-        None => "origin/HEAD".to_string(),
+/// The branch a colony's changes are measured against: `origin/<base>` when it is here, else the
+/// local `<base>` — a stacked colony's base is another colony's branch, which has no `origin/` ref
+/// until it is pushed, so the same order `stale::catch_up` merges by — else `origin/HEAD`.
+async fn base_ref(app: &App, admin: &FsPath, s: &Session) -> String {
+    let Some(b) = s.base.as_deref().filter(|b| !b.is_empty()) else {
+        return "origin/HEAD".to_string();
+    };
+    let origin = format!("origin/{b}");
+    if stale::ref_exists(app, admin, &origin).await {
+        origin
+    } else if stale::ref_exists(app, admin, b).await {
+        b.to_string()
+    } else {
+        origin
     }
 }
 
@@ -814,10 +825,9 @@ fn base_ref(s: &Session) -> String {
 /// through the admin dir (never the worktree's `.git`, which the VM controls). `None` on any failure.
 async fn merge_base(app: &App, s: &Session) -> Option<String> {
     let admin = FsPath::new(s.git_admin_dir.as_deref()?);
+    let base = base_ref(app, admin, s).await;
     let mut cmd = app.git(admin);
-    cmd.arg("--work-tree")
-        .arg(&s.worktree)
-        .args(["merge-base", &base_ref(s), "HEAD"]);
+    cmd.arg("--work-tree").arg(&s.worktree).args(["merge-base", &base, "HEAD"]);
     let from = exec_within(FILE_DIFF_TIME, &mut cmd).await.ok()?.trim().to_string();
     (!from.is_empty() && from.chars().all(|c| c.is_ascii_hexdigit())).then_some(from)
 }
@@ -930,12 +940,13 @@ pub async fn session_diff(State(app): State<Shared>, Path(id): Path<String>) -> 
         ));
     };
     let admin = FsPath::new(admin);
-    let from = merge_base(&app, &s).await.ok_or_else(|| {
-        client_error(
+    let Some(from) = merge_base(&app, &s).await else {
+        let base = base_ref(&app, admin, &s).await;
+        return Err(client_error(
             StatusCode::CONFLICT,
-            &format!("could not find where this colony branched from {}", base_ref(&s)),
-        )
-    })?;
+            &format!("could not find where this colony branched from {base}"),
+        ));
+    };
     let mut cmd = app.git(admin);
     cmd.arg("--work-tree")
         .arg(&s.worktree)
@@ -1695,6 +1706,96 @@ file its +++ one, a rename and a binary file come from their own headers at 0/0"
         assert_eq!(err.0, StatusCode::CONFLICT);
         let err = session_diff(State(app), Path("nope".into())).await.unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A `git` in `dir` for a fixture: the committed identity and, crucially, the GIT_DIR /
+    /// GIT_WORK_TREE / GIT_INDEX_FILE a colony sandbox exports dropped, so the fixture's git stays
+    /// inside its own scratch repo.
+    fn fixture_git(dir: &FsPath, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .args(["-c", "user.email=test@colonizer", "-c", "user.name=test"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A stacked colony's base is another colony's branch, which has no `origin/` ref until it is
+    /// pushed; the diff falls back to the local branch instead of 409ing (issue #622).
+    #[tokio::test]
+    async fn a_colony_whose_base_is_only_a_local_branch_still_diffs() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-stack-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        fixture_git(&worktree, &["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        fixture_git(&worktree, &["add", "a.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "base"]);
+        // No `refs/remotes/origin/main`: the parent colony's branch was never pushed.
+        fixture_git(&worktree, &["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "committed\n").unwrap();
+        fixture_git(&worktree, &["add", "b.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "colony work"]);
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "s1".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("s1".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(
+            diff.contains("b.txt"),
+            "the committed change is measured against the local base, not a missing origin/main"
+        );
+        assert_eq!(value["base"].as_str(), Some("main"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// When both refs are here `origin/<base>` still wins: the pushed base is the source of truth, so
+    /// a commit only the local branch carries is not measured as the colony's work.
+    #[tokio::test]
+    async fn origin_base_is_still_preferred_over_the_local_branch() {
+        let root = std::env::temp_dir().join(format!("colonizer-map-pref-{}", crate::util::short_id()));
+        let worktree = root.join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        fixture_git(&worktree, &["init", "-q", "-b", "main"]);
+        std::fs::write(worktree.join("a.txt"), "one\n").unwrap();
+        fixture_git(&worktree, &["add", "a.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "base"]);
+        fixture_git(&worktree, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        // The local base moves on; the colony is still measured against origin, its pushed base.
+        std::fs::write(worktree.join("moved.txt"), "later\n").unwrap();
+        fixture_git(&worktree, &["add", "moved.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "local base moves"]);
+        fixture_git(&worktree, &["checkout", "-qb", "colony"]);
+        std::fs::write(worktree.join("b.txt"), "colony\n").unwrap();
+        fixture_git(&worktree, &["add", "b.txt"]);
+        fixture_git(&worktree, &["commit", "-qm", "colony work"]);
+
+        let app = crate::tests::test_app(&root);
+        let mut s = crate::sessions::tests::colony("acme", SessionStatus::Stopped);
+        s.id = "s2".into();
+        s.base = Some("main".into());
+        s.worktree = worktree.to_string_lossy().into_owned();
+        s.git_admin_dir = Some(worktree.join(".git").to_string_lossy().into_owned());
+        app.sessions.write().await.push(s);
+
+        let Json(value) = session_diff(State(app.clone()), Path("s2".into())).await.unwrap();
+        let diff = value["diff"].as_str().unwrap();
+        assert!(diff.contains("b.txt"), "the colony's own change is in the diff");
+        assert!(
+            diff.contains("moved.txt"),
+            "measuring against origin/main counts a locally-only base commit as unreached"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

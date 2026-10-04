@@ -13,6 +13,22 @@ pub struct Mount {
     pub read_only: bool,
 }
 
+/// The file, inside the read-only `/colonizer` mount, listing the colony's writable binds: one
+/// guest target per line, written by the boot from [`host_mounts_text`] and read by the guest's
+/// exec policy (`modules/agents/*/execpolicy.mjs`, issue #877) to tell a write into the microVM's
+/// own root filesystem — discarded with the VM — from one into a host-backed mount.
+pub(crate) const HOST_MOUNTS_FILE: &str = "host-mounts";
+
+/// The [`HOST_MOUNTS_FILE`] text: each writable mount's guest target on its own line, in mount
+/// order, newline-terminated like the path policy's list.
+pub(crate) fn host_mounts_text(mounts: &[Mount]) -> String {
+    mounts
+        .iter()
+        .filter(|m| !m.read_only)
+        .map(|m| format!("{}\n", m.target))
+        .collect()
+}
+
 pub struct Secret {
     pub env: String,
     pub value: String,
@@ -367,6 +383,27 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_mounts_lists_only_the_writable_binds() {
+        let mount = |target: &str, read_only: bool| Mount {
+            source: PathBuf::from("/host/unused"),
+            target: target.into(),
+            read_only,
+        };
+        let mounts = vec![
+            mount("/workspace", false),
+            mount("/colonizer", true),
+            mount("/harness/out", false),
+            mount("/root/.claude/projects", false),
+        ];
+        assert_eq!(
+            host_mounts_text(&mounts),
+            "/workspace\n/harness/out\n/root/.claude/projects\n",
+            "read-only mounts are the guest's own, not the host's to protect"
+        );
+        assert_eq!(host_mounts_text(&[]), "", "no mounts, no lines");
+    }
 
     #[test]
     fn pull_states_serialise_as_the_ui_expects() {

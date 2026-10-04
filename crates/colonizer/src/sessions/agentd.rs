@@ -175,7 +175,7 @@ pub(crate) async fn agentd_http(app: &App, s: &Session, method: &str, path: &str
 }
 
 /// The offset just past the blank line that ends the response headers.
-fn find_headers_end(buf: &[u8]) -> Option<usize> {
+pub(crate) fn find_headers_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|at| at + 4)
 }
 
