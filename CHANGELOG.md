@@ -18,6 +18,115 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.4] - 2026-10-04
+
+### Added
+
+- **A colony can switch agent mid-task: `POST /api/sessions/{id}/switch-agent`.** `{"module":
+  "codex"}` hands a running or stopped colony to another agent module without losing the
+  conversation: the current runner is stopped, the stored session transcript is converted with
+  [txcript](https://crates.io/crates/txcript) and written where the target runner resumes from, the
+  colony's `agent` and `agent_session` are updated, and it is booted on the same worktree with a
+  first turn telling the new agent it is continuing another agent's session. Only `claude-code` ↔
+  `codex` are supported; anything else is a **400**. A restricted colony is refused (**403**) unless
+  the target module reaches a provider the gateway would let it use, so a switch is never laxer than
+  launching the colony on that module. The conversion reports losses only as a heuristic — the
+  source and target record counts plus a fixed per-direction caveat — never an exact figure. ([#737])
+- **The merge-train loop now brings a merged file's other candidates onto the new `main` before
+  their turn, and `colonizer hotspots` shows where colonies collide.** After the loop merges a pull
+  request it re-reads every candidate still waiting in the run that shares a file with the one
+  merged and brings each onto the new base at once — `update-branch`, or the host's mechanical
+  rebase (`needs_redo` if that conflicts) when the merge left it dirty — rather than leaving it
+  stale for its own turn; a candidate updated after one merge is updated again after the next, and
+  the fan-out stops at `max_merges`, so a merge that reaches the cap still ends the run. The new
+  `colonizer hotspots` reads a git repository on this machine (no mothership needed) and ranks the
+  files the most distinct merged pull requests touched — the repository in the current directory
+  unless `--repo owner/repo` names a data-dir mirror or `--git-dir PATH` names a git directory,
+  `--days` and `--top` narrowing the window (30 days, top 15 by default) — dropping the
+  always-touched noise (`CHANGELOG.md`, `changelog.d/`, `Cargo.lock`, the route snapshots `crates/colonizer/routes/*.snap`); `--json`
+  prints `{days, pull_requests, files}`. ([#831])
+- **Colonies can claim the files they are about to change and message their siblings, so two pull
+  requests stop fighting over the same file.** A new per-colony gateway route, `POST /coordinate`,
+  backs one `colonizer_coord` MCP server exposing four tools. `claim` records the paths a colony plans to change
+  (in `sessions/<id>/claims.json`) and answers the live same-repo colonies already holding or touching
+  them — from their own claims or the files their pull request changed — with short advice to wait,
+  coordinate, or keep edits additive; both colonies' logs name the other. `claims` lists every live
+  same-repo colony's paths, `send` delivers a redacted, rate-limited message (20 per hour) to one
+  colony by id, id prefix or issue number, and `inbox` reads them back. The task brief tells colonies
+  to claim before editing. ([#834])
+- **Shannon runs as a red-team hunter inside a colony.** A red-team run can now name
+  `"hunter": "shannon"` (the API, a schedule, or the wizard's **Who hunts** step) alongside the
+  colony swarm. Shannon is Keygraph's AI pentester for web apps and APIs, and it is AGPL, so the
+  mothership never runs it: the run launches one colony per repository, whose brief starts the app
+  locally inside its microVM and runs the pinned `npx @keygraph/shannon@3.3.0` command under the
+  colony's usual egress rules. The colony files nothing itself; when its session ends the host
+  reads the `report.sarif` it left behind, parses it with the same SARIF normalizer as a host-side
+  scan, and files each finding through orchestrator validation and the per-colony cap — so
+  Shannon's findings count in the run tally and reach synthesis like any swarm hunter's. Host-side
+  install and `hunters::scan` still refuse Shannon, and Strix is unchanged (it still needs a Docker
+  daemon colonies do not have). ([#952])
+- **The merge-train loop resolves conflicted colony pull requests instead of leaving them DIRTY.**
+  With `resolve_conflicts` on (`colonizer loop merge-train set --resolve on`), a conflicted pull
+  request gets its base merged into the colony's kept worktree — a merge commit, never a rebase or
+  force-push. A clean merge is pushed as it is; conflicts resume the colony with a brief to resolve
+  them keeping both sides' intent, rerun the repository's generators, run its checks and publish the
+  merge to the same pull request, asking with choices (and labelling the pull request
+  `needs-human`) when a conflict needs a decision. One resolve per pull request and per repository
+  at a time, one attempt per base commit, at most `resolve_attempts` (default 3) before the pull
+  request is labelled `needs-human` and left open. `.colonizer/merge.toml`'s `[resolve]` table names
+  files never to auto-resolve and generators to rerun per file pattern. The Merge-train card shows
+  **resolving conflicts** and gains the switch. ([#968])
+- **The merge-train loop keeps merging when GitHub CI can't run.** When every check on a colony pull
+  request was refused at start — Actions billing or spending limit, no runner, Actions or every
+  workflow disabled — and not one ran and failed, an opted-in repository's checks run in a one-shot
+  microVM on the head merged with main, the result is posted as the `colonizer/local-checks` commit
+  status, and the pull request merges only when they all pass and main has not moved. Opt in with
+  `local_checks = [...]` in `.colonizer/merge.toml`, or per owner or repository with
+  `colonizer loop merge-train set --local-checks` (commands then detected from the stack: Cargo's
+  fmt, clippy and tests, or a package's install, test, typecheck, lint and build). A main whose CI
+  could not run is no longer read as red, so it is not re-run or "fixed". ([#969])
+- **You hear once when a repository's GitHub CI stops running, and once when it is back.** The
+  merge-train loop announces through the notify channels (desktop, webhook, Web Push) the first run
+  that finds a repository's CI refused at start — billing or spending limit, no runner, Actions off —
+  with GitHub's reason, and again when main's CI runs green again; the mode is remembered across
+  restarts and shown in the loop's report. ([#972])
+
+### Changed
+
+- **The exec policy now asks about a write onto a read-only host mount or into the checkout's `.git`, and an org can restore the strict, pre-#877 behaviour.** Writes into the colony's own microVM root filesystem still do not ask (issue #877), but a write to `/colonizer` (the mothership's vm directory), `/opt/colonizer` (the agent's binaries, runner and plugins) or `/workspace/.git` is the host's even though the mount refuses it, so `writes-outside-repo` asks and the card says which: a read-only mount by name, the `.git` internals, or a host-backed path outside the repository. A new rule predicate, `"writes_outside": "strict"`, makes the rule ask for any absolute write outside the repository — the microVM's root filesystem included — even with the mount list present, so an org, install or repo layer can go back to the conservative behaviour; `/tmp` and writes inside the repository never ask either way. ([#750])
+
+### Fixed
+
+- **A colony whose pull request is still open can be resumed after its worktree is reclaimed.** The
+  sweeper reclaims a finished colony's worktree 12 h after its last update, and `resume` refused such a
+  colony forever — `can_resume` saw `cleaned_up` and the branch on GitHub was ignored. Resume now
+  re-creates the worktree from the colony's own pushed branch (a fetch, then the same `-b` checkout a
+  first boot makes) and unsets `cleaned_up`, so the run comes back on its branch. A colony whose pull
+  request is no longer open, or whose branch was itself deleted, is still unresumable once reclaimed.
+  ([#623])
+- **A resumed colony is no longer told its own subagents were stopped by the user.** When a colony
+  is suspended and restored, the harness restarts or its microVM is torn down, the pinned runner
+  reports the subagents it left behind as "stopped by the user", and the harness relayed that
+  verbatim — so a resumed orchestrator stalled to ask about agents nobody stopped. A run ended by a
+  suspension, a restart or a sandbox teardown now records that cause on the session (a stop at your
+  hand does not), and the resume brief names the subagents that were still in flight — each one's
+  task and the last line it emitted — and says plainly that nobody stopped them. With the new
+  **`relaunch_subagents`** setting (on by default) the orchestrator relaunches the unfinished ones
+  without asking; off, it asks first. The section reaches both resume paths: a fresh-brief resume
+  and a suspension restore that continues the agent's own transcript. ([#756])
+- **The model router names a failed Anthropic request for what it was, and long answers are no longer cut off.**
+  A colony whose requests go through the model router got `502 model router: Anthropic is unreachable`
+  for every failure without an HTTP answer — a refused connection, a reset, a TLS failure or a timeout
+  alike — and the cause was thrown away, so neither the colony nor the mothership's log could say what
+  happened. The router now answers a DNS, connect or TLS failure as "unreachable" with the reason, a
+  silence past its idle timeout as a 504 `timeout_error` ("timed out after N s"), and a broken connection
+  with its error code; Anthropic's own 401/403, 429 (with `retry-after`) and 5xx answers still pass
+  through unchanged. Every upstream failure is logged with the provider, class, status and elapsed time,
+  and the mothership writes those lines to its own output with the colony and the Claude account id
+  (never a credential). Responses keep streaming through with no overall limit; the upstream gets 30 s
+  to connect and may stay silent for up to 10 minutes (the new **Model request idle timeout** setting)
+  instead of the 300 s that Node's built-in fetch allowed. ([#983])
+
 ## [v0.2.3] - 2026-10-04
 
 v0.2.2 was tagged but never published: the tagged commit did not compile (below), so it has no
@@ -2114,6 +2223,7 @@ Macs. ([#74])
 [#620]: https://github.com/Colonizer-dev/harness/issues/620
 [#621]: https://github.com/Colonizer-dev/harness/issues/621
 [#622]: https://github.com/Colonizer-dev/harness/issues/622
+[#623]: https://github.com/Colonizer-dev/harness/issues/623
 [#624]: https://github.com/Colonizer-dev/harness/issues/624
 [#625]: https://github.com/Colonizer-dev/harness/issues/625
 [#626]: https://github.com/Colonizer-dev/harness/issues/626
@@ -2166,13 +2276,16 @@ Macs. ([#74])
 [#707]: https://github.com/Colonizer-dev/harness/issues/707
 [#728]: https://github.com/Colonizer-dev/harness/issues/728
 [#736]: https://github.com/Colonizer-dev/harness/issues/736
+[#737]: https://github.com/Colonizer-dev/harness/issues/737
 [#742]: https://github.com/Colonizer-dev/harness/issues/742
 [#743]: https://github.com/Colonizer-dev/harness/issues/743
 [#744]: https://github.com/Colonizer-dev/harness/issues/744
 [#745]: https://github.com/Colonizer-dev/harness/issues/745
 [#746]: https://github.com/Colonizer-dev/harness/issues/746
+[#750]: https://github.com/Colonizer-dev/harness/issues/750
 [#751]: https://github.com/Colonizer-dev/harness/issues/751
 [#754]: https://github.com/Colonizer-dev/harness/issues/754
+[#756]: https://github.com/Colonizer-dev/harness/issues/756
 [#759]: https://github.com/Colonizer-dev/harness/issues/759
 [#761]: https://github.com/Colonizer-dev/harness/issues/761
 [#762]: https://github.com/Colonizer-dev/harness/issues/762
@@ -2184,6 +2297,8 @@ Macs. ([#74])
 [#774]: https://github.com/Colonizer-dev/harness/issues/774
 [#778]: https://github.com/Colonizer-dev/harness/issues/778
 [#818]: https://github.com/Colonizer-dev/harness/issues/818
+[#831]: https://github.com/Colonizer-dev/harness/issues/831
+[#834]: https://github.com/Colonizer-dev/harness/issues/834
 [#840]: https://github.com/Colonizer-dev/harness/issues/840
 [#867]: https://github.com/Colonizer-dev/harness/issues/867
 [#875]: https://github.com/Colonizer-dev/harness/issues/875
@@ -2200,7 +2315,13 @@ Macs. ([#74])
 [#935]: https://github.com/Colonizer-dev/harness/issues/935
 [#939]: https://github.com/Colonizer-dev/harness/issues/939
 [#940]: https://github.com/Colonizer-dev/harness/issues/940
+[#952]: https://github.com/Colonizer-dev/harness/issues/952
 [#967]: https://github.com/Colonizer-dev/harness/issues/967
+[#968]: https://github.com/Colonizer-dev/harness/issues/968
+[#969]: https://github.com/Colonizer-dev/harness/issues/969
+[#972]: https://github.com/Colonizer-dev/harness/issues/972
+[#983]: https://github.com/Colonizer-dev/harness/issues/983
+[v0.2.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.4
 [v0.2.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.3
 [v0.2.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.2
 [v0.2.1]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.1

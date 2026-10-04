@@ -1,0 +1,6 @@
+/api/fleet/peer/payloads/{sha256}                    PUT    unauth=401    token=fleet            activity=-
+/api/fleet/peer/rows                                 POST   unauth=401    token=fleet            activity=-
+/api/fleet/sync                                      GET    unauth=401    token=owner            activity=-
+/api/fleet/sync                                      POST   unauth=401    token=owner            activity=-
+/api/fleet/sync/consent                              POST   unauth=401    token=owner            activity=-
+/api/fleet/sync/preview                              GET    unauth=401    token=owner            activity=-

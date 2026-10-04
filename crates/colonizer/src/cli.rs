@@ -1,5 +1,5 @@
 //! The `colonizer` command line, built on clap: the commands that run against this machine
-//! (`version`, `update`, `open`, `login-item`, `telemetry`), and the client commands that drive a
+//! (`version`, `update`, `open`, `login-item`, `telemetry`, `hotspots`), and the client commands that drive a
 //! mothership already running somewhere — here or across a tailnet (`launch`, `list`, `status`,
 //! `logs`, `diff`, `ask`, `answer`, `stop`, `resume`, `pr`, `map`, `loop`, `token`, `mcp`).
 //!
@@ -118,6 +118,22 @@ enum Command {
         /// show, on or off
         #[arg(value_enum)]
         action: TelemetryAction,
+    },
+    /// Show the files merged pull requests touched most often in a window — where parallel
+    /// colonies collide, and a hint at what to split (issue #831)
+    Hotspots {
+        /// The repository to read, as owner/repo: its bare mirror in this machine's data dir
+        #[arg(long, value_name = "OWNER/REPO", conflicts_with = "git_dir")]
+        repo: Option<String>,
+        /// A git directory to read instead: a bare mirror, or a worktree's .git
+        #[arg(long, value_name = "PATH", conflicts_with = "repo")]
+        git_dir: Option<PathBuf>,
+        /// How far back to look, in days
+        #[arg(long, value_name = "DAYS", default_value_t = crate::hotspots::DEFAULT_DAYS)]
+        days: u64,
+        /// How many files to list
+        #[arg(long, value_name = "N", default_value_t = crate::hotspots::DEFAULT_TOP)]
+        top: usize,
     },
     /// Copy this machine's colonies into another local session store (docs/session-store.md)
     MigrateStore {
@@ -1188,11 +1204,14 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 /// a flag that names a mothership (`--host`, `--token-file`) or asks for JSON means nothing to
 /// them. `update` is the one exception: it is a thin client of a running mothership, so it keeps
 /// `--host` and `--token-file` and refuses only `--json`, which it has no rendering for.
+/// `hotspots` reads a local repository and renders it, so it refuses the two host flags and keeps
+/// `--json` — like the local `fleet export`/`import`.
 const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("update", &["json"]),
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
+    ("hotspots", &["host", "token_file"]),
     ("migrate-store", &["host", "token_file", "json"]),
     ("version", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
@@ -1346,6 +1365,15 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 TelemetryAction::Off => crate::usage::cli_set(&cfg.config_dir, false),
             };
             await_local(result)
+        }
+        Command::Hotspots {
+            repo,
+            git_dir,
+            days,
+            top,
+        } => {
+            let json = cli.json;
+            await_local(crate::hotspots::command(repo.as_deref(), git_dir.as_deref(), days, top, json))
         }
         Command::MigrateStore { from, to, dry_run } => {
             let cfg = match Settings::from_env() {
@@ -3006,6 +3034,10 @@ mod tests {
             &["telemetry", "show"][..],
             &["telemetry", "on"][..],
             &["telemetry", "off"][..],
+            &["hotspots"][..],
+            &["hotspots", "--days", "7", "--top", "5"][..],
+            &["hotspots", "--repo", "acme/app"][..],
+            &["hotspots", "--git-dir", "/tmp/mirror.git"][..],
             &["completions", "bash"][..],
             &["man"][..],
             &["launch", "acme/app"][..],
@@ -3142,6 +3174,8 @@ mod tests {
             &["version", "--json"][..],
             &["--json", "telemetry", "show"][..],
             &["login-item", "enable", "--host", "h:1"][..],
+            &["hotspots", "--host", "h:1"][..],
+            &["hotspots", "--token-file", "/tmp/token"][..],
             &["completions", "bash", "--token-file", "/tmp/token"][..],
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],
@@ -3205,6 +3239,22 @@ mod tests {
         for flag in ["--host", "--token-file", "--json", "--parked"] {
             assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
+    }
+
+    /// `hotspots` is local but renders JSON: it refuses the two host flags and keeps `--json`.
+    #[test]
+    fn hotspots_is_local_but_keeps_json() {
+        let help = help_for("hotspots");
+        assert!(
+            !help.contains("--host") && !help.contains("--token-file"),
+            "`hotspots --help` should list neither host flag:\n{help}"
+        );
+        assert!(help.contains("--json"), "`hotspots --help` should list --json:\n{help}");
+        assert!(parse(&["hotspots", "--json"]).unwrap().json);
+        assert!(parse(&["--json", "hotspots"]).unwrap().json);
+        // --repo and --git-dir name the source, so they refuse to combine.
+        let err = parse(&["hotspots", "--repo", "acme/app", "--git-dir", "/tmp/x.git"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
     }
 
     /// The launch flags arrive as the API body wants them, task included.

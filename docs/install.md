@@ -152,6 +152,7 @@ this machine and read the same environment the mothership does:
 | `colonizer update --check` | Asks GitHub (or `COLONIZER_RELEASES_URL`) whether a newer release exists and prints one line; no mothership needed ([docs/updates.md](updates.md#checking-without-a-mothership)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
+| `colonizer hotspots [--days N] [--top N]` | Ranks the files merged pull requests touched most, from a git repository on this machine ([docs/cli.md](cli.md)) |
 | `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
 | `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |

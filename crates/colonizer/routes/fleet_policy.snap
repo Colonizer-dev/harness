@@ -1,0 +1,2 @@
+/api/fleet/policy                                    GET    unauth=401    token=fleet            activity=-
+/api/fleet/policy                                    PUT    unauth=401    token=owner            activity=-

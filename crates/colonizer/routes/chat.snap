@@ -1,0 +1,16 @@
+/api/chat                                            GET    unauth=401    token=owner            activity=-
+/api/chat                                            POST   unauth=401    token=owner            activity=-
+/api/chat/models                                     GET    unauth=401    token=owner            activity=-
+/api/chat/prefs                                      GET    unauth=401    token=owner            activity=-
+/api/chat/prefs/feedback/{message}                   PUT    unauth=401    token=owner            activity=-
+/api/chat/prefs/personas/{id}                        PUT    unauth=401    token=owner            activity=-
+/api/chat/{id}                                       DELETE unauth=401    token=owner            activity=-
+/api/chat/{id}                                       GET    unauth=401    token=owner            activity=-
+/api/chat/{id}                                       PATCH  unauth=401    token=owner            activity=-
+/api/chat/{id}/compare                               POST   unauth=401    token=owner            activity=-
+/api/chat/{id}/export                                GET    unauth=401    token=owner            activity=-
+/api/chat/{id}/fork                                  POST   unauth=401    token=owner            activity=-
+/api/chat/{id}/issue                                 POST   unauth=401    token=owner            activity=chat.issue
+/api/chat/{id}/messages                              POST   unauth=401    token=owner            activity=-
+/api/chat/{id}/pick                                  POST   unauth=401    token=owner            activity=-
+/api/chat/{id}/title                                 POST   unauth=401    token=owner            activity=-

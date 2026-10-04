@@ -1,0 +1,1 @@
+/api/autonomy/status                                 GET    unauth=401    token=read             activity=-

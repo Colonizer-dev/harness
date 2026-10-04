@@ -1,0 +1,15 @@
+/api/editor/settings                                 GET    unauth=401    token=owner            activity=-
+/api/editor/settings                                 PUT    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/ask                        POST   unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/blame                      GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/blob                       GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/branches                   GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/coverage                   GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/drafts                     DELETE unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/drafts                     GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/drafts                     PUT    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/edits                      POST   unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/git-summary                GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/history                    GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/loc                        GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/tree                       GET    unauth=401    token=owner            activity=-

@@ -1,0 +1,2 @@
+/api/sessions/{id}/behind                            GET    unauth=401    token=owner            activity=-
+/api/sessions/{id}/catch-up                          POST   unauth=401    token=owner            activity=colony.catch_up

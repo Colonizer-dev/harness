@@ -21,6 +21,7 @@ import {
   loadExecPolicy,
 } from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
+import { COORDINATION_PROMPT_APPEND, COORDINATION_SERVER, createCoordinationServer } from './coordinate.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createGithubServer, GITHUB_PROMPT_APPEND, GITHUB_SERVER, githubDecision } from './github.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
@@ -464,6 +465,7 @@ export function backgroundRecordName(command) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
+ * @param {object} [extras.coordinateServer]  in-process colony-to-colony coordination MCP server (issue #834)
  * @param {object} [extras.githubServer]  in-process host-proxied GitHub write MCP server (issue #778)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
@@ -471,7 +473,7 @@ export function backgroundRecordName(command) {
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -488,6 +490,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   // Both halves of the recall credential: the mothership sets them only when deja is enabled for
   // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
+  // Colony-to-colony coordination (issue #834): its own gateway URL and token, set for every colony
+  // whose gateway token exists, so it is not tied to deja the way recall is.
+  const coordinate = Boolean(env.COLONIZER_COORD_URL && env.COLONIZER_COORD_TOKEN && coordinateServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // Only a GitHub-needing loop's colony (loop_github.rs): the mothership sets the flag when it wrote
@@ -511,6 +516,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
+  if (coordinate) appended.push(COORDINATION_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (github) appended.push(GITHUB_PROMPT_APPEND);
@@ -562,6 +568,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
+  if (coordinate) mcpServers[COORDINATION_SERVER] = coordinateServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (github) mcpServers[GITHUB_SERVER] = githubServer;
@@ -1091,6 +1098,11 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     for (const block of content) {
       if (block?.type !== 'tool_result' || askIds.has(block.tool_use_id)) continue;
       const output = toolResultText(block.content);
+      // A subagent started in the background answers its Task call with an immediate launch ack,
+      // not a report — the SDK marks it `async_launched`, and the real result arrives later as a
+      // task_notification (below). Mark the ack so a resumed boot does not read the subagent as
+      // finished the moment it started (issue #756).
+      const background = msg.tool_use_result?.status === 'async_launched';
       // The denial layer only ever adds a `denial` field to errored results; is_error and the
       // output are exactly as they would be without it (denials.mjs).
       const event = annotateDenial(
@@ -1100,6 +1112,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
             tool_call_id: block.tool_use_id,
             output,
             is_error: Boolean(block.is_error),
+            ...(background ? { background: true } : {}),
           },
           parent,
         ),
@@ -1240,6 +1253,12 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
                   jevLivePairs = jevLivePairs.filter((pair) => !dropped.has(pair.tool_call_id));
                 }
               }
+            } else if (msg.subtype === 'task_notification' && msg.tool_use_id) {
+              // A background subagent settled (issue #756): recorded by the Task call that started
+              // it, so a resumed boot can tell one that finished from one a suspension left in
+              // flight. A `stopped` status is not a completion — like the pinned runner's "stopped
+              // by the user", the resume brief exists to report it.
+              emit({ type: 'subagent_end', tool_call_id: msg.tool_use_id, status: msg.status });
             }
             break;
         }
@@ -1349,7 +1368,8 @@ async function main() {
   for (const message of plan.warnings) emit({ type: 'log', level: 'warn', message });
   let router = null;
   if (plan.needsRouter) {
-    router = await startRouter({ routes: plan.routes, env: process.env, log: ({ level, message }) => emit({ type: 'log', level, message }) });
+    // `source` marks the router's lines, which the mothership also writes to its own log (#983).
+    router = await startRouter({ routes: plan.routes, env: process.env, log: ({ level, message, source }) => emit({ type: 'log', level, message, source }) });
     const served = plan.routes.map((route) => route.prefix).join(', ') || 'none';
     emit({ type: 'log', level: 'info', message: `model router listening on ${router.url} (provider routes: ${served})` });
   }
@@ -1375,6 +1395,13 @@ async function main() {
   let recallServer;
   if (process.env.COLONIZER_RECALL_URL && process.env.COLONIZER_RECALL_TOKEN) {
     recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
+  }
+
+  // Colony-to-colony coordination (issue #834): its own gateway URL and token, present whenever the
+  // colony has a gateway token, whether or not recall is.
+  let coordinateServer;
+  if (process.env.COLONIZER_COORD_URL && process.env.COLONIZER_COORD_TOKEN) {
+    coordinateServer = createCoordinationServer({ url: process.env.COLONIZER_COORD_URL, token: process.env.COLONIZER_COORD_TOKEN, createSdkMcpServer, tool, z });
   }
 
   // Host-proxied GitHub writes (issue #778): only for a loop that asked for GitHub, which is
@@ -1413,6 +1440,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     recallServer,
+    coordinateServer,
     findingsServer,
     loopServer,
     githubServer,

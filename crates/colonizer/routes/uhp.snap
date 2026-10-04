@@ -1,0 +1,5 @@
+/uhp/v1/harnesses                                    GET    unauth=401    token=read             activity=-
+/uhp/v1/harnesses/{harness_id}                       GET    unauth=401    token=read             activity=-
+/uhp/v1/models                                       GET    unauth=401    token=read             activity=-
+/uhp/v1/sessions/{id}                                GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/uhp                                          GET    unauth=200    token=read             activity=-
