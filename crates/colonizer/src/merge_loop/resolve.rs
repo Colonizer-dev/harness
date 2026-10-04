@@ -277,7 +277,7 @@ mod tests {
             [resolve]
             never = ["migrations/**", "SECURITY.md"]
             [[resolve.generators]]
-            files = "crates/colonizer/routes.snap"
+            files = "crates/colonizer/routes/*.snap"
             run = "UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table"
             "#,
         )
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(never_resolved(&conflicts, &cfg()), vec!["migrations/0042_add.sql"]);
         assert!(never_resolved(&conflicts[..1], &cfg()).is_empty());
         assert!(never_resolved(&conflicts, &ResolveToml::default()).is_empty());
-        let snap = vec!["crates/colonizer/routes.snap".to_string()];
+        let snap = vec!["crates/colonizer/routes/maps.snap".to_string()];
         let text = brief("https://github.com/acme/web/pull/7", "main", &snap, &cfg());
         assert!(text.contains("UPDATE_ROUTE_SNAPSHOT=1"), "{text}");
         assert!(!brief("u", "main", &conflicts, &cfg()).contains("UPDATE_ROUTE_SNAPSHOT"));

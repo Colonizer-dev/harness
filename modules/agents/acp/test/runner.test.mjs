@@ -246,10 +246,11 @@ test('the vm-writes vectors hold against the ACP copy of the exec policy (#877)'
     readFile: (path) => (path === HOST_MOUNTS_FILE ? mountsText : null),
   });
   assert.deepEqual(policy.hostMounts, [...fixture.hostMounts], 'the mount list is parsed off the file');
-  for (const { command, decision, rule } of fixture.cases) {
+  for (const { command, decision, rule, reason } of fixture.cases) {
     const hit = evaluateExecPolicy(policy, command, { cwd: fixture.cwd });
     assert.equal(hit?.decision ?? null, decision, command);
     if (rule) assert.equal(hit.rule, rule, command);
+    if (reason) assert.ok(hit.reason.includes(reason), `${command}: ${hit.reason}`);
   }
 });
 

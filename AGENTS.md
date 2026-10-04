@@ -13,7 +13,11 @@ same time as you:
   request that edits `CHANGELOG.md`; only a release does that. If you already wrote an entry into
   `CHANGELOG.md`, `node scripts/changelog.mjs convert` moves it into a fragment. See
   [changelog.d/README.md](changelog.d/README.md).
-- **Adding an API route?** Regenerate `crates/colonizer/routes.snap` with
-  `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` and commit it; a new route
-  is owner-only to scoped API tokens until `api_tokens::classify` lists it. The whole recipe for a
-  new module is in [docs/architecture.md](docs/architecture.md#adding-a-module).
+- **Adding a feature or an API route?** A feature keeps a descriptor in its own file — a
+  `features::Feature` (`crates/colonizer/src/features.rs`) naming its `routes`, its `token_scope`,
+  its `activity` rules, its `kinds` and its `start_tasks` — and one sorted line in `features::ALL`;
+  regenerate the route snapshots with
+  `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` and commit the module's
+  `crates/colonizer/routes/<module>.snap`. A route is owner-only to scoped API tokens unless its
+  feature's `token_scope` (or, for an un-migrated module, `api_tokens::classify`) lists it. The whole
+  recipe is in [docs/architecture.md](docs/architecture.md#adding-a-module).

@@ -77,6 +77,30 @@ jobs:
             cargo publish --dry-run --locked -p "$crate"
           done
 
+      # The tests the way a user gets them: each crate's .crate, unpacked outside the checkout so
+      # nothing but the crate itself is in reach. This is what a stray include_str! or a path above
+      # the crate fails on; the workspace test above cannot, because it sees the whole repository.
+      # The tarball is built here rather than reused from the step above: `cargo publish --dry-run`
+      # leaves its copy under target/package/tmp-crate, target/ is restored from cache so a stale
+      # .crate of another version can also be lying around, and building it fresh pins the crate's
+      # current version. target/ is shared so only the registry dependencies are reused; the crate
+      # itself compiles from the unpacked source.
+      - name: Test the packaged crates
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          for crate in colonizer-agentd colonizer-harness; do
+            pkgid=$(cargo pkgid -p "$crate")
+            version="${pkgid##*@}"
+            version="${version##*#}"
+            cargo package --locked -p "$crate"
+            dest="$RUNNER_TEMP/packaged/$crate-$version"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            tar -xzf "$CARGO_TARGET_DIR/package/$crate-$version.crate" -C "$dest" --strip-components=1
+            (cd "$dest" && cargo test --locked)
+          done
+
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -261,6 +285,16 @@ jobs:
 
       - name: Test the exec-bit check
         run: sh scripts/test/check-exec-bits.test.sh
+
+      # scripts/ci/check-rust-file-size.sh keeps non-test Rust modules under 2000 lines (issue
+      # #825), against an allowlist of files not yet split; a file over the limit that is not
+      # listed fails, and so does a listed file that shrank or is gone. Its own test drives it
+      # against throwaway repos, so neither needs cargo nor the network.
+      - name: Check Rust file sizes
+        run: sh scripts/ci/check-rust-file-size.sh
+
+      - name: Test the Rust file size check
+        run: sh scripts/test/check-rust-file-size.test.sh
 
       # Two tracked paths that differ only in letter case (or script modules whose names do, once
       # the extension is dropped) pass every Linux job and break a macOS or Windows checkout: the

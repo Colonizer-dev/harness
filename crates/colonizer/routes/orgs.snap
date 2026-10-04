@@ -1,0 +1,2 @@
+/api/orgs                                            GET    unauth=401    token=owner            activity=-
+/api/orgs/{org}                                      PUT    unauth=401    token=owner            activity=workspace.settings

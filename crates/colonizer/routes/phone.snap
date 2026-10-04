@@ -1,0 +1,6 @@
+/api/phone                                           GET    unauth=401    token=owner            activity=-
+/api/phone/claim                                     POST   unauth=404    token=owner            activity=-
+/api/phone/devices/{id}                              DELETE unauth=401    token=owner            activity=-
+/api/phone/invites                                   POST   unauth=401    token=owner            activity=-
+/api/phone/pairings/confirm                          POST   unauth=401    token=owner            activity=-
+/api/phone/pairings/{id}/reject                      POST   unauth=401    token=owner            activity=-

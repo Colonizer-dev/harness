@@ -1,0 +1,2 @@
+/api/chat/attachments                                POST   unauth=401    token=owner            activity=-
+/api/chat/attachments/{sha}                          GET    unauth=401    token=owner            activity=-

@@ -1,0 +1,10 @@
+/api/sessions                                        GET    unauth=401    token=read             activity=-
+/api/sessions                                        POST   unauth=401    token=launch           activity=colony.launch
+/api/sessions/{id}/answer                            POST   unauth=401    token=session>=operate activity=-
+/api/sessions/{id}/commits                           GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/events                            GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/messages                          POST   unauth=401    token=session>=operate activity=-
+/api/sessions/{id}/prewarm                           POST   unauth=401    token=session>=operate activity=-
+/api/sessions/{id}/question                          GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/seen                              POST   unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/terminal                          GET    unauth=401    token=owner            activity=-
