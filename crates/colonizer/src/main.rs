@@ -120,6 +120,7 @@ mod sensitivity;
 mod server;
 mod services;
 mod sessions;
+mod setup;
 mod snapshot;
 mod spend;
 mod stack;

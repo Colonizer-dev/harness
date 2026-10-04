@@ -122,16 +122,61 @@ pub fn app_link() -> Option<PathBuf> {
 /// `scripts/install.sh`; saying so is better than half-applying something.
 pub fn blocker(assets: Option<&Path>) -> Option<String> {
     let Some(assets) = assets else {
-        return Some("this mothership is running without an installed app directory".into());
+        // A `cargo install` binary lands here too: no assets were found beside it at all.
+        return Some(
+            "this mothership is running without an installed app directory; run `colonizer setup` to install one".into(),
+        );
     };
     if !installer(assets).is_file() {
-        return Some("this install has no scripts/install-release.sh, so it was not installed from a release".into());
+        return Some(
+            "this install has no scripts/install-release.sh, so it was not installed from a release; run `colonizer setup` to install one"
+                .into(),
+        );
     }
     match app_link() {
         Some(app) if app.is_symlink() => None,
         Some(app) => Some(format!("{} is not the symlink the installer maintains", app.display())),
         None => Some("HOME is not set, so the app directory cannot be found".into()),
     }
+}
+
+/// Hands a start that has no assets of its own over to the installed app, if there is one (#905).
+///
+/// A `cargo install` binary has nothing beside it, so the mothership comes up degraded. When the
+/// installer's app link holds a different binary, `exec` it with the same arguments instead. Resolved
+/// paths are compared, which makes it a one-way trip: the installed binary finds its own assets and
+/// never looks for the link again, so there is no loop. A binary under a cargo build tree
+/// ([`in_cargo_tree`]) is left alone, so `cargo run` from a checkout stays the checkout's.
+///
+/// `None` means there was nothing to hand off to (or this *is* the installed binary); `Some` is the
+/// message to print when the hand-off was attempted and `exec` failed.
+pub fn hand_off(assets: Option<&Path>) -> Option<String> {
+    if assets.is_some() {
+        return None;
+    }
+    let current = std::env::current_exe().ok()?;
+    // A developer running from a checkout is not hijacked into an installed release.
+    if in_cargo_tree(&current) {
+        return None;
+    }
+    let target = app_link()?.join("bin/colonizer").canonicalize().ok()?;
+    if !target.is_file() || target == current.canonicalize().ok()? {
+        return None;
+    }
+    eprintln!("colonizer: starting the installed app at {}", target.display());
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // Only returns if exec failed: on success this process is already gone.
+    let error = exec(&target, &args);
+    Some(format!("could not start {}: {error}", target.display()))
+}
+
+/// Whether `exe` sits inside a cargo build tree: a `Cargo.toml` in one of its ancestor directories.
+///
+/// `cargo run` leaves the binary under `<checkout>/target/...`, whose ancestors hold the checkout's
+/// `Cargo.toml`; a `cargo install` binary lands in `~/.cargo/bin`, whose ancestors hold none. That
+/// is the difference between a developer working from source and an install that needs its assets.
+pub fn in_cargo_tree(exe: &Path) -> bool {
+    exe.ancestors().skip(1).any(|dir| dir.join("Cargo.toml").is_file())
 }
 
 /// The one refusal decision, shared by the route and `colonizer update` alike:
@@ -852,9 +897,11 @@ mod tests {
 
     #[test]
     fn a_source_checkout_says_why_it_cannot_update() {
-        // No assets at all: running from a build tree.
+        // No assets at all: running from a build tree, or a cargo install with no app beside it.
         let reason = blocker(None).expect("should refuse");
         assert!(reason.contains("installed app directory"), "{reason}");
+        // The cargo-install case lands here, so the message has to say how to fix it.
+        assert!(reason.contains("colonizer setup"), "{reason}");
     }
 
     #[test]
@@ -863,6 +910,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let reason = blocker(Some(&dir)).expect("should refuse");
         assert!(reason.contains("install-release.sh"), "{reason}");
+        assert!(reason.contains("colonizer setup"), "{reason}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The build-tree guard: a `Cargo.toml` among the ancestors means the binary came from a cargo
+    /// build directory and must not be hijacked; a bare bin directory must not be.
+    #[test]
+    fn a_binary_under_a_cargo_tree_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("colonizer-tree-{}", util::short_id()));
+        let bin = dir.join("target/debug");
+        std::fs::create_dir_all(&bin).unwrap();
+        assert!(!in_cargo_tree(&bin.join("colonizer")), "no Cargo.toml anywhere above it");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(in_cargo_tree(&bin.join("colonizer")), "the checkout's Cargo.toml is above it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
