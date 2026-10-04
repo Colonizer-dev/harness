@@ -573,9 +573,9 @@ them with a cooldown, paces and budgets its GitHub calls and stops on any
 most one redo colony), and can self-heal a main the train itself turned red. When GitHub CI cannot
 run at all (billing, no runner, Actions off), it can run an opted-in repository's checks itself in a
 microVM on the head merged with main and merge on those, posting `colonizer/local-checks`
-([loops.md](loops.md#when-github-ci-cannot-run), issue #969), and with `resolve_conflicts` it merges
+([loops.md](loops/merge-train.md#when-github-ci-cannot-run), issue #969), and with `resolve_conflicts` it merges
 main into a conflicted pull request's worktree and resumes its colony to resolve the conflicts — a
-merge commit, never a rebase or force-push ([loops.md](loops.md#resolving-conflicts-with-a-colony),
+merge commit, never a rebase or force-push ([loops.md](loops/merge-train.md#resolving-conflicts-with-a-colony),
 issue #968). It reuses the train's
 `decide`, guards and merge invocation; a repository it drives is skipped by the tick.
 
