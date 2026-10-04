@@ -257,16 +257,19 @@
     },
     "github_action": {
       "type": "object",
-      "description": "A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, docs/protocol.md §6.12). The token never enters a colony: the guest proposes, the host validates against bounded fields, caps per colony and makes the `gh` call on the colony's own repository (the guest only supplies issue numbers).",
+      "description": "A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, PR actions issue #807, docs/protocol.md §6.12). The token never enters a colony: the guest proposes, the host validates against bounded fields, caps per colony and makes the `gh` call on the colony's own repository (the guest only supplies issue or pull request numbers).",
       "properties": {
         "type": { "const": "github_action" },
-        "tool": { "enum": ["issue_label", "issue_comment", "issue_close_duplicate"], "description": "The action asked for." },
-        "issue": { "type": "integer", "minimum": 1, "description": "The issue number, on the colony's own repository." },
-        "labels": { "type": "array", "items": { "type": "string" }, "description": "issue_label: the labels to add, at most ten." },
-        "body": { "type": "string", "description": "issue_comment: the comment, up to 20 000 characters. issue_close_duplicate's comment is the host's." },
-        "duplicate_of": { "type": "integer", "minimum": 1, "description": "issue_close_duplicate: the issue this one duplicates." }
+        "tool": { "enum": ["issue_label", "issue_comment", "issue_close_duplicate", "pr_comment", "pr_label", "pr_merge"], "description": "The action asked for. issue_* carry `issue`; pr_* carry `pr`; only pr_merge carries `head_sha` and `reason` and is refused unless the operator enabled merges for the repository." },
+        "issue": { "type": "integer", "minimum": 1, "description": "The issue number, on the colony's own repository, for the issue_* tools." },
+        "pr": { "type": "integer", "minimum": 1, "description": "The pull request number, on the colony's own repository, for the pr_* tools." },
+        "labels": { "type": "array", "items": { "type": "string" }, "description": "issue_label or pr_label: the labels to add, at most ten." },
+        "body": { "type": "string", "description": "issue_comment or pr_comment: the comment, up to 20 000 characters. issue_close_duplicate's comment is the host's." },
+        "duplicate_of": { "type": "integer", "minimum": 1, "description": "issue_close_duplicate: the issue this one duplicates." },
+        "head_sha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$", "description": "pr_merge: the full 40-character hex SHA of the head commit the colony reviewed (either case; the host lowercases it); the merge is refused if the pull request has moved on." },
+        "reason": { "type": "string", "description": "pr_merge: one short line, up to 500 characters, saying why the merge is safe now." }
       },
-      "required": ["type", "tool", "issue"]
+      "required": ["type", "tool"]
     },
     "jev_ladder": {
       "type": "object",

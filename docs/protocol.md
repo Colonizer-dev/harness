@@ -2339,6 +2339,12 @@ marks the colonies superseded and leaves their pull requests open for a person. 
 validated as a repository name; the compare against a colony's repository is case-insensitive, and
 the close is skipped while external writes are blocked (§6.3).
 
+`merge_prs` (issue #807) is the same shape and the same not-inherited rule, for the other
+irreversible write: a list of this org's repositories, full `owner/name`, whose pull requests a
+colony in a GitHub loop may ask the mothership to merge (`pr_merge`, §6.12). Empty — the default —
+refuses every merge, so a repository merges only once the operator lists it here. Each entry is
+validated as a repository name, and the compare is case-insensitive like `close_superseded_prs`.
+
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
 allow list or add blocks but never remove a global block ([sandbox-network.md](sandbox-network.md)).
@@ -2360,6 +2366,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
   "max_parallel": 2,
   "repo_max_parallel": 1,
   "close_superseded_prs": ["acme/api"],
+  "merge_prs": ["acme/web"],
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
@@ -3713,7 +3720,7 @@ before the join.
 deliberately *not* in version 1: optional categories (approved memory notes, loops and schedules,
 repo claims — off by default) and the cockpit's origin-host marking of imported colonies.
 
-### 6.12 GitHub loops (issue #778)
+### 6.12 GitHub loops (issue #778, PR actions issue #807)
 
 Some loops do GitHub's work (triaging issues, CI flakes, merged PRs), but a colony has no GitHub
 token. Such a loop sets `needs_github: true` on its definition (colony loops only; the map and
@@ -3732,23 +3739,39 @@ hours before a first run) and carrying the `since` timestamp. A fetch that fails
 that file and logs; it never fails the boot.
 
 **Host-proxied writes.** When the context was written, boot sets `COLONIZER_GITHUB=true`, which adds
-the runner's in-process MCP server `colonizer_github` — three write tools the orchestrator alone may
+the runner's in-process MCP server `colonizer_github` — six write tools the orchestrator alone may
 call (a subagent's call is refused by a `PreToolUse` hook, as with `finding_file`):
 
 ```jsonc
 {"type":"github_action","tool":"issue_label","issue":42,"labels":["bug","P1"]}
 {"type":"github_action","tool":"issue_comment","issue":42,"body":"markdown…"}
 {"type":"github_action","tool":"issue_close_duplicate","issue":43,"duplicate_of":42}
+{"type":"github_action","tool":"pr_comment","pr":219,"body":"markdown…"}
+{"type":"github_action","tool":"pr_label","pr":219,"labels":["needs-human"]}
+{"type":"github_action","tool":"pr_merge","pr":231,"head_sha":"<40 hex>","reason":"one line"}
 ```
 
 `github_action` is host-consumed (the web ignores it, like `loop_next`/`loop_stop`). The `loop_github`
-module validates it (positive issue numbers, ≤ 10 labels of ≤ 100 chars, a comment ≤ 20 000 chars, no
-self-duplicate), refuses it while external writes are blocked (§6.3: `ignored a github action:
-external writes are blocked …`), caps one colony at 30 writes counted from `sessions/<id>/github.jsonl`,
-and makes the `gh` call on the colony's own repository — the guest never names a repository. Every
-outcome, success or failure, is one ledger line `{ts, repo, issue, outcome, tool, …}` and one line of
-the colony log; the agent is told only that the call was handed over. Because the cap is counted from
-the ledger, a partial failure (a close-duplicate's comment written, its close refused) still counts.
+module validates it (positive issue/PR numbers, ≤ 10 labels of ≤ 100 chars, a comment ≤ 20 000 chars,
+a merge `reason` ≤ 500 chars and a full 40-hex `head_sha`, no self-duplicate), refuses it while
+external writes are blocked (§6.3: `ignored a github action: external writes are blocked …`), caps one
+colony at 30 writes counted from `sessions/<id>/github.jsonl`, and makes the `gh` call on the colony's
+own repository — the guest never names a repository.
+
+**Merge gates (issue #807).** `pr_merge` is refused unless the operator has enabled merges for this
+repository: the org setting `merge_prs` is a list of repos of that org, empty by default, set with
+`PUT /api/orgs/{org}`. Even then a merge is made only for an open, non-draft, same-repo pull request
+whose head is still `head_sha`, that is mergeable, with every check green, targeting the default
+branch, touching nothing under `.github/` and no credential-like file, and only up to 5 merges per
+colony inside the same 30-action cap. A refusal is recorded like any other action — one ledger line
+`{ts, repo, outcome:"refused", tool, …}` in `github.jsonl` and one line of the colony log. The kill
+switch `COLONIZER_NO_EXTERNAL_EFFECTS` covers these writes as it does the issue tools. `pr_update` (a
+fast-forward push to a PR branch) is not implemented yet.
+
+Every outcome, success or failure, is one ledger line `{ts, repo, issue, outcome, tool, …}` and one
+line of the colony log; the agent is told only that the call was handed over. Because the cap is
+counted from the ledger, a partial failure (a close-duplicate's comment written, its close refused)
+still counts.
 
 ---
 

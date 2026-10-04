@@ -76,9 +76,11 @@ mothership can read its repository; if it cannot — no token, no access — no 
 loop's note says so and how to fix it. Second, the run gets the inputs it cannot fetch itself, under
 the read-only `/colonizer/github`: `issues.json` (open issues touched since the last run),
 `ci-failures.json` (failed runs on the default branch) and `merged-prs.json` (pull requests merged
-since the last run), each with the `since` timestamp it was narrowed to, plus three tools the
-orchestrator may call — `issue_label`, `issue_comment` and `issue_close_duplicate` — which the
-mothership makes on the loop's own repository. The loop's brief names all of it. A loop without the
+since the last run), each with the `since` timestamp it was narrowed to, plus tools the
+orchestrator may call — `issue_label`, `issue_comment`, `issue_close_duplicate`, `pr_comment`,
+`pr_label` and `pr_merge` — which the mothership makes on the loop's own repository (`pr_merge`
+only once merges are switched on for it, see [protocol.md](protocol.md#612-github-loops-issue-778-pr-actions-issue-807)).
+The loop's brief names all of it. A loop without the
 switch behaves exactly as before.
 
 A loop also ends by itself after its **max runs**, when its next run would fall past its **end

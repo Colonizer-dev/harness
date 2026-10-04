@@ -137,6 +137,11 @@ pub struct OrgSettings {
     /// #673). Empty — the default — marks the colonies superseded but never touches GitHub.
     #[serde(default)]
     pub close_superseded_prs: Vec<String>,
+    /// The repositories of this org (full `owner/name`) whose pull requests a colony in a GitHub loop
+    /// may ask the mothership to merge (issue #807). Empty — the default — refuses every merge
+    /// request, so merges stay off until the operator lists a repository here.
+    #[serde(default)]
+    pub merge_prs: Vec<String>,
     /// Dollars one colony of this org may spend on models in total, Claude and routed together. `0`
     /// opts the org out of a global budget; `None` inherits the sandbox module's `budget_usd`.
     #[serde(default)]
@@ -519,6 +524,14 @@ pub fn closes_superseded_prs(org: &OrgSettings, repo: &str) -> bool {
         .any(|named| named.trim().eq_ignore_ascii_case(repo))
 }
 
+/// Whether a colony in a GitHub loop may ask the mothership to merge a pull request in `repo` (issue
+/// #807): the repository is in the org's `merge_prs` list. Compared case-insensitively, the way
+/// GitHub itself reads repository names. Empty — the default — never merges: the operator opts in
+/// per repository, and until then a merge request is refused before `gh` is reached.
+pub fn merges_prs(org: &OrgSettings, repo: &str) -> bool {
+    org.merge_prs.iter().any(|named| named.trim().eq_ignore_ascii_case(repo))
+}
+
 /// The mothership-wide per-colony spend budget from the sandbox module, in dollars. The default is `0`:
 /// unlike cpus or memory there is no dollar figure the harness can pick for someone else's deployment,
 /// and a default that silently stopped running colonies on upgrade would be a surprise.
@@ -743,6 +756,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
             "close_superseded_prs entries are repositories like acme/api, and {bad:?} is not one"
         ));
     }
+    if let Some(bad) = settings.merge_prs.iter().find(|repo| !crate::util::valid_repo(repo.trim())) {
+        return Err(format!(
+            "merge_prs entries are repositories like acme/api, and {bad:?} is not one"
+        ));
+    }
     if settings.budget_usd.is_some_and(|n| !n.is_finite() || n < 0.0) {
         return Err("budget must be 0 or more dollars (0 means no budget)".into());
     }
@@ -930,6 +948,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("close_superseded_prs") {
         incoming.close_superseded_prs = saved.close_superseded_prs.clone();
+    }
+    if !named("merge_prs") {
+        incoming.merge_prs = saved.merge_prs.clone();
     }
     if !named("budget_usd") {
         incoming.budget_usd = saved.budget_usd;
@@ -1406,6 +1427,31 @@ mod tests {
     }
 
     #[test]
+    fn merging_pull_requests_is_per_repository_and_never_the_default() {
+        assert!(
+            !merges_prs(&OrgSettings::default(), "acme/api"),
+            "empty — the default — never merges"
+        );
+        let org = OrgSettings {
+            merge_prs: vec!["acme/api".into(), "acme/web".into()],
+            ..Default::default()
+        };
+        assert!(merges_prs(&org, "acme/api"));
+        assert!(
+            merges_prs(&org, "ACME/API"),
+            "GitHub reads repository names case-insensitively"
+        );
+        assert!(!merges_prs(&org, "acme/mobile"), "a repository not on the list never merges");
+        // The save path validates each entry as a repository.
+        assert!(validate(&org).is_ok());
+        let bad = OrgSettings {
+            merge_prs: vec!["not a repo".into()],
+            ..Default::default()
+        };
+        assert!(validate(&bad).is_err(), "an entry that names no repository is refused");
+    }
+
+    #[test]
     fn the_held_colony_timeout_reads_the_sandbox_setting_with_a_30_minute_default() {
         let modules = ModulesConfig::default();
         assert_eq!(hold_timeout(&modules), chrono::Duration::minutes(30));
@@ -1800,6 +1846,8 @@ mod tests {
             }),
             max_parallel: Some(4),
             repo_max_parallel: Some(2),
+            close_superseded_prs: vec!["acme/api".into()],
+            merge_prs: vec!["acme/web".into()],
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
@@ -1861,6 +1909,17 @@ mod tests {
             incoming.repo_max_parallel,
             Some(2),
             "a per-repository limit the client never heard of survives the save"
+        );
+        assert_eq!(
+            incoming.merge_prs, saved.merge_prs,
+            "an org's merge_prs list a web build from before it survives the save"
+        );
+        let merge_clears = json!({"merge_prs": []});
+        let mut cleared_merges: OrgSettings = serde_json::from_value(merge_clears.clone()).unwrap();
+        keep_unnamed_fields(&mut cleared_merges, &saved, Some(&merge_clears));
+        assert!(
+            cleared_merges.merge_prs.is_empty(),
+            "a named list wins, so a web build that clears it disables merges"
         );
         let clears = json!({"repo_max_parallel": null});
         let mut cleared: OrgSettings = serde_json::from_value(clears.clone()).unwrap();
@@ -1954,6 +2013,7 @@ mod tests {
         assert_eq!(blank.host_disk.as_deref(), Some("16G"));
         assert_eq!(blank.stack, saved.stack);
         assert_eq!(blank.agent, saved.agent);
+        assert_eq!(blank.merge_prs, saved.merge_prs, "nothing named, nothing replaced");
         assert_eq!(blank.watchdog, saved.watchdog);
 
         // A build that knows the switch treats it like any other field: a named null inherits, a

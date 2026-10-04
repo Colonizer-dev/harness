@@ -1298,9 +1298,29 @@ pub async fn pr_info(app: &App, url: &str) -> Result<PrInfo> {
     pr_info_from_json(&out)
 }
 
+/// Whether a pull request comes from a fork (`isCrossRepository`), its own call because only the
+/// colony merge gate (issue #807) reads it. Fails closed: a field `gh` leaves out reads as
+/// cross-repository, never as a licence to merge a stranger's branch.
+pub async fn pr_is_cross_repository(app: &App, url: &str) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Cross {
+        #[serde(rename = "isCrossRepository", default)]
+        is_cross_repository: Option<bool>,
+    }
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "isCrossRepository"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    let view: Cross = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
+    Ok(view.is_cross_repository.unwrap_or(true))
+}
+
 /// The paths a pull request changes, from `gh pr view --json files`, capped at
 /// [`crate::sessions::CHANGED_PATHS_CAP`]. Its own call, not a `PR_VIEW_FIELDS` field: the file list
-/// is read twice per PR (opened, merged), not on every watch tick.
+/// is read twice per PR (opened, merged), not on every watch tick. The cap truncates silently, so a
+/// caller that must see every path has to treat a list that comes back full as possibly cut short.
 pub async fn pr_files(app: &App, url: &str) -> Result<Vec<String>> {
     let out = tokio::time::timeout(
         Duration::from_secs(20),
