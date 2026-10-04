@@ -49,6 +49,8 @@ export interface AutonomyStatus {
   enabled: boolean;
   model: string | null;
   fallback_models: string[];
+  /** Set when autonomy is on with no model — the one way "on" is still silent (issue #776). */
+  problem?: string | null;
   last_success: { at: string; model: string } | null;
   last_error: { at: string; model: string; kind: JudgeFailureKind; status: number | null; message: string } | null;
   consecutive_failures: number;

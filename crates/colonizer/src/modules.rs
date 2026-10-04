@@ -795,6 +795,18 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                     "risk_ceiling": {"type": "string", "title": "Answer questions up to this risk", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "Each runner question carries a risk class. The judge answers only at or below this ceiling; a question above it waits for you however long, with a note in the colony's log saying why. Workspace write means the judge may settle anything confined to the colony's own workspace; publish-affecting touches what other people see; credential-adjacent is anything near a key or a login.", "default": "workspace_write"}
                 }}),
             ),
+            p(
+                "full_autonomy",
+                "Full autonomy (YOLO)",
+                "The judge with no answer limit: a model answers every question a colony stops to ask, for as long as the colony runs. It still never overrides a denial and still only picks among the options the agent offered. Needs a model from a Model provider — the Claude login cannot be used.",
+                json!({"type": "object", "properties": {
+                    "model": {"type": "string", "title": "Model", "description": "Any model you have added in Model providers: provider/model, or a plain id such as fable or opus once one of those providers' base URL host is api.anthropic.com. Answers spend that provider's key, never your Claude login. A frontier model answers best — it is deciding for you, on less context than you have, and the difference shows.", "default": ""},
+                    "fallback_models": {"type": "string", "title": "Fallback models", "description": "Ordered, comma-separated provider/model ids tried in turn when the model above cannot be reached — an HTTP error, a rate limit, a timeout. The first that answers wins. A refusal is not retried: only a provider-level failure falls through. Leave empty for no fallback.", "default": ""},
+                    "after_minutes": {"type": "integer", "title": "Answer after minutes unanswered", "description": "How long a question waits for you first. 0 answers as soon as it is asked.", "minimum": 0, "maximum": 1440, "default": 1},
+                    "free_text": {"type": "boolean", "title": "Answer questions that have no options", "description": "Off by default even here: a free-text box is where an automatic answer can do the most damage. With it off, those questions wait for you.", "default": false},
+                    "risk_ceiling": {"type": "string", "title": "Answer questions up to this risk", "enum": ["read_only", "workspace_write", "publish_affecting", "credential_adjacent"], "description": "Each runner question carries a risk class. Answers go only at or below this ceiling; a question above it waits for you however long, with a note in the colony's log saying why. Workspace write means anything confined to the colony's own workspace; publish-affecting touches what other people see; credential-adjacent is anything near a key or a login. Raising this is a real decision — above workspace write the model is settling things other people will see.", "default": "workspace_write"}
+                }}),
+            ),
         ],
         "notify" => vec![p(
             "default",
@@ -966,6 +978,19 @@ pub async fn update(State(app): State<Shared>, Path(kind): Path<String>, Json(re
     }
     check_plugin_dirs(&app.cfg, &provider.schema, &settings)
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    // Autonomous mode with no model can never work: there is nothing to ask, and the judge reads as
+    // off for hours. Unlike the probe below this is not skippable by `save_anyway` — an empty model
+    // is not settings to fix up later, it is unusable as stored (issue #776).
+    if kind == "autonomy" && req.enabled && matches!(req.provider.as_str(), "judge" | "full_autonomy") {
+        let model = settings.get("model").and_then(Value::as_str).unwrap_or_default().trim();
+        if model.is_empty() {
+            return Err(client_error(
+                StatusCode::BAD_REQUEST,
+                "Autonomous mode needs a model: add a Model provider in Settings → Model providers and name one of its models \
+                 here — the judge can't use the Claude login.",
+            ));
+        }
+    }
     // The autonomy judge is checked against the real world before it is stored (issue #875): its
     // models must route, and the primary must answer one cheap call, or the operator gets the
     // provider's own error back instead of a judge that fails silently for hours. `save_anyway`
@@ -1311,6 +1336,33 @@ mod tests {
 
         let saved = save(" ecc, ,").await.unwrap_or_else(|e| panic!("save refused: {:#}", e.1)).0;
         assert_eq!(saved["settings"]["plugins"], " ecc, ,");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn enabling_autonomy_with_no_model_is_refused_even_with_save_anyway() {
+        let root = std::env::temp_dir().join(format!("colonizer-autonomy-model-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        for provider in ["judge", "full_autonomy"] {
+            for save_anyway in [false, true] {
+                let req = UpdateModule {
+                    provider: provider.into(),
+                    enabled: true,
+                    settings: Map::from_iter([("model".into(), json!(""))]),
+                    save_anyway,
+                    confirm_content: false,
+                };
+                let err = update(State(app.clone()), Path("autonomy".into()), Json(req))
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{provider} save_anyway={save_anyway}");
+                assert!(
+                    err.message().starts_with("Autonomous mode needs a model"),
+                    "{provider} save_anyway={save_anyway}: {}",
+                    err.message()
+                );
+            }
+        }
         std::fs::remove_dir_all(root).ok();
     }
 

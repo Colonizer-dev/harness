@@ -157,6 +157,11 @@ export function installModulesMockState(ms: MockState): void {
           name: "Judge model",
           description: "A model answers a colony's questions when nobody does, choosing only among the options the agent offered",
         },
+        {
+          id: "full_autonomy",
+          name: "Full autonomy (YOLO)",
+          description: "The judge with no answer limit: a model answers every question a colony stops to ask, for as long as the colony runs. Needs a model from a Model provider — the Claude login cannot be used",
+        },
       ],
       enabled: true,
       settings: {},

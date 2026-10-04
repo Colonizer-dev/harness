@@ -2220,7 +2220,9 @@ API (v3), and the runner side is identical:
 ### 6.2b Autonomous mode (Mothership)
 
 The `autonomy` module decides who answers a colony's questions. `off` (the default) means they wait
-for a person. `judge` means a model answers one the person has not.
+for a person. `judge` means a model answers one the person has not. `full_autonomy` ([#776]) is
+`judge` with no `max_answers`: it answers every question at or below the ceiling for as long as the
+colony runs, waiting `after_minutes` of 1 rather than 10.
 
 | Setting | Default | |
 | --- | --- | --- |

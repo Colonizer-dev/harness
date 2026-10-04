@@ -4,11 +4,13 @@ import { cx, timeAgo } from "../ui";
 /**
  * The autonomy judge's recent health (issue #875), shown above its settings: a compact line while
  * it is answering, and the last provider error — with how long the run of failures is — when it is
- * not. The pane renders it only for the autonomy module; a fetch failure (an older mothership) has
- * nothing to show and renders nothing.
+ * not. An autonomy switched on with no model says so here too (issue #776), since nothing else in
+ * the pane would. The pane renders it only for the autonomy module; a fetch failure (an older
+ * mothership) has nothing to show and renders nothing.
  */
 export function AutonomyHealth({ status, now = new Date() }: { status: AutonomyStatus; now?: Date }) {
   const failing = status.consecutive_failures > 0;
+  const trouble = failing || Boolean(status.problem);
   const answered = status.last_success
     ? `Last answered ${timeAgo(status.last_success.at, now)} by ${status.last_success.model}`
     : "No answer yet";
@@ -17,14 +19,15 @@ export function AutonomyHealth({ status, now = new Date() }: { status: AutonomyS
       role="status"
       className={cx(
         "rounded-xl border px-4 py-3 text-[12.5px]",
-        failing ? "border-warn/40 bg-warn-soft text-warn" : "border-border bg-panel-2/40 text-muted",
+        trouble ? "border-warn/40 bg-warn-soft text-warn" : "border-border bg-panel-2/40 text-muted",
       )}
     >
       <p className="flex items-center gap-1.5">
-        <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", failing ? "bg-warn" : "bg-ok")} />
+        <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", trouble ? "bg-warn" : "bg-ok")} />
         {answered}
         {failing && <span>· {status.consecutive_failures} in a row</span>}
       </p>
+      {status.problem && <p className="mt-1 [overflow-wrap:anywhere]">{status.problem}</p>}
       {status.last_error && <p className="mt-1 [overflow-wrap:anywhere]">{judgeErrorLine(status.last_error, now)}</p>}
     </div>
   );
