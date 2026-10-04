@@ -267,6 +267,58 @@ async fn colonizer_routes_drift_against_protocol_md() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The first run after the snapshots were split: the revision the drift is measured from still has
+/// the one `crates/colonizer/routes.snap` file, while the head has the `crates/colonizer/routes/`
+/// directory. The old side is read from the legacy file and the new side from the directory, so the
+/// drift is still found rather than silently missed.
+#[tokio::test]
+async fn colonizer_routes_drift_reads_a_split_snapshot_against_the_legacy_file() {
+    let dir = root("routes-split");
+    let app = crate::tests::test_app(&dir);
+    let f = Fixture::new(&dir);
+    let legacy = "/api/loops      GET    unauth=401    token=owner    activity=-\n\
+                  /api/keep       GET    unauth=401    token=owner    activity=-\n\
+                  /api/old/{id}   DELETE unauth=401    token=owner    activity=-\n";
+    let protocol =
+        "# Protocol\n\n| `GET /api/loops` | loops |\n| `GET /api/keep` | kept |\n| `DELETE /api/old/{name}` | gone soon |\n";
+    f.commit(
+        "Initial",
+        &[
+            ("crates/colonizer/routes.snap", legacy),
+            (COLONIZER_PROTOCOL, protocol),
+            ("README.md", "# Colonizer\n"),
+        ],
+        2,
+    );
+    // The split lands: one file per module. `loops` gains a route, `old` is dropped, `keep` stays.
+    let loops_v2 = "/api/loops      GET    unauth=401    token=owner    activity=-\n\
+                    /api/docs-loop  GET    unauth=401    token=owner    activity=-\n";
+    f.commit(
+        "Split the route snapshots (#30)",
+        &[
+            ("crates/colonizer/routes.snap", ""),
+            ("crates/colonizer/routes/loops.snap", loops_v2),
+            (
+                "crates/colonizer/routes/keep.snap",
+                "/api/keep  GET  unauth=401  token=owner  activity=-\n",
+            ),
+        ],
+        0,
+    );
+    let bare = f.mirror(&app, "Colonizer-dev/harness");
+    let s = scan(&app, &bare, None, 24, Utc::now()).await.unwrap();
+    let routes: Vec<&String> = s
+        .findings
+        .iter()
+        .filter(|x| x.kind == Kind::RoutesDrift)
+        .map(|x| &x.message)
+        .collect();
+    assert_eq!(routes.len(), 2, "{:#?}", s.findings);
+    assert!(routes.iter().any(|m| m.contains("/api/docs-loop is new")), "{routes:?}");
+    assert!(routes.iter().any(|m| m.contains("/api/old/{} was removed")), "{routes:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn changelog_gaps_are_found_only_where_the_repository_keeps_one() {
     let code = |sha: &str, subject: &str, extra: &[&str]| Commit {

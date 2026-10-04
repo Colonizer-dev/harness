@@ -1,0 +1,2 @@
+/api/hunters/{id}/install                            POST   unauth=401    token=owner            activity=-
+/api/hunters/{id}/probe                              GET    unauth=401    token=owner            activity=-

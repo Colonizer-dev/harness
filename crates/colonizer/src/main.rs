@@ -46,6 +46,7 @@ mod epic;
 mod events;
 mod exec_bits;
 mod execution;
+mod features;
 mod findings;
 mod fleet;
 mod fleet_export;

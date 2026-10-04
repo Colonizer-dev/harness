@@ -1,0 +1,5 @@
+/api/docs-loop                                       GET    unauth=401    token=owner            activity=-
+/api/docs-loop                                       PUT    unauth=401    token=owner            activity=-
+/api/docs-loop/disable                               POST   unauth=401    token=owner            activity=-
+/api/docs-loop/enable                                POST   unauth=401    token=owner            activity=-
+/api/docs-loop/run                                   POST   unauth=401    token=owner            activity=-

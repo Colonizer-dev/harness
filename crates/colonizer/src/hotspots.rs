@@ -47,9 +47,14 @@ pub fn pr_number(subject: &str) -> Option<u64> {
 }
 
 /// The always-touched files that say nothing about collisions: the changelog every pull request
-/// edits, the generated lockfile, `changelog.d/` fragments and the route snapshots.
+/// edits, the generated lockfile, `changelog.d/` fragments and the generated route snapshots (the
+/// per-module `crates/colonizer/routes/*.snap`, and the single `routes.snap` older history has).
 fn is_noise(path: &str) -> bool {
-    path == "CHANGELOG.md" || path == "Cargo.lock" || path.starts_with("changelog.d/") || path.ends_with("routes.snap")
+    path == "CHANGELOG.md"
+        || path == "Cargo.lock"
+        || path.starts_with("changelog.d/")
+        || path.ends_with("routes.snap")
+        || (path.starts_with("crates/colonizer/routes/") && path.ends_with(".snap"))
 }
 
 /// Parses `git log --first-parent -m --name-only --format=%x1e%s` output into a [`Report`]:
@@ -155,7 +160,7 @@ mod tests {
         "\x1eDouble (#589) (#837)\n\nsrc/b.rs\n",
         "\x1eNo pull request here\n\nsrc/c.rs\n",
         "\x1eMerge pull request #20 from colonizer/issue-1\n\nsrc/a.rs\n",
-        "CHANGELOG.md\nchangelog.d/12.added.md\nCargo.lock\ncrates/colonizer/routes.snap\n",
+        "CHANGELOG.md\nchangelog.d/12.added.md\nCargo.lock\ncrates/colonizer/routes.snap\ncrates/colonizer/routes/maps.snap\n",
     );
 
     fn ranked(report: &Report) -> Vec<(&str, usize)> {
