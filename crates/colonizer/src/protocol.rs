@@ -288,18 +288,28 @@ pub(crate) enum AgentEvent {
     Finding { title: String, body: String, evidence: String },
     /// A GitHub write a colony of a GitHub-needing loop asks the host to make (issue #778, §6.12).
     /// The token never enters a colony, so the guest only proposes: `tool` names the action
-    /// (`issue_label`, `issue_comment`, `issue_close_duplicate`), `issue` is the colony's own
-    /// repository's issue number, and everything else is validated, capped and scoped in
-    /// `loop_github.rs`, which still reads the raw event.
+    /// (`issue_label`, `issue_comment`, `issue_close_duplicate`, and since issue #807 the pull-request
+    /// tools `pr_comment`, `pr_label`, `pr_merge`), the issue or pull-request number is the colony's
+    /// own repository's, and everything else is validated, capped and scoped in `loop_github.rs`,
+    /// which still reads the raw event. Every field but `tool` is optional, so one type reads both
+    /// the issue and the pull-request bodies: `issue`/`pr` name which, `duplicate_of` closes one as
+    /// a duplicate of another, and `head_sha`/`reason` carry a merge request's pinned head and why.
     GithubAction {
         tool: String,
-        issue: u64,
+        #[serde(default)]
+        issue: Option<u64>,
+        #[serde(default)]
+        pr: Option<u64>,
         #[serde(default)]
         labels: Vec<String>,
         #[serde(default)]
         body: String,
         #[serde(default)]
         duplicate_of: Option<u64>,
+        #[serde(default)]
+        head_sha: Option<String>,
+        #[serde(default)]
+        reason: Option<String>,
     },
     /// A self-paced loop's colony names its next run (loops.rs): minutes from now, and why.
     LoopNext {
