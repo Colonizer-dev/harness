@@ -291,7 +291,7 @@ slot_pids() {
     exe_pids=$(for link in /proc/[0-9]*/exe; do
       real=$(readlink "$link" 2>/dev/null) || continue
       case "$real" in
-        "$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
+        ("$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
       esac
     done)
   elif command -v lsof >/dev/null 2>&1; then
