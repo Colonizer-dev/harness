@@ -1,0 +1,23 @@
+# Non-test Rust source files over 2000 lines that predate the limit (issue #825). Each line is a
+# repo-relative path. This list only ever shrinks: when a file is split into a directory module the
+# check fails until its line is deleted, and an entry for a file that is gone or back under the
+# limit fails too. Do not add a line to let a file grow past the limit; split it instead.
+crates/colonizer/src/boot.rs
+crates/colonizer/src/chat.rs
+crates/colonizer/src/cli.rs
+crates/colonizer/src/deps.rs
+crates/colonizer/src/docs_loop.rs
+crates/colonizer/src/github.rs
+crates/colonizer/src/lifecycle.rs
+crates/colonizer/src/merge_loop.rs
+crates/colonizer/src/orgs.rs
+crates/colonizer/src/prescan.rs
+crates/colonizer/src/providers.rs
+crates/colonizer/src/publish.rs
+crates/colonizer/src/queue.rs
+crates/colonizer/src/redteam.rs
+crates/colonizer/src/remote.rs
+crates/colonizer/src/supply_chain_loop.rs
+crates/colonizer/src/ts_any_loop.rs
+crates/colonizer/src/usage.rs
+crates/colonizer/src/verify.rs

@@ -411,14 +411,15 @@ The wizard has three steps:
 
 A one-off run waits until no colony is live, then starts. A schedule is kept by the mothership.
 
-Only **Colony swarm** runs today. **Strix** and **Shannon** appear in the wizard but cannot be
-picked:
+The **Colony swarm** and **Shannon** can be picked today; **Strix** cannot:
 
-- Shannon always shows "Coming soon".
+- Shannon shows "Ready · runs in a colony". Its run uses one colony per repository, so the
+  swarm-size slider is replaced by a note.
 - Strix shows "Installed · runs coming soon" once it is installed, and "Coming soon" otherwise.
 
-Red-team runs do not drive their scans yet. See [red-team.md](red-team.md) for how runs work and
-[security-hunters.md](security-hunters.md) for the hunter modules.
+Red-team runs drive Shannon's scan inside its colony; they do not drive Strix's yet. See
+[red-team.md](red-team.md) for how runs work and [security-hunters.md](security-hunters.md) for
+the hunter modules.
 
 ## Memory
 

@@ -1,0 +1,12 @@
+/api/previews/{id}/                                  DELETE unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  GET    unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  PATCH  unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  POST   unauth=401    token=fleet            activity=-
+/api/previews/{id}/                                  PUT    unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           DELETE unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           GET    unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           PATCH  unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           POST   unauth=401    token=fleet            activity=-
+/api/previews/{id}/{*rest}                           PUT    unauth=401    token=fleet            activity=-
+/api/sessions/{id}/preview                           DELETE unauth=401    token=owner            activity=-
+/api/sessions/{id}/preview                           POST   unauth=401    token=owner            activity=-

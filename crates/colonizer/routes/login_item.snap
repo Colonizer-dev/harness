@@ -1,0 +1,2 @@
+/api/login-item                                      GET    unauth=401    token=owner            activity=-
+/api/login-item                                      POST   unauth=401    token=owner            activity=settings.save

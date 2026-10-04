@@ -1,0 +1,7 @@
+/api/push/key                                        GET    unauth=401    token=owner            activity=-
+/api/push/presence                                   POST   unauth=401    token=owner            activity=-
+/api/push/subscriptions                              GET    unauth=401    token=owner            activity=-
+/api/push/subscriptions                              POST   unauth=401    token=owner            activity=-
+/api/push/subscriptions/{id}                         DELETE unauth=401    token=owner            activity=-
+/api/push/subscriptions/{id}                         PATCH  unauth=401    token=owner            activity=-
+/api/push/subscriptions/{id}/test                    POST   unauth=401    token=owner            activity=-

@@ -104,7 +104,7 @@ impl QuestionRisk {
 /// writing is enforced here, by the type: only these values can be stamped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Origin {
+pub enum Origin {
     /// A person drove it: a message typed into the colony, or their answer to a question.
     User,
     /// The colony's orchestrator agent — most runner lines, its questions included.
@@ -127,7 +127,7 @@ pub(crate) enum Origin {
 
 impl Origin {
     /// The wire spelling, for stamping a line's `origin` field.
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Agent => "agent",
@@ -392,122 +392,6 @@ impl AgentEvent {
 mod tests {
     use super::*;
 
-    /// The runner's contract fixture: every line must deserialise and land on the variant the
-    /// harness dispatches on — or, for the forwarded-only types, deliberately on the catch-all.
-    /// This is the seam between the JS runner and this enum, so drift fails a test on both sides.
-    #[test]
-    fn every_fixture_event_deserialises_and_lands_on_its_variant() {
-        let fixture = include_str!("../../../modules/agents/claude-code/test/fixtures/events.jsonl");
-        let events: Vec<AgentEvent> = fixture
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("fixture line satisfies docs/agent-events.schema.json"))
-            .collect();
-
-        // The events the harness acts on, with the fields the dispatch reads.
-        assert_eq!(
-            events[0],
-            AgentEvent::Status {
-                state: AgentState::Idle,
-                detail: None
-            }
-        );
-        assert_eq!(
-            events[1],
-            AgentEvent::UserMessage {
-                id: "initial".into(),
-                text: "Fix the issue".into()
-            }
-        );
-        assert!(matches!(
-            &events[2],
-            AgentEvent::Status {
-                state: AgentState::Working,
-                detail: None
-            }
-        ));
-        // The agent-session id the harness keeps on the record (issue #562): a resumable runner
-        // announces it at init, before the log line naming the same session.
-        assert!(matches!(
-            &events[3],
-            AgentEvent::AgentSession { session_id } if !session_id.is_empty()
-        ));
-        assert!(matches!(
-            &events[9],
-            AgentEvent::Question { question_id, questions, message_id: Some(message_id), .. }
-                if question_id == "toolu_ask" && message_id == "msg_1" && questions.len() == 1
-        ));
-        assert!(matches!(
-            &events[10],
-            AgentEvent::Status {
-                state: AgentState::WaitingForAnswer,
-                detail: None
-            }
-        ));
-        assert!(matches!(
-            &events[11],
-            AgentEvent::QuestionAnswered { question_id, response: None, .. } if question_id == "toolu_ask"
-        ));
-        assert!(matches!(
-            &events[16],
-            AgentEvent::MemoryProposal { scope: Some(scope), tags, .. }
-                if scope == "repo" && tags == &["workspace".to_string()]
-        ));
-        assert!(matches!(
-            &events[17],
-            AgentEvent::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
-        ));
-        assert!(matches!(
-            &events[24],
-            AgentEvent::Status {
-                state: AgentState::Idle,
-                detail: None
-            }
-        ));
-        assert!(matches!(
-            &events[25],
-            AgentEvent::Status {
-                state: AgentState::Exited,
-                detail: None
-            }
-        ));
-        match &events[23] {
-            AgentEvent::TurnEnd {
-                is_error,
-                cost_usd,
-                model_usage: Some(usage),
-                ..
-            } => {
-                assert!(!is_error);
-                assert!(cost_usd.is_some_and(|cost| cost > 0.0));
-                assert!(usage.is_object());
-            }
-            other => panic!("the turn that ends the fixture is a turn_end, got {other:?}"),
-        }
-        // The masked read the runner reports (issue #647): the attempt, with the tool that made it.
-        assert_eq!(
-            events[21],
-            AgentEvent::PathPolicy {
-                access: "read".into(),
-                policy: "masked".into(),
-                path: ".env".into(),
-                tool: "Read".into(),
-            }
-        );
-
-        // The forwarded-only types land on the catch-all on purpose: the browser is their consumer.
-        assert_eq!(events[4], AgentEvent::Other, "log");
-        assert_eq!(events[5], AgentEvent::Other, "model_changed");
-        assert_eq!(events[6], AgentEvent::Other, "assistant_text_delta");
-        assert_eq!(events[8], AgentEvent::Other, "assistant_text");
-        assert_eq!(events[13], AgentEvent::Other, "thinking");
-        assert_eq!(events[14], AgentEvent::Other, "tool_call");
-        assert_eq!(events[15], AgentEvent::Other, "tool_result");
-        assert_eq!(events[18], AgentEvent::Other, "tool_call");
-        assert_eq!(events[19], AgentEvent::Other, "tool_result with a denial");
-        assert_eq!(events[20], AgentEvent::Other, "tool_call for the masked read");
-        assert_eq!(events[22], AgentEvent::Other, "tool_result of the masked read");
-    }
-
     /// The regression guard for browser pass-through: a type a newer runner adds, or a known body
     /// with broken fields, must land on the catch-all rather than error out, so dispatching can
     /// never drop the line — it was already forwarded to the browser before this point (§2: unknown
@@ -738,37 +622,6 @@ mod tests {
         );
         assert_eq!(Origin::parse_logged(None), None, "no origin is a legacy line, not a bug");
         assert_eq!(Origin::parse_logged(Some("the_runner_itself")), None);
-    }
-
-    /// The schema's `#/$defs/origin` enum is this vocabulary's second hand-kept side: a variant
-    /// added here without the schema — or a wire spelling changed on one side only — fails here, the
-    /// same seam the fixture test above pins for the event types themselves.
-    #[test]
-    fn the_origin_variants_are_exactly_the_schemas_origin_enum() {
-        let schema: Value = serde_json::from_str(include_str!("../../../docs/agent-events.schema.json")).unwrap();
-        let mut schema_enum: Vec<&str> = schema["$defs"]["origin"]["enum"]
-            .as_array()
-            .expect("the schema defines #/$defs/origin as an enum")
-            .iter()
-            .map(|v| v.as_str().expect("an enum of strings"))
-            .collect();
-        schema_enum.sort_unstable();
-        let mut variants: Vec<&str> = [
-            Origin::User,
-            Origin::Agent,
-            Origin::Subagent,
-            Origin::Watchdog,
-            Origin::Autonomy,
-            Origin::BurnDown,
-            Origin::Redteam,
-            Origin::Notify,
-            Origin::System,
-        ]
-        .iter()
-        .map(|o| o.as_str())
-        .collect();
-        variants.sort_unstable();
-        assert_eq!(variants, schema_enum);
     }
 
     /// The schema's defaults, held by the type: a proposal without `scope` or `tags` proposes for

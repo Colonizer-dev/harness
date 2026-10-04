@@ -103,6 +103,13 @@ else passes through to `https://api.anthropic.com` unchanged, so a subscription 
 the orchestrator. Routed `count_tokens` calls the provider doesn't support get an estimate. Provider key
 variables are removed from Claude Code's own environment.
 
+Responses stream through as they arrive, with no overall time limit. The router gives an upstream 30 s
+to connect and lets it stay silent for up to `router_idle_timeout_secs` (600 s by default) before its
+answer starts or between two chunks of it. A failure is answered for what it is — unreachable (DNS,
+connect, TLS) as a 502, a timeout as a 504 `timeout_error`, a broken connection as a 502 with its error
+code — and logged with `source: "model_router"` (provider, class, status, elapsed time); upstream 401/403,
+429 and 5xx answers pass through unchanged. See docs/protocol.md §6.1 (issue #983).
+
 Claude Code sends its full request shape to routed providers, including `thinking`, `context_management`,
 `output_config`, `metadata`, every tool definition and betas such as `context-management-*` and
 `advisor-tool-*`. Providers that reject unknown fields need to ignore them; a provider on the gateway's
@@ -161,8 +168,12 @@ Predicates: `command` (regex over the command), `touches` (path globs matched ag
 tokens of the command and its scripts; `~` is $HOME; components at any depth, `*` never crosses
 `/`; an entry starting with `!` excludes the tokens it matches), `script` (regex over script
 contents) and `writes_outside` (a redirect or cp/mv/rm/tee-style target that is an absolute path
-outside the repository *and on a host-backed mount* — `/tmp`, the `/dev` sinks and the microVM's own
-root filesystem don't count).
+outside the repository *and on a host-backed mount*, or a write onto a read-only host mount
+(`/colonizer`, `/opt/colonizer`) or into the checkout's own `.git` — `/tmp`, the `/dev` sinks and
+the microVM's own root filesystem don't count). `writes_outside` is `true` for that set; the string
+`"strict"` widens it to *every* absolute path outside the repository, as before issue #877 (see
+below). The reason on the card says which: a host-backed path, a read-only mount by name, or the
+`.git` internals.
 Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env*` and the files the
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
@@ -175,11 +186,23 @@ this is guidance in front of the model, like the delegation gate — not a bound
 `writes_outside` reads the boot's writable-bind list (`/colonizer/host-mounts`; env override
 `COLONIZER_HOST_MOUNTS`, a file path). The microVM's root filesystem is discarded when the colony
 stops, so a write there — `mkdir -p /root/target`, a rustup install under `/root/.cargo`, an install
-under `/usr` — is not the host's to protect: only a path at, under or above a listed mount
-(`/workspace`, `/harness/out`, the resume directory, `/colonizer/services`) asks. A write *above* a
-mount asks too, so `rm -rf /root` still asks while `/root/.claude/projects` is mounted. When the
-list is absent — an older mothership, or a runner outside a VM — every absolute path outside the
-repository asks, as before.
+under `/usr`, a `CARGO_TARGET_DIR` like `/root/colonizer-target` — is not the host's to protect:
+only a path at, under or above a listed mount (`/workspace`, `/harness/out`, the resume directory,
+`/colonizer/services`) asks. A write *above* a mount asks too, so `rm -rf /root` still asks while
+`/root/.claude/projects` is mounted. The guest's own read-only host mounts — `/colonizer` (the
+mothership's `host-mounts`, memory scopes, the services mount point) and `/opt/colonizer` (the
+agent's binaries, runner and plugins), the vendored runtime binaries (`/opt/node/bin/node`,
+`/opt/claude/bin/claude`), plus a write into the checkout's `.git` — ask regardless of the list,
+since a write there is the host's even though the mount refuses it. When the list is
+absent — an older mothership, or a runner outside a VM — every absolute path outside the repository
+asks, as before.
+
+An org (or install, or repo) layer can restore that conservative behaviour with a rule whose
+predicate is the string `"strict"`, e.g.
+`{ "id": "strict-writes", "decision": "ask", "writes_outside": "strict" }`: it asks for a write to
+any absolute path outside the repository — the microVM's owned root filesystem included — even with
+the mount list present. `/tmp` and a write inside the repository never ask, strict or not, and the
+layering is unchanged (a stricter decision still wins, and a later layer still cannot widen).
 
 Coverage: Claude Code and the ACP runner apply the policy. Codex, Grok Build, Hermes, OpenCode and
 Pi do not — the harness refuses to launch a colony on one of them while a policy is set (the
