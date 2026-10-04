@@ -137,31 +137,35 @@ pub fn blocker(assets: Option<&Path>) -> Option<String> {
 /// The one refusal decision, shared by the route and `colonizer update` alike:
 /// why this build must not be replaced by `latest`, if it must not.
 ///
-/// A development build — commits after its last tag, a modified tree, or no tag
-/// at all — holds work the newest release does not, however much newer that
-/// release's number is. And a release newer than the latest one would be a
-/// downgrade, not an update. Both refuse unless `force` says the operator has
-/// read the reason and means it anyway; anything else is the caller's
-/// newer-or-nothing decision to make, not a refusal.
+/// One refusal holds even with `force`: a `latest` older than the release
+/// this build already contains is not an update under any name — installing
+/// it would throw away work the build already holds, forced or not (issue
+/// #820). Past that check, `force` skips the other one: a development build
+/// — commits after its last tag, a modified tree, or no tag at all — holds
+/// work the newest release does not, however much newer that release's
+/// number is, unless `force` says the operator has read the reason and means
+/// it anyway.
 ///
 /// The refusal names both versions, so either side can print it as is: the
 /// route only has the stamped build, and the command only has the JSON.
 pub fn refusal(build: &version::Build, latest: Option<&str>, force: bool) -> Option<String> {
+    let release = build.release.as_deref().and_then(version::Semver::parse);
+    let newest = latest.and_then(version::Semver::parse);
+    if let (Some(release), Some(newest), Some(latest)) = (release, newest, latest)
+        && newest < release
+    {
+        return Some(format!(
+            "the latest known release `{latest}` is older than the release `{}` this build already contains — refusing to downgrade, even with `--force`",
+            build.release.as_deref().unwrap_or_default(),
+        ));
+    }
     if force {
         return None;
     }
     if build.development {
         return Some(dev_refusal(&build.version, build.release.as_deref(), latest));
     }
-    let running = build.release.as_deref().and_then(version::Semver::parse);
-    let newest = latest.and_then(version::Semver::parse);
-    match (running, newest, latest) {
-        (Some(running), Some(newest), Some(latest)) if running > newest => Some(format!(
-            "running `{}`, newer than the latest release `{latest}` — refusing to downgrade; pass `--force` to install `{latest}` anyway",
-            build.version
-        )),
-        _ => None,
-    }
+    None
 }
 
 /// How many commits a `git describe` build sits ahead of its release, if it says so.
@@ -887,9 +891,9 @@ mod tests {
     #[test]
     fn a_release_newer_than_the_latest_release_refuses_the_downgrade() {
         let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), false).expect("should refuse");
+        assert!(reason.contains("`v0.1.5`"), "{reason}");
         assert!(reason.contains("`v0.1.6`"), "{reason}");
-        assert!(reason.contains("newer than the latest release `v0.1.5`"), "{reason}");
-        assert!(reason.contains("`--force` to install `v0.1.5` anyway"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
     }
 
     #[test]
@@ -902,11 +906,37 @@ mod tests {
 
     #[test]
     fn force_proceeds_past_either_refusal() {
+        // Dev build, forced, reinstalling the exact release it already sits
+        // ahead of: not a downgrade, so force does what it says.
         assert_eq!(
             refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), Some("v0.1.5"), true),
             None
         );
-        assert_eq!(refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true), None);
+        // A release build, forced, with a genuinely newer release: not a
+        // refusal at all, forced or not.
+        assert_eq!(refusal(&a_build("v0.1.5", "v0.1.5", false), Some("v0.1.6"), true), None);
+    }
+
+    #[test]
+    fn force_never_downgrades_past_the_release_this_build_already_contains() {
+        // What `--force` used to skip: a release build forced backwards to an
+        // older release. `force` bypasses the refusal below it, not this one.
+        let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true).expect("should still refuse");
+        assert!(reason.contains("`v0.1.5`"), "{reason}");
+        assert!(reason.contains("`v0.1.6`"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
+    }
+
+    #[test]
+    fn force_never_installs_a_release_older_than_a_dev_builds_base() {
+        // Issue #820's exact shape: a stale "latest" that is actually older
+        // than the tag this dev build already sits ahead of must not be
+        // treated as something `--force` can install.
+        let reason =
+            refusal(&a_build("v0.1.10-58-g9354d16", "v0.1.10", true), Some("v0.1.9"), true).expect("should refuse even forced");
+        assert!(reason.contains("`v0.1.9`"), "{reason}");
+        assert!(reason.contains("`v0.1.10`"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
     }
 
     /// One `/api/update` read, as the command sees it.
