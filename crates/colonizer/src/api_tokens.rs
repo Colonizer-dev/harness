@@ -503,7 +503,7 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             "api",
             "sessions",
             id,
-            "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm",
+            "answer" | "messages" | "stop" | "resume" | "keep" | "prewarm" | "switch-agent",
         ] if post && !id.is_empty() => Need::Session {
             id,
             at_least: Scope::Operate,

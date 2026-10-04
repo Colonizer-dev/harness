@@ -56,6 +56,10 @@ toml = "1.1.6"
 # (remote.rs); the auth tests drive it the same way.
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
+# Session transcript conversion for switching a colony's agent module mid-task (switch_agent.rs,
+# issue #737). Default features pull cmake-built backends the harness never uses, so the library
+# alone is taken.
+txcript = { version = "0.14", default-features = false }
 uuid = { version = "1.26.1", features = ["v4"] }
 
 # The system keychain for saved secrets (secrets.rs): Keychain on macOS, the Secret Service

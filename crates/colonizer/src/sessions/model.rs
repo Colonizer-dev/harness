@@ -450,6 +450,13 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The note the next boot hands a colony whose agent module was switched mid-task (issue #737):
+    /// the switch sets it with the new `agent` and `agent_session`, the boot that follows treats it
+    /// as a resume trigger and uses it as the turn prompt, and it is cleared once the runner is up —
+    /// the same delivery as `pending_answer`, and for the same reason: it survives a failed boot and
+    /// a mothership restart, so a switch whose boot has not run is never lost. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_note: Option<String>,
     /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
     /// question and the queue has not started (or has already given up on) the warm-up boot.
     /// `None` unless a request is live.
@@ -572,6 +579,7 @@ impl Default for Session {
             parked: None,
             agent_session: None,
             pending_answer: None,
+            switch_note: None,
             prewarm: None,
             supply_chain: None,
             superseded: None,

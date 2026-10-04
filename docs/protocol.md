@@ -376,6 +376,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed`/`parked` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees. A superseded colony that is not kept is a **409** until it is kept (*Superseded colony work*, below) |
+| `POST /api/sessions/{id}/switch-agent` | `{module}` — switch the colony to another agent module mid-task ([#737]): a live colony is stopped, the stored conversation is converted from the source module's transcript to the target's with [txcript](https://crates.io/crates/txcript), written where the target runner resumes from, and the colony is booted on the target with a first turn telling the new agent it is continuing another agent's session (`switch_note`, below). Only `claude-code` ↔ `codex` are supported — the pairs txcript maps both ways — so an unsupported target, an unknown one, a target module that declares no `session_resume.dir` (its converted transcript would have nowhere to land), and a colony already on the target module are all a **400**. A queued colony, one mid-publish, one already over, one suspended waiting on an answer (the stop would discard it), one whose worktree is gone or was cleaned up, and one superseded but not kept (`resume` would refuse any of them) are a **409**. A restricted colony whose target module reaches no eligible provider is a **403** — the switch is never laxer than launching the colony on that module (*Sensitivity*, [providers.md](providers.md)). Losses are reported only as a heuristic (source and target record counts plus a per-direction caveat), never an exact figure |
 | `POST /api/sessions/{id}/keep` | Marks a superseded colony as kept (issue #673; *Superseded colony work*, below): `superseded.kept` goes true and the queue starts it as slots free. The supersession record itself stays, so the history still says what covered this work. **409** for a colony that is not superseded, or was kept already; **404** for an unknown colony |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch. **409** while the colony is live, queued or publishing. Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
@@ -457,7 +458,7 @@ routed together).
   `GET /api/loops` and `/api/loops/{id}/runs` (filtered the same way), the events WebSocket, the
   `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`, and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|prewarm`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|prewarm|switch-agent`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -687,7 +688,7 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 
 The example shows the common fields; the record carries more, and most optional ones are left out
 of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`, `parked`,
-`agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
+`agent_session`, `pending_answer`, `switch_note`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
@@ -731,6 +732,13 @@ to `starting` and then `running` — the colony holds its slot again — but an 
 the runner is up. `prewarm_timeout_minutes` (default 5) with no answer, a mothership restart or a
 failed boot clears `prewarm` and leaves the colony suspended again, never failed; answering
 clears `prewarm`, `suspended` and `pending_answer` together once the answer is delivered.
+
+`switch_note` is set when the colony's agent module was switched mid-task ([#737], `POST
+/api/sessions/{id}/switch-agent`): the note the resumed runner is told first, telling the new agent
+it is continuing another agent's session and that the converted transcript may be missing detail.
+It is what the boot's resume trigger and first turn read, and it is cleared once the runner is up —
+persisted so a failed boot or a mothership restart never loses the switch, exactly like
+`pending_answer`.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never

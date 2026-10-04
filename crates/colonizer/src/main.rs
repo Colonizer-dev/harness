@@ -117,6 +117,7 @@ mod stream;
 mod summaries;
 mod supersede;
 mod supply_chain_loop;
+mod switch_agent;
 mod telemetry;
 mod timing;
 mod ts_any_loop;
