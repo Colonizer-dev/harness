@@ -866,6 +866,25 @@ pub(crate) fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: 
     matches!(status, SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::Parked) && !cleaned_up && has_worktree
 }
 
+/// A colony reclaimed while its pull request was still open (issue #623): `cleaned_up` is set but
+/// the branch is still on the remote, so resume can re-create the worktree instead of refusing it
+/// forever.
+///
+/// `PrOpened` is the status the real auto-reclaim scenario leaves the colony in: the reclaim sweep
+/// (`reclaim.rs`) only ever cleans up colonies that are `PrOpened`, `Merged`, `Closed` or
+/// `NoChanges` — `Stopped`/`Failed` are excluded because they are resumable as they are — and
+/// `cleanup_one` never touches `status`, so a colony reclaimed with its pull request open stays
+/// `PrOpened` forever. Nothing else moves a non-live `PrOpened` colony to `Stopped` (`stop` is
+/// gated on `is_live`, which `PrOpened` is not). `Stopped`/`Failed`/`Parked` are kept too: a
+/// manually cleaned-up colony in one of those states resumes the same way.
+pub(crate) fn resumable_from_pr_branch(s: &Session) -> bool {
+    matches!(
+        s.status,
+        SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::Parked | SessionStatus::PrOpened
+    ) && s.cleaned_up
+        && s.pr_url.is_some()
+}
+
 /// Whether this colony is suspended while it waits on its user (issue #562) — the only shape a
 /// suspension takes, since the claim and every path that touches a suspended colony keep the
 /// status at `waiting_for_answer`. The gates that give a suspension an escape (`resume`) check
@@ -985,7 +1004,7 @@ pub async fn resume(
     // to bring it back. Its claim below clears the suspension; any held answer is delivered by the
     // boot, exactly as the queue's restore delivers one. The escape is for a colony actually
     // waiting — status `waiting_for_answer` — not the flag alone (`suspended_waiting`).
-    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
+    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) && !resumable_from_pr_branch(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
     // Issue #673: a superseded colony does not come back until it is kept — a merge covered its
@@ -1003,7 +1022,7 @@ pub async fn resume(
     if let Some(warm) = warm_resume(&app, &id, &s).await {
         return warm;
     }
-    let previous_status = s.status;
+    let mut previous_status = s.status;
     // What a failed rotation below puts back: the suspension as well as the status, so the colony
     // stays restorable and `can_resume`-shaped for the retry this error asks for. The park record
     // comes back with them, for the same reason.
@@ -1030,6 +1049,50 @@ pub async fn resume(
     // Every early return below (404, 409) simply drops it.
     let lifecycle = app.session_lock(&id).await;
     let _lifecycle = lifecycle.lock().await;
+    // Issue #623: re-fetched and re-checked under this colony's lifecycle lock so two concurrent
+    // resumes can't both try to create the same worktree — the loser here sees `cleaned_up` already
+    // false and `can_resume` passes it through normally below. A failure to re-create is a 500: the
+    // colony is left as it was, still `cleaned_up`, and the resume can be retried. The repo lock is
+    // taken for the duration, as `cleanup_one` takes it, so a concurrent cleanup of the same repo
+    // cannot race the fetch.
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if resumable_from_pr_branch(&s) {
+        app.session_log(
+            &id,
+            "info",
+            "the worktree was reclaimed while the pull request was still open; re-creating it".into(),
+        )
+        .await;
+        let admin = {
+            let lock = app.repo_lock(&s.repo).await;
+            let _guard = lock.lock().await;
+            github::recreate_worktree(&app, &s).await
+        }
+        .map_err(|e| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("could not re-create the worktree: {e:#}"),
+            )
+        })?;
+        app.update_session(&id, |x| {
+            x.git_admin_dir = Some(admin.display().to_string());
+            x.cleaned_up = false;
+            // Issue #623: the colony is no longer the reclaimed-with-an-open-PR shape, it is an
+            // ordinary stopped colony with a worktree — which is exactly what `can_resume` (checked
+            // again inside the claim below) and every other status gate expects. Without this a
+            // colony the sweep left at `PrOpened` would be re-created yet refused by the claim.
+            x.status = SessionStatus::Stopped;
+        })
+        .await;
+        // A rotation failure below reverts the status; reverting to the pre-reclaim `PrOpened` would
+        // leave a colony with a restored worktree that no gate (`can_resume` needs a stopped-shaped
+        // status, `resumable_from_pr_branch` needs `cleaned_up`) will ever admit again. The status
+        // this resume is really rolling back to is the `Stopped` it just became.
+        previous_status = SessionStatus::Stopped;
+    }
     // The claim comes first, exactly as the publish claim does: `failed` is both resumable and
     // publishable, so a resume landing just after a publish claimed the colony must be refused
     // rather than overwrite `publishing`. Nothing outside the list is touched until it succeeds, so
@@ -1932,6 +1995,138 @@ mod tests {
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
         }
+    }
+
+    #[test]
+    fn only_a_cleaned_up_colony_with_an_open_pull_request_can_be_resumed_from_its_pr_branch() {
+        // The reclaimed-but-open-PR shape (issue #623) is the one that resumes by re-creating:
+        // `cleaned_up` set, a pull request still recorded, and a status the reclaim leaves it in.
+        // `PrOpened` is the real one — the sweep never moves a colony out of it — and the
+        // stopped-shaped statuses cover a manual cleanup.
+        for status in [
+            SessionStatus::PrOpened,
+            SessionStatus::Stopped,
+            SessionStatus::Failed,
+            SessionStatus::Parked,
+        ] {
+            let mut s = colony("acme", status);
+            s.cleaned_up = true;
+            s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+            assert!(resumable_from_pr_branch(&s), "{status:?}");
+        }
+        // No pull request recorded: nothing to re-create the branch from.
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.cleaned_up = true;
+        assert!(!resumable_from_pr_branch(&s), "no pr_url");
+        // Not reclaimed: the ordinary `can_resume` path handles it.
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+        assert!(!resumable_from_pr_branch(&s), "not cleaned up");
+        // Any other status is refused by the status check regardless, so the escape never applies.
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Idle,
+            SessionStatus::Publishing,
+            SessionStatus::Queued,
+            SessionStatus::Merged,
+            SessionStatus::Closed,
+            SessionStatus::NoChanges,
+        ] {
+            let mut s = colony("acme", status);
+            s.cleaned_up = true;
+            s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+            assert!(!resumable_from_pr_branch(&s), "{status:?}");
+        }
+    }
+
+    /// Issue #623, end to end through the handler, from the state the real reclaimer leaves behind:
+    /// a colony the sweep reclaimed while its pull request was still open — `PrOpened`, the status
+    /// `cleanup_one` never changes — resumes by re-creating the worktree from the pushed branch, and
+    /// the claim then sees an ordinary resumable colony. The parallel limit is full, so the resume
+    /// queues instead of spawning a boot whose git and `msb` work would race these assertions.
+    #[tokio::test]
+    async fn a_resume_of_a_colony_reclaimed_with_its_pull_request_open_re_creates_the_worktree() {
+        async fn git_in(dir: &std::path::Path, args: &[&str]) {
+            let mut c = tokio::process::Command::new("git");
+            c.args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            let out = c.output().await.expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // The colony as the auto-reclaim sweep leaves it: cleaned up, its pull request still open,
+        // and its status still `PrOpened` — `cleanup_one` never changes the status. Nothing else
+        // ever moves a non-live `PrOpened` colony to `Stopped`, so this is the real shape.
+        let (app, root) = app_with_colony("abc", SessionStatus::PrOpened).await;
+        // The pushed branch the resume must bring back: a seed repo standing in for the remote, and
+        // the mothership's bare repo with origin pointed at it, as `sync_repo` would have left it.
+        let branch = "colonizer/issue-623-abc12345";
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_in(&seed, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(&seed, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await;
+        git_in(&seed, &["checkout", "-q", "-b", branch]).await;
+        // The colony's committed work, only on its branch, so the worktree can only be right if it
+        // really came back from the pushed branch.
+        std::fs::write(seed.join("work.txt"), "the colony's work\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(
+            &seed,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "colony work"],
+        )
+        .await;
+
+        let bare = app.bare_repo("acme/repo");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git_in(&root, &["init", "--quiet", "--bare", bare.to_str().unwrap()]).await;
+        git_in(&bare, &["config", "remote.origin.url", seed.to_str().unwrap()]).await;
+        git_in(
+            &bare,
+            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        )
+        .await;
+        git_in(&bare, &["fetch", "--quiet", "origin"]).await;
+
+        let wt = root.join("worktrees/acme/repo/issue-623-abc12345");
+        app.update_session("abc", |s| {
+            s.branch = branch.into();
+            s.pr_url = Some("https://github.com/acme/repo/pull/623".into());
+            s.worktree = wt.display().to_string();
+            s.cleaned_up = true;
+            s.git_admin_dir = None;
+        })
+        .await
+        .unwrap();
+        // The real scenario, asserted before the resume: `PrOpened`, reclaimed, pull request open,
+        // no worktree on disk. Without the #623 fix this shape is refused forever.
+        let start = app.session("abc").await.unwrap();
+        assert_eq!(start.status, SessionStatus::PrOpened);
+        assert!(start.cleaned_up && start.pr_url.is_some());
+        assert!(!wt.exists(), "the reclaim left no worktree on disk");
+        // Full: the resume is admitted to the queue, so no boot runs its git and `msb` work.
+        fill_the_parallel_limit(&app).await;
+
+        let out = resume(State(app.clone()), Path("abc".to_string()), None)
+            .await
+            .expect("resume re-creates the worktree rather than refusing");
+        assert_eq!(out.0.status, SessionStatus::Queued, "the colony was admitted, not refused");
+        let s = app.session("abc").await.unwrap();
+        assert!(!s.cleaned_up, "the colony is no longer cleaned up");
+        assert!(s.git_admin_dir.is_some(), "the re-created admin dir is recorded");
+        assert!(wt.join("work.txt").exists(), "the worktree is back on disk");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

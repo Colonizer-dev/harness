@@ -24,7 +24,7 @@ boundary crossing — but it is still recorded here.
   manual procedure at the end of this page and are signed off per release.
 - **On a pin move, re-run the affected vectors.** A change to
   `crates/colonizer/images.lock`, `vendor/vendor.lock`, `crates/colonizer/claude-code.lock`,
-  `vendor/node.lock`, `boot.rs`'s `BOOT_SCRIPT`, `mesh.rs`, `gateway.rs`,
+  `vendor/node.lock`, `boot.rs`'s `BOOT_SCRIPT`, `mesh.rs`, `gateway/mod.rs`,
   `egress.rs` or `harden.rs` invalidates the sign-off for the vectors it touches.
 - **Every `blocked` names its mechanism** (file + config) so a later code change
   that removes it is visible as drift; every `open` links a follow-up.
@@ -182,14 +182,14 @@ directly to `api.anthropic.com` with the placeholder (must 401); DNS-rebind
 value stays in msb's host process and the guest env holds only a placeholder
 (`sandbox.rs:62-67`; assembled `boot.rs:1550-1598`, `CLAUDE_API_HOST =
 api.anthropic.com` at `app.rs:37`). The gateway token is 244-bit random, `0600`
-(`boot.rs:1087`, `:1118`), compared constant-time (`gateway.rs:723-742`); an unknown
-token 401s before anything else (`gateway.rs:1503-1515`) and a valid token alone
-does not open an unrouted provider (`gateway.rs:1546-1560`). The colony's inbound
+(`boot.rs:1087`, `:1118`), compared constant-time (`gateway/mod.rs:723-744`); an unknown
+token 401s before anything else (`gateway/proxy.rs:264-277`) and a valid token alone
+does not open an unrouted provider (`gateway/proxy.rs:307-321`). The colony's inbound
 `x-api-key`/`authorization` are never forwarded — `FORWARD_HEADERS`
-(`gateway.rs:51`) — and the real credential is inserted host-side
-(`credential_header`, `gateway.rs:1207-1217`, `set_sensitive(true)`); placeholder
-creds "must never reach an upstream" is tested with `gateway.rs:2991-2997`. Upstream
-path traversal is rejected (`upstream_url`, `gateway.rs:1140-1159`).
+(`gateway/mod.rs:51`) — and the real credential is inserted host-side
+(`credential_header`, `gateway/stream.rs:408-419`, `set_sensitive(true)`); placeholder
+creds "must never reach an upstream" is tested at `gateway/tests.rs:513-519`. Upstream
+path traversal is rejected (`upstream_url`, `gateway/stream.rs:345-362`).
 
 *Verdict.* **Blocked** at the gateway (harness-asserted). The msb TLS-edge swap, the
 direct-to-`api.anthropic.com` 401 and DNS-rebinding of

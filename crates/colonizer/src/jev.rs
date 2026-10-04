@@ -112,7 +112,7 @@ pub(crate) enum AskError {
 }
 
 /// A small HTTP client owned by this feature alone, following the crate's convention of not sharing a
-/// `reqwest::Client` across features (see `gateway.rs`'s `Gateway.client`, `mem0.rs`'s `Mem0.client`).
+/// `reqwest::Client` across features (see `gateway/mod.rs`'s `Gateway.client`, `mem0.rs`'s `Mem0.client`).
 pub struct JevClient {
     client: reqwest::Client,
     api_key: String,

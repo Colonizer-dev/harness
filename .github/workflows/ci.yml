@@ -266,6 +266,16 @@ jobs:
       - name: Test the exec-bit check
         run: sh scripts/test/check-exec-bits.test.sh
 
+      # scripts/ci/check-rust-file-size.sh keeps non-test Rust modules under 2000 lines (issue
+      # #825), against an allowlist of files not yet split; a file over the limit that is not
+      # listed fails, and so does a listed file that shrank or is gone. Its own test drives it
+      # against throwaway repos, so neither needs cargo nor the network.
+      - name: Check Rust file sizes
+        run: sh scripts/ci/check-rust-file-size.sh
+
+      - name: Test the Rust file size check
+        run: sh scripts/test/check-rust-file-size.test.sh
+
       # Two tracked paths that differ only in letter case (or script modules whose names do, once
       # the extension is dropped) pass every Linux job and break a macOS or Windows checkout: the
       # macOS release build of v0.2.0 failed that way (issue #915). This catches it on the PR.
