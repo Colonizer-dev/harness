@@ -285,6 +285,13 @@ if [ "$install_app" = 1 ]; then
   swap_app "$dist"
   mkdir -p "$HOME/.local/bin"
   relink "$app/bin/colonizer" "$HOME/.local/bin/colonizer"
+  # Record the identity the app was signed with, so an in-place update (scripts/install-release.sh,
+  # run by 'colonizer update') re-signs the new binary and keeps the Keychain grant. Same path and
+  # name install-release.sh reads back. Written after the swap and renamed into place.
+  if [ -n "${COLONIZER_CODESIGN_IDENTITY:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    printf '%s\n' "$COLONIZER_CODESIGN_IDENTITY" > "$(dirname "$app")/codesign-identity.new"
+    mv -f "$(dirname "$app")/codesign-identity.new" "$(dirname "$app")/codesign-identity"
+  fi
   echo "installed: run 'colonizer'; it prints and opens a sign-in link ('colonizer open' reprints it)"
 else
   echo "built: run '$dist/bin/colonizer'; it prints and opens a sign-in link ('colonizer open' reprints it)"

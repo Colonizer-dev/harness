@@ -399,7 +399,7 @@ mothership they talk to is `--host`, else `COLONIZER_BIND`. See [docs/cli.md](cl
 | `COLONIZER_KEEP_PREVIOUS` | `install.sh` | `1` keeps the slot being replaced; an in-place update sets it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)) |
 | `COLONIZER_IMAGE` | both scripts, with `--pull-image` | The image to pull instead of the pinned `node:24-bookworm` |
 | `COLONIZER_MSB` | `scripts/install.sh` | A microsandbox binary to build with instead of the vendored one |
-| `COLONIZER_CODESIGN_IDENTITY` | `scripts/install.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds |
+| `COLONIZER_CODESIGN_IDENTITY` | `install.sh`, `install-release.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds; a release install also records it, so later updates re-sign ([docs/configuration.md](configuration.md#the-system-keychain)) |
 | `COLONIZER_PREBUILT` | `scripts/install.sh` | A directory of prebuilt binaries to use instead of building them; the release workflow sets it |
 | `COLONIZER_DESCRIBE`, `COLONIZER_COMMIT` | the Rust build | The version and commit to stamp into the binary when git is not available; the release workflow sets them ([docs/updates.md](updates.md#which-version-am-i-running)) |
 

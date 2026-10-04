@@ -133,6 +133,31 @@ main() {
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
 
+  # The macOS Keychain ties each saved secret to the binary that wrote it, so an ad-hoc signed app
+  # loses that access the moment an update replaces it — and a mothership updating in place passes its
+  # own environment, which a cockpit-started update usually does not carry COLONIZER_CODESIGN_IDENTITY
+  # in. When an identity is known — the variable, or the one a previous install recorded beside the
+  # app — the new binary is signed before the switch, so the Keychain grant survives. A signing
+  # failure removes the new slot and stops before the switch: the old version, which the Keychain
+  # knows, stays installed and $app keeps pointing at it.
+  identity=${COLONIZER_CODESIGN_IDENTITY:-}
+  from_env=0
+  if [ -n "$identity" ]; then
+    from_env=1
+  elif [ -f "$dir/codesign-identity" ]; then
+    identity=$(cat "$dir/codesign-identity" 2>/dev/null || true)
+  fi
+  signed=0
+  if [ -n "$identity" ] && [ "$(uname -s)" = Darwin ]; then
+    say "signing colonizer as $identity"
+    if ! codesign --force --sign "$identity" --identifier dev.colonizer.mothership \
+         --timestamp=none "$dir/$slot/bin/colonizer"; then
+      rm -rf "${dir:?}/$slot"
+      fail "codesign failed for '$identity'; without it the macOS Keychain would ask for every saved secret again. Nothing was changed: the previous version is still installed."
+    fi
+    signed=1
+  fi
+
   if [ -L "$app" ] || [ ! -e "$app" ]; then
     relink "$slot" "$app"
   else
@@ -144,6 +169,16 @@ main() {
     parked=
     rm -rf "$app.old"
   fi
+
+  # Remember an identity that came in the environment, so an update started from the cockpit — whose
+  # installer child has no environment of its own — re-signs too. Written beside the app and renamed
+  # into place, so a reader never sees a half-written name. An identity that was only read back from
+  # this file is already in it. Delete the file to stop re-signing.
+  if [ "$from_env" = 1 ] && [ "$signed" = 1 ]; then
+    printf '%s\n' "$identity" > "$dir/codesign-identity.new"
+    mv -f "$dir/codesign-identity.new" "$dir/codesign-identity"
+  fi
+
   # Colonies mount vendored plugins straight out of the slot the mothership was
   # started from (sessions.rs resolves its assets through current_exe, which
   # canonicalises the symlink away), so removing it under a running colony takes
