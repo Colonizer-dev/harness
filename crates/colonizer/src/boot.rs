@@ -14,8 +14,8 @@ use crate::{
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     sessions::{
-        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, Session, SessionLogger, SessionStatus, agent_env,
-        agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
+        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, RunEndCause, Session, SessionLogger, SessionStatus,
+        agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
     },
     stack,
     util::{append_line, random_token, truncate, write_private},
@@ -75,14 +75,9 @@ async fn resolve_stack(
     stack
 }
 
-/// What a resumed colony is told about its previous run (issue #213): a short digest of the last
-/// events of the log the resume just rotated aside — the same one-line digests the cockpit's
-/// diagnosis reads, capped at twenty lines and 64 KiB of source, so it rides in the prompt without
-/// weighing it down. `None` when there is nothing to tell (no archived log, or one that digests to
-/// nothing but deltas), which is the fresh-boot shape and asks for no block at all.
-async fn resume_digest(dir: &std::path::Path) -> Option<String> {
-    // The resume rotated `events.jsonl` into the highest slot before this boot started, so the
-    // highest-numbered archive is the run that just ended.
+/// The highest-numbered `events-N.jsonl` in a session directory — the run a resume just rotated
+/// aside, since the highest slot names it — or `None` when there is no archive.
+fn latest_archive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut highest: Option<u64> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name();
@@ -95,7 +90,16 @@ async fn resume_digest(dir: &std::path::Path) -> Option<String> {
             highest = Some(highest.map_or(n, |m: u64| m.max(n)));
         }
     }
-    let archive = dir.join(format!("events-{}.jsonl", highest?));
+    Some(dir.join(format!("events-{}.jsonl", highest?)))
+}
+
+/// What a resumed colony is told about its previous run (issue #213): a short digest of the last
+/// events of the log the resume just rotated aside — the same one-line digests the cockpit's
+/// diagnosis reads, capped at twenty lines and 64 KiB of source, so it rides in the prompt without
+/// weighing it down. `None` when there is nothing to tell (no archived log, or one that digests to
+/// nothing but deltas), which is the fresh-boot shape and asks for no block at all.
+async fn resume_digest(dir: &std::path::Path) -> Option<String> {
+    let archive = latest_archive(dir)?;
     let recent = diagnosis::recent_events(&diagnosis::tail_events_within(&archive, 64 * 1024).await)?;
     let mut block = String::from(
         "\n## Where your previous run left off\n\n\
@@ -104,6 +108,161 @@ async fn resume_digest(dir: &std::path::Path) -> Option<String> {
     );
     for e in &recent {
         block.push_str(&format!("- #{} {}: {}\n", e.seq, e.kind, e.summary));
+    }
+    Some(block)
+}
+
+/// One subagent a run ended with still in flight (issue #756): the name its Task call gave it, the
+/// task prompt it was handed, and its last event digested. Built from the archived log at resume
+/// and reported in the brief, so a resumed orchestrator knows the pinned runner's "stopped by the
+/// user" report for these is not the truth.
+#[derive(Clone, Debug, PartialEq)]
+struct InterruptedSubagent {
+    id: String,
+    name: String,
+    prompt: Option<String>,
+    progress: Option<String>,
+}
+
+/// Whether a Task result reads as the user having stopped the subagent — the wording the pinned
+/// runner uses for a subagent a suspension or restart tore away, which must not be taken at face
+/// value.
+fn stopped_by_the_user(output: &str) -> bool {
+    output.to_ascii_lowercase().contains("stopped by the user")
+}
+
+/// The Task/Agent calls in `events` with no matching result ending them — or a result that reads
+/// as the user stopping it — each with the prompt it carried and the last line it emitted (matched
+/// by the call id its events carry as their `agent` ref). Pure, so the pairing is testable apart
+/// from the file read.
+fn interrupted_from_events(events: &[Value]) -> Vec<InterruptedSubagent> {
+    use std::collections::{HashMap, HashSet};
+    let mut calls: Vec<InterruptedSubagent> = Vec::new();
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    let mut finished: HashSet<String> = HashSet::new();
+    for event in events {
+        // A subagent's every event names it by the Task call that started it, so the newest one is
+        // its progress marker, shortened the way the digest shortens a tail line.
+        if let Some(agent_id) = event.get("agent").and_then(|a| a.get("id")).and_then(Value::as_str)
+            && let Some(&i) = at.get(agent_id)
+            && let Some(line) = diagnosis::summarize(event)
+        {
+            calls[i].progress = Some(format!("{}: {}", line.kind, line.summary));
+        }
+        match event.get("type").and_then(Value::as_str) {
+            Some("tool_call") if matches!(event.get("name").and_then(Value::as_str), Some("Task" | "Agent")) => {
+                let Some(id) = event.get("tool_call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let input = event.get("input");
+                let name = input
+                    .and_then(|i| i.get("subagent_type").or_else(|| i.get("description")))
+                    .and_then(Value::as_str)
+                    .unwrap_or("subagent")
+                    .to_string();
+                let prompt = input
+                    .and_then(|i| i.get("prompt"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                at.insert(id, calls.len());
+                calls.push(InterruptedSubagent {
+                    id: id.to_string(),
+                    name,
+                    prompt,
+                    progress: None,
+                });
+            }
+            Some("tool_result") => {
+                // A subagent started in the background answers its Task call with an immediate
+                // launch ack (the runner marks it `background`), not a report — it is still running,
+                // so only its `subagent_end` below ends it (issue #756).
+                if let Some(id) = event.get("tool_call_id").and_then(Value::as_str)
+                    && at.contains_key(id)
+                    && !stopped_by_the_user(event.get("output").and_then(Value::as_str).unwrap_or_default())
+                    && event.get("background").and_then(Value::as_bool) != Some(true)
+                {
+                    finished.insert(id.to_string());
+                }
+            }
+            // A background subagent that settled (the runner's `task_notification`) ends its call.
+            // `stopped` is not a finish: like the pinned runner's "stopped by the user", it is what
+            // the brief exists to report.
+            Some("subagent_end") => {
+                if let Some(id) = event.get("tool_call_id").and_then(Value::as_str)
+                    && at.contains_key(id)
+                    && matches!(event.get("status").and_then(Value::as_str), Some("completed" | "failed"))
+                {
+                    finished.insert(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    calls.into_iter().filter(|c| !finished.contains(&c.id)).collect()
+}
+
+/// [`interrupted_from_events`] over the run `dir`'s highest archive holds, read whole and line by
+/// line: a Task call sits at the start of a run, out of reach of the digest's 64 KiB tail. Every
+/// line is redacted on the way in (issue #761) — the report this feeds rides the prompt.
+async fn interrupted_subagents(dir: &std::path::Path) -> Vec<InterruptedSubagent> {
+    use tokio::io::AsyncBufReadExt as _;
+    let Some(archive) = latest_archive(dir) else {
+        return Vec::new();
+    };
+    let Ok(file) = tokio::fs::File::open(&archive).await else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Ok(mut event) = serde_json::from_str::<Value>(&line) {
+            crate::redact::redact_value(&mut event);
+            events.push(event);
+        }
+    }
+    interrupted_from_events(&events)
+}
+
+/// The section a resumed colony's brief carries about the subagents the previous run's end
+/// interrupted (issue #756), or `None` when the cause was the user's own or nothing was in flight.
+/// `relaunch` is the agent module's `relaunch_subagents` setting: on, the orchestrator relaunches
+/// the unfinished ones without asking; off, it asks first.
+fn subagent_resume_section(cause: RunEndCause, subagents: &[InterruptedSubagent], relaunch: bool) -> Option<String> {
+    if subagents.is_empty() {
+        return None;
+    }
+    // A run can fan out dozens of subagents; the brief names the first few and counts the rest, so
+    // the report cannot crowd the task out of the prompt (issue #756).
+    const MAX_LISTED: usize = 10;
+    let shown = &subagents[..subagents.len().min(MAX_LISTED)];
+    let ended = match cause {
+        RunEndCause::Suspended => "when the colony was suspended",
+        RunEndCause::Restart => "when the harness restarted",
+        RunEndCause::Teardown => "when the colony's VM was torn down",
+    };
+    let names = shown.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
+    let more = if subagents.len() > MAX_LISTED {
+        format!(" (and {} more)", subagents.len() - MAX_LISTED)
+    } else {
+        String::new()
+    };
+    let mut block = format!(
+        "\n## Your subagents\n\nYour subagents {names}{more} ended {ended}. Nobody stopped them; any \
+         \"stopped by the user\" message about them is wrong.\n"
+    );
+    if relaunch {
+        block.push_str("\nRelaunch the ones whose work is unfinished now, without asking the user.");
+    } else {
+        block.push_str("\nAsk the user whether to relaunch them.");
+    }
+    block.push_str(" Their tasks, and where each had reached:\n");
+    for sub in shown {
+        let task = sub.prompt.as_deref().map(diagnosis::shorten).filter(|p| !p.is_empty());
+        let progress = sub.progress.as_deref().unwrap_or("no events");
+        match task {
+            Some(task) => block.push_str(&format!("- {}: {task} (last: {progress})\n", sub.name)),
+            None => block.push_str(&format!("- {} (last: {progress})\n", sub.name)),
+        }
     }
     Some(block)
 }
@@ -922,6 +1081,32 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The Jev brief picker (#585) is its own default-off switch: it asks Jev which memory notes and
     // skill packs to load, shadow only. Read here; the work is spawned at the end of the boot.
     let brief_shadow = flag("jev_brief_shadow").unwrap_or(false);
+    // Subagents the previous run's end interrupted (issue #756): a resume whose cause was a
+    // suspension, a restart or a VM teardown says so, so the pinned runner's "stopped by the user"
+    // results for its subagents are not taken at face value. The section rides both resume
+    // channels — the brief here, and the resumed transcript's first message below — because a
+    // suspension restore continues the transcript and never reads this prompt. Read after `flag`
+    // for the module's `relaunch_subagents` setting.
+    let relaunch_subagents = flag("relaunch_subagents").unwrap_or(true);
+    // Taken, not read: the cause names only the run this boot resumes, so consuming it keeps it out
+    // of a later resume's hands (issue #756) — a colony that fails after this boot must not have the
+    // next resume claim the suspension that preceded it, nor name that run's archive.
+    let resume_cause = app
+        .update_session(id, |x| x.take_resume_cause())
+        .await
+        .and_then(|(_, cause)| cause);
+    let subagent_section = if resume {
+        match resume_cause {
+            // Only paid for when a resume can actually say something about the previous run.
+            Some(cause) => subagent_resume_section(cause, &interrupted_subagents(&dir).await, relaunch_subagents),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(section) = &subagent_section {
+        prompt.push_str(section);
+    }
     // The routing point's ask (issue #582): `None` only when the mode is off, so a short-circuit the
     // decision layer handles without a network call still produces a ledger row below. The org's own
     // switch (`org_settings.jev`) can turn every point off for its colonies.
@@ -1277,6 +1462,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
         runner_env.insert("COLONIZER_RECALL_TOKEN".into(), Value::String(gateway_token.clone()));
     }
+    // Colony-to-colony coordination (issue #834): the /coordinate route and this colony's gateway
+    // token, set for every colony the gateway token exists for — it needs no deja index, unlike
+    // recall above.
+    runner_env.insert(
+        "COLONIZER_COORD_URL".into(),
+        Value::String(format!(
+            "http://host.microsandbox.internal:{}/coordinate",
+            app.cfg.gateway_bind.port()
+        )),
+    );
+    runner_env.insert("COLONIZER_COORD_TOKEN".into(), Value::String(gateway_token.clone()));
     // What the colony can and cannot run is part of the agent's brief (runner.mjs), so it names the
     // image this colony actually boots — the resolved stack's, not the configured one — or an agent
     // in a repository detected as Rust would brief itself for a Node machine.
@@ -1289,8 +1485,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // below). Without a session id — never reported, or the module stopped declaring resumability
     // since — the answer still rides the prompt, so it is delivered either way. A pre-warm boot
     // (issue #701) resumes too: no answer is riding it, but the transcript it continues is the one
-    // the question belongs to.
-    if (s.pending_answer.is_some() || s.prewarming())
+    // the question belongs to. A mid-task agent switch (issue #737) resumes as well: the transcript
+    // it wrote for the target module is the one this boot's runner must pick up.
+    if (s.pending_answer.is_some() || s.prewarming() || s.switch_note.is_some())
         && let Some(session_id) = &s.agent_session
     {
         runner_env.insert("COLONIZER_RESUME_SESSION".into(), Value::String(session_id.clone()));
@@ -1532,9 +1729,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // no turn, and the answer is delivered as a user message once it arrives.
     let initial_prompt = if s.prewarming() {
         String::new()
+    } else if let Some(note) = &s.switch_note {
+        // A mid-task agent switch (issue #737): the converted transcript carries the task brief, so
+        // the switch note alone is the first turn — it tells the new runner it is continuing another
+        // agent's session. It outranks a held answer, which cannot ride the same boot (the switch
+        // stops a waiting colony, clearing any held answer).
+        note.clone()
     } else {
         match (&s.pending_answer, &s.agent_session) {
-            (Some(pa), Some(_)) => pa.prompt.clone(),
+            // A resumed transcript is this path's channel — the brief above is never read — so the
+            // interrupted-subagents section has to prefix the answer (issue #756).
+            (Some(pa), Some(_)) => match subagent_section.as_deref() {
+                Some(section) => format!("{}\n\n{}", section.trim(), pa.prompt),
+                None => pa.prompt.clone(),
+            },
             (Some(pa), None) => format!("{prompt}\n\n{}", pa.prompt),
             (None, _) => prompt,
         }
@@ -1924,6 +2132,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             app.session_log(id, "info", "resume note delivered to the agent".into()).await;
         }
     }
+    // A switch note is consumed the same way (issue #737): the runner is up, so its first turn
+    // carried the note and it must not repeat on a later boot. Taken only here, after the runner
+    // linked, so a failed boot above leaves it for the retry.
+    if let Some((_, true)) = app.update_session(id, |x| x.switch_note.take().is_some()).await {
+        app.session_log(
+            id,
+            "info",
+            "agent switch note delivered: the new agent is continuing the converted session".into(),
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -2080,6 +2299,194 @@ mod tests {
         assert!(!story.contains("first run"), "the older archive is not the story");
         assert!(!story.contains("the new run"), "the live log is not the story");
         assert!(!story.contains("assistant_text_delta"), "delta noise is digested away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run's log: a Task still in flight (its Bash line is the last it emitted), a Task that
+    /// finished, and one Claude Code reports as the user stopping — which must count as in flight
+    /// too, since that is exactly the wording a suspension or restart provokes (issue #756).
+    fn task_log() -> Vec<Value> {
+        vec![
+            json!({"seq": 2, "type": "tool_call", "tool_call_id": "t1", "name": "Task",
+                "input": {"subagent_type": "general-purpose", "description": "Fix login",
+                    "prompt": "Fix the flaky login test in tests/login.rs"}}),
+            json!({"seq": 3, "type": "tool_call", "tool_call_id": "t2", "name": "Bash",
+                "agent": {"id": "t1", "name": "general-purpose"}, "input": {}}),
+            json!({"seq": 4, "type": "assistant_text", "text": "still working",
+                "agent": {"id": "t1", "name": "general-purpose"}}),
+            json!({"seq": 5, "type": "tool_call", "tool_call_id": "t3", "name": "Task",
+                "input": {"subagent_type": "Explore", "prompt": "find x"}}),
+            json!({"seq": 6, "type": "tool_result", "tool_call_id": "t3", "output": "found it"}),
+            json!({"seq": 7, "type": "tool_call", "tool_call_id": "t4", "name": "Agent",
+                "input": {"subagent_type": "Plan", "prompt": "plan y"}}),
+            json!({"seq": 8, "type": "tool_result", "tool_call_id": "t4", "output": "Subagent stopped by the user"}),
+        ]
+    }
+
+    /// The pairing behind the report: an unfinished Task (or one reported stopped by the user) is
+    /// in flight, carries its prompt, and the last line it emitted is its progress marker.
+    #[test]
+    fn interrupted_from_events_keeps_only_the_unfinished_subagents() {
+        let subs = interrupted_from_events(&task_log());
+        let names: Vec<&str> = subs.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["general-purpose", "Plan"], "the finished Explore is dropped");
+        assert_eq!(subs[0].prompt.as_deref(), Some("Fix the flaky login test in tests/login.rs"));
+        assert_eq!(subs[0].progress.as_deref(), Some("assistant_text: still working"));
+        // A background subagent answers its Task call with an immediate launch ack, not a report:
+        // it is still in flight — the very subagent this feature exists to rescue (issue #756).
+        let background = interrupted_from_events(&[
+            json!({"type": "tool_call", "tool_call_id": "b1", "name": "Agent",
+                "input": {"subagent_type": "claude", "prompt": "audit the parser"}}),
+            json!({"type": "tool_result", "tool_call_id": "b1", "output": "Async agent launched", "background": true}),
+        ]);
+        assert_eq!(background.len(), 1, "the launch ack does not finish a background subagent");
+        assert_eq!(background[0].prompt.as_deref(), Some("audit the parser"));
+        // Only the runner's settle notification ends it — and a `stopped` one leaves it in flight.
+        let settled = |status: &str| {
+            interrupted_from_events(&[
+                json!({"type": "tool_call", "tool_call_id": "b1", "name": "Agent",
+                    "input": {"subagent_type": "claude", "prompt": "audit the parser"}}),
+                json!({"type": "tool_result", "tool_call_id": "b1", "output": "Async agent launched", "background": true}),
+                json!({"type": "subagent_end", "tool_call_id": "b1", "status": status}),
+            ])
+        };
+        assert!(settled("completed").is_empty(), "a finished background subagent is dropped");
+        assert!(settled("failed").is_empty(), "a failed one finished too, one way or another");
+        assert_eq!(settled("stopped").len(), 1, "a stopped subagent is what the brief reports");
+        // A Task with no prompt (an older log) still reports, and says nothing it does not have.
+        let bare = interrupted_from_events(&[json!({"type": "tool_call", "tool_call_id": "z", "name": "Agent"})]);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].name, "subagent");
+        assert_eq!(bare[0].progress, None);
+    }
+
+    /// The report names the reason for each cause and, with relaunch on, tells the orchestrator to
+    /// bring the unfinished subagents back without asking.
+    #[test]
+    fn the_brief_names_each_cause_and_relaunches_the_interrupted_subagents() {
+        let subs = interrupted_from_events(&task_log());
+        for (cause, needle) in [
+            (RunEndCause::Suspended, "when the colony was suspended"),
+            (RunEndCause::Restart, "when the harness restarted"),
+            (RunEndCause::Teardown, "when the colony's VM was torn down"),
+        ] {
+            let section = subagent_resume_section(cause, &subs, true).expect("a cause with work in flight speaks");
+            for want in [
+                needle,
+                "Nobody stopped them",
+                "stopped by the user\" message about them is wrong",
+                "Relaunch the ones whose work is unfinished now, without asking the user.",
+                "general-purpose",
+                "Fix the flaky login test",
+                "last: assistant_text: still working",
+            ] {
+                assert!(section.contains(want), "{cause:?}: {section} misses {want}");
+            }
+        }
+    }
+
+    /// Auto-relaunch is the shipped default; off, the brief asks the user instead. The setting is
+    /// read the way the boot reads it — `config::setting` over the module's schema — so an explicit
+    /// `relaunch_subagents: false` reaches the wording. The schema here is the setting as the
+    /// claude-code manifest ships it; that the manifest really says so is checked in
+    /// `repo-contracts` (this crate's tests run from its packaged tarball, without `modules/`).
+    #[test]
+    fn auto_relaunch_is_the_default_and_switching_it_off_asks_instead() {
+        let schema = json!({ "properties": { "relaunch_subagents": { "type": "boolean", "default": true } } });
+        let choice = |settings: Value| crate::config::ModuleChoice {
+            provider: "claude-code".into(),
+            enabled: true,
+            settings: settings.as_object().cloned().unwrap_or_default(),
+        };
+        let read =
+            |c: &crate::config::ModuleChoice| crate::config::setting(c, &schema, "relaunch_subagents").and_then(Value::as_bool);
+        assert_eq!(
+            read(&choice(json!({}))),
+            Some(true),
+            "the manifest default, through the real read"
+        );
+        let configured = choice(json!({ "relaunch_subagents": false }));
+        assert_eq!(read(&configured), Some(false), "an explicit setting wins over the default");
+        // The boot's own expression, fed by that read, picks the ask wording.
+        let relaunch = read(&configured).unwrap_or(true);
+        let subs = interrupted_from_events(&task_log());
+        let on = subagent_resume_section(RunEndCause::Suspended, &subs, true).unwrap();
+        assert!(on.contains("Relaunch the ones whose work is unfinished now, without asking the user."));
+        let off = subagent_resume_section(RunEndCause::Suspended, &subs, relaunch).unwrap();
+        assert!(off.contains("Ask the user whether to relaunch them."), "{off}");
+        assert!(!off.contains("without asking"), "off never relaunches on its own: {off}");
+    }
+
+    /// A long fan-out does not inflate the brief: the first ten are named, the rest counted.
+    #[test]
+    fn the_report_lists_at_most_ten_subagents_and_counts_the_rest() {
+        let many: Vec<InterruptedSubagent> = (0..14)
+            .map(|i| InterruptedSubagent {
+                id: format!("t{i}"),
+                name: format!("agent-{i}"),
+                prompt: Some(format!("task {i}")),
+                progress: None,
+            })
+            .collect();
+        let section = subagent_resume_section(RunEndCause::Restart, &many, true).unwrap();
+        assert!(section.contains("(and 4 more)"), "{section}");
+        assert!(section.contains("agent-9"), "the tenth is listed");
+        assert!(!section.contains("agent-10"), "the eleventh is only counted: {section}");
+        assert_eq!(section.matches("\n- ").count(), 10, "ten bullets, no more");
+    }
+
+    /// The cause is consumed by the boot that reads it (issue #756): a run that fails after this
+    /// resume must not leave a stale cause for the next resume to name, nor its archive with it.
+    #[test]
+    fn a_consumed_cause_is_not_reported_to_a_later_resume() {
+        let subs = interrupted_from_events(&task_log());
+        let mut s = Session {
+            run_end_cause: Some(RunEndCause::Restart),
+            ..Default::default()
+        };
+        let first = s.take_resume_cause();
+        assert_eq!(first, Some(RunEndCause::Restart));
+        assert!(
+            subagent_resume_section(first.unwrap(), &subs, true).is_some(),
+            "the first resume speaks"
+        );
+        assert_eq!(s.run_end_cause, None, "the durable record is gone");
+        assert_eq!(s.take_resume_cause(), None, "the second resume gets no cause");
+    }
+
+    /// A run the user stopped on purpose gets nothing new: the stop cleared the cause, so the boot
+    /// composes no section and never claims the subagents were suspended.
+    #[test]
+    fn a_user_stop_gets_no_subagent_section_and_no_suspension_claim() {
+        // What the stop handler leaves (lifecycle.rs): no recorded cause.
+        assert_eq!(Session::default().resume_cause(), None, "a user stop records no cause");
+        // A suspension the claim collapsed into the transient flag still reads as one.
+        let old = Session {
+            was_suspended: true,
+            ..Default::default()
+        };
+        assert_eq!(old.resume_cause(), Some(RunEndCause::Suspended));
+        // And nothing in flight is nothing to say, whatever the cause the boot did read.
+        assert!(subagent_resume_section(RunEndCause::Suspended, &[], true).is_none());
+    }
+
+    /// The archive read behind the report: the highest slot, whole — the Task call at the start is
+    /// out of the digest's 64 KiB tail, so a small tail budget would miss it.
+    #[tokio::test]
+    async fn interrupted_subagents_reads_the_whole_archived_run() {
+        let dir = std::env::temp_dir().join(format!("colonizer-subagents-{}", crate::util::short_id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(interrupted_subagents(&dir).await.is_empty(), "no archive, no report");
+        let task = json!({"seq": 1, "type": "tool_call", "tool_call_id": "t1", "name": "Task",
+            "input": {"subagent_type": "general-purpose", "prompt": "do the thing"}});
+        let noise: Vec<String> = (2..500)
+            .map(|i| json!({"seq": i, "type": "status", "state": "working"}).to_string())
+            .collect();
+        std::fs::write(dir.join("events-1.jsonl"), format!("{task}\n{}\n", noise.join("\n"))).unwrap();
+        let subs = interrupted_subagents(&dir).await;
+        assert_eq!(subs.len(), 1);
+        assert_eq!(subs[0].prompt.as_deref(), Some("do the thing"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

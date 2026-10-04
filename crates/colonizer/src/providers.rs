@@ -1,7 +1,7 @@
 //! Model providers: endpoints that colonies can route models to, such as DeepSeek's Anthropic-compatible
 //! API, OpenAI (the `openai` wire, translated by openai.rs), or a model served on this machine or the
 //! operator's tailnet. Colonies reach them
-//! through the mothership's provider gateway (gateway.rs), so keys stay here (0600) and never enter a
+//! through the mothership's provider gateway (gateway/mod.rs), so keys stay here (0600) and never enter a
 //! colony.
 
 use crate::{
@@ -99,7 +99,7 @@ pub struct QuotaProbe {
 
 /// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
 /// Data, not branches: the next dialect gap becomes a row in [`PRESET_QUIRKS`], consulted at proxy
-/// time, instead of another `if id == ...` in gateway.rs. Keyed by the provider's `preset` (the
+/// time, instead of another `if id == ...` in gateway/proxy.rs. Keyed by the provider's `preset` (the
 /// catalogue id it was added from), so a hand-pointed custom endpoint keeps default behaviour.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProviderQuirks {

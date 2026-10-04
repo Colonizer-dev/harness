@@ -1,0 +1,2 @@
+/api/sandbox/pull                                    GET    unauth=401    token=owner            activity=-
+/api/sandbox/pull                                    POST   unauth=401    token=owner            activity=-

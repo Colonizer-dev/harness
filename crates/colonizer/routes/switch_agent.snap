@@ -1,0 +1,1 @@
+/api/sessions/{id}/switch-agent                      POST   unauth=401    token=session>=operate activity=colony.switch_agent

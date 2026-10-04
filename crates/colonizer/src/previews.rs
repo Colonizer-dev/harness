@@ -115,7 +115,7 @@ pub(crate) async fn proxy(State(app): State<Shared>, req: Request) -> Response {
 }
 
 /// The API routes this module serves. The preview's methods are listed rather than `any`, so the
-/// route table's `OPTIONS` probe still reads them as a method fallback (`routes.snap`).
+/// route table's `OPTIONS` probe still reads them as a method fallback (`routes/previews.snap`).
 pub(crate) fn routes() -> axum::Router<Shared> {
     use axum::routing::{get, post};
     let preview = get(proxy).post(proxy).put(proxy).patch(proxy).delete(proxy);

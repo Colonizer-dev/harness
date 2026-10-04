@@ -316,6 +316,44 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
   assert.deepEqual([...types].sort(), protocolTypes.slice().sort());
 });
 
+test('a background subagent is marked on its launch ack and ended by its task_notification', async () => {
+  // A subagent started in the background is not finished when its Task call returns: the result is
+  // an immediate launch ack (SDK status `async_launched`) and the real settle arrives later as a
+  // task_notification. The runner marks both, or a resumed boot reports the wrong subagents as
+  // interrupted (issue #756).
+  const turn = async function* () {
+    yield { type: 'system', subtype: 'init', session_id: 's1', model: 'fake-model' };
+    yield assistant('msg_1', [
+      { type: 'tool_use', id: 'toolu_agent', name: 'Agent', input: { subagent_type: 'claude', prompt: 'audit' } },
+    ]);
+    yield {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_agent', content: [{ type: 'text', text: 'Async agent launched' }] }] },
+      parent_tool_use_id: null,
+      tool_use_result: { status: 'async_launched', agentId: 'a1' },
+    };
+    yield { type: 'system', subtype: 'task_notification', task_id: 'a1', tool_use_id: 'toolu_agent', status: 'completed', output_file: '', summary: 'done' };
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0, duration_ms: 1, modelUsage: {} };
+  };
+  const { query } = fakeQuery(turn);
+  const events = [];
+  const commands = new AsyncQueue();
+  const emit = (e) => {
+    events.push(e);
+    if (e.type === 'turn_end') commands.push({ type: 'shutdown' });
+  };
+  commands.push({ type: 'user_message', id: 'initial', text: 'Kick off a background audit' });
+  await runAgent({ query, commands, emit, options: { model: 'fake' }, graceMs: 100 });
+
+  const ack = events.find((e) => e.type === 'tool_result' && e.tool_call_id === 'toolu_agent');
+  assert.equal(ack.background, true, 'the launch ack is marked so the harness keeps it in flight');
+  assert.deepEqual(
+    events.find((e) => e.type === 'subagent_end'),
+    { type: 'subagent_end', tool_call_id: 'toolu_agent', status: 'completed' },
+    'the settle notification ends the subagent',
+  );
+});
+
 test('a resumed session resumes the reported session id and delivers the answer', async () => {
   // Issue #562: a colony suspended while it waited on its user boots to deliver the answer — the
   // session id travels as an SDK option, the answer as the first user message, so the conversation

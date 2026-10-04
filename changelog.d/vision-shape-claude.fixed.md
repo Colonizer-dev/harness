@@ -1,1 +1,0 @@
-**The vision page's Shape diagram shows how Claude calls really leave a colony.** Unrouted Claude models go straight to api.anthropic.com with a placeholder key swapped at the edge; only `<provider>/<model>` calls go through the mothership's provider gateway (modules/agents/claude-code/router.mjs).

@@ -1,0 +1,2 @@
+/api/modules                                         GET    unauth=401    token=owner            activity=-
+/api/modules/{kind}                                  PUT    unauth=401    token=owner            activity=settings.save

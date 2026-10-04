@@ -1,0 +1,3 @@
+/api/fleet/history                                   GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}                 GET    unauth=401    token=owner            activity=-
+/api/fleet/history/{member}/{row_id}/logs/{name}     GET    unauth=401    token=owner            activity=-

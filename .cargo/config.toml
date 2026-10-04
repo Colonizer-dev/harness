@@ -1,0 +1,8 @@
+[env]
+# The tests of a published crate must not reach outside their own crate: CI runs each published
+# crate's tests from its packaged tarball, where nothing outside it exists. The few in-place tests
+# that do need the repository (the real-relay end-to-end tests and the ignored docs-loop self-scan)
+# find it through this variable, and skip when it is unset, as it is in the unpacked tarball, which
+# ships no .cargo/config.toml. `relative = true` resolves "." against the directory holding
+# .cargo/, that is this workspace root.
+COLONIZER_REPO_ROOT = { value = ".", relative = true }
