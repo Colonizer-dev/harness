@@ -267,6 +267,12 @@ jobs:
           cd release
           sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
+          # A shipped, per-release notes file (docs/release-notes/<tag>.md, if the tagged commit has
+          # one) goes at the top of the body, above the generic text every release carries below.
+          if [ -f "../docs/release-notes/$TAG.md" ]; then
+            cat "../docs/release-notes/$TAG.md"
+            echo
+          fi > notes.md
           {
             echo "Prebuilt Colonizer for Linux x86_64 (with KVM) and Apple Silicon Macs, built from ${{ github.sha }}."
             echo
@@ -287,7 +293,7 @@ jobs:
             echo '```'
             cat SHA256SUMS
             echo '```'
-          } > notes.md
+          } >> notes.md
 
       # Attests build provenance for the tarballs, the installer and SHA256SUMS itself: an installer
       # that has verified the checksums file can then trust every digest it lists. Artifact
@@ -309,7 +315,9 @@ jobs:
           gh release create "$TAG" colonizer-*.tar.gz install.sh SHA256SUMS \
             --draft --repo "${{ github.repository }}" --target "${{ github.sha }}" \
             --title "Colonizer $TAG" --notes-file notes.md
-          gh release edit "$TAG" --draft=false --repo "${{ github.repository }}"
+          # --latest on publish: the app release claims "latest" deterministically, so a newer
+          # bundle release (which is created with --latest=false) can never hold it instead.
+          gh release edit "$TAG" --draft=false --latest --repo "${{ github.repository }}"
 
   crates:
     if: startsWith(github.ref, 'refs/tags/v')

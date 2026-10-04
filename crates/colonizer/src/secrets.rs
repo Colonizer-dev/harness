@@ -434,30 +434,35 @@ impl Access {
 /// Every secret this mothership knows about, whether or not it is set.
 fn catalog(app: &App) -> Vec<Item> {
     let dir = &app.cfg.config_dir;
-    let mut items = vec![
-        Item {
-            id: "github-token".into(),
-            label: "GitHub token".into(),
-            group: "connections",
-            used_by: "Issues, pushes and pull requests".into(),
-            icon: "github",
-            path: Some(app.github_token_file()),
-            env: None,
-            editable: true,
-            colonies: Access::None,
-        },
-        Item {
+    let mut items = vec![Item {
+        id: "github-token".into(),
+        label: "GitHub token".into(),
+        group: "connections",
+        used_by: "Issues, pushes and pull requests".into(),
+        icon: "github",
+        path: Some(app.github_token_file()),
+        env: None,
+        editable: true,
+        colonies: Access::None,
+    }];
+    // The single token an older version wrote to `<config>/claude-token` (#621). The token routes
+    // and claude-login save into the default account now, so this shows up only while a legacy copy
+    // is actually there — and stays delete-only (never `editable`), since a save here would land in
+    // a file the default account shadows. `DELETE /api/secrets/claude-token` still clears it.
+    let legacy = app.claude_token_file();
+    if util::read_secret(&legacy).is_some() {
+        items.push(Item {
             id: "claude-token".into(),
             label: "Claude token".into(),
             group: "connections",
             used_by: "Every Claude colony".into(),
             icon: "claude",
-            path: Some(app.claude_token_file()),
+            path: Some(legacy),
             env: None,
-            editable: true,
+            editable: false,
             colonies: Access::Injected(vec![crate::CLAUDE_API_HOST.into()]),
-        },
-    ];
+        });
+    }
     for (id, meta) in crate::claude_accounts::load_meta(dir).accounts {
         items.push(Item {
             id: format!("claude-accounts:{id}"),
@@ -532,6 +537,19 @@ fn catalog(app: &App) -> Vec<Item> {
         icon: "bell",
         path: Some(dir.join("notify-secret")),
         env: None,
+        editable: true,
+        colonies: Access::None,
+    });
+    items.push(Item {
+        id: "observability-headers".into(),
+        label: "Observability headers".into(),
+        group: "integrations",
+        // A standard OTEL_EXPORTER_OTLP_HEADERS list, `k=v,k2=v2`, read only by the exporter
+        // (observability module, #840); it never enters a colony.
+        used_by: "OTLP export (observability module)".into(),
+        icon: "key",
+        path: Some(dir.join("observability-headers")),
+        env: Some("OTEL_EXPORTER_OTLP_HEADERS"),
         editable: true,
         colonies: Access::None,
     });
@@ -660,7 +678,13 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(body): 
 pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
     let store = store()?;
     let item = find(&app, &id)?;
-    let path = editable_path(&item)?;
+    // The legacy `claude-token` (#621) is delete-only: it is never `editable_path`, but it must
+    // still be removable, so it is deleted by its path like any other saved secret.
+    let path = if id == "claude-token" {
+        app.claude_token_file()
+    } else {
+        editable_path(&item)?
+    };
     tokio::task::spawn_blocking(move || util::delete_secret(&path))
         .await
         .map_err(|e| anyhow!(e))?;
@@ -668,6 +692,11 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>) -> ApiRes
     if let Some(env) = id.strip_prefix("colony:") {
         crate::colony_secrets::remove(&app.cfg.config_dir, env)
             .map_err(|e| client_error(StatusCode::CONFLICT, &format!("{e:#}")))?;
+        return Ok(Json(json!({ "id": id, "removed": true })));
+    }
+    // The legacy `claude-token` row is listed only while a copy is there, so the cockpit has to
+    // reload rather than keep an unset row (#621) — same reply shape as a colony secret.
+    if id == "claude-token" {
         return Ok(Json(json!({ "id": id, "removed": true })));
     }
     Ok(Json(row(store, &item)))
@@ -836,6 +865,35 @@ mod tests {
     }
 
     #[test]
+    fn the_observability_headers_secret_is_listed_as_metadata_never_a_value() {
+        let root = crate::tests::temp_root();
+        let app = crate::tests::test_app(&root);
+        let item = catalog(&app)
+            .into_iter()
+            .find(|item| item.id == "observability-headers")
+            .expect("the OTLP headers secret is registered");
+        assert_eq!(item.group, "integrations");
+        assert_eq!(item.env, Some("OTEL_EXPORTER_OTLP_HEADERS"));
+        assert!(item.editable, "the page may set, replace and remove it");
+        assert!(matches!(item.colonies, Access::None), "it never enters a colony");
+
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        let store = Store::new(&app.cfg.config_dir, Some(Box::new(std::sync::Arc::new(Fake::default()))));
+        store.probe();
+        // A value built at runtime: no credential-looking literal lives in the source.
+        let value = format!("canary-{}", std::process::id());
+        store.write(item.path.as_deref().unwrap(), &value).unwrap();
+        assert_eq!(store.read(item.path.as_deref().unwrap()), Some(Some(value.clone())));
+        let shown = row(&store, &item).to_string();
+        assert!(
+            !shown.contains(&value),
+            "the API returns where it lives, never its value: {shown}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn the_index_survives_a_restart_and_holds_no_values() {
         let (store, fake, dir) = setup(false);
         let path = dir.join("notify-secret");
@@ -846,5 +904,38 @@ mod tests {
         assert_eq!(again.location(&path), Location::Keychain);
         assert_eq!(again.read(&path), Some(Some("whsec".into())));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The legacy single `claude-token` (#621) is listed only while a copy is actually there, and
+    /// then delete-only: the default Claude account shadows it, so the row must never be writable
+    /// through `PUT /api/secrets/{id}` (a third door onto the bug the token routes closed).
+    #[test]
+    fn the_legacy_claude_token_row_shows_only_when_present_and_is_delete_only() {
+        let root = std::env::temp_dir().join(format!("colonizer-secrets-legacy-{}", util::short_id()));
+        let app = crate::tests::test_app(&root);
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+
+        assert!(
+            catalog(&app).iter().all(|item| item.id != "claude-token"),
+            "no legacy copy, no row"
+        );
+        std::fs::write(app.claude_token_file(), "sk-ant-oat-legacy").unwrap();
+        let row = catalog(&app)
+            .into_iter()
+            .find(|item| item.id == "claude-token")
+            .expect("a legacy copy is listed");
+        assert!(!row.editable, "the row is not editable");
+        assert!(
+            editable_path(&row).is_err(),
+            "so it cannot be written through the secrets PUT"
+        );
+        // The row is only listed while the copy is there, so removing it drops the row entirely —
+        // which is why `DELETE /api/secrets/claude-token` answers `removed` and reloads the cockpit.
+        util::delete_secret(&app.claude_token_file());
+        assert!(
+            catalog(&app).iter().all(|item| item.id != "claude-token"),
+            "the row goes with the copy"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

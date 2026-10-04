@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { OrgEntry } from "../orgs";
-import type { Session } from "../types";
+import type { AutonomyStatus, Session } from "../types";
 import { actionError } from "./Cockpit";
 import { Header, runningOrgs } from "./Header";
 import { NavRail, navTabs, type CockpitView } from "./NavRail";
@@ -154,6 +154,39 @@ describe("Header remote access badge (issue #535)", () => {
     expect(html).toContain("<button");
     expect(html).toContain("Remote access ON");
     expect(html).toContain('aria-label="Remote access on"');
+  });
+});
+
+describe("Header judge chip (issue #875)", () => {
+  const judge = (over: Partial<AutonomyStatus> = {}): AutonomyStatus => ({
+    enabled: true,
+    model: "deepseek/deepseek-flash",
+    fallback_models: [],
+    last_success: null,
+    last_error: null,
+    consecutive_failures: 0,
+    alerted: false,
+    ...over,
+  });
+  const withJudge = (status: AutonomyStatus | null) =>
+    renderToStaticMarkup(
+      <Header orgs={[]} selectedOrg={null} onSelectOrg={() => {}} needByOrg={{}} statusError={false} onOpenRemote={() => {}} judge={status} />,
+    );
+
+  it("stays quiet until the judge has failed several times in a row", () => {
+    expect(withJudge(null)).not.toContain("Judge failing");
+    expect(withJudge(judge({ consecutive_failures: 2 }))).not.toContain("Judge failing");
+  });
+
+  it("warns with the run length and the last error in the tooltip", () => {
+    const html = withJudge(
+      judge({
+        consecutive_failures: 3,
+        last_error: { at: "2026-09-24T09:00:00Z", model: "deepseek/deepseek-flash", kind: "provider_error", status: 402, message: "Insufficient Balance" },
+      }),
+    );
+    expect(html).toContain("Judge failing");
+    expect(html).toContain('title="The autonomy judge has failed 3 times in a row: provider error · HTTP 402 · Insufficient Balance"');
   });
 });
 

@@ -244,30 +244,37 @@ export function mapLoopBody(repo: string, all: boolean, days: number, now = new 
   };
 }
 
-export const LOOP_TEMPLATES: { label: string; prompt: string; choice: LoopChoice }[] = [
+/** A template's starting point: `needsGithub` marks work that is GitHub's — the loop then waits until
+ *  the mothership can reach the repository, and its colony reads `/colonizer/github` and writes
+ *  through the host-proxied `colonizer_github` tools rather than a `gh` it does not have (issue #778). */
+export const LOOP_TEMPLATES: { label: string; prompt: string; choice: LoopChoice; needsGithub: boolean }[] = [
   {
     label: "Triage new issues",
     prompt:
-      "Triage issues opened since the last run: label them, ask for missing reproduction details in a comment, close exact duplicates with a link, and fix any that are small and clear in one pull request.",
+      "Triage the issues in /colonizer/github/issues.json (open issues touched since the last run): label them with issue_label, ask for missing reproduction details with issue_comment, close exact duplicates with issue_close_duplicate, and fix any that are small and clear in one pull request. That file is all you get from GitHub — you have no gh CLI.",
     choice: { every: "daily", time: "09:00" },
+    needsGithub: true,
   },
   {
     label: "Keep dependencies current",
     prompt:
       "Update outdated dependencies that have no breaking changes, run every check, and open one pull request with the updates and a short changelog of what moved. Leave major upgrades for a person and list them in the PR.",
     choice: { every: "weekly", weekday: 0, time: "08:00" },
+    needsGithub: false,
   },
   {
     label: "Fix flaky tests from last night's CI",
     prompt:
-      "Look at the failed and re-run CI jobs on the default branch from the last 24 hours, find tests that failed and then passed without a code change, and fix the flakiness at its cause. Open a pull request per root cause.",
+      "Read /colonizer/github/ci-failures.json — the workflow runs that failed on the default branch, each with its run URL — find tests that failed there and then passed on a later run without a code change, and fix the flakiness at its cause. Open a pull request per root cause. You have no gh CLI, so that file is your whole pipeline view.",
     choice: { every: "daily", time: "07:00" },
+    needsGithub: true,
   },
   {
     label: "Write changelog entries for yesterday's merged PRs",
     prompt:
-      "For every pull request merged yesterday that has no changelog entry yet, write a user-facing one the way this repository keeps its changelog: one fragment file per change when it has a fragments directory such as changelog.d/ (follow its README, and leave CHANGELOG.md alone), otherwise under Unreleased in CHANGELOG.md in the file's existing style. Open one pull request.",
+      "Read /colonizer/github/merged-prs.json for the pull requests merged since the last run. For every one that has no changelog entry yet, write a user-facing one the way this repository keeps its changelog: one fragment file per change when it has a fragments directory such as changelog.d/ (follow its README, and leave CHANGELOG.md alone), otherwise under Unreleased in CHANGELOG.md in the file's existing style. Open one pull request.",
     choice: { every: "daily", time: "06:00" },
+    needsGithub: true,
   },
 ];
 

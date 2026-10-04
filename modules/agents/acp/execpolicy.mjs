@@ -13,11 +13,15 @@
 
 import { openSync, readSync, closeSync, statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, normalize } from 'node:path';
 
 export const EXEC_POLICY_DECISIONS = ['deny', 'ask', 'allow'];
 export const EXEC_POLICY_REPO_FILE = join('.colonizer', 'exec-policy.json');
+/** Where the boot mounts the writable-bind list (boot.rs writes `vm_dir/host-mounts`, exposed at
+ * guest `/colonizer`, alongside `path-policy`). */
+export const HOST_MOUNTS_FILE = '/colonizer/host-mounts';
 const EXEC_POLICY_MAX_BYTES = 64 * 1024; // a policy file is rules, not data; more is a mistake
+const HOST_MOUNTS_MAX_BYTES = 64 * 1024; // the list is paths, not data; more is a mistake
 const SCRIPT_MAX_BYTES = 256 * 1024;
 const REGEX_MAX_CHARS = 500; // a rule regex is a pattern, not a program; longer is a mistake — the
 // only cheap handle on ReDoS here, so a repo-layer rule does not get to be one either
@@ -43,7 +47,8 @@ const SCRIPT_EGRESS = [
 
 // The first layer, present for every colony. It mirrors the path policy's DEFAULT_MASKED
 // (crates/colonizer/src/path_policy.rs): ~/.ssh and the credential files the path policy masks are
-// denied in the command and in any script it runs; writing outside the repository asks.
+// denied in the command and in any script it runs; writing to a host-backed path outside the
+// repository asks (a write into the microVM's discarded root filesystem does not — see #877).
 export function defaultPolicy() {
   return {
     rules: [
@@ -63,7 +68,7 @@ export function defaultPolicy() {
       {
         id: 'writes-outside-repo',
         decision: 'ask',
-        reason: 'the command writes outside the repository',
+        reason: 'the command writes to a host-backed path outside the repository',
         writes_outside: true,
       },
     ],
@@ -129,10 +134,42 @@ export function parsePolicy(input) {
 }
 
 /**
+ * The guest targets of the colony's writable host mounts, one absolute path per line (boot.rs
+ * writes `vm_dir/host-mounts`). Blank lines and `#` comments are skipped; each path is normalized
+ * and deduplicated. Every entry is a path the host still owns after the microVM dies — the only
+ * place outside the repository a write can matter.
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function parseHostMounts(text) {
+  const mounts = [];
+  const seen = new Set();
+  for (const line of String(text ?? '').split('\n')) {
+    const entry = line.trim();
+    if (!entry || entry.startsWith('#') || !entry.startsWith('/')) continue;
+    const path = normalize(entry).replace(/\/+$/, '') || '/';
+    if (!seen.has(path)) {
+      seen.add(path);
+      mounts.push(path);
+    }
+  }
+  return mounts;
+}
+
+/** The writable host-mount list the boot wrote, or null when the file is absent — a runner outside
+ * a microVM, or a mothership predating the mount list. */
+function loadHostMounts(env, readFile) {
+  const file = env.COLONIZER_HOST_MOUNTS || HOST_MOUNTS_FILE;
+  const text = readFile(file, HOST_MOUNTS_MAX_BYTES);
+  return text ? parseHostMounts(text) : null;
+}
+
+/**
  * The colony's policy, layered: default → install → org → repo. Called once at runner start; the
  * repo file read here is the one the whole run keeps, so the agent rewriting it mid-run cannot
  * widen anything (and the layering would not let it anyway). A layer that does not parse is
- * dropped with a warning, never fatal: the default keeps enforcing.
+ * dropped with a warning, never fatal: the default keeps enforcing. `hostMounts` (the writable
+ * bind list, or null when unknown) rides on the result for [`evaluateExecPolicy`] to read.
  */
 export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFile = readTextCapped } = {}) {
   const layers = [{ name: 'default', rules: parsePolicy({ rules: defaultPolicy().rules }).rules }];
@@ -149,21 +186,22 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   if (env.COLONIZER_EXEC_POLICY_ORG) add('org', env.COLONIZER_EXEC_POLICY_ORG);
   const repo = readFile(join(cwd, EXEC_POLICY_REPO_FILE), EXEC_POLICY_MAX_BYTES);
   if (repo) add('repo', repo);
-  return { layers, warnings };
+  return { layers, warnings, hostMounts: loadHostMounts(env, readFile) };
 }
 
 /**
  * The decision for one Bash command, or null when no rule matches. Within a layer the first
  * matching rule wins; across layers the strictest decision wins, and on a tie the earlier layer's
  * rule is the one reported (the default names itself first, which is the one an operator reads).
- * @param {{ layers: {name: string, rules: object[]}[] }} policy   as loadExecPolicy returned
+ * @param {{ layers: {name: string, rules: object[]}[], hostMounts?: string[]|null }} policy
+ *        as loadExecPolicy returned; its `hostMounts` narrows `writes_outside` (#877)
  * @param {string} command                                         the Bash tool's command
  * @param {object} [opts]   { cwd, readFile } — cwd is the repository root the command runs in
  * @returns {{ decision: string, rule: string, layer: string, reason: string } | null}
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts);
+  const ctx = buildContext(command, opts, policy.hostMounts ?? null);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
@@ -318,7 +356,8 @@ function words(text) {
     .replace(/\$\{HOME\}/g, '$HOME') // before the split: the braces would break the word apart
     .split(/[\s;|&<>()"'`\[\]{}]+/)
     .map((w) => w.replace(/^[@:=+]+/, '').replace(/[,;:]+$/, ''))
-    .filter((w) => w.length > 1);
+    // One-char words are noise (`echo x`), except the filesystem root, which a `rm -rf /` writes.
+    .filter((w) => w.length > 1 || w === '/');
 }
 
 /** A segment's words past its env assignments and a leading sudo/env/command/exec. */
@@ -396,13 +435,32 @@ function writeTargets(segment) {
   return targets;
 }
 
-/** True when a segment writes an absolute path outside cwd (the repo root), /tmp and /dev aside. */
-function writesOutsideRepo(segment, cwd) {
+/** True when `target` sits at, under, or above a writable host mount's guest target. Comparisons
+ * are on segment boundaries, so `/root/.claudefoo` is not under a mounted `/root/.claude`. */
+function onHostMount(target, mounts) {
+  const parts = normalize(target).split('/').filter(Boolean);
+  return mounts.some((mount) => {
+    const mountParts = normalize(mount).split('/').filter(Boolean);
+    const shared = Math.min(parts.length, mountParts.length);
+    return parts.slice(0, shared).join('/') === mountParts.slice(0, shared).join('/');
+  });
+}
+
+/**
+ * True when a segment writes an absolute path outside cwd (the repo root), /tmp and /dev aside.
+ * With `hostMounts` known (the boot's writable bind list), only a path at, under or above one of
+ * those mounts counts — anything else lives in the microVM's root filesystem, which is discarded
+ * with the VM, so it is not the host's to protect. The ancestor case keeps `rm -rf /root` and
+ * `rm -rf /` asking while `/root/.claude/projects` is mounted. A null `hostMounts` (an older
+ * mothership, or a runner outside a VM) counts every absolute path outside the repo, as before.
+ */
+function writesOutsideRepo(segment, cwd, hostMounts) {
   for (const raw of writeTargets(segment)) {
     const target = expandTilde(raw);
     if (!target.startsWith('/')) continue; // relative: inside the worktree
     if (NEVER_OUTSIDE.some((re) => re.test(target))) continue;
     if (target === cwd || target.startsWith(`${cwd}/`)) continue;
+    if (hostMounts && !onHostMount(target, hostMounts)) continue;
     return true;
   }
   return false;
@@ -411,9 +469,10 @@ function writesOutsideRepo(segment, cwd) {
 /**
  * Everything the predicates see, derived from the command alone: its segments, the tokens the
  * `touches` globs match against (the command's words and every script's words), the scripts it
- * runs (resolved against the repo root, contents capped), and whether anything is written outside.
+ * runs (resolved against the repo root, contents capped), and whether anything is written to a
+ * host-backed path outside the repo (`hostMounts`, the boot's writable bind list, or null).
  */
-function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}) {
+function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null) {
   const segments = splitCommands(command);
   const scripts = [];
   const seen = new Set();
@@ -435,6 +494,6 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
     segments,
     tokens: [...tokens],
     scripts,
-    writesOutside: segments.some((segment) => writesOutsideRepo(segment, cwd)),
+    writesOutside: segments.some((segment) => writesOutsideRepo(segment, cwd, hostMounts)),
   };
 }

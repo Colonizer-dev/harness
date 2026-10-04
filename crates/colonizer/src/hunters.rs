@@ -124,7 +124,7 @@ pub fn builtin() -> Vec<Manifest> {
     vec![strix(), shannon()]
 }
 
-fn find(id: &str) -> Option<Manifest> {
+pub(crate) fn find(id: &str) -> Option<Manifest> {
     builtin().into_iter().find(|m| m.id == id)
 }
 
@@ -900,6 +900,28 @@ fn render_scan(template: &str, target: &str, mode: &str, out: &str) -> Result<Ve
             Ok(rendered)
         })
         .collect()
+}
+
+/// The in-colony command line for a Node hunter: its manifest's `scan` template rendered whole — the
+/// program word (`npx`) included, unlike [`render_scan`]. A hunter colony runs it inside its microVM,
+/// so a licence-incompatible hunter (Shannon, AGPL) is fetched only by that line, never run on the
+/// host. The template must name `m.pinned_version`.
+pub(crate) fn colony_command(m: &Manifest, target: &str, repo: &str, out: &str) -> Result<String> {
+    if !matches!(m.runtime, Runtime::Node) {
+        bail!("{} does not run as an in-colony command (it is not a Node hunter)", m.name);
+    }
+    let line = m
+        .scan
+        .replace("{target}", target)
+        .replace("{repo}", repo)
+        .replace("{out}", out);
+    if line.contains('{') || line.contains('}') {
+        bail!("the {} scan template holds an unknown placeholder", m.id);
+    }
+    if !line.contains(m.pinned_version) {
+        bail!("the {} scan template does not pin its version {}", m.id, m.pinned_version);
+    }
+    Ok(line)
 }
 
 /// The installed binary to run, once its pinned version is on disk:
@@ -1682,6 +1704,27 @@ mod tests {
         assert!(
             render_scan("   ", "/t", "quick", "/o").is_err(),
             "an empty template is refused"
+        );
+    }
+
+    /// The in-colony command: the whole template including `npx`, its placeholders filled and pinned
+    /// to the manifest version — and refused for a hunter that is not a Node one.
+    #[test]
+    fn the_colony_command_keeps_npx_and_pins_the_version() {
+        let line = colony_command(
+            &find("shannon").unwrap(),
+            "http://127.0.0.1:3000",
+            "/workspace",
+            "/harness/out/shannon",
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            "npx @keygraph/shannon@3.3.0 start -u http://127.0.0.1:3000 -r /workspace -o /harness/out/shannon"
+        );
+        assert!(
+            colony_command(&find("strix").unwrap(), "t", "r", "o").is_err(),
+            "a binary hunter has no in-colony command"
         );
     }
 

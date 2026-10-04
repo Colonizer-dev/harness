@@ -30,6 +30,9 @@ A browser without the cookie gets a "Sign in to your cockpit" page that tells yo
 A phone pairs through [Add your phone](#add-your-phone) instead, and gets a sign-in of its own:
 the API token never appears on it or in any URL.
 
+> **Coming.** Making the cockpit address obvious and getting it on your phone's home screen in one
+> step ([#867](https://github.com/Colonizer-dev/harness/issues/867)).
+
 Limits:
 
 - `colonizer open` works only on the mothership's own machine. It reads the local token file
@@ -124,6 +127,7 @@ With **All workspaces** chosen, Overview shows everything at once:
   red-team buttons ([Red team](#red-team)),
 - **Colonies**: every colony in a table,
 - a system strip about the host,
+- the fleet panel and the [fleet colony list](fleet.md#the-fleet-colony-list), when there is a fleet,
 - the [storage panel](#storage).
 
 The range picker switches between 7, 30 and 90 days. **Compare** overlays the previous period of
@@ -407,14 +411,15 @@ The wizard has three steps:
 
 A one-off run waits until no colony is live, then starts. A schedule is kept by the mothership.
 
-Only **Colony swarm** runs today. **Strix** and **Shannon** appear in the wizard but cannot be
-picked:
+The **Colony swarm** and **Shannon** can be picked today; **Strix** cannot:
 
-- Shannon always shows "Coming soon".
+- Shannon shows "Ready · runs in a colony". Its run uses one colony per repository, so the
+  swarm-size slider is replaced by a note.
 - Strix shows "Installed · runs coming soon" once it is installed, and "Coming soon" otherwise.
 
-Red-team runs do not drive their scans yet. See [red-team.md](red-team.md) for how runs work and
-[security-hunters.md](security-hunters.md) for the hunter modules.
+Red-team runs drive Shannon's scan inside its colony; they do not drive Strix's yet. See
+[red-team.md](red-team.md) for how runs work and [security-hunters.md](security-hunters.md) for
+the hunter modules.
 
 ## Memory
 
@@ -458,8 +463,8 @@ what would be removed before you apply it.
 
 **Sidebar: Settings** (at the bottom). Settings opens as a full page. Its sections:
 
-- **General**: Setup, Connections (GitHub and Claude), Model providers, Runtime, Live map, Remote
-  access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
+- **General**: Your cockpit, Setup, Connections (GitHub and Claude), Model providers, Runtime, Live
+  map, Remote access, Add your phone, API tokens, Fleet, Updates ([updates.md](updates.md)), Usage data
   ([usage-data.md](usage-data.md)), Notifications, Desktop.
 - **Modules**: one page per module, such as the agent, the source of issues, and memory.
 - **Workspaces**: one page per workspace.
@@ -490,6 +495,36 @@ The link exposes this cockpit, including colony terminals, and nothing else on t
 [remote-tunnel.md](remote-tunnel.md) for the tunnel contract,
 [protocol.md](protocol.md#610-remote-access-tunnel) for the routes, and
 [remote-access-review.md](remote-access-review.md) for the security review.
+
+### Your cockpit
+
+**Settings → Your cockpit** (also the small button in the header, and offered at the end of Setup)
+lists the addresses this cockpit can be reached on, each with **Copy** and **Show QR**:
+
+- **On this computer** — the loopback address, when you are opening the cockpit on the machine itself.
+- **On your network** (or **On your tailnet**) — an address another device on the same network can
+  use, taken from the same ranked origins the pairing flow answers with (`GET /api/phone`). Only a
+  **reachable** origin is offered: one the mothership cannot answer on is left out, and a line says
+  it is not reachable from other devices, naming what to change (usually the bind) and pointing at
+  Remote access. A plain-http address still pairs, but carries a note that a phone cannot install
+  the app or get notifications over it. A mothership too old to send origins falls back to the
+  address this page is already open on.
+- **Anywhere** — the remote-access link (`https://<install>.my.colonizer.dev`) while remote access is on.
+
+Every address is reduced to its scheme, host and base path. The one-time sign-in link from your
+terminal (which carries `?token=…`) and a phone pairing code are never shown, copied or drawn into a
+QR code, so a bookmark made here is a plain address that asks for a real sign-in like any other.
+
+**Put it on your phone** opens [Add your phone](#add-your-phone). **Add to this device** offers the
+bookmark-or-install prompt again.
+
+On your first sign-in the cockpit asks once, per device, to **Bookmark this page** — naming your
+browser's shortcut, ⌘D on macOS and Ctrl+D otherwise — or, where the browser supports it, to
+**Install app**. A phone gets its own Add to Home Screen steps instead: iOS Safari is walked through
+Share → Add to Home Screen, another iOS browser is pointed at Safari, and Android Chrome gets its
+native install prompt (or the **⋮ → Install app** menu path). Dismissing or installing is remembered,
+and the card's **Add to this device** brings the offer back; nothing is shown once the cockpit is
+running as the installed app.
 
 ### Add your phone
 
@@ -683,8 +718,8 @@ Each setting can follow the global default or be overridden for this workspace:
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
   several are early: Pi cannot ask you questions, and the Hermes and ACP-grok binaries are not
-  yet staged into the colony image, while Codex, Grok Build and the ACP gemini preset fetch their
-  pinned CLI on first boot. Each module's description in Settings, Modules says what it
+  yet staged into the colony image, while Codex, OpenCode, Grok Build and the ACP gemini preset fetch
+  their pinned CLI on first boot. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
   colony.

@@ -144,6 +144,22 @@ export interface StallInfo {
 
 export type CiState = "success" | "failure" | "pending" | "no_checks";
 
+/**
+ * One model setting the boot resolved away from what it named because the gateway would have refused
+ * the model for this colony's sensitivity class (issue #704) — a restricted colony's subagent model
+ * on an untrusted provider, for instance.
+ */
+export interface ModelSubstitution {
+  /** The model setting's name: `model`, `subagent_model`, `background_model` or `small_model`. */
+  setting: string;
+  /** The model the setting named, which the gateway would have refused. */
+  from: string;
+  /** The eligible model the colony runs on instead, or "the orchestrator's model" when cleared. */
+  to: string;
+  /** Why the gateway would have refused `from`, e.g. `"zai" is not marked trusted`. */
+  reason: string;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -167,11 +183,15 @@ export interface Session {
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
   origin?: string | null;
+  /** Why the fleet scheduler put this colony where it runs, in the scheduler's own words — e.g. "archlinux: 3 free slots" or "pinned to box-2" (issue #688). Absent when no reason was given. */
+  placement?: string | null;
   worktree: string;
   /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
@@ -274,6 +294,12 @@ export interface Session {
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
   recent_events?: RecentEvent[] | null;
+  /**
+   * Model settings the boot replaced with an eligible one because the gateway would have refused
+   * what they named for this colony's sensitivity class (issue #704); absent when every model
+   * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
+   */
+  model_substitutions?: ModelSubstitution[];
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -404,6 +430,13 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
   quota_cards?: QuotaCard[];
+  /**
+   * A drain is holding the queue while an update or a restart waits for the colonies still booting
+   * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.
+   * The cockpit banners it. Optional so a mothership from before the drain sends nothing (reads as
+   * not draining).
+   */
+  draining?: boolean;
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
@@ -529,6 +562,20 @@ export interface FleetHost {
   /** RFC3339; null when the peer has never answered. */
   last_heartbeat: string | null;
   health: FleetHostHealth;
+  /** Whether the peer can boot a microVM at all (issue #688); false means colonies cannot start there. Absent from an older peer build, null on a platform where KVM does not apply. */
+  kvm?: boolean | null;
+  /** A fleet member's history-push drain state (issue #764); absent on self, on an older peer, and on a never-reached one. */
+  fleet_sync?: PeerSync | null;
+}
+
+/** A member's `fleet_sync` block of its reduced `/api/status` (issue #764): where its history push stands. `backlog_rows` rises as colonies finish and falls as the drain sends them, so it moves on a push. */
+export interface PeerSync {
+  state: string;
+  backlog_rows: number;
+  /** Seconds the oldest unsent row has waited; null when nothing is backed up. */
+  oldest_unsent_age_s?: number | null;
+  last_error_class?: string | null;
+  consent: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +701,8 @@ export interface FleetHistoryRecord {
   summary: string | null;
   error: string | null;
   cost_usd: number | null;
+  /** What the gateway recorded for responses it routed to other providers, on top of `cost_usd`. */
+  routed_cost_usd?: number | null;
   model_tier?: string | null;
   agent: string;
   created_at: string;
@@ -930,6 +979,25 @@ export interface ModuleInfo {
   schema: SettingsSchema | null;
 }
 
+/** Why the autonomy judge's last call failed (issue #875), as the mothership classified it. */
+export type JudgeFailureKind = "provider_error" | "rate_limited" | "timeout" | "unreachable" | "refused";
+
+/**
+ * GET /api/autonomy/status (issue #875): the autonomy judge's recent health, for the Settings
+ * status line and the header's warning chip. `last_success` and `last_error` are null until the
+ * judge has answered or failed once; `consecutive_failures` counts the run of failures since the
+ * last success, and `alerted` says whether the mothership has already told the operator about them.
+ */
+export interface AutonomyStatus {
+  enabled: boolean;
+  model: string | null;
+  fallback_models: string[];
+  last_success: { at: string; model: string } | null;
+  last_error: { at: string; model: string; kind: JudgeFailureKind; status: number | null; message: string } | null;
+  consecutive_failures: number;
+  alerted: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------
@@ -1151,7 +1219,7 @@ export interface UpdateStatus {
   /// Whether this install can update itself, and why not if it cannot.
   can_apply: { ok: boolean; reason: string | null };
   apply: {
-    phase: "idle" | "installing" | "restarting" | "failed";
+    phase: "idle" | "draining" | "installing" | "restarting" | "failed";
     version: string | null;
     started_at: string | null;
     error: string | null;
@@ -1670,6 +1738,8 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
+  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#298). */
+  host?: string;
 }
 
 /**
@@ -1915,6 +1985,10 @@ export interface Loop {
   /** What a run starts: a colony from `prompt` (the default), the repository's architecture map, or —
    * for the one built-in loop, id `disk-cleanup` — the mothership's own disk cleanup. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778): before it launches, the mothership checks it can reach
+   * `repo`, and the colony gets the read-only `/colonizer/github` context and the host-proxied
+   * `colonizer_github` tools. Colony loops only. */
+  needs_github?: boolean;
   /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
   pending?: string[];
   /** The built-in disk-cleanup loop only: its settings, run history and attention item. */
@@ -2103,6 +2177,8 @@ export interface NewLoop {
   /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. `disk_cleanup`
    * only on the built-in loop's own PUT. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778); see `Loop.needs_github`. Colony loops only. */
+  needs_github?: boolean;
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;
@@ -2639,6 +2715,9 @@ export interface PendingPhone {
 export interface Phones {
   devices: PairedPhone[];
   pending: PendingPhone[];
+  /** The same ranked origins an invite answers with (bare origins, no code, no credential), so a
+   * bookmark can name the network address without minting an invite. Older motherships omit it. */
+  origins?: PhoneOrigin[];
 }
 
 // ---------------------------------------------------------------------------
@@ -3099,9 +3178,14 @@ export interface MergeLoopSettings {
   min_call_gap_ms: number;
   /** Colony ids held out of the loop. */
   held: string[];
+  /** Issue #969: `owner` or `owner/repo` entries whose checks run locally when GitHub CI cannot run. */
+  local_checks: string[];
+  /** Issue #968: resolve a conflicted pull request by merging the base in and resuming its colony. */
+  resolve_conflicts: boolean;
+  resolve_attempts: number;
 }
 
-export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "waiting" | "skipped";
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "resolving" | "waiting" | "skipped";
 
 export interface MergeLoopItem {
   session: string;

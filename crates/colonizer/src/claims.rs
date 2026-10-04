@@ -205,6 +205,19 @@ pub fn remote_conflict_message(info: &RemoteClaimInfo, issue: u64) -> String {
     }
 }
 
+/// Whether a claim's holder host is one of `unreachable_ids`, the host ids the caller's fleet view
+/// reads as unreachable (issue #688). The label is the `"hostname (id)"` shape [`claim_is_ours`]
+/// already matches, so that comparison is reused rather than re-parsed.
+pub fn holder_host_unreachable(host_label: &str, unreachable_ids: &[String]) -> bool {
+    unreachable_ids.iter().any(|id| claim_is_ours(host_label, id))
+}
+
+/// The extra sentence a conflict carries when the claim's holder is a fleet member the fleet view
+/// reads as unreachable (issue #688): still refused, but the operator knows its colony is not being
+/// re-run elsewhere, so the ways out are clear.
+pub const UNREACHABLE_HOLDER_NOTE: &str =
+    "; that host is unreachable — its colony is not re-run elsewhere (remove the member or pass allow_duplicate to override)";
+
 /// The colony id a colony's branch name carries: the tail after `colonizer/issue-{N}-`.
 fn branch_colony(branch: &str, issue: u64) -> Option<&str> {
     branch
@@ -1032,5 +1045,41 @@ mod tests {
                 status.as_str()
             );
         }
+    }
+
+    /// Issue #688: the marker is fleet-wide, so two members launching the same issue see one claim.
+    /// B parses A's marker back, is refused naming A's host and colony, and never releases A's claim.
+    #[test]
+    fn two_members_launching_the_same_issue_see_one_fleet_wide_claim() {
+        let seen = parse_claim(&format_claim("box-a (host-a)", "colony-a", 7)).expect("B parses A's marker");
+        let info = RemoteClaimInfo {
+            kind: ClaimKind::Label,
+            detail: CLAIM_LABEL.to_string(),
+            host: Some(seen.host.clone()),
+            colony: Some(seen.colony.clone()),
+            merged: false,
+        };
+        let message = remote_conflict_message(&info, 7);
+        assert!(
+            message.contains("colony-a") && message.contains("box-a (host-a)"),
+            "{message}"
+        );
+        assert!(message.contains("allow_duplicate"), "{message}");
+        // A's host id is not B's, so B never releases A's claim in its own reconcile.
+        assert!(orphaned_claims("host-b", &[], &[("acme/app".into(), seen)]).is_empty());
+    }
+
+    #[test]
+    fn a_holder_host_id_is_matched_only_by_its_install_id() {
+        let down = vec!["host-a".to_string()];
+        assert!(holder_host_unreachable("box-a (host-a)", &down), "the label's id matches");
+        assert!(!holder_host_unreachable("box-b (host-b)", &down));
+        assert!(!holder_host_unreachable("box-a (host-a)", &[]));
+        // A hostname alone is not an id: it never matches, so a renamed host is never mistaken.
+        assert!(!holder_host_unreachable("host-a", &["box-a".to_string()]));
+        // The note completes the refusal, which still names the way out.
+        let refusal = remote_conflict_message(&info_with_identity(), 7);
+        assert!(format!("{refusal}{UNREACHABLE_HOLDER_NOTE}").contains("allow_duplicate"));
+        assert!(UNREACHABLE_HOLDER_NOTE.contains("unreachable"));
     }
 }
