@@ -380,6 +380,8 @@ fn mark_stopped_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bo
     }
     x.status = SessionStatus::Stopped;
     x.error = Some(VM_GONE_AFTER_RESTART.into());
+    // What a resume tells the colony its previous run ended by (issue #756).
+    x.run_end_cause = Some(RunEndCause::Restart);
     true
 }
 
@@ -482,6 +484,8 @@ fn mark_stopped_after_teardown(x: &mut Session, at_teardown: SessionStatus) -> b
     }
     x.status = SessionStatus::Stopped;
     x.error = Some(VM_STOPPED_EARLY.into());
+    // Why the colony's run ended, for a brief that resumes it (issue #756).
+    x.run_end_cause = Some(RunEndCause::Teardown);
     // Only on the landed flip: a publish that claimed the colony mid-teardown keeps its claim,
     // and its attention flag with it.
     x.attention = None;
@@ -551,6 +555,9 @@ async fn stop_colony_with(
                 // (issue #562).
                 x.suspended = None;
                 x.pending_answer = None;
+                // A host stop is no suspension, restart or teardown (issue #756): a later resume
+                // does not borrow a cause this run never had, nor report subagents it ended.
+                x.run_end_cause = None;
             }
             due
         })
@@ -629,6 +636,9 @@ pub(crate) async fn park_colony(
                 // a park is not a question's rest state (issue #562's rule, issue #213's case).
                 x.suspended = None;
                 x.pending_answer = None;
+                // A park is none of the causes a resume's brief names (issue #756), and keeping a
+                // stale one would mislabel the teardown a park's resume follows.
+                x.run_end_cause = None;
             }
             due
         })
@@ -1430,6 +1440,9 @@ pub async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> ApiResul
             if was.is_live() || was == SessionStatus::Queued || was == SessionStatus::Parked {
                 x.status = SessionStatus::Stopped;
                 attention = x.clear_attention();
+                // A stop at the user's hand is no other cause (issue #756): a later resume does not
+                // tell the colony its subagents were ended by a suspension or a restart.
+                x.run_end_cause = None;
                 // A suspended colony stopped by hand is just stopped (issue #562): its held answer
                 // would be delivered by a resume that is never coming, and the question it was
                 // waiting on is closed for good. A pending pre-warm request dies with it too.
@@ -2524,6 +2537,8 @@ mod tests {
         let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
         app.update_session("abc", |s| {
             s.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+            // A cause the teardown watchdog left: a stop at the user's hand clears it (issue #756).
+            s.run_end_cause = Some(RunEndCause::Teardown);
         })
         .await
         .unwrap();
@@ -2533,6 +2548,10 @@ mod tests {
             stopped.session.status,
             SessionStatus::Stopped,
             "the stop answers with the stopped colony"
+        );
+        assert_eq!(
+            stopped.session.run_end_cause, None,
+            "a user stop is no other cause, so a resume adds no subagent section"
         );
         let s = app.session("abc").await.unwrap();
         assert_eq!(s.status, SessionStatus::Stopped);
@@ -2828,6 +2847,11 @@ mod tests {
         );
         assert_eq!(stopped_early.status, SessionStatus::Stopped, "the colony reads stopped");
         assert_eq!(stopped_early.error, Some(VM_STOPPED_EARLY.into()), "the flip says why");
+        assert_eq!(
+            stopped_early.run_end_cause,
+            Some(RunEndCause::Teardown),
+            "and a resume will tell the colony the teardown ended its run"
+        );
         // A publish holds no lifecycle lock, so it can claim the colony while the watchdog's teardown
         // is still in flight; the flip must leave that claim standing.
         let mut claimed = colony("acme", SessionStatus::Publishing);
@@ -3020,6 +3044,11 @@ mod tests {
         );
         assert_eq!(gone.status, SessionStatus::Stopped, "the colony reads stopped");
         assert_eq!(gone.error, Some(VM_GONE_AFTER_RESTART.into()), "the flip says why");
+        assert_eq!(
+            gone.run_end_cause,
+            Some(RunEndCause::Restart),
+            "and a resume will tell the colony the restart ended its run"
+        );
         let mut claimed = colony("acme", SessionStatus::Publishing);
         assert!(
             !mark_stopped_after_restart(&mut claimed, SessionStatus::Idle),
