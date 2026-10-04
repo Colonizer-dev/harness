@@ -3,7 +3,20 @@ import type { ModelProviderStatus, StatusQuota } from "../providers/types";
 
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
-  claude: { configured: boolean; source: string | null; kind: string | null; account?: string | null; account_note?: string | null; saved_at?: string | null; expires_at?: string | null; expires_estimated?: boolean };
+  claude: {
+    configured: boolean;
+    source: string | null;
+    kind: string | null;
+    account?: string | null;
+    account_note?: string | null;
+    saved_at?: string | null;
+    expires_at?: string | null;
+    expires_estimated?: boolean;
+    /** The background per-account health check's verdict on the default account (issue #983); omitted by older mothership builds. `unchecked` until the first check has run. */
+    health_status?: "ok" | "auth_expired" | "unreachable" | "unchecked" | null;
+    /** When that check last ran (RFC3339); null when it never has. */
+    health_checked_at?: string | null;
+  };
   sandbox: {
     msb_version: string | null;
     image: string;

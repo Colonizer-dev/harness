@@ -216,6 +216,9 @@ pub fn in_use_msg(is_default: bool, orgs: &[String], sessions: &[String]) -> Opt
 pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
     let _ = migrate_legacy(&app.cfg.config_dir);
     let meta = load_meta(&app.cfg.config_dir);
+    // The background health check's latest verdict per account (issue #983); a missing entry reads
+    // as unchecked, so an account added since the last tick shows a state rather than nothing.
+    let health = app.claude_health.lock().await;
     Json(
         meta.accounts
             .iter()
@@ -224,6 +227,7 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                     .map(|(_, token)| sniff(&token))
                     .map(|(env, source)| (Some(env), Some(source)))
                     .unwrap_or((None, None));
+                let account_health = health.get(id);
                 json!({
                     "id": id,
                     "label": account.label,
@@ -231,6 +235,10 @@ pub async fn list(State(app): State<Shared>) -> Json<Vec<Value>> {
                     "kind": kind,
                     "source": source,
                     "added_at": account.added_at.to_rfc3339(),
+                    "health_status": account_health
+                        .map(|h| h.status)
+                        .unwrap_or(crate::claude_login::HealthStatus::Unchecked),
+                    "health_checked_at": account_health.and_then(|h| h.checked_at).map(|t| t.to_rfc3339()),
                 })
             })
             .collect(),

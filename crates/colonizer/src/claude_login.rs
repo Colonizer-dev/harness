@@ -375,6 +375,107 @@ enum ProfileError {
     Other(String),
 }
 
+/// One credential's health, from the cheap Anthropic check (issue #983). The background task
+/// refreshes it every few minutes for each configured account. `Unchecked` is only ever the cache's
+/// initial state — an account with no secret, or one no check has reached yet — never an outcome of
+/// the check itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    /// Anthropic accepted the token.
+    Ok,
+    /// Anthropic rejected the token (401) — it may have expired or been revoked.
+    AuthExpired,
+    /// The check could not reach Anthropic.
+    Unreachable,
+    /// Not checked yet.
+    Unchecked,
+}
+
+/// One account's latest health and when it was checked, in the cache on `App`.
+#[derive(Clone, Debug)]
+pub struct AccountHealth {
+    pub status: HealthStatus,
+    /// When the check ran; `None` while the account has never been checked (no secret, or the first
+    /// tick has not run yet).
+    pub checked_at: Option<DateTime<Utc>>,
+}
+
+/// Classifies a profile lookup into a health verdict. A `403` counts as healthy: a `user:inference`
+/// subscription token cannot read its profile, but Anthropic accepted the token. Pure, so the
+/// classification is testable without the network.
+fn classify_profile(result: Result<Value, ProfileError>) -> HealthStatus {
+    match result {
+        Ok(_) | Err(ProfileError::Forbidden) => HealthStatus::Ok,
+        Err(ProfileError::Unauthorized) => HealthStatus::AuthExpired,
+        Err(ProfileError::Other(_)) => HealthStatus::Unreachable,
+    }
+}
+
+/// The cheap Anthropic check one credential runs: ask for the profile and classify the answer. An
+/// API key is never sent to the OAuth profile endpoint — it carries no account identity and the
+/// endpoint expects a subscription token — and counts as ok without a call, the same treatment
+/// `account_status` gives it.
+pub async fn credential_health(token: &str) -> HealthStatus {
+    if is_api_key(token) {
+        return HealthStatus::Ok;
+    }
+    classify_profile(fetch_profile(token).await)
+}
+
+/// One pass of the per-account health check (issue #983): every configured account with a stored
+/// secret gets the cheap check, and the cache on `App` is replaced with the fresh verdicts. An
+/// account whose secret is gone is recorded as unchecked, and a deleted account's stale entry is
+/// dropped with it.
+pub async fn check_accounts(app: &App) {
+    let meta = crate::claude_accounts::load_meta(&app.cfg.config_dir);
+    let mut fresh = std::collections::HashMap::new();
+    for id in meta.accounts.keys() {
+        let health = match crate::claude_accounts::cred_for(&app.cfg.config_dir, id) {
+            Some((_, token)) => AccountHealth {
+                status: credential_health(&token).await,
+                checked_at: Some(Utc::now()),
+            },
+            None => AccountHealth {
+                status: HealthStatus::Unchecked,
+                checked_at: None,
+            },
+        };
+        fresh.insert(id.clone(), health);
+    }
+    *app.claude_health.lock().await = fresh;
+}
+
+/// Runs the per-account health check every five minutes (issue #983). Missed ticks are skipped, not
+/// queued: the check is a few seconds of network and the next tick is soon enough.
+pub fn start_tasks(app: &Shared) {
+    let app = app.clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(300));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            check_accounts(&app).await;
+        }
+    });
+}
+
+/// The cached health of the account the status payload's credential resolves to (the install
+/// default), for `claude_status`. `Unchecked` with no timestamp until the first check has run.
+async fn default_account_health(app: &App) -> (HealthStatus, Option<String>) {
+    let meta = crate::claude_accounts::load_meta(&app.cfg.config_dir);
+    let id = if meta.default.is_empty() {
+        "default".to_string()
+    } else {
+        meta.default.clone()
+    };
+    let cache = app.claude_health.lock().await;
+    match cache.get(&id) {
+        Some(health) => (health.status, health.checked_at.map(|t| t.to_rfc3339())),
+        None => (HealthStatus::Unchecked, None),
+    }
+}
+
 /// The `claude` object of `GET /api/status`. These field names are the JSON contract the web UI is
 /// written against. With nothing configured the identity fields are null and `expires_estimated` false.
 pub async fn claude_status(app: &App, cred: Option<&ClaudeCred>) -> Value {
@@ -382,15 +483,17 @@ pub async fn claude_status(app: &App, cred: Option<&ClaudeCred>) -> Value {
         return json!({
             "configured": false, "source": null, "kind": null, "account": null,
             "account_note": null, "saved_at": null, "expires_at": null, "expires_estimated": false,
+            "health_status": null, "health_checked_at": null,
         });
     };
     let saved = saved_at(app, cred);
     let status = account_status(app, cred).await;
+    let (health_status, health_checked_at) = default_account_health(app).await;
     // A saved subscription token is valid for a year from the moment it was minted, and nothing
     // records that moment, so the best honest estimate is saving time plus 365 days.
     let (expires_at, expires_estimated) = match (&status.profile_expires_at, saved) {
         (Some(at), _) => (Some(at.clone()), false),
-        (None, Some(saved)) if !is_api_key(cred) => (Some(estimated_expiry(saved).to_rfc3339()), true),
+        (None, Some(saved)) if !is_api_key(&cred.value) => (Some(estimated_expiry(saved).to_rfc3339()), true),
         (None, _) => (None, false),
     };
     json!({
@@ -402,18 +505,20 @@ pub async fn claude_status(app: &App, cred: Option<&ClaudeCred>) -> Value {
         "saved_at": saved.map(|at| at.to_rfc3339()),
         "expires_at": expires_at,
         "expires_estimated": expires_estimated,
+        "health_status": health_status,
+        "health_checked_at": health_checked_at,
     })
 }
 
-fn is_api_key(cred: &ClaudeCred) -> bool {
-    cred.value.starts_with("sk-ant-api")
+fn is_api_key(token: &str) -> bool {
+    token.starts_with("sk-ant-api")
 }
 
 /// The cached lookup. The cache lock is held across the request so concurrent status polls share one
 /// lookup instead of stacking several; the request itself is bounded by `fetch_profile`'s timeout.
 async fn account_status(app: &App, cred: &ClaudeCred) -> AccountStatus {
     let fingerprint = fingerprint(&cred.value);
-    if is_api_key(cred) {
+    if is_api_key(&cred.value) {
         // An API key carries no account identity and there is no endpoint to ask, so don't.
         return AccountStatus {
             fingerprint,
@@ -765,6 +870,30 @@ mod tests {
         // estimate back a day, which is the honest reading of "valid for 1 year" at 365 days.
         let saved = Utc.with_ymd_and_hms(2023, 3, 1, 0, 0, 0).unwrap();
         assert_eq!(estimated_expiry(saved), Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn a_profile_lookup_classifies_to_a_health_verdict() {
+        assert_eq!(
+            classify_profile(Ok(serde_json::json!({"email": "ada@example.com"}))),
+            HealthStatus::Ok,
+            "a 200 is healthy"
+        );
+        assert_eq!(
+            classify_profile(Err(ProfileError::Unauthorized)),
+            HealthStatus::AuthExpired,
+            "a 401 means the token was rejected"
+        );
+        assert_eq!(
+            classify_profile(Err(ProfileError::Other("error sending request".into()))),
+            HealthStatus::Unreachable,
+            "a connection failure is unreachable, not rejected"
+        );
+        assert_eq!(
+            classify_profile(Err(ProfileError::Forbidden)),
+            HealthStatus::Ok,
+            "a 403 is the expected answer for a subscription token: it is accepted, just not readable"
+        );
     }
 
     #[test]
