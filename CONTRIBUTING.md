@@ -90,7 +90,11 @@ in different places:
 
 Rust tests live in `#[cfg(test)]` modules beside the code. Build a shared struct through its
 test-only constructor, never a struct literal, so adding a field means one edit:
-`AgentModule::test("claude-code").needs_claude(true)` (crates/colonizer/src/modules.rs).
+`AgentModule::test("claude-code").needs_claude(true)` (crates/colonizer/src/modules.rs). A test
+that needs a file outside its crate — a doc, a schema, a module manifest, a shared fixture — reads
+it through `crates/repo-contracts` (unpublished; reachable from colonizer-harness through its
+`contract` module), because CI runs each published crate's tests from its packaged tarball, where
+nothing outside the crate exists.
 
 ## Checks
 

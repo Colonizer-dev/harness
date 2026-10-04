@@ -76,6 +76,30 @@ jobs:
             cargo publish --dry-run --locked -p "$crate"
           done
 
+      # The tests the way a user gets them: each crate's .crate, unpacked outside the checkout so
+      # nothing but the crate itself is in reach. This is what a stray include_str! or a path above
+      # the crate fails on; the workspace test above cannot, because it sees the whole repository.
+      # The tarball is built here rather than reused from the step above: `cargo publish --dry-run`
+      # leaves its copy under target/package/tmp-crate, target/ is restored from cache so a stale
+      # .crate of another version can also be lying around, and building it fresh pins the crate's
+      # current version. target/ is shared so only the registry dependencies are reused; the crate
+      # itself compiles from the unpacked source.
+      - name: Test the packaged crates
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          for crate in colonizer-agentd colonizer-harness; do
+            pkgid=$(cargo pkgid -p "$crate")
+            version="${pkgid##*@}"
+            version="${version##*#}"
+            cargo package --locked -p "$crate"
+            dest="$RUNNER_TEMP/packaged/$crate-$version"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            tar -xzf "$CARGO_TARGET_DIR/package/$crate-$version.crate" -C "$dest" --strip-components=1
+            (cd "$dest" && cargo test --locked)
+          done
+
       - name: Lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
