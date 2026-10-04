@@ -157,6 +157,7 @@ mothership's saved key for the provider is injected.
 | :--- | :--- | :--- |
 | [`crates/colonizer`](../crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
 | [`crates/colonizer-agentd`](../crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`crates/repo-contracts`](../crates/repo-contracts) | Test-only access to the repository's own files — docs, schemas, module manifests, shared fixtures — so an in-place test reads them without the published crates reaching outside themselves | `UNPUBLISHED` |
 | [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
@@ -198,12 +199,14 @@ Two parts are bigger than one file:
   prompt, mounts, secrets and network rules, write `boot.sh`, start the microVM and wait for
   agentd. `sessions::boot` is a re-export of it.
 
-`crates/colonizer/routes.snap` is the API's surface in one file, one line per route: the path and
-method, what an unauthenticated request gets (`unauth=401`, or `public` for `GET /api/status`),
-what a scoped API token needs (`token=owner`, `read`, `session>=read`, `session>=operate`, `map` or
-`launch`, from `api_tokens::classify`), and the History entry it records (`activity=`). A test
-(`server/route_table_tests.rs`) rebuilds the table from the real router and fails when it differs
-from the file.
+`crates/colonizer/routes/` is the API's surface, one snapshot per source module (`maps.snap`,
+`sessions.api.snap`, …), each named after the module it came from, so two features never edit the
+same file. Each line is a route:
+the path and method, what an unauthenticated request gets (`unauth=401`, or `public` for
+`GET /api/status`), what a scoped API token needs (`token=owner`, `read`, `session>=read`,
+`session>=operate`, `map` or `launch`, from `api_tokens::classify`), and the History entry it
+records (`activity=`). A test (`server/route_table_tests.rs`) rebuilds the table from the real
+router and fails when any file differs, is missing or is stale.
 
 ### Adding a module
 
@@ -225,21 +228,37 @@ different lines instead of both appending to the same spot.
    }
    ```
 
-   Then add `.merge(crate::<name>::routes())` in its alphabetical place in `server::api_routes`.
    Every route is behind `host_guard` and the activity log's route layer without doing anything:
-   `router` wraps them all. What a scoped API token may call is decided separately, in
-   `api_tokens::classify`, which is closed by default, so a new route is owner-only until it is
-   listed there. Recording a change in History is a rule in `activity.rs`. Run
-   `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` to regenerate
-   `crates/colonizer/routes.snap`, the route table with each route's auth, token scope and
+   `router` wraps them all. For a **feature** — a module with routes, or meaningfully one — prefer a
+   descriptor beside the handlers instead of the central lists:
+
+   ```rust
+   pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+       name: "<name>",
+       routes,
+       token_scope: Some(token_scope),          // None: owner-only, like an unlisted classify arm
+       activity: ACTIVITY,                      // the rules its writes record, or `&[]`
+       kinds: &["<name>.created"],              // the activity kinds only it writes, or `&[]`
+       start_tasks: Some(start_tasks),          // None if it has none
+   };
+   ```
+
+   then add `&crate::<name>::FEATURE` in its alphabetical place in `features::ALL`
+   (`src/features.rs`). `server::api_routes`, `server::start_tasks`, `api_tokens::classify` and
+   `activity::rule_for` read that list, so one line replaces a line in each. `token_scope` decides
+   what a scoped API token needs, exactly as an `api_tokens::classify` arm would — un-migrated
+   modules still keep their arm there, and `classify` asks the features only for what no arm claims.
+   Either way run `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` to regenerate
+   `crates/colonizer/routes/<name>.snap`, the route table with each route's auth, token scope and
    activity kind. Commit it with the change, so the change to the API's surface shows in review.
    Without the regeneration, `cargo test` fails and prints that command.
 3. **State.** If the module keeps state, give it a type of its own with a constructor taking what
    it needs from `Settings`. Add one field to the "module state" block of `App` and one line to
    the same block of `App::new`, both alphabetical. Handlers reach it as `app.<name>`.
 4. **Background work.** If it runs in the background (a loop, a watcher, a sweep, a backfill),
-   give it `pub(crate) fn start_tasks(app: &Shared)`, which spawns what it runs. Add
-   `crate::<name>::start_tasks(app);` in its alphabetical place in `server::start_tasks`.
+   give it `pub(crate) fn start_tasks(app: &Shared)`, which spawns what it runs, and run it from the
+   feature's `start_tasks` (or, un-migrated, from `crate::<name>::start_tasks(app);` in its
+   alphabetical place in `server::start_tasks`).
 
 The functions are called `routes` and `start_tasks` in every module. The session modules
 (`sessions`, `lifecycle`, `publish`, `queue`, `events`) glob-import one another, so a name like
@@ -847,7 +866,10 @@ real binary as a host process on loopback against a stub agent runner and assert
 behaviour (docs/protocol.md §2–§3): the bearer-token wall, the initial prompt, events stamped with a
 gap-free `seq` and an RFC 3339 `ts`, `user_message` and `answer` frames reaching the runner's stdin,
 replay from `since`, the PTY roundtrip, and clean shutdown. `cargo test -p colonizer-agentd --test
-smoke` runs just the single boot-path pass of those.
+smoke` runs just the single boot-path pass of those. A test that needs something the repository
+holds outside its own crate — a doc, a schema, a module manifest, a shared fixture — reads it
+through `crates/repo-contracts` rather than the filesystem: CI runs each published crate's tests
+from its packaged tarball, where nothing outside the crate exists.
 
 What it does not cover is the colony around agentd: the `msb run` boot itself, the session directory
 the mothership writes (plugin mounts, `boot.sh`, the mesh key), subagent model resolution and cost

@@ -88,7 +88,7 @@ The repository can steer it from its base branch's `.colonizer/merge.toml`:
 never = ["migrations/**", "SECURITY.md"]          # a conflict here goes to a person, never a colony
 
 [[resolve.generators]]
-files = "crates/colonizer/routes.snap"            # when this conflicts, rerun its generator
+files = "crates/colonizer/routes/*.snap"         # when this conflicts, rerun its generator
 run = "UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table"
 ```
 

@@ -74,15 +74,20 @@ Every list you touch is alphabetical, one entry per line, so parallel pull reque
 in different places:
 
 1. `mod <name>;` in `crates/colonizer/src/main.rs`, with the module in `crates/colonizer/src/<name>.rs`.
-2. Routes: `pub(crate) fn routes() -> axum::Router<crate::Shared>` in your module, and
-   `.merge(crate::<name>::routes())` in `server::api_routes`. Then regenerate the route table with
+2. Routes: `pub(crate) fn routes() -> axum::Router<crate::Shared>` in your module. Prefer migrating
+   the module to a `features::Feature` descriptor, declared in the feature's own module next to its
+   routes, and one sorted line in `features::ALL` (`crates/colonizer/src/features.rs` holds the
+   descriptor type and that list). The descriptor also carries its `token_scope`, `activity` rules,
+   `kinds` and `start_tasks`; otherwise add `.merge(crate::<name>::routes())` in `server::api_routes`
+   and list its routes in `api_tokens::classify`. Either way regenerate the route table with
    `UPDATE_ROUTE_SNAPSHOT=1 cargo test -p colonizer-harness route_table` and commit
-   `crates/colonizer/routes.snap`. A new route is owner-only to scoped API tokens until it is
-   listed in `api_tokens::classify`.
+   `crates/colonizer/routes/<module>.snap` — the snapshot is named after the source module, e.g.
+   `sessions.api.snap` for `sessions/api.rs`. A new route is owner-only to scoped API tokens until
+   its feature's `token_scope` (or, un-migrated, an `api_tokens::classify` arm) lists it.
 3. State: one field in the "module state" block of `App` and one line in the same block of
    `App::new` (`app.rs`).
-4. Background work: `pub(crate) fn start_tasks(app: &Shared)` in your module, and
-   `crate::<name>::start_tasks(app);` in `server::start_tasks`.
+4. Background work: `pub(crate) fn start_tasks(app: &Shared)` in your module, run from the feature
+   descriptor or from `crate::<name>::start_tasks(app);` in `server::start_tasks`.
 
 A non-test Rust file stays under 2,000 lines; once it grows past that, split it into a directory
 module (`<name>/mod.rs` plus siblings) with its tests in `<name>/tests.rs` (issue #825).
@@ -93,7 +98,11 @@ module (`<name>/mod.rs` plus siblings) with its tests in `<name>/tests.rs` (issu
 
 Rust tests live in `#[cfg(test)]` modules beside the code. Build a shared struct through its
 test-only constructor, never a struct literal, so adding a field means one edit:
-`AgentModule::test("claude-code").needs_claude(true)` (crates/colonizer/src/modules.rs).
+`AgentModule::test("claude-code").needs_claude(true)` (crates/colonizer/src/modules.rs). A test
+that needs a file outside its crate — a doc, a schema, a module manifest, a shared fixture — reads
+it through `crates/repo-contracts` (unpublished; reachable from colonizer-harness through its
+`contract` module), because CI runs each published crate's tests from its packaged tarball, where
+nothing outside the crate exists.
 
 ## Checks
 

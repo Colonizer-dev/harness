@@ -8,8 +8,8 @@
 //! - relative links and `#anchors` in README files and `docs/` that no longer resolve;
 //! - commands the docs show that no longer exist (`npm run` scripts, script paths, `make` targets,
 //!   `cargo -p` crates, and the repository's own CLI subcommands and flags);
-//! - for Colonizer itself, API routes added to or removed from `routes.snap` since the last run that
-//!   `docs/protocol.md` and its `docs/protocol/` area files do not reflect;
+//! - for Colonizer itself, API routes added to or removed from `crates/colonizer/routes/` since the
+//!   last run that `docs/protocol.md` and its `docs/protocol/` area files do not reflect;
 //! - where the repository keeps `changelog.d/` fragments or an `## Unreleased` section, merged
 //!   pull requests that changed code with no changelog entry.
 //!
@@ -404,7 +404,8 @@ pub struct RoutesSpec {
 
 /// Colonizer's own layout: its CLI and its route table, checked without a docs-map file.
 const COLONIZER_CLI: &str = "crates/colonizer/src/cli.rs";
-const COLONIZER_ROUTES: &str = "crates/colonizer/routes.snap";
+/// The route table: one snapshot per module (`route_table_tests.rs`), read as a directory.
+const COLONIZER_ROUTES: &str = "crates/colonizer/routes";
 const COLONIZER_PROTOCOL: &str = "docs/protocol.md";
 
 /// A glob over repository paths: `*` within a segment, `**` across segments, and a plain path also
@@ -2087,6 +2088,50 @@ async fn git(app: &App, bare: &FsPath, args: &[&str]) -> Result<String> {
     exec_within(GIT_LIMIT, app.git(bare).args(args)).await
 }
 
+/// The route snapshot at `sha`, read the way `snapshot_text` reads the working tree: the file
+/// `path`, or every file under the `path/` directory joined. A directory is told from a file with
+/// `cat-file -t` first, so `git show` on a tree (which lists it) is never mistaken for its contents.
+/// A revision from before the split has no `path/` tree — only the single `path.snap` file — so
+/// that is read as the fallback, and drift is caught across the split rather than silently missed.
+async fn old_snapshot(app: &App, bare: &FsPath, sha: &str, path: &str) -> Option<String> {
+    let spec = format!("{sha}:{path}");
+    if git(app, bare, &["cat-file", "-t", &spec])
+        .await
+        .is_ok_and(|kind| kind.trim() == "blob")
+    {
+        return git(app, bare, &["show", &spec]).await.ok();
+    }
+    let listing = git(app, bare, &["ls-tree", "--name-only", "-r", &spec])
+        .await
+        .unwrap_or_default();
+    let mut out = String::new();
+    for name in listing.lines().filter(|l| !l.trim().is_empty()) {
+        if let Ok(text) = git(app, bare, &["show", &format!("{sha}:{path}/{name}")]).await {
+            out.push_str(&text);
+        }
+    }
+    if !out.is_empty() {
+        return Some(out);
+    }
+    git(app, bare, &["show", &format!("{sha}:{path}.snap")]).await.ok()
+}
+
+/// Whether `path` is `dir` itself or a file under it. A route snapshot may be one file or a
+/// directory of one file per module (`crates/colonizer/routes/`).
+fn under(path: &str, dir: &str) -> bool {
+    path == dir || path.starts_with(&format!("{dir}/"))
+}
+
+/// The route snapshot text: the file `path`, or every file under the `path/` directory joined —
+/// a split snapshot reads as one table. `text` is keyed by path, so the modules concatenate sorted.
+fn snapshot_text(text: &BTreeMap<String, String>, path: &str) -> Option<String> {
+    if let Some(one) = text.get(path) {
+        return Some(one.clone());
+    }
+    let joined: String = text.iter().filter(|(p, _)| under(p, path)).map(|(_, t)| t.as_str()).collect();
+    (!joined.is_empty()).then_some(joined)
+}
+
 /// Whether a file is read for the checks.
 fn wanted(path: &str, map_file_sources: &BTreeSet<String>) -> bool {
     let name = path.rsplit('/').next().unwrap_or_default();
@@ -2098,9 +2143,9 @@ fn wanted(path: &str, map_file_sources: &BTreeSet<String>) -> bool {
             || path.starts_with("changelog.d/")))
         || path == DOCS_MAP
         || path == COLONIZER_CLI
-        || path == COLONIZER_ROUTES
+        || under(path, COLONIZER_ROUTES)
         || path == "scripts/changelog.mjs"
-        || map_file_sources.contains(path)
+        || map_file_sources.iter().any(|source| under(path, source))
 }
 
 async fn read_tree(app: &Shared, bare: &FsPath, sha: &str) -> Result<(Tree, MapFile, Vec<String>)> {
@@ -2288,19 +2333,20 @@ pub async fn scan(app: &Shared, bare: &FsPath, last_sha: Option<&str>, interval_
     }
     findings.extend(command_findings(&tree, &clis));
     let routes = map_file.routes.clone().or_else(|| {
-        (tree.paths.contains(COLONIZER_ROUTES) && tree.paths.contains(COLONIZER_PROTOCOL)).then(|| RoutesSpec {
+        (tree.exists(COLONIZER_ROUTES) && tree.paths.contains(COLONIZER_PROTOCOL)).then(|| RoutesSpec {
             snapshot: COLONIZER_ROUTES.to_string(),
             doc: COLONIZER_PROTOCOL.to_string(),
         })
     });
     if let Some(r) = routes
-        && let (Some(new_snap), Some(doc)) = (tree.text.get(&r.snapshot), route_doc_text(&tree, &r.doc))
+        && let Some(doc) = route_doc_text(&tree, &r.doc)
+        && let Some(new_snap) = snapshot_text(&tree.text, &r.snapshot)
     {
         let old = match &since {
-            Some(s) => git(app, bare, &["show", &format!("{s}:{}", r.snapshot)]).await.ok(),
+            Some(s) => old_snapshot(app, bare, s, &r.snapshot).await,
             None => None,
         };
-        findings.extend(routes_findings(old.as_deref(), new_snap, &r.doc, &doc));
+        findings.extend(routes_findings(old.as_deref(), &new_snap, &r.doc, &doc));
     }
     let fragments_since = if tree.dirs.contains("changelog.d") {
         git(

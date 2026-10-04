@@ -76,12 +76,26 @@
         "default": true,
         "env": "COLONIZER_SUMMARIES"
       },
+      "relaunch_subagents": {
+        "type": "boolean",
+        "title": "Relaunch subagents a suspension or restart ended",
+        "description": "When a resumed colony's previous run ended because it was suspended, the harness restarted or its microVM was torn down, the brief tells the orchestrator which subagents were still in flight — with each one's task and last progress — and that nobody stopped them, so the runner's \"stopped by the user\" report for them is not taken at face value. On, it relaunches the unfinished ones without asking. Off, it asks you first. On by default.",
+        "default": true
+      },
       "background_model": {
         "type": "string",
         "title": "Background model",
         "description": "Model for background work such as titles and summaries: a Claude alias or ID, or <provider>/<model>. Empty uses Claude Code's default.",
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
+      },
+      "router_idle_timeout_secs": {
+        "type": "integer",
+        "title": "Model request idle timeout (seconds)",
+        "description": "When a colony's model requests go through the model router, how long Anthropic or a provider may stay silent \u2014 before it starts answering, or between two parts of a streamed answer \u2014 before the request fails as timed out. A streamed answer has no overall limit. A provider's own timeout is never cut short. 600 by default.",
+        "minimum": 60,
+        "default": 600,
+        "env": "COLONIZER_ROUTER_IDLE_TIMEOUT_SECS"
       },
       "route_per_task": {
         "type": "boolean",

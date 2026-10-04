@@ -1,0 +1,6 @@
+/api/maps/{owner}/{name}                             GET    unauth=401    token=map              activity=-
+/api/maps/{owner}/{name}                             POST   unauth=401    token=owner            activity=map.create
+/api/maps/{owner}/{name}/file                        GET    unauth=401    token=map              activity=-
+/api/maps/{owner}/{name}/files                       GET    unauth=401    token=map              activity=-
+/api/sessions/{id}/diff                              GET    unauth=401    token=session>=read    activity=-
+/api/touched                                         GET    unauth=401    token=owner            activity=-

@@ -33,6 +33,8 @@ mod colonize;
 mod colony_secrets;
 mod commit_links;
 mod config;
+#[doc(hidden)]
+pub mod contract;
 mod coordination;
 mod decide;
 mod deja;
@@ -46,6 +48,7 @@ mod epic;
 mod events;
 mod exec_bits;
 mod execution;
+mod features;
 mod findings;
 mod fleet;
 mod fleet_export;
@@ -161,7 +164,12 @@ use std::process::ExitCode;
 
 /// The definitions and the runners live in `cli` (the MCP server in `mcp`); this stays a parse and
 /// a dispatch. An argument nobody planned for is clap's usage error, not a silently started server.
+///
+/// `pub` and `#[doc(hidden)]` because this file is also the library root (see `Cargo.toml`): the
+/// `colonizer` binary is a thin wrapper that calls it, and the repository-level checks in
+/// `crates/repo-contracts` link the library, not the binary.
+#[doc(hidden)]
 #[tokio::main]
-async fn main() -> ExitCode {
+pub async fn main() -> ExitCode {
     ExitCode::from(cli::run(cli::parse()).await as u8)
 }

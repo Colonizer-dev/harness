@@ -267,18 +267,71 @@ async fn colonizer_routes_drift_against_protocol_md() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The first run after the snapshots were split: the revision the drift is measured from still has
+/// the one `crates/colonizer/routes.snap` file, while the head has the `crates/colonizer/routes/`
+/// directory. The old side is read from the legacy file and the new side from the directory, so the
+/// drift is still found rather than silently missed.
 #[tokio::test]
-async fn colonizer_routes_drift_reads_the_split_protocol_directory() {
+async fn colonizer_routes_drift_reads_a_split_snapshot_against_the_legacy_file() {
     let dir = root("routes-split");
     let app = crate::tests::test_app(&dir);
     let f = Fixture::new(&dir);
+    let legacy = "/api/loops      GET    unauth=401    token=owner    activity=-\n\
+                  /api/keep       GET    unauth=401    token=owner    activity=-\n\
+                  /api/old/{id}   DELETE unauth=401    token=owner    activity=-\n";
+    let protocol =
+        "# Protocol\n\n| `GET /api/loops` | loops |\n| `GET /api/keep` | kept |\n| `DELETE /api/old/{name}` | gone soon |\n";
+    f.commit(
+        "Initial",
+        &[
+            ("crates/colonizer/routes.snap", legacy),
+            (COLONIZER_PROTOCOL, protocol),
+            ("README.md", "# Colonizer\n"),
+        ],
+        2,
+    );
+    // The split lands: one file per module. `loops` gains a route, `old` is dropped, `keep` stays.
+    let loops_v2 = "/api/loops      GET    unauth=401    token=owner    activity=-\n\
+                    /api/docs-loop  GET    unauth=401    token=owner    activity=-\n";
+    f.commit(
+        "Split the route snapshots (#30)",
+        &[
+            ("crates/colonizer/routes.snap", ""),
+            ("crates/colonizer/routes/loops.snap", loops_v2),
+            (
+                "crates/colonizer/routes/keep.snap",
+                "/api/keep  GET  unauth=401  token=owner  activity=-\n",
+            ),
+        ],
+        0,
+    );
+    let bare = f.mirror(&app, "Colonizer-dev/harness");
+    let s = scan(&app, &bare, None, 24, Utc::now()).await.unwrap();
+    let routes: Vec<&String> = s
+        .findings
+        .iter()
+        .filter(|x| x.kind == Kind::RoutesDrift)
+        .map(|x| &x.message)
+        .collect();
+    assert_eq!(routes.len(), 2, "{:#?}", s.findings);
+    assert!(routes.iter().any(|m| m.contains("/api/docs-loop is new")), "{routes:?}");
+    assert!(routes.iter().any(|m| m.contains("/api/old/{} was removed")), "{routes:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn colonizer_routes_drift_reads_the_split_protocol_directory() {
+    let dir = root("routes-split-protocol");
+    let app = crate::tests::test_app(&dir);
+    let f = Fixture::new(&dir);
+    let snap = "crates/colonizer/routes/loops.snap";
     let snap_v1 = "/api/loops      GET    unauth=401    token=owner    activity=-\n";
     let index = "# Protocol\n\nThe routes live under [the routes area](protocol/routes.md).\n";
     let area = "# Routes\n\n| `GET /api/docs-loop` | the docs loop |\n";
     f.commit(
         "Initial",
         &[
-            (COLONIZER_ROUTES, snap_v1),
+            (snap, snap_v1),
             (COLONIZER_PROTOCOL, index),
             ("docs/protocol/routes.md", area),
             ("README.md", "# Colonizer\n"),
@@ -288,7 +341,7 @@ async fn colonizer_routes_drift_reads_the_split_protocol_directory() {
     let snap_v2 = "/api/loops           GET    unauth=401    token=owner    activity=-\n\
                    /api/docs-loop       GET    unauth=401    token=owner    activity=-\n\
                    /api/undocumented    GET    unauth=401    token=owner    activity=-\n";
-    f.commit("Add two routes (#31)", &[(COLONIZER_ROUTES, snap_v2)], 0);
+    f.commit("Add two routes (#31)", &[(snap, snap_v2)], 0);
     let bare = f.mirror(&app, "Colonizer-dev/harness");
     let s = scan(&app, &bare, None, 24, Utc::now()).await.unwrap();
     let routes: Vec<&String> = s
@@ -886,8 +939,15 @@ fn settings_and_history_survive_a_round_trip_and_old_files_read() {
 async fn this_repository() {
     let dir = root("self");
     let app = crate::tests::test_app(&dir);
-    let repo = FsPath::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let git_dir = git_in(&repo, &["rev-parse", "--absolute-git-dir"], None);
+    // This scan needs the repository itself, which lives outside the crate. The root comes from
+    // COLONIZER_REPO_ROOT, which the workspace .cargo/config.toml sets; the published crate ships
+    // no such config, so there the variable is unset and this skips.
+    let Some(root) = std::env::var_os("COLONIZER_REPO_ROOT") else {
+        eprintln!("skipping the docs-loop self-scan: COLONIZER_REPO_ROOT is unset (run it from the repository)");
+        return;
+    };
+    let repo = FsPath::new(&root);
+    let git_dir = git_in(repo, &["rev-parse", "--absolute-git-dir"], None);
     let s = scan(&app, FsPath::new(&git_dir), None, 24 * 7, Utc::now()).await.unwrap();
     let mut by_kind: BTreeMap<Kind, usize> = BTreeMap::new();
     for f in &s.findings {

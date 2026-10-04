@@ -52,6 +52,39 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new().route("/api/sessions/{id}/switch-agent", routing::post(switch_agent))
 }
 
+/// This module's feature descriptor (`features.rs`): its route, scoped-token rule, activity rule
+/// and kind, read through `features::ALL` by `server`, `api_tokens` and `activity`.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "switch_agent",
+    routes,
+    token_scope: Some(token_scope),
+    activity: ACTIVITY,
+    kinds: &["colony.switch_agent"],
+    start_tasks: None,
+};
+
+/// The activity line a switch records, against the colony it switched.
+const ACTIVITY: &[crate::activity::Rule] = &[crate::activity::rule(
+    "POST",
+    "/api/sessions/{id}/switch-agent",
+    "colony.switch_agent",
+    crate::activity::Target::Colony,
+)];
+
+/// What a scoped token needs to switch a colony's agent: operate on that colony, like answering,
+/// stopping or resuming it (`api_tokens`).
+fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crate::api_tokens::Need<'a>> {
+    match segs {
+        ["api", "sessions", id, "switch-agent"] if *method == axum::http::Method::POST && !id.is_empty() => {
+            Some(crate::api_tokens::Need::Session {
+                id,
+                at_least: crate::api_tokens::Scope::Operate,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Whether a colony in this state may be switched. Live colonies are stopped and booted again on the
 /// target module; stopped, failed and parked ones are only booted. A queued colony has nothing to
 /// convert yet, `publishing` has a push in flight, and the terminal states (a pull request opened,
