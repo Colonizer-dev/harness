@@ -1,12 +1,13 @@
-import { useEffect, useId, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { MergeTrainSection } from "../MergeTrain";
-import type { Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField } from "../../types";
+import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField } from "../../types";
 import { type ImagePull } from "../../useImagePull";
 import { Button, Spinner, Switch, cx, inputClass, seconds } from "../ui";
 import { ModuleProviderMark, isAdvancedField } from "../settingsGuide";
 import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
+import { AutonomyHealth } from "./AutonomyHealth";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ export function ModulePane({
   const api = useApi();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const providerId = useId();
   const headroom = useHeadroom(module.kind === "agent");
   const info = kindInfo(module.kind);
@@ -122,18 +124,43 @@ export function ModulePane({
   const dirty = isDirty(module, draft);
   const providerInfo = module.providers.find((p) => p.id === draft.provider);
 
-  const save = async () => {
+  // The autonomy judge's health (issue #875): fetched when its pane opens and again after a save,
+  // since a save is the moment a broken judge is most likely to have just been configured.
+  const [judge, setJudge] = useState<AutonomyStatus | null>(null);
+  const loadJudge = useCallback(async () => {
+    try {
+      setJudge(await api.autonomyStatus());
+    } catch {
+      /* an older mothership has no /api/autonomy/status: there is no line to show */
+    }
+  }, [api]);
+  useEffect(() => {
+    if (module.kind === "autonomy") void loadJudge();
+  }, [module.kind, loadJudge]);
+
+  const save = async (anyway = false) => {
     setSaving(true);
     try {
-      const saved = await api.saveModule(module.kind, { provider: draft.provider, enabled: draft.enabled, settings: draft.settings });
+      const saved = await api.saveModule(module.kind, {
+        provider: draft.provider,
+        enabled: draft.enabled,
+        settings: draft.settings,
+        ...(anyway ? { save_anyway: true } : {}),
+      });
       onSaved(saved);
+      setSaveError(null);
       toast(`${info.title} module saved`);
       // Choosing a stack is the moment to download it, not the first launch.
       if (module.kind === "sandbox") void pull.start();
       // Switching Headroom on is the moment to download its bundle, too.
       if (module.kind === "agent" && saved.settings?.headroom === true) void headroom.start();
+      if (module.kind === "autonomy") void loadJudge();
     } catch (error) {
-      toast(errorMessage(error), "error");
+      const message = errorMessage(error);
+      toast(message, "error");
+      // The autonomy judge is the one module whose save runs a live test call, so its refusal is
+      // shown in the pane with a way past it (issue #875).
+      if (module.kind === "autonomy") setSaveError(message);
     } finally {
       setSaving(false);
     }
@@ -199,7 +226,7 @@ export function ModulePane({
               Reset
             </Button>
           )}
-          <Button variant="primary" disabled={!dirty || saving} onClick={save}>
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => void save()}>
             {saving && <Spinner />} Save
           </Button>
         </>
@@ -208,6 +235,19 @@ export function ModulePane({
       {module.kind === "sandbox" && (
         <div className="mb-1">
           <ImagePullRow pull={pull} />
+        </div>
+      )}
+      {module.kind === "autonomy" && (judge !== null || saveError !== null) && (
+        <div className="mb-3 flex flex-col gap-2">
+          {judge && <AutonomyHealth status={judge} />}
+          {saveError && (
+            <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+              <p className="[overflow-wrap:anywhere]">{saveError}</p>
+              <Button size="sm" className="mt-2" disabled={saving} onClick={() => void save(true)}>
+                {saving && <Spinner />} Save anyway
+              </Button>
+            </div>
+          )}
         </div>
       )}
       <div className={cx(!draft.enabled && "opacity-60")}>

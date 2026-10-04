@@ -258,6 +258,8 @@ export function hostMock(ms: MockState): HostApi {
       host: mockHost(live),
       // Reclamation counts for the sidebar's Storage dot (issue #223).
       reclaim: { reclaimable: 2, unpushed: 1 },
+      // The drain flag (issue #880): off by default; ?draining=1 could model an update in flight.
+      draining: false,
       // Disk health for the sidebar's Storage dot (issue #220): plenty free, so neither
       // low_disk nor admission_paused. ?runtime=old omits storage with the rest, as a
       // mothership from before the probe did not.
@@ -307,11 +309,13 @@ export function hostMock(ms: MockState): HostApi {
     applyUpdate: async () => {
       await sleep(200);
       const live = [...ms.sessions.values()].map((s) => s.session).filter((s) => isLive(s.status));
-      if (live.some((s) => s.status === "publishing")) throw new ApiError("a colony is publishing", 409);
+      // The real one drains first — holding the queue while the colonies still booting or publishing
+      // finish, a publish being waited for rather than refused (issue #880) — then installs and
+      // restarts. The mock just reports the phases.
       mockUpdate = {
     ...mockUpdate,
     apply: {
-      phase: "installing",
+      phase: "draining",
       version: mockUpdate.latest?.version ?? null,
       started_at: new Date().toISOString(),
       error: null,
@@ -320,7 +324,10 @@ export function hostMock(ms: MockState): HostApi {
       backup: null,
     },
       };
-      // The real one replaces the process here; the mock just reports it did.
+      // The drain finishes (nothing is really in flight here), then the process is replaced.
+      setTimeout(() => {
+    mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "installing" } };
+      }, 1500);
       setTimeout(() => {
     mockUpdate = { ...mockUpdate, apply: { ...mockUpdate.apply, phase: "restarting", log: "==> installed Colonizer" } };
       }, 2500);

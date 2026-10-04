@@ -142,6 +142,22 @@ export interface StallInfo {
 
 export type CiState = "success" | "failure" | "pending" | "no_checks";
 
+/**
+ * One model setting the boot resolved away from what it named because the gateway would have refused
+ * the model for this colony's sensitivity class (issue #704) — a restricted colony's subagent model
+ * on an untrusted provider, for instance.
+ */
+export interface ModelSubstitution {
+  /** The model setting's name: `model`, `subagent_model`, `background_model` or `small_model`. */
+  setting: string;
+  /** The model the setting named, which the gateway would have refused. */
+  from: string;
+  /** The eligible model the colony runs on instead, or "the orchestrator's model" when cleared. */
+  to: string;
+  /** Why the gateway would have refused `from`, e.g. `"zai" is not marked trusted`. */
+  reason: string;
+}
+
 export interface Session {
   id: string;
   repo: string;
@@ -165,11 +181,15 @@ export interface Session {
   needs_rebase?: boolean;
   /** What launched the colony, when it was not a person: `burn_down` for bug-hunt colonies the burn-down scheduler auto-launched near the token-plan reset (issue #210). Absent otherwise. */
   origin?: string | null;
+  /** Why the fleet scheduler put this colony where it runs, in the scheduler's own words — e.g. "archlinux: 3 free slots" or "pinned to box-2" (issue #688). Absent when no reason was given. */
+  placement?: string | null;
   worktree: string;
   /** Path of the worktree's git admin dir on the host; null until the worktree was created. */
   git_admin_dir: string | null;
   sandbox: string;
   mesh: { name: string; ip: string | null } | null;
+  /** The guest-local port a dev-server preview is proxied from (`/api/previews/{id}/`), set by the owner; absent when no preview is open. */
+  preview_port?: number;
   agent: string;
   autopilot: boolean;
   /** Whether a filed finding from this colony spawns a fix colony; absent until the operator answers, when the publish module's `autofix` setting decides (§6.6). */
@@ -272,6 +292,12 @@ export interface Session {
   diagnosis?: Diagnosis | null;
   /** Last ≤20 events, oldest first — single-session GET only (issue #230). */
   recent_events?: RecentEvent[] | null;
+  /**
+   * Model settings the boot replaced with an eligible one because the gateway would have refused
+   * what they named for this colony's sensitivity class (issue #704); absent when every model
+   * cleared the bar. Shown on the colony view so what it really runs on is not hidden.
+   */
+  model_substitutions?: ModelSubstitution[];
 }
 
 /** GET /api/burn-down state: where the weekly-token-plan scheduler's burn-down is (issue #210). */
@@ -368,6 +394,8 @@ export interface NewSessionRequest {
   serialize?: boolean;
   /** Who is launching when it is not the launch form: `chat` marks a conversation turned into a colony, `colonize` a hand-off from the Colonize pane; the activity log records both as such. */
   origin?: string;
+  /** Pin the colony to a fleet member by id or name (issue #688). Omitting it, or naming this host, launches here; naming another member is refused with 409 until cross-member launch lands (#298). */
+  host?: string;
 }
 
 /**

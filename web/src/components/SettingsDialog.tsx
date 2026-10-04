@@ -26,6 +26,7 @@ import { FleetPane } from "./FleetPane";
 import { SetupSection } from "./SetupSection";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { PhonePane } from "./PhonePane";
+import { YourCockpitCard } from "./YourCockpitCard";
 import { SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { ConnectionsPane } from "./settings/ConnectionsPane";
 import { RuntimePane } from "./settings/RuntimePane";
@@ -49,6 +50,7 @@ export type { SectionId } from "./settings/ui";
 export { Pane, Row } from "./settings/ui";
 export { JevCompactionNotice, VoiceKeyRow, VoiceTestRow } from "./settings/moduleFields";
 export { HealthStatus } from "./settings/ProvidersPane";
+export { AutonomyHealth } from "./settings/AutonomyHealth";
 export { ChipsInput, ProviderForm } from "./settings/ProviderForm";
 export { duplicateModelMapCanonicals, modelMapCanonicals, providerSaveBody, sameWireFallbacks } from "./settings/providerCatalog";
 export type { ModelMapRow, ProviderSaveInput } from "./settings/providerCatalog";
@@ -286,6 +288,11 @@ export function SettingsBody({
     {
       label: "General",
       items: [
+        {
+          id: "cockpit",
+          label: "Your cockpit",
+          hint: "The address to bookmark for this cockpit",
+        },
         {
           id: "setup",
           label: "Setup",
@@ -616,6 +623,15 @@ type SectionEntry = {
 };
 
 const SECTIONS: SectionEntry[] = [
+  // Your cockpit first: the address to bookmark, with Copy and a QR code, and the way into pairing.
+  {
+    id: "cockpit",
+    render: (c) => (
+      <Pane title="Your cockpit" subtitle="The address to bookmark for this cockpit" back={c.back}>
+        <YourCockpitCard remote={c.remote} onOpenPhone={() => c.select("phone")} />
+      </Pane>
+    ),
+  },
   {
     id: "setup",
     render: (c) => (
@@ -632,6 +648,7 @@ const SECTIONS: SectionEntry[] = [
         onDismiss={c.onSetupDismissed}
         onShown={c.onSetupShown}
         onOpenLiveMap={() => c.select("live-map")}
+        onOpenCockpit={() => c.select("cockpit")}
         back={c.back}
       />
     ),

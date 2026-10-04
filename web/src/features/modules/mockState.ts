@@ -160,7 +160,17 @@ export function installModulesMockState(ms: MockState): void {
       ],
       enabled: true,
       settings: {},
-      schema: { type: "object", properties: {} },
+      schema: {
+        type: "object",
+        properties: {
+          fallback_models: {
+            type: "string",
+            title: "Fallback models",
+            description: "Comma-separated model ids the judge may fall back to when the main one fails",
+            default: "",
+          },
+        },
+      },
     },
     {
       kind: "watchdog",

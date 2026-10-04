@@ -129,7 +129,8 @@ An issue counts as an epic when any of these is true:
 `allow_epic: true`. The Colonize pane greys out epics and leaves them out of bulk hand-offs.
 
 **Limits.** If the GitHub lookup fails, the launch goes ahead. The guard helps you avoid a mistake.
-It is not an access control. There is no CLI or MCP override (see above). Details are in
+It is not an access control. The CLI (`--allow-epic`) and MCP (`allow_epic`) take the same
+override (see above). Details are in
 [protocol.md](protocol.md#duplicate-colony-prevention-and-issue-claims), under "Epics".
 
 ## Questions, and who answers them
@@ -208,6 +209,17 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   never suspended. Its agent — often a subagent — is blocked on the command in flight, and a
   resumed transcript cannot continue that call, so the agent would be lost. The question carries
   `kind: "exec_policy"`, and the colony keeps its microVM and its slot until you answer.
+
+  `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
+  write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
+  microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
+  mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
+  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
+  own `.git` asks too, and the card says why. An org can restore the older, stricter behaviour — any
+  absolute write outside the repository asks, the microVM's root filesystem included — with a policy
+  rule whose predicate is `"writes_outside": "strict"`. The `secret-paths` and `script-egress` denies
+  are unchanged.
+
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
   permission request: the tool call that asked is blocked in flight, and suspending the colony
   would kill the agent and leave the answer with nobody to receive it. The question carries
@@ -597,11 +609,13 @@ it is older than the retention window since its last update.
 | Sandbox `warn_free_disk` | 10G | The cockpit warns below this much free disk. |
 | "Keep worktree" in the colony view | off | Exempts one colony (`POST /api/sessions/{id}/retain` with `{"keep": true}`). |
 
-**Limits.** A cleaned-up colony cannot be resumed, because resume needs its worktree. That includes
-a colony whose pull request is still open. Stopped and failed colonies are never cleaned up
-automatically, because they can still be resumed. Work that was never pushed is never deleted:
-`GET /api/storage` lists it under `unpushed` for you to publish or clean up by hand. See
-[protocol.md, Automatic reclamation](protocol.md#automatic-reclamation).
+**Limits.** A cleaned-up colony is normally unresumable, because resume needs its worktree — but
+when the colony's pull request is still open, resume re-creates the worktree from the branch on the
+remote instead of refusing (issue #623). Only a colony whose pull request is no longer open, or
+whose branch was itself deleted, stays unresumable once cleaned up. Stopped and failed colonies are
+never cleaned up automatically, because they can still be resumed. Work that was never pushed is
+never deleted: `GET /api/storage` lists it under `unpushed` for you to publish or clean up by hand.
+See [protocol.md, Automatic reclamation](protocol.md#automatic-reclamation).
 
 ## Measuring Jev compaction
 

@@ -45,7 +45,7 @@ export function UpdatesPane({
   // pane follows it until the answer stops coming.
   useEffect(() => {
     const phase = update?.apply.phase;
-    if (phase !== "installing" && phase !== "restarting") return;
+    if (phase !== "draining" && phase !== "installing" && phase !== "restarting") return;
     const timer = setInterval(() => {
       api
         .update()
@@ -129,15 +129,27 @@ export function UpdatesPane({
               <div className="mt-2.5 flex flex-wrap items-center gap-2">
                 <Button
                   variant="primary"
-                  disabled={applying || !update.can_apply.ok || update.apply.phase === "installing" || update.apply.phase === "restarting"}
+                  disabled={
+                    applying ||
+                    !update.can_apply.ok ||
+                    update.apply.phase === "draining" ||
+                    update.apply.phase === "installing" ||
+                    update.apply.phase === "restarting"
+                  }
                   onClick={() => void install()}
                 >
-                  {update.apply.phase === "installing" || update.apply.phase === "restarting" ? <Spinner /> : null}
-                  {update.apply.phase === "installing"
-                    ? "Installing…"
-                    : update.apply.phase === "restarting"
-                      ? "Restarting…"
-                      : `Update to ${update.latest.version}`}
+                  {update.apply.phase === "draining" ||
+                  update.apply.phase === "installing" ||
+                  update.apply.phase === "restarting" ? (
+                    <Spinner />
+                  ) : null}
+                  {update.apply.phase === "draining"
+                    ? "Draining…"
+                    : update.apply.phase === "installing"
+                      ? "Installing…"
+                      : update.apply.phase === "restarting"
+                        ? "Restarting…"
+                        : `Update to ${update.latest.version}`}
                 </Button>
                 {!update.can_apply.ok && <span className="text-muted">{update.can_apply.reason}</span>}
               </div>

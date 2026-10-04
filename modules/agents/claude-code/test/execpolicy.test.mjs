@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { buildOptions, runAgent } from '../runner.mjs';
 import { AsyncQueue } from '../runner.mjs';
 import {
+  HOST_MOUNTS_FILE,
   createExecAllowCache,
   defaultPolicy,
   evaluateExecPolicy,
@@ -73,7 +74,9 @@ test('the default layer denies a script that calls out, and allows a benign one'
 });
 
 test('the default layer asks when a command writes outside the repository, and not for /tmp', () => {
-  const policy = loadExecPolicy({});
+  // readFile: () => null keeps the mount list unknown, so the conservative fallback holds whatever
+  // a real /colonizer/host-mounts on the test machine would say (#877).
+  const policy = loadExecPolicy({}, { readFile: () => null });
   const ask = (command) => decide(policy, command, '/repo');
   assert.equal(ask('echo x > /etc/foo')?.decision, 'ask');
   assert.equal(ask('echo x >> /var/log/app.log')?.decision, 'ask');
@@ -87,6 +90,75 @@ test('the default layer asks when a command writes outside the repository, and n
   assert.equal(ask("sed 's/</>/g' f"), null, 'a `>` inside a quoted pattern is not a redirect');
   assert.equal(ask('echo x > inside.txt'), null);
   assert.equal(ask('echo x > /repo/inside.txt'), null);
+});
+
+// The vectors the ACP runner's test drives its own (byte-identical) copy of execpolicy.mjs with:
+// a colony whose microVM root filesystem is discarded, with only these host-backed mounts writable.
+const vmWrites = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-vm-writes.json', import.meta.url), 'utf8'));
+
+test('with the boot’s host mounts, a host-backed, read-only or .git write asks; a VM-local one does not (#877, #750)', () => {
+  const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
+  const policy = loadExecPolicy({}, {
+    cwd: vmWrites.cwd,
+    readFile: (path) => (path === HOST_MOUNTS_FILE ? mountsText : null),
+  });
+  assert.deepEqual(policy.hostMounts, [...vmWrites.hostMounts], 'the mount list is parsed off the file');
+  for (const { command, decision, rule, reason } of vmWrites.cases) {
+    const hit = evaluateExecPolicy(policy, command, { cwd: vmWrites.cwd });
+    assert.equal(hit?.decision ?? null, decision, command);
+    if (rule) assert.equal(hit.rule, rule, command);
+    if (reason) assert.ok(hit.reason.includes(reason), `${command}: ${hit.reason}`);
+  }
+});
+
+test('without a host-mount list, every write outside the repository still asks (#877)', () => {
+  const policy = loadExecPolicy({}, { cwd: '/workspace', readFile: () => null });
+  assert.equal(policy.hostMounts, null, 'no file, no list');
+  assert.equal(decide(policy, 'mkdir -p /root/x', '/workspace')?.decision, 'ask');
+  assert.equal(decide(policy, 'echo x > /usr/local/bin/tool', '/workspace')?.decision, 'ask');
+});
+
+test('the ask names why: a read-only mount, the .git internals or a host-backed path (#750)', () => {
+  const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
+  const policy = loadExecPolicy({}, {
+    cwd: vmWrites.cwd,
+    readFile: (path) => (path === HOST_MOUNTS_FILE ? mountsText : null),
+  });
+  const question = (command) => execPolicyQuestion(decide(policy, command, vmWrites.cwd), command).questions[0].question;
+  assert.match(question('echo x > /opt/colonizer/agent/runner.mjs'), /writes to a read-only mount \(\/opt\/colonizer\)/);
+  assert.match(question('echo x > /colonizer/memory/repo/notes.json'), /read-only mount \(\/colonizer\)/);
+  assert.match(question('echo x > /workspace/.git/config'), /into the repository's \.git internals/);
+  assert.match(question('echo x > /workspace/sub/../.git/x'), /into the repository's \.git internals/);
+  assert.match(question('echo x > .git/HEAD'), /into the repository's \.git internals/);
+  assert.match(question('echo x > /opt/node/bin/node'), /read-only mount \(\/opt\/node\/bin\/node\)/);
+  assert.match(question('cp a /harness/out/z'), /to a host-backed path outside the repository/);
+  // A nested writable bind of the read-only /colonizer is host-backed, not read-only.
+  assert.match(question('echo x > /colonizer/services/s.json'), /host-backed path outside the repository/);
+});
+
+test('an org-layer `"writes_outside": "strict"` rule restores the pre-#877 asks (#750)', () => {
+  const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
+  const readFile = (path) => (path === HOST_MOUNTS_FILE ? mountsText : null);
+  const org = (rules) => loadExecPolicy({ COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules }) }, { cwd: vmWrites.cwd, readFile });
+  const strict = org([{ id: 'strict-writes', decision: 'ask', reason: 'this org asks about every write outside the repository', writes_outside: 'strict' }]);
+  // A VM-local write the default layer now lets through asks again, under the org rule.
+  const local = decide(strict, 'mkdir -p /root/tmp/x', vmWrites.cwd);
+  assert.equal(local?.decision, 'ask');
+  assert.equal(local.layer, 'org');
+  assert.equal(local.rule, 'strict-writes');
+  assert.equal(local.reason, 'this org asks about every write outside the repository');
+  // A host-backed write still asks, but the default layer names it first (and more precisely).
+  const host = decide(strict, 'echo x > /harness/out/z', vmWrites.cwd);
+  assert.equal(host.decision, 'ask');
+  assert.equal(host.layer, 'default');
+  assert.match(host.reason, /host-backed path outside the repository/);
+  // /tmp and a write inside the repository never ask, even strict.
+  assert.equal(decide(strict, 'echo x > /tmp/x', vmWrites.cwd), null);
+  assert.equal(decide(strict, 'echo x > inside.txt', vmWrites.cwd), null);
+  // Without the strict rule, the same VM-local write is the default: allowed.
+  assert.equal(decide(org([]), 'mkdir -p /root/tmp/x', vmWrites.cwd), null);
+  // `writes_outside` accepts only true or "strict"; anything else is not a predicate, so the rule drops.
+  assert.equal(parsePolicy({ rules: [{ id: 'bad', decision: 'ask', writes_outside: 'loose' }] }).rules.length, 0);
 });
 
 test('a later layer can narrow but never widen', () => {

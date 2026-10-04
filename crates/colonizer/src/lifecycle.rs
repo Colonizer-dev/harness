@@ -309,19 +309,38 @@ pub async fn recover(app: &Shared) {
         } else {
             // A snapshot already `Starting` is an orphaned boot — its owner died with the restart
             // and nothing else reaps `Starting` — so it falls through here instead of stranding
-            // the colony forever.
+            // the colony forever. Issue #880: rather than stop it, tear down the half-booted
+            // microVM and put it back in the queue with `interrupted_by_restart` on its log; a
+            // colony whose boot already made the worktree reboots on it (like a quota resume),
+            // one that never got that far boots fresh. Every other status here is a live colony
+            // whose microVM is gone, and is stopped as before.
+            let interrupted = fresh.status == SessionStatus::Starting;
             teardown_vm(app, &fresh).await;
             let at = fresh.status;
             let mut attention = None;
-            app.update_session(&fresh.id, |x| {
-                if !mark_stopped_after_restart(x, at) {
-                    return false;
-                }
-                attention = x.clear_attention();
-                true
-            })
-            .await;
+            let landed = app
+                .update_session(&fresh.id, |x| {
+                    let landed = if interrupted {
+                        mark_queued_after_restart(x, at)
+                    } else {
+                        mark_stopped_after_restart(x, at)
+                    };
+                    if landed {
+                        attention = x.clear_attention();
+                    }
+                    landed
+                })
+                .await
+                .is_some_and(|(_, landed)| landed);
             app.note_cleared_attention(&fresh.id, attention).await;
+            if landed && interrupted {
+                app.session_log(
+                    &fresh.id,
+                    "info",
+                    "the harness restarted while this colony was booting (interrupted_by_restart); queued to start again".into(),
+                )
+                .await;
+            }
         }
     }
 }
@@ -361,6 +380,20 @@ fn mark_stopped_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bo
     }
     x.status = SessionStatus::Stopped;
     x.error = Some(VM_GONE_AFTER_RESTART.into());
+    true
+}
+
+/// This pass's flip of a colony whose half-finished boot it has just torn down (issue #880): a
+/// compare-and-set against the status the re-read saw, so a publish that claimed the colony while
+/// the teardown was in flight keeps its claim. The colony goes back to `Queued` rather than being
+/// stranded `Stopped` — the queue restarts it, on the worktree its boot already made if it got
+/// that far. Returns whether the flip landed.
+fn mark_queued_after_restart(x: &mut Session, at_teardown: SessionStatus) -> bool {
+    if x.status != at_teardown {
+        return false;
+    }
+    x.status = SessionStatus::Queued;
+    x.error = None;
     true
 }
 
@@ -569,6 +602,10 @@ pub(crate) async fn park_colony(
         app.session_log(&s.id, "warn", format!("park: {why_kept}")).await;
     }
     let vm_kept = !discard;
+    // The question the colony was parked on, if any: its risk class rides on the park record, so the
+    // hold-timeout backoff can tell a question the autonomy judge may answer from one it never may
+    // without reaching for a runtime a cold park has torn down.
+    let question_risk = app.runtime(&s.id).await.open_question().await.map(|(_, _, risk)| risk);
     let lifecycle = app.session_lock(&s.id).await;
     let _lifecycle = lifecycle.lock().await;
     let claimed = app
@@ -584,6 +621,7 @@ pub(crate) async fn park_colony(
                     reason: reason.into(),
                     resets_at: resets_at.clone(),
                     vm_kept,
+                    question_risk,
                 });
                 x.attention = Some(json!({"reason": reason, "since": Utc::now(), "nudges": 0}));
                 // Parked by the host ends the wait outright, as a stop does: the held answer and
@@ -745,9 +783,10 @@ fn over_host_disk(bytes: u64, quota_bytes: u64) -> bool {
 }
 
 /// What a colony leaves on the host: its worktree (bind-mounted rw at `/workspace` inside the microVM,
-/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, and the
-/// append-only logs). The microVM's root disk is a separate limit, microsandbox's `--root-disk`. Walked
-/// on the blocking pool: it is plain IO over trees that can be gigabytes.
+/// where everything the colony builds lands) plus its session directory (`out/`, `vm/`, the append-only
+/// logs, and — behind the false snapshot gate — `<session dir>/snapshots/`, which the walk counts with
+/// everything else, issue #702). The microVM's root disk is a separate limit, microsandbox's `--root-disk`.
+/// Walked on the blocking pool: it is plain IO over trees that can be gigabytes.
 async fn host_footprint_bytes(app: &App, s: &Session) -> u64 {
     let (worktree, session_dir) = (PathBuf::from(&s.worktree), app.session_dir(&s.id));
     // A walk that never finishes (a shutdown) measures 0, which can only under-report — never a reason to
@@ -825,6 +864,25 @@ pub async fn watch_host_disks(app: Shared) {
 /// gate here only says the state itself is resumable.
 pub(crate) fn can_resume(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     matches!(status, SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::Parked) && !cleaned_up && has_worktree
+}
+
+/// A colony reclaimed while its pull request was still open (issue #623): `cleaned_up` is set but
+/// the branch is still on the remote, so resume can re-create the worktree instead of refusing it
+/// forever.
+///
+/// `PrOpened` is the status the real auto-reclaim scenario leaves the colony in: the reclaim sweep
+/// (`reclaim.rs`) only ever cleans up colonies that are `PrOpened`, `Merged`, `Closed` or
+/// `NoChanges` — `Stopped`/`Failed` are excluded because they are resumable as they are — and
+/// `cleanup_one` never touches `status`, so a colony reclaimed with its pull request open stays
+/// `PrOpened` forever. Nothing else moves a non-live `PrOpened` colony to `Stopped` (`stop` is
+/// gated on `is_live`, which `PrOpened` is not). `Stopped`/`Failed`/`Parked` are kept too: a
+/// manually cleaned-up colony in one of those states resumes the same way.
+pub(crate) fn resumable_from_pr_branch(s: &Session) -> bool {
+    matches!(
+        s.status,
+        SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::Parked | SessionStatus::PrOpened
+    ) && s.cleaned_up
+        && s.pr_url.is_some()
 }
 
 /// Whether this colony is suspended while it waits on its user (issue #562) — the only shape a
@@ -946,7 +1004,7 @@ pub async fn resume(
     // to bring it back. Its claim below clears the suspension; any held answer is delivered by the
     // boot, exactly as the queue's restore delivers one. The escape is for a colony actually
     // waiting — status `waiting_for_answer` — not the flag alone (`suspended_waiting`).
-    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) {
+    if !can_resume(s.status, s.cleaned_up, s.git_admin_dir.is_some()) && !suspended_waiting(&s) && !resumable_from_pr_branch(&s) {
         return Err(client_error(StatusCode::CONFLICT, RESUME_CONFLICT));
     }
     // Issue #673: a superseded colony does not come back until it is kept — a merge covered its
@@ -964,7 +1022,7 @@ pub async fn resume(
     if let Some(warm) = warm_resume(&app, &id, &s).await {
         return warm;
     }
-    let previous_status = s.status;
+    let mut previous_status = s.status;
     // What a failed rotation below puts back: the suspension as well as the status, so the colony
     // stays restorable and `can_resume`-shaped for the retry this error asks for. The park record
     // comes back with them, for the same reason.
@@ -991,6 +1049,50 @@ pub async fn resume(
     // Every early return below (404, 409) simply drops it.
     let lifecycle = app.session_lock(&id).await;
     let _lifecycle = lifecycle.lock().await;
+    // Issue #623: re-fetched and re-checked under this colony's lifecycle lock so two concurrent
+    // resumes can't both try to create the same worktree — the loser here sees `cleaned_up` already
+    // false and `can_resume` passes it through normally below. A failure to re-create is a 500: the
+    // colony is left as it was, still `cleaned_up`, and the resume can be retried. The repo lock is
+    // taken for the duration, as `cleanup_one` takes it, so a concurrent cleanup of the same repo
+    // cannot race the fetch.
+    let s = app
+        .session(&id)
+        .await
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
+    if resumable_from_pr_branch(&s) {
+        app.session_log(
+            &id,
+            "info",
+            "the worktree was reclaimed while the pull request was still open; re-creating it".into(),
+        )
+        .await;
+        let admin = {
+            let lock = app.repo_lock(&s.repo).await;
+            let _guard = lock.lock().await;
+            github::recreate_worktree(&app, &s).await
+        }
+        .map_err(|e| {
+            client_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("could not re-create the worktree: {e:#}"),
+            )
+        })?;
+        app.update_session(&id, |x| {
+            x.git_admin_dir = Some(admin.display().to_string());
+            x.cleaned_up = false;
+            // Issue #623: the colony is no longer the reclaimed-with-an-open-PR shape, it is an
+            // ordinary stopped colony with a worktree — which is exactly what `can_resume` (checked
+            // again inside the claim below) and every other status gate expects. Without this a
+            // colony the sweep left at `PrOpened` would be re-created yet refused by the claim.
+            x.status = SessionStatus::Stopped;
+        })
+        .await;
+        // A rotation failure below reverts the status; reverting to the pre-reclaim `PrOpened` would
+        // leave a colony with a restored worktree that no gate (`can_resume` needs a stopped-shaped
+        // status, `resumable_from_pr_branch` needs `cleaned_up`) will ever admit again. The status
+        // this resume is really rolling back to is the `Stopped` it just became.
+        previous_status = SessionStatus::Stopped;
+    }
     // The claim comes first, exactly as the publish claim does: `failed` is both resumable and
     // publishable, so a resume landing just after a publish claimed the colony must be refused
     // rather than overwrite `publishing`. Nothing outside the list is touched until it succeeds, so
@@ -1018,7 +1120,10 @@ pub async fn resume(
             if !can_resume(x.status, x.cleaned_up, x.git_admin_dir.is_some()) && !suspended_waiting(x) {
                 return Err(RESUME_CONFLICT.to_string()); // another resume won the race between the handler and the lock
             }
-            x.status = if room {
+            // Issue #880: while the mothership drains for an update or restart a resume queues
+            // rather than boots, so the restart cannot cut the boot short.
+            let admitted = room && !app.drain.draining();
+            x.status = if admitted {
                 SessionStatus::Starting
             } else {
                 SessionStatus::Queued
@@ -1027,6 +1132,9 @@ pub async fn resume(
             x.attention = None;
             x.mesh = None;
             x.local_port = None;
+            // The old microVM's preview is closed with its address (previews.rs): a resumed colony
+            // starts with no preview and the owner opens one again.
+            x.preview_port = None;
             // A suspended colony stops being one here (issue #562), so the claim holds its slot for
             // the boot; any held answer stays on the record, and the boot delivers it. The boot is
             // told whether it is restoring a suspension (issue #700) before the flag goes. A pending
@@ -1040,8 +1148,13 @@ pub async fn resume(
             x.parked = None;
             // The last boot's phases would read as this one's under `starting` or `queued`.
             x.boot_timing = None;
+            // An operator resume starts the boot afresh (issue #881): a stale retry wait must not
+            // hold it and a spent transient budget must not fail it, so the bookkeeping is cleared.
+            x.retry_at = None;
+            x.failure_class = None;
+            x.boot_retries = 0;
             x.updated_at = Utc::now();
-            Ok(Some((x.clone(), room, waiting)))
+            Ok(Some((x.clone(), admitted, waiting)))
         },
     )
     .await;
@@ -1101,6 +1214,18 @@ pub async fn resume(
         app.storage_failed("rotate the old event log", &e).await;
         app.session_log(&id, "error", message.clone()).await;
         return Err(client_error(StatusCode::INTERNAL_SERVER_ERROR, &message));
+    }
+    // Issue #702: behind this gate a suspended colony comes back from its sealed memory snapshot
+    // (snapshot.rs) instead of the transcript. `resume` decrypts it into a staging file and re-mints
+    // the credentials a restored runtime carries; any failure — missing, expired, corrupt, no key —
+    // falls back to the fresh boot below. The gate is false, so the branch does not run: the pinned
+    // msb cannot restore a `--secret`-carrying sandbox (sandbox.rs has the measurement).
+    if admitted
+        && crate::sandbox::supports_memory_snapshot()
+        && crate::snapshot::resume(&app, &id, &s.sandbox, suspension.as_ref().and_then(|x| x.snapshot.clone())).await
+    {
+        let s = app.session(&id).await.unwrap_or(s);
+        return Ok(Json(s));
     }
     if admitted {
         // A park that kept the microVM (issue #213) but could not resume warm — the link is gone
@@ -1201,6 +1326,9 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
     let lifecycle = app.session_lock(id).await;
     let _lifecycle = lifecycle.lock().await;
     let reason = park.reason.clone();
+    // The one-shot note this resume carries (issue #876): a warm resume never boots, so it is taken
+    // off the record here and handed over on the prompt below.
+    let mut note = None;
     let claimed = with_slot(
         &app.sessions,
         &s.org,
@@ -1211,9 +1339,12 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         |sessions, room| {
             let x = sessions.iter_mut().find(|x| x.id == id)?;
             // The mesh and the local port survive on purpose: the microVM they point at never left.
-            if x.status != SessionStatus::Parked || !room {
+            // Issue #880: while the mothership drains, the warm resume is refused so the cold path
+            // queues the colony instead of prompting a runner a restart is about to cut off.
+            if x.status != SessionStatus::Parked || !room || app.drain.draining() {
                 return None;
             }
+            note = x.resume_note.take();
             x.status = SessionStatus::Running;
             x.error = None;
             x.attention = None;
@@ -1234,15 +1365,26 @@ async fn warm_resume(app: &Shared, id: &str, s: &Session) -> Option<ApiResult<Se
         format!("warm resume: the kept microVM is still running (parked for {reason}); prompting the agent to continue"),
     )
     .await;
+    // The kept runtime still carries the `pr.md` mark from before the park; clear it so the resumed
+    // colony's first completed turn counts as done even if it leaves an existing description
+    // untouched (a cold resume gets the same effect from `Runtime::load` seeding the mark empty).
+    *rt.pr_mark.lock().await = None;
     // The same channel the transcript's user messages take (sessions/api.rs `client_command`): the
     // runner starts a turn on it, which is all a warm resume is.
+    let mut text = format!(
+        "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
+         never stopped. Pick up where you left off and continue with the task."
+    );
+    // The note the resume carries, if any: the hold-timeout backoff's "choose for yourself", or the
+    // answer that arrived while the colony was parked.
+    if let Some(note) = &note {
+        text.push_str("\n\n");
+        text.push_str(note);
+    }
     let _ = rt.commands.send(json!({
         "type": "user_message",
         "id": format!("u-{}", crate::util::short_id()),
-        "text": format!(
-            "Your colony was parked ({reason}) and has now been resumed; the machine you are running in \
-             never stopped. Pick up where you left off and continue with the task."
-        ),
+        "text": text,
     }));
     Some(Ok(Json(s)))
 }
@@ -1564,6 +1706,17 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
     } else {
         (0, None)
     };
+    // The colony's snapshots go with it (issue #702): best-effort `msb snapshot remove`, then the
+    // sealed directory and the key file — the key lives under the private state rather than the
+    // session dir removed below, so it would otherwise outlive the colony forever.
+    let snapshot_name = s
+        .suspended
+        .as_ref()
+        .and_then(|x| x.snapshot.as_ref())
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    crate::snapshot::remove(&app, &id, snapshot_name.as_deref()).await;
     let dir = app.session_dir(&id);
     let leftover = match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => None,
@@ -1842,6 +1995,138 @@ mod tests {
         ] {
             assert!(!can_resume(status, false, true), "{status:?}");
         }
+    }
+
+    #[test]
+    fn only_a_cleaned_up_colony_with_an_open_pull_request_can_be_resumed_from_its_pr_branch() {
+        // The reclaimed-but-open-PR shape (issue #623) is the one that resumes by re-creating:
+        // `cleaned_up` set, a pull request still recorded, and a status the reclaim leaves it in.
+        // `PrOpened` is the real one — the sweep never moves a colony out of it — and the
+        // stopped-shaped statuses cover a manual cleanup.
+        for status in [
+            SessionStatus::PrOpened,
+            SessionStatus::Stopped,
+            SessionStatus::Failed,
+            SessionStatus::Parked,
+        ] {
+            let mut s = colony("acme", status);
+            s.cleaned_up = true;
+            s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+            assert!(resumable_from_pr_branch(&s), "{status:?}");
+        }
+        // No pull request recorded: nothing to re-create the branch from.
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.cleaned_up = true;
+        assert!(!resumable_from_pr_branch(&s), "no pr_url");
+        // Not reclaimed: the ordinary `can_resume` path handles it.
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+        assert!(!resumable_from_pr_branch(&s), "not cleaned up");
+        // Any other status is refused by the status check regardless, so the escape never applies.
+        for status in [
+            SessionStatus::Starting,
+            SessionStatus::Running,
+            SessionStatus::WaitingForAnswer,
+            SessionStatus::Idle,
+            SessionStatus::Publishing,
+            SessionStatus::Queued,
+            SessionStatus::Merged,
+            SessionStatus::Closed,
+            SessionStatus::NoChanges,
+        ] {
+            let mut s = colony("acme", status);
+            s.cleaned_up = true;
+            s.pr_url = Some("https://github.com/acme/repo/pull/1".into());
+            assert!(!resumable_from_pr_branch(&s), "{status:?}");
+        }
+    }
+
+    /// Issue #623, end to end through the handler, from the state the real reclaimer leaves behind:
+    /// a colony the sweep reclaimed while its pull request was still open — `PrOpened`, the status
+    /// `cleanup_one` never changes — resumes by re-creating the worktree from the pushed branch, and
+    /// the claim then sees an ordinary resumable colony. The parallel limit is full, so the resume
+    /// queues instead of spawning a boot whose git and `msb` work would race these assertions.
+    #[tokio::test]
+    async fn a_resume_of_a_colony_reclaimed_with_its_pull_request_open_re_creates_the_worktree() {
+        async fn git_in(dir: &std::path::Path, args: &[&str]) {
+            let mut c = tokio::process::Command::new("git");
+            c.args(args)
+                .current_dir(dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env("GIT_TERMINAL_PROMPT", "0");
+            let out = c.output().await.expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        // The colony as the auto-reclaim sweep leaves it: cleaned up, its pull request still open,
+        // and its status still `PrOpened` — `cleanup_one` never changes the status. Nothing else
+        // ever moves a non-live `PrOpened` colony to `Stopped`, so this is the real shape.
+        let (app, root) = app_with_colony("abc", SessionStatus::PrOpened).await;
+        // The pushed branch the resume must bring back: a seed repo standing in for the remote, and
+        // the mothership's bare repo with origin pointed at it, as `sync_repo` would have left it.
+        let branch = "colonizer/issue-623-abc12345";
+        let seed = root.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git_in(&seed, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(&seed, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await;
+        git_in(&seed, &["checkout", "-q", "-b", branch]).await;
+        // The colony's committed work, only on its branch, so the worktree can only be right if it
+        // really came back from the pushed branch.
+        std::fs::write(seed.join("work.txt"), "the colony's work\n").unwrap();
+        git_in(&seed, &["add", "-A"]).await;
+        git_in(
+            &seed,
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "colony work"],
+        )
+        .await;
+
+        let bare = app.bare_repo("acme/repo");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git_in(&root, &["init", "--quiet", "--bare", bare.to_str().unwrap()]).await;
+        git_in(&bare, &["config", "remote.origin.url", seed.to_str().unwrap()]).await;
+        git_in(
+            &bare,
+            &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        )
+        .await;
+        git_in(&bare, &["fetch", "--quiet", "origin"]).await;
+
+        let wt = root.join("worktrees/acme/repo/issue-623-abc12345");
+        app.update_session("abc", |s| {
+            s.branch = branch.into();
+            s.pr_url = Some("https://github.com/acme/repo/pull/623".into());
+            s.worktree = wt.display().to_string();
+            s.cleaned_up = true;
+            s.git_admin_dir = None;
+        })
+        .await
+        .unwrap();
+        // The real scenario, asserted before the resume: `PrOpened`, reclaimed, pull request open,
+        // no worktree on disk. Without the #623 fix this shape is refused forever.
+        let start = app.session("abc").await.unwrap();
+        assert_eq!(start.status, SessionStatus::PrOpened);
+        assert!(start.cleaned_up && start.pr_url.is_some());
+        assert!(!wt.exists(), "the reclaim left no worktree on disk");
+        // Full: the resume is admitted to the queue, so no boot runs its git and `msb` work.
+        fill_the_parallel_limit(&app).await;
+
+        let out = resume(State(app.clone()), Path("abc".to_string()), None)
+            .await
+            .expect("resume re-creates the worktree rather than refusing");
+        assert_eq!(out.0.status, SessionStatus::Queued, "the colony was admitted, not refused");
+        let s = app.session("abc").await.unwrap();
+        assert!(!s.cleaned_up, "the colony is no longer cleaned up");
+        assert!(s.git_admin_dir.is_some(), "the re-created admin dir is recorded");
+        assert!(wt.join("work.txt").exists(), "the worktree is back on disk");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2744,6 +3029,25 @@ mod tests {
         assert_eq!(claimed.error, None, "and the restart's error is not painted over it");
     }
 
+    /// Issue #880: a colony whose half-finished boot this pass tore down goes back to `Queued`,
+    /// and the flip is a compare-and-set so a publish that claimed it meanwhile keeps its claim.
+    #[test]
+    fn a_restart_requeue_flip_lands_on_the_boot_it_tore_down_and_not_on_a_claim_that_moved() {
+        let mut boot = colony("acme", SessionStatus::Starting);
+        assert!(
+            mark_queued_after_restart(&mut boot, SessionStatus::Starting),
+            "the flip lands while the colony is still on the status the re-read saw"
+        );
+        assert_eq!(boot.status, SessionStatus::Queued, "the interrupted boot rejoins the queue");
+        assert_eq!(boot.error, None, "and carries no error");
+        let mut claimed = colony("acme", SessionStatus::Publishing);
+        assert!(
+            !mark_queued_after_restart(&mut claimed, SessionStatus::Starting),
+            "the flip refuses a colony that moved off its teardown status"
+        );
+        assert_eq!(claimed.status, SessionStatus::Publishing, "the publish keeps its claim");
+    }
+
     #[tokio::test]
     async fn recover_reaps_what_the_restart_orphaned_and_leaves_a_finished_colony_alone() {
         // Safe without KVM: the fixture colonies have no mesh address and no local port, so none
@@ -2770,10 +3074,15 @@ mod tests {
         let boot = app.session("boot").await.unwrap();
         assert_eq!(
             boot.status,
-            SessionStatus::Stopped,
-            "an orphaned boot is not stranded forever"
+            SessionStatus::Queued,
+            "an orphaned boot is requeued, not stranded"
         );
-        assert_eq!(boot.error.as_deref(), Some(VM_GONE_AFTER_RESTART), "the reaped boot says why");
+        assert_eq!(boot.error, None, "a requeued boot carries no error");
+        let boot_log = std::fs::read_to_string(app.session_dir("boot").join("harness.jsonl")).unwrap_or_default();
+        assert!(
+            boot_log.contains("interrupted_by_restart"),
+            "the requeue says why: {boot_log}"
+        );
         let push = app.session("push").await.unwrap();
         assert_eq!(push.status, SessionStatus::Failed, "an orphaned push is reaped");
         assert_eq!(
@@ -2925,6 +3234,7 @@ exit 0
                 reason: "hold_timeout".into(),
                 resets_at: None,
                 vm_kept,
+                question_risk: None,
             });
             app.sessions.write().await.push(s);
             tokio::fs::create_dir_all(app.session_dir(id)).await.unwrap();

@@ -149,6 +149,9 @@ export interface PendingPhone {
 export interface Phones {
   devices: PairedPhone[];
   pending: PendingPhone[];
+  /** The same ranked origins an invite answers with (bare origins, no code, no credential), so a
+   * bookmark can name the network address without minting an invite. Older motherships omit it. */
+  origins?: PhoneOrigin[];
 }
 
 // ---------------------------------------------------------------------------

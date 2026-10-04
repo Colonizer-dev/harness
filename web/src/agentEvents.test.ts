@@ -45,8 +45,9 @@ const HOST_TYPES = new Set(["verification", "screening"]);
 // Runner events the harness consumes alone (docs/agent-events.schema.json's preamble): typed on the
 // Rust side, and ignored by the web's stream as an unknown type: `agent_session` (#562), the
 // runner's own session id, kept so a suspended colony can resume its conversation, and the loop
-// tools' `loop_next` and `loop_stop`, which only the mothership's loop scheduler reads.
-const HARNESS_ONLY = new Set(["agent_session", "loop_next", "loop_stop"]);
+// tools' `loop_next` and `loop_stop`, which only the mothership's loop scheduler reads, and
+// `github_action` (issue #778), which only the host-proxied GitHub write path does.
+const HARNESS_ONLY = new Set(["agent_session", "loop_next", "loop_stop", "github_action"]);
 
 describe("agent event types", () => {
   it("cover every event the schema defines, and nothing else", () => {

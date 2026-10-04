@@ -21,6 +21,9 @@ export function defaultMergeLoopSettings(): MergeLoopSettings {
     max_api_calls: 400,
     min_call_gap_ms: 1000,
     held: [],
+    local_checks: [],
+    resolve_conflicts: false,
+    resolve_attempts: 3,
   };
 }
 
@@ -66,7 +69,7 @@ export function parseNames(text: string): string[] {
 }
 
 /** The order the report lists pull requests in: what moved first, then what needs a person, then the rest. */
-const ORDER: MergeLoopAction[] = ["merged", "updated", "rebased", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
+const ORDER: MergeLoopAction[] = ["merged", "updated", "rebased", "resolving", "rerun", "redo_dispatched", "red", "needs_redo", "waiting", "skipped"];
 
 /** The words an action reads as, for a real run or a dry one. */
 export function actionLabel(action: MergeLoopAction, dry: boolean): string {
@@ -78,6 +81,7 @@ export function actionLabel(action: MergeLoopAction, dry: boolean): string {
     rerun: "re-ran flaky checks",
     needs_redo: "needs redo",
     redo_dispatched: "redo dispatched",
+    resolving: "resolving conflicts",
     waiting: "waiting",
     skipped: "skipped",
   };
@@ -87,6 +91,7 @@ export function actionLabel(action: MergeLoopAction, dry: boolean): string {
     rebased: "would rebase",
     rerun: "would re-run",
     redo_dispatched: "would dispatch a redo",
+    resolving: "would resolve conflicts",
   };
   return dry ? (would[action] ?? real[action]) : real[action];
 }

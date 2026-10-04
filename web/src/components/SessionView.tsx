@@ -438,6 +438,16 @@ export function SessionView({
             </span>
           </div>
         )}
+        {session.model_substitutions?.length ? (
+          <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
+            <span className="font-semibold">Routed for sensitivity: </span>
+            <span className="text-muted">
+              {session.model_substitutions
+                .map((s) => `${s.setting.replace(/_/g, " ")} ${s.from} → ${s.to}`)
+                .join("; ")}
+            </span>
+          </div>
+        ) : null}
         {diagnosis && (
           <div role="status" className="mt-3 rounded-lg bg-panel-2 px-3 py-2 text-[13px] [overflow-wrap:anywhere]">
             <span className="font-semibold">Status: </span>

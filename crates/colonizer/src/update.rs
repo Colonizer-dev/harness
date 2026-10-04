@@ -15,9 +15,15 @@
 //!   of the slot the mothership was started from, so the installer must not take
 //!   that slot away while they are reading it. It is cleaned up later, by
 //!   [`sweep_slots`], once no live colony still points at it.
-//! * Nothing is applied while a colony is publishing. The microVM is already
-//!   gone at that point and the host is committing and pushing; interrupting it
-//!   leaves the colony `failed` with its pull request unopened.
+//! * Nothing new is started while an update is being applied, and the update waits
+//!   for the colonies already booting or publishing. It enters `draining`
+//!   (drain.rs, issue #880), which holds the queue so no boot is caught mid-way
+//!   by the restart, then waits for the in-flight ones. A publish is waited out
+//!   for the same reason as before: the microVM is gone at that point and the
+//!   host is committing and pushing, and interrupting it leaves the colony
+//!   `failed` with its pull request unopened — so a publish that outlasts the wait
+//!   refuses the update instead. A boot still `Starting` when the wait gives up is
+//!   left to `recover`, which requeues it on the next start.
 //!
 //! The restart is an `exec` of the app symlink's binary, which now points at the
 //! new slot. Colonies are detached microVMs, so `sessions::recover` reconnects
@@ -50,6 +56,8 @@ const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 *
 pub enum Phase {
     #[default]
     Idle,
+    /// Holding the queue while the in-flight colonies finish booting or publishing (issue #880).
+    Draining,
     Installing,
     /// Installed; the process is about to be replaced by the new one.
     Restarting,
@@ -206,8 +214,13 @@ pub fn will_reconnect(status: SessionStatus) -> bool {
     status.is_live()
 }
 
-pub fn publishing(sessions: &[Session]) -> Vec<&Session> {
-    sessions.iter().filter(|s| holds_update(s.status)).collect()
+/// The publishing colonies in `sessions`. After a drain runs out of time, one of these is why the
+/// update must refuse rather than install: the microVM is gone and the host is mid-push, and a
+/// restart leaves the colony `failed` with its pull request unopened. A boot still `Starting` is
+/// deliberately not here — it is safe to interrupt, because `recover` requeues it on the next
+/// start (issue #880).
+fn still_publishing(sessions: &[Session]) -> Vec<&Session> {
+    sessions.iter().filter(|s| s.status == SessionStatus::Publishing).collect()
 }
 
 /// What each colony will experience, decided before anything is installed.
@@ -219,7 +232,8 @@ pub fn notes(sessions: &[Session]) -> Vec<ColonyNote> {
             id: s.id.clone(),
             repo: s.repo.clone(),
             outcome: match s.status {
-                // Should never reach here: publishing blocks the update.
+                // A colony publishing when the update was asked for is waited for by the drain; if
+                // it outlasts the wait the update is refused instead of cutting the push off.
                 SessionStatus::Publishing => "was publishing".into(),
                 _ => "reconnected after the restart".into(),
             },
@@ -339,6 +353,19 @@ async fn install(app: &Shared, version: &str) -> Result<String> {
         .stderr(Stdio::piped());
     if let Some(app_dir) = app_link() {
         command.env("COLONIZER_APP", app_dir);
+    }
+    // The provenance step runs `gh`, which reads GH_TOKEN: on a headless host the
+    // mothership's own `gh` login may be absent, so pass on the token it saved in
+    // settings. Only when the environment carries neither name already — an
+    // inherited one reaches the child on its own. `env_nonempty` is the same test
+    // `App::github_token` uses, so an exported-but-empty name counts as absent
+    // here too. `script` is the installer in this install's own assets directory,
+    // not a fresh download, so the token is not handed to anything unverified.
+    if util::env_nonempty("GH_TOKEN").is_none()
+        && util::env_nonempty("GITHUB_TOKEN").is_none()
+        && let Some(token) = app.github_token()
+    {
+        command.env("GH_TOKEN", token);
     }
 
     let output = tokio::time::timeout(INSTALL_TIMEOUT, command.output())
@@ -524,7 +551,7 @@ pub async fn command(force: bool, host: &str, token: &str) -> Result<()> {
         Preflight::Proceed { installed, latest } => (installed, latest),
     };
     if force {
-        println!("{}", force_warning(&client, &base, &installed, &latest).await);
+        println!("{}", force_warning(&client, &base, token, &installed, &latest).await);
     }
     println!("updating from {installed} to {latest}");
 
@@ -577,8 +604,8 @@ pub async fn command(force: bool, host: &str, token: &str) -> Result<()> {
 /// Queued colonies hold nothing yet, so an update does not interrupt them — but
 /// `--force` is the explicit acknowledgement of the queue, and the count
 /// belongs in the warning next to the total.
-async fn force_warning(client: &reqwest::Client, base: &str, installed: &str, latest: &str) -> String {
-    let sessions = session_counts(client, base).await;
+async fn force_warning(client: &reqwest::Client, base: &str, token: &str, installed: &str, latest: &str) -> String {
+    let sessions = session_counts(client, base, token).await;
     let at_risk = match sessions {
         Ok((total, queued)) => {
             let noun = if total == 1 {
@@ -595,8 +622,17 @@ async fn force_warning(client: &reqwest::Client, base: &str, installed: &str, la
     )
 }
 
-async fn session_counts(client: &reqwest::Client, base: &str) -> Result<(usize, usize)> {
-    let sessions: Vec<Value> = client.get(format!("{base}/api/sessions")).send().await?.json().await?;
+async fn session_counts(client: &reqwest::Client, base: &str, token: &str) -> Result<(usize, usize)> {
+    let sessions: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .bearer_auth(token)
+        .send()
+        .await?
+        // The route needs the per-install token; a 401 (or any other refusal) must read as an
+        // unknown count, not as a count parsed out of a plain-text error body.
+        .error_for_status()?
+        .json()
+        .await?;
     let queued = sessions.iter().filter(|s| s["status"].as_str() == Some("queued")).count();
     Ok((sessions.len(), queued))
 }
@@ -669,28 +705,17 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
 
     let version = latest;
     let sessions = app.sessions.read().await.clone();
-    let busy = publishing(&sessions);
-    if !busy.is_empty() {
-        let names: Vec<String> = busy.iter().map(|s| format!("{} ({})", s.repo, s.id)).collect();
-        return Err(crate::client_error(
-            StatusCode::CONFLICT,
-            &format!(
-                "a colony is publishing: {}. Updating now would leave its pull request unopened.",
-                names.join(", ")
-            ),
-        ));
-    }
 
     {
         let mut progress = app.updater.progress.lock().await;
-        if progress.phase == Phase::Installing || progress.phase == Phase::Restarting {
+        if matches!(progress.phase, Phase::Draining | Phase::Installing | Phase::Restarting) {
             return Err(crate::client_error(
                 StatusCode::CONFLICT,
                 "an update is already being applied",
             ));
         }
         *progress = Progress {
-            phase: Phase::Installing,
+            phase: Phase::Draining,
             version: Some(version.clone()),
             started_at: Some(Utc::now()),
             error: None,
@@ -699,9 +724,45 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
             backup: None,
         };
     }
+    // Issue #880: hold the queue before the answer goes out, so nothing new boots while the
+    // update waits for the colonies already in flight to leave `Starting`/`Publishing`. A colony
+    // that was publishing when the operator pressed update is waited for, not refused.
+    app.drain.enter();
 
     let background = app.clone();
+    let budget = crate::drain::timeout();
     tokio::spawn(async move {
+        // Wait for the in-flight colonies, bounded by `COLONIZER_DRAIN_TIMEOUT_SECS`. A boot still
+        // `Starting` when the wait gives up is safe to interrupt: `recover` requeues it on the next
+        // start. A publish is not, so one that outlasts the drain refuses the update instead of
+        // cutting the push off — the same safety the old upfront refusal gave, now after the wait.
+        if !crate::drain::drain_and_wait(&background, budget).await {
+            let sessions = background.sessions.read().await.clone();
+            let publishing = still_publishing(&sessions);
+            if !publishing.is_empty() {
+                let names: Vec<String> = publishing.iter().map(|s| format!("{} ({})", s.repo, s.id)).collect();
+                background.drain.clear();
+                let mut progress = background.updater.progress.lock().await;
+                progress.phase = Phase::Failed;
+                progress.error = Some(util::truncate(
+                    &format!(
+                        "a colony is still publishing after {}s; try again once it finishes: {}",
+                        budget.as_secs(),
+                        names.join(", ")
+                    ),
+                    2000,
+                ));
+                return;
+            }
+            let mut progress = background.updater.progress.lock().await;
+            progress
+                .log
+                .push_str("\nthe drain timed out; installing with booting colonies still in flight (recovery requeues them)\n");
+        }
+        {
+            let mut progress = background.updater.progress.lock().await;
+            progress.phase = Phase::Installing;
+        }
         match back_up_and_install(&background, &version).await {
             Ok((log, saved)) => {
                 {
@@ -718,13 +779,17 @@ pub async fn apply(State(app): State<Shared>, body: Bytes) -> crate::ApiResult<V
                 // process is replaced underneath it.
                 tokio::time::sleep(std::time::Duration::from_millis(750)).await;
                 let e = restart(&background).await;
+                // The restart never happened, so the queue must not stay held.
+                background.drain.clear();
                 let mut progress = background.updater.progress.lock().await;
                 progress.phase = Phase::Failed;
                 progress.error = Some(util::truncate(&format!("{e:#}"), 1000));
             }
             Err(e) => {
                 // The running version is untouched: the installer swaps the
-                // symlink last, and only after everything is unpacked.
+                // symlink last, and only after everything is unpacked. Nothing is
+                // being replaced, so release the drain hold and let the queue resume.
+                background.drain.clear();
                 let mut progress = background.updater.progress.lock().await;
                 progress.phase = Phase::Failed;
                 progress.error = Some(util::truncate(&format!("{e:#}"), 2000));
@@ -754,6 +819,24 @@ mod tests {
         for status in [Running, WaitingForAnswer, Idle, Starting, Queued, Stopped, PrOpened] {
             assert!(!holds_update(status), "{status:?} should not hold an update");
         }
+    }
+
+    /// After the drain runs out of time the update goes on for a boot (`recover` requeues it) but
+    /// refuses for a publish, which a restart would leave failed with its pull request unopened.
+    #[test]
+    fn a_publish_outlasting_the_drain_refuses_while_a_boot_does_not() {
+        use crate::sessions::tests::colony;
+        use SessionStatus::*;
+        assert_eq!(
+            still_publishing(&[colony("acme", Publishing)]).len(),
+            1,
+            "a publish that outlasted the drain refuses the update"
+        );
+        assert!(
+            still_publishing(&[colony("acme", Starting)]).is_empty(),
+            "a boot is safe to interrupt: recovery requeues it"
+        );
+        assert!(still_publishing(&[]).is_empty());
     }
 
     #[test]
@@ -920,10 +1003,62 @@ mod tests {
     #[test]
     fn a_refused_post_prints_the_message_not_the_json() {
         assert_eq!(
-            server_error(r#"{"error":"a colony is publishing: o/r (abc)"}"#),
-            "a colony is publishing: o/r (abc)"
+            server_error(r#"{"error":"an update is already being applied"}"#),
+            "an update is already being applied"
         );
         assert_eq!(server_error("  Bad Gateway  "), "Bad Gateway");
+    }
+
+    /// `--force`'s session count reads the token-protected `/api/sessions` with the install's
+    /// bearer token: the right token counts the sessions and the queues, a missing or wrong one
+    /// reads as unknown rather than as a count parsed out of a refusal.
+    #[tokio::test]
+    async fn the_force_warning_counts_sessions_through_the_api_token() {
+        use axum::{
+            Json, Router,
+            http::{HeaderMap, StatusCode, header},
+            routing::get,
+        };
+
+        let app = Router::new().route(
+            "/api/sessions",
+            get(|headers: HeaderMap| async move {
+                let authorized =
+                    headers.get(header::AUTHORIZATION).and_then(|value| value.to_str().ok()) == Some("Bearer s3cret");
+                if authorized {
+                    (
+                        StatusCode::OK,
+                        Json(json!([
+                            {"id": "a", "status": "running"},
+                            {"id": "b", "status": "queued"},
+                            {"id": "c", "status": "queued"},
+                        ])),
+                    )
+                } else {
+                    // What the route answers without the token: a 401 the count must not read as data.
+                    (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"})))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+        assert_eq!(
+            session_counts(&client, &base, "s3cret").await.unwrap(),
+            (3, 2),
+            "three sessions, two of them queued"
+        );
+        assert!(
+            session_counts(&client, &base, "wrong").await.is_err(),
+            "a wrong token is an unknown count, not a parsed one"
+        );
+        assert!(
+            session_counts(&client, &base, "").await.is_err(),
+            "a missing token is an unknown count too"
+        );
     }
 
     #[test]

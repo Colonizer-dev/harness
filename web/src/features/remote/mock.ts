@@ -2,10 +2,19 @@
 // Shared state lives in src/mockState.ts; shared helpers in src/mockShared.ts.
 import { clone, now, sleep } from "../../mockShared";
 import { defaultPushPrefs, mergePushPrefs } from "../../push";
-import type { ApiTokenMeta, PushSubscriptionSummary } from "../../types";
+import type { ApiTokenMeta, PhoneOrigin, PushSubscriptionSummary } from "../../types";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { RemoteApi } from "./api";
+
+// Where a phone might reach this cockpit, in the mothership's preference order: the relay when
+// remote access is on, otherwise a plain-http lan address (so the insecure-origin warning has a
+// real case). GET /api/phone answers with this list too — bare origins, no code — so a bookmark
+// can name the network address without minting an invite (issue #867).
+const phoneOrigins = (ms: MockState): PhoneOrigin[] =>
+  ms.remoteState.enabled
+    ? [{ kind: "relay", url: `https://${ms.remoteHost}`, reachable: true, secure: true, note: null }]
+    : [{ kind: "lan", url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" }];
 
 export function remoteMock(ms: MockState): RemoteApi {
   return {
@@ -139,7 +148,7 @@ export function remoteMock(ms: MockState): RemoteApi {
       ms.remotePairingState.pending = [];
       ms.logActivity({ kind: "remote.unpair", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
     },
-    phones: () => ms.later(() => clone(ms.phoneState)),
+    phones: () => ms.later(() => clone({ ...ms.phoneState, origins: phoneOrigins(ms) })),
     phoneInvite: async () => {
       await sleep(250);
       ms.phoneState.pending = [{ id: `ph_${ms.mockId()}`, label: "iPhone", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
@@ -147,11 +156,7 @@ export function remoteMock(ms: MockState): RemoteApi {
         code: `${ms.mockId()}${ms.mockId()}`,
         expires_at: new Date(Date.now() + 5 * 60_000).toISOString(),
         ttl_secs: 300,
-        origins: [
-          ms.remoteState.enabled
-            ? { kind: "relay" as const, url: `https://${ms.remoteHost}`, reachable: true, secure: true, note: null }
-            : { kind: "lan" as const, url: "http://192.168.1.20:7878", reachable: true, secure: false, note: "Plain http: prefer the relay link" },
-        ],
+        origins: phoneOrigins(ms),
       });
     },
     confirmPhone: async (code) => {

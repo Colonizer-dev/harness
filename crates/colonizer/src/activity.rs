@@ -81,6 +81,7 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.retain",
     "colony.answer",
     "colony.prewarm",
+    "colony.switch_agent",
     "colony.path_policy",
     "chat.colony",
     "chat.issue",
@@ -278,7 +279,7 @@ pub(crate) async fn record(app: &App, entry: Entry) {
     record_with_limit(app, entry, ROTATE_BYTES).await;
 }
 
-async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
+pub(crate) async fn record_with_limit(app: &App, entry: Entry, rotate_bytes: u64) {
     let data_dir = app.cfg.data_dir.clone();
     let mut next = app.activity.next_seq.lock().await;
     let seq = match *next {
@@ -427,6 +428,12 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/sessions", "colony.launch", Target::NewColony),
     rule("POST", "/api/sessions/{id}/stop", "colony.stop", Target::Colony),
     rule("POST", "/api/sessions/{id}/resume", "colony.resume", Target::Colony),
+    rule(
+        "POST",
+        "/api/sessions/{id}/switch-agent",
+        "colony.switch_agent",
+        Target::Colony,
+    ),
     rule("POST", "/api/sessions/{id}/keep", "colony.keep", Target::Colony),
     rule("DELETE", "/api/sessions/{id}", "colony.delete", Target::Colony),
     rule("POST", "/api/sessions/{id}/publish", "colony.publish", Target::Colony),

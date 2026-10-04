@@ -7,14 +7,15 @@ environment is under [Settings](#settings).
 ## What you need
 
 - **A machine that can run microVMs**: Linux x86_64 with `/dev/kvm` readable and writable by your user,
-  or an Apple Silicon Mac. An Intel Mac can't run Colonizer, because microsandbox's libkrun backend is
-  aarch64-only. On Linux the host also needs glibc 2.28 or newer, which the pinned microsandbox
-  binary requires.
+  or an Apple Silicon Mac. On a stock Ubuntu, `/dev/kvm` is `root:kvm 0660`, so add yourself to the
+  `kvm` group and log back in: `sudo usermod -aG kvm "$USER"`. An Intel Mac can't run Colonizer, because
+  microsandbox's libkrun backend is aarch64-only. On Linux the host also needs glibc 2.28 or newer,
+  which the pinned microsandbox binary requires.
 - **Tools**: `git` and `gh`, which colonies use, and `curl` and `tar` (with xz support, for the
   Node.js runtime the installer unpacks). The installer also uses `gh`, when it is present, to verify
   a release's build provenance ([Install a release](#install-a-release)). A build from source also
   needs `npm`, Node.js 20.19 or newer (or 22.12 or newer; the web UI's Vite requires one of those),
-  and a Rust toolchain of 1.88 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
+  and a Rust toolchain of 1.98 or newer. Homebrew's `rust` can lag a long way behind, so `rustup` is
   the safe bet.
 - **Claude Code**: on Linux, a native Claude Code install, which colonies use. On a Mac the installer
   fetches the Linux build a colony needs ([On a Mac](#on-a-mac)).
@@ -30,6 +31,12 @@ curl -fsSL https://colonizer.dev/install.sh | sh
 
 Then run `colonizer`. It prints a sign-in link and opens it in your browser; `colonizer open` prints it
 again. Opening <http://127.0.0.1:7878> without that link asks you to sign in.
+
+That link carries a one-time token in its query string and is spent the first time it opens; the
+plain address — <http://127.0.0.1:7878> — is what you come back to afterwards, the browser having
+remembered the sign-in. To bookmark it, use **Settings → Your cockpit** (also reachable from the
+small header button and the end of Setup): it lists this cockpit's addresses with **Copy** and a QR
+code, the same ones the first-sign-in prompt offers you.
 
 The installer picks the app for your machine from the latest
 [release](https://github.com/Colonizer-dev/harness/releases) and checks it against the release's
@@ -144,6 +151,9 @@ this machine and read the same environment the mothership does:
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
+| `colonizer hotspots [--days N] [--top N]` | Ranks the files merged pull requests touched most, from a git repository on this machine ([docs/cli.md](cli.md)) |
+| `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
+| `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
 
@@ -193,6 +203,9 @@ taskbar icon, the same sign-in.
   sheet. When the device isn't installed yet, **Settings → Notifications** and **Settings →
   Desktop** show those steps in the app itself, next to the web push they unlock.
 
+> **Coming.** One step from the address to the home screen, with the cockpit's address made obvious
+> ([#867](https://github.com/Colonizer-dev/harness/issues/867)).
+
 The installed app carries a few shortcuts — **Inbox**, **Colonize**, **Nest** — from the icon's
 long-press menu (right-click on the taskbar/Dock icon). Sharing a GitHub issue or pull request link
 to Colonizer (Android's share sheet) opens the colony holding it, or Colonize with that issue
@@ -229,6 +242,9 @@ Either way, it:
 - runs `~/.local/bin/colonizer` (or, when that link does not exist, the binary you ran `enable` with)
   with `COLONIZER_NO_BROWSER=1`
 - restarts it only after a crash
+- on a stop or a restart, asks the mothership to drain first and waits for it: `KillMode=mixed` sends
+  SIGTERM to the main process alone, and `TimeoutStopSec` (the plist's `ExitTimeOut`) is 330 s — the
+  five minute drain plus slack — before anything it left behind is killed
 - appends to `mothership.out` in the data directory
 - carries over this shell's `PATH` and `COLONIZER_*` settings, never anything whose name contains
   `KEY`, `TOKEN`, `SECRET`, `PASSWORD` or `PASS`, because the plist and unit are plain files
@@ -240,6 +256,11 @@ missing.
 
 Disabling removes the agent and never stops a running mothership, so it never interrupts a
 colony.
+
+The unit itself can change between versions — the stop timeout above is one such change, and an
+existing install keeps the old unit file until it is re-written. `enable` is idempotent: after
+updating `colonizer`, run `colonizer login-item enable` again (or switch **Settings → Desktop → Start
+Colonizer at login** off and on) to write the current definition and load it.
 
 **One mothership at a time.** A mothership binds its port before anything else. A second one,
 say one started at login while another already runs by hand, says the port is taken and stops
@@ -263,7 +284,7 @@ What the mothership keeps in the config directory:
 | `modules.json` | Module settings, edited in Settings → Modules |
 | `orgs.json`, `known-orgs.json` | Per-org overrides, and the orgs the cockpit has seen |
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
-| `github-token`, `claude-token`, `claude-accounts.json` | Saved GitHub and Claude credentials |
+| `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
 | `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
@@ -272,6 +293,8 @@ What the mothership keeps in the config directory:
 | `updates.json` | The update check switch ([docs/updates.md](updates.md)) |
 | `loops.json`, `redteam-schedules.json` | Scheduled loops and red-team runs |
 | `colonizer.toml` | Optional hand-written file; today it holds `[publish] co_author` |
+| `fleet.json` | [Fleet](fleet.md) membership: pairings, members and this machine's own fleet token |
+| `phones.json` | Paired phones: each phone's credential, stored as a SHA-256 |
 | `remote/` | The remote-access identity key pair |
 | `host_id` | This mothership's id |
 
@@ -281,7 +304,8 @@ system keychain; the Secrets page shows which.
 What it keeps in the data directory: `sessions.json` (the colony list, read back at every start) and
 `sessions/<id>/` (each colony's logs and state), `repos/` and `worktrees/` (clones and each colony's
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
-`archive/`, `cache/`, `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
+`archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
+`colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
 `routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
 `mothership.out` when the mothership is started at login.
 
@@ -290,7 +314,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`) read the same variables.
+`telemetry`, `migrate-store`, `fleet export`, `fleet import`) read the same variables.
 
 ### The mothership
 
@@ -318,6 +342,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_RECLAIM_RETENTION_HOURS` | `12` | How long a finished colony's worktree is kept before the sweep may reclaim it |
 | `COLONIZER_FLEET_INGEST_RETENTION_DAYS` | `90` | On a fleet owner, days a member's synced colony and its logs are kept after they arrive; `0` keeps them ([fleet.md](fleet.md#reading-it-on-the-owner)) |
 | `COLONIZER_RECLAIM_MIN_FREE` | `5G` | The free-disk floor, used only when the sandbox module's `min_free_disk` setting has not been saved. Below it the queue pauses and the sweep reclaims pushed work without waiting |
+| `COLONIZER_DRAIN_TIMEOUT_SECS` | `300` | How long an update or a restart waits for colonies that are booting or publishing to finish before it goes on without them ([docs/updates.md](updates.md#updating-in-place)). Raising it above about 300 s also needs a longer `TimeoutStopSec` (systemd) or `ExitTimeOut` (launchd), or the service manager kills the mothership part-way through the drain |
 | `MSB_HOME` | `~/.microsandbox` | Where microsandbox keeps its state and image cache, for the disk figures |
 | `COLONIZER_HUNTER_INSTALL` | off | `1`, `true`, `on` or `yes` allows installing security hunters ([docs/security-hunters.md](security-hunters.md)) |
 | `COLONIZER_UPDATE_CHECK` | on | `0`, `false` or `off` keeps the update check off whatever Settings says, and then no request is made at all |
@@ -353,6 +378,7 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 | `MEM0_API_KEY` | The mem0 shared-memory provider |
 | `JEV_API_KEY` | Jev compaction and the Jev second opinion (TypeSafe). Never saved; only the environment |
 | `OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY` | Speech to text in the composer, one per voice service (the last is the OpenAI-compatible one) |
+| `OPENAI_API_KEY`, `XAI_API_KEY` | Also the vendor key the `codex` and `grok-build` agent modules get, when no `openai` or `xai-grok` provider has a saved key ([docs/runner-authoring.md](runner-authoring.md)) |
 | `COLONIZER_NOTIFY_SECRET` | Signing outgoing notification webhooks |
 
 A login item does not carry any of these ([above](#desktop-install-the-cockpit-as-an-app-start-at-login)).
@@ -374,7 +400,7 @@ mothership they talk to is `--host`, else `COLONIZER_BIND`. See [docs/cli.md](cl
 | `COLONIZER_KEEP_PREVIOUS` | `install.sh` | `1` keeps the slot being replaced; an in-place update sets it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)) |
 | `COLONIZER_IMAGE` | both scripts, with `--pull-image` | The image to pull instead of the pinned `node:24-bookworm` |
 | `COLONIZER_MSB` | `scripts/install.sh` | A microsandbox binary to build with instead of the vendored one |
-| `COLONIZER_CODESIGN_IDENTITY` | `scripts/install.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds |
+| `COLONIZER_CODESIGN_IDENTITY` | `install.sh`, `install-release.sh` | On macOS, sign the binary with this identity so the Keychain keeps granting access across rebuilds; a release install also records it, so later updates re-sign ([docs/configuration.md](configuration.md#the-system-keychain)) |
 | `COLONIZER_PREBUILT` | `scripts/install.sh` | A directory of prebuilt binaries to use instead of building them; the release workflow sets it |
 | `COLONIZER_DESCRIBE`, `COLONIZER_COMMIT` | the Rust build | The version and commit to stamp into the binary when git is not available; the release workflow sets them ([docs/updates.md](updates.md#which-version-am-i-running)) |
 
@@ -401,7 +427,11 @@ the system keychain, and the per-colony budgets.
 ## Updating
 
 A running mothership can update itself: Settings offers the newer release, installs it and restarts into
-it without losing colonies, and `colonizer update` does the same from a terminal. That, and the
+it without losing colonies, and `colonizer update` does the same from a terminal. It drains first: the
+queue admits no new boot, and a colony still booting or publishing gets up to five minutes
+(`COLONIZER_DRAIN_TIMEOUT_SECS`) to finish before the install and restart go ahead — a boot the wait
+gives up on is requeued on the next start with `interrupted_by_restart` on its log, and a publish the
+wait gives up on makes the update refuse rather than cut the push off. That, and the
 version check behind it, is [docs/updates.md](updates.md).
 
 Two builds are refused: a development build, which holds work no release contains (update it from its
@@ -416,7 +446,17 @@ git pull
 scripts/install.sh --install
 ```
 
-Either way, restart `colonizer` afterwards. Settings and colonies live outside the checkout, so a rebuild leaves them
-alone, and the colony list is read back when the harness starts. If colonies are running, prefer
-`colonizer update`: an installer run by hand removes the previous app slot straight away, and running
-colonies mount plugins from it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)).
+Either way, restart `colonizer` afterwards. The restart drains too — SIGTERM, the signal `systemctl
+--user restart colonizer` (or a `kill`) sends, makes the mothership wait for the in-flight colonies
+before it exits (Ctrl-C at a terminal stops at once instead). After a restart, check the old service
+left nothing running: `systemctl --user status colonizer` should show only the new main process in its
+CGroup tree (`systemd-cgls --user-unit colonizer.service` shows the processes). Settings and colonies
+live outside the checkout, so a rebuild leaves them alone, and the colony list is read back when the
+harness starts. If colonies are running, prefer `colonizer update`: it drains first, and it keeps the
+previous app slot until nothing is using it
+([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)). An installer run by hand
+drains nothing, but it will not stage into or delete a slot a process is still running from — it
+refuses, naming the pid, or keeps the slot for the next start to sweep. It sees a process started
+through a symlink outside the slot (the way `~/.local/bin/colonizer` starts the mothership), by
+reading the real executable behind it (`/proc/<pid>/exe` on Linux, `lsof` on macOS when installed),
+as well as its command line.

@@ -174,12 +174,10 @@ impl App {
     pub(crate) async fn persist_sessions(&self) -> Result<()> {
         let _guard = self.session_persist.lock().await;
         let data = serde_json::to_vec_pretty(&*self.sessions.read().await).context("could not serialize the session list")?;
-        // Through the session store (the default local one), not the file helper directly: the
-        // path and bytes are identical, and the write goes by the same name every backend will
-        // answer it by.
-        crate::store::LocalDirStore::new(self.cfg.data_dir.clone())
-            .write_index(&data)
-            .await?;
+        // Through the session store this App was built with (the default local one), not a fresh
+        // file helper: the path and bytes are identical, and the write answers by the same name
+        // every backend will answer it by.
+        self.store().write_index(&data).await?;
         // The session list is written on nearly every state change, so its saves are the signal
         // that the disk is taking writes again after a failure.
         self.storage_succeeded().await;
@@ -210,7 +208,14 @@ impl App {
         let rt = self.runtime(id).await;
         let persisted = {
             let _guard = rt.file_lock.lock().await;
-            append_line(&rt.logs_path, &entry.to_string()).await.err()
+            // Through the store, so the line lands in `sessions/<id>/harness.jsonl` by the same name
+            // a remote backend would answer by. The store adds the newline, as `append_line` did.
+            let line = entry.to_string();
+            self.store()
+                .append(id, "harness.jsonl", line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         };
         if let Some(e) = persisted {
             // Recorded here, not by calling session_log again — that would recurse — and outside

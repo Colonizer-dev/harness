@@ -24,7 +24,7 @@ boundary crossing — but it is still recorded here.
   manual procedure at the end of this page and are signed off per release.
 - **On a pin move, re-run the affected vectors.** A change to
   `crates/colonizer/images.lock`, `vendor/vendor.lock`, `crates/colonizer/claude-code.lock`,
-  `vendor/node.lock`, `boot.rs`'s `BOOT_SCRIPT`, `mesh.rs`, `gateway.rs`,
+  `vendor/node.lock`, `boot.rs`'s `BOOT_SCRIPT`, `mesh.rs`, `gateway/mod.rs`,
   `egress.rs` or `harden.rs` invalidates the sign-off for the vectors it touches.
 - **Every `blocked` names its mechanism** (file + config) so a later code change
   that removes it is visible as drift; every `open` links a follow-up.
@@ -39,18 +39,18 @@ boundary crossing — but it is still recorded here.
 `/colonizer` mounts.
 
 *Result / mechanism.* The runner child cannot call the mount family at all:
-`crates/colonizer-agentd/src/harden.rs:76-82` denies `mount`, `umount2`,
+`crates/colonizer-agentd/src/harden.rs:79-85` denies `mount`, `umount2`,
 `open_tree`, `move_mount`, `fsopen`/`fsconfig`/`fsmount`/`fspick`,
 `mount_setattr`, `pivot_root`, `chroot`; `CAP_SYS_ADMIN` is dropped
-(`harden.rs:58-65`) and `PR_SET_NO_NEW_PRIVS` set (`harden.rs:294-296`). The RO
-mount set is built with `:ro` in `crates/colonizer/src/util.rs:528-536` (separator
-injection rejected, tested `util.rs:728-730`) and requested per-mount in
-`crates/colonizer/src/boot.rs:712-742`. Path-policy masks are applied in-guest and
+(`harden.rs:61-68`) and `PR_SET_NO_NEW_PRIVS` set (`harden.rs:297-299`). The RO
+mount set is built with `:ro` in `crates/colonizer/src/util.rs:565-576` (separator
+injection rejected, tested `util.rs:766-769`) and requested per-mount in
+`crates/colonizer/src/boot.rs:1243-1274`. Path-policy masks are applied in-guest and
 **fail closed**: `boot.rs` `BOOT_SCRIPT` binds `/dev/null` over mask files
-(`:1259`), an RO tmpfs over mask dirs (`:1262`) and a bind+`remount,ro` over
-protected paths (`:1265`); a missing policy file, a symlinked target or any mount
-failure exits boot (`:1248,1255,1256,1259,1262,1266,1272`; tested
-`boot.rs:1521-1545`).
+(`:1909`), an RO tmpfs over mask dirs (`:1912`) and a bind+`remount,ro` over
+protected paths (`:1915`); a missing policy file, a symlinked target or any mount
+failure exits boot (`:1898,1901,1905,1906,1909,1912,1916,1921`; tested
+`boot.rs:2683-2707`).
 
 *Verdict.* **Blocked** (seccomp mount-family denial + `CAP_SYS_ADMIN` drop for the
 runner; fail-closed path-policy masks). Caveat: `/workspace` is `rw` by design, and
@@ -64,11 +64,11 @@ way.
 observe whether a secret placeholder or RO git object becomes writable/visible.
 
 *Result / mechanism.* `umount2` is denied for the runner child
-(`crates/colonizer-agentd/src/harden.rs:78`; legacy `umount` on x86_64 at
-`harden.rs:100`), and `unshare`/`setns` are denied so the masks cannot be undone in
+(`crates/colonizer-agentd/src/harden.rs:81`; legacy `umount` on x86_64 at
+`harden.rs:103`), and `unshare`/`setns` are denied so the masks cannot be undone in
 a new namespace; the boot-script ordering guarantee (masks applied before
-`exec agentd`, runner then filtered) is asserted at `boot.rs:1277-1279` and tested
-`boot.rs:1550-1573`.
+`exec agentd`, runner then filtered) is asserted at `boot.rs:1927-1929` and tested
+`boot.rs:2712-2735`.
 
 *Verdict.* **Blocked** for the runner child, and the token-file route into the
 unfiltered PTY is closed too: the bearer token that opens `/v1/pty` is sealed
@@ -90,14 +90,14 @@ agentd's plaintext HTTP — is not closed by the seal; see the open verdict belo
 `kallsyms`, `sysrq-trigger`); write `/proc/sys` knobs; reach `/sys/kernel/debug`.
 
 *Result / mechanism.* A fresh `proc`/`sys` mount needs the mount family +
-`unshare`, all denied for the runner child (`harden.rs:76-82`). At boot,
-`BOOT_SCRIPT` sets `dmesg_restrict`/`kptr_restrict` (`boot.rs:1280-1281`), remounts
-`/proc` `hidepid=invisible` with a `hidepid=2` fallback (`:1282-1284`), binds
+`unshare`, all denied for the runner child (`harden.rs:79-85`). At boot,
+`BOOT_SCRIPT` sets `dmesg_restrict`/`kptr_restrict` (`boot.rs:1930-1931`), remounts
+`/proc` `hidepid=invisible` with a `hidepid=2` fallback (`:1932-1934`), binds
 `/dev/null` over `kcore kallsyms keys timer_list sched_debug sysrq-trigger cmdline
-latency_stats modules config.gz kpageflags kpagecgroup` (`:1285-1287`), lays RO
+latency_stats modules config.gz kpageflags kpagecount kpagecgroup` (`:1935-1937`), lays RO
 tmpfs over `/sys/kernel/{debug,tracing,security}`, `/sys/fs/bpf`, `/sys/firmware`,
-`/proc/acpi` (`:1288-1290`), and remounts `/proc/sys` and `/sys` read-only
-(`:1291-1294`). These are best-effort (a failed mask logs one line and boot
+`/proc/acpi`, `/proc/scsi`, `/proc/asound` (`:1938-1940`), and remounts `/proc/sys` and `/sys` read-only
+(`:1941-1944`). These are best-effort (a failed mask logs one line and boot
 continues).
 
 *Verdict.* **Blocked** for the runner child (mount-family + `unshare` denial;
@@ -115,7 +115,7 @@ anything allowlists or pins it.
 / headscale / tailscale), `crates/colonizer/claude-code.lock`, `vendor/node.lock` — and
 `PATH` puts the pinned binaries first (`boot.sh`, `export PATH=/opt/node/bin:...`).
 Pre-exec validation of the agent binary is ELF-magic only
-(`crates/colonizer/src/config.rs:119-131`); there is no per-exec digest check.
+(`linux_binary`, `crates/colonizer/src/config.rs:121-134`); there is no per-exec digest check.
 
 *Verdict.* **n/a** — by design. A colony runs arbitrary build tooling from the `rw`
 worktree; the containment is the microVM boundary plus the runner's seccomp/cap
@@ -131,16 +131,17 @@ or raw sockets to bypass the gateway / TLS edge; reach another colony.
 *Result / mechanism.* The fence is host-side msb network policy, not guest
 firewalling: `crates/colonizer/src/sandbox.rs:68-76` passes `--net`,
 `--net-default-egress deny` and `--net-rule`; rule compilation order in
-`crates/colonizer/src/egress.rs:317-330` places `ALWAYS_BLOCKED`
-(`egress.rs:89-112`) after allows so "no configuration can reopen a blocked
-destination" (fuzzed `egress.rs:521-600`). The colony reaches the gateway only via
-the port-scoped `allow@host:tcp:{port}` (`boot.rs:182-184`, default
-`127.0.0.1:41750` at `config.rs:91-99`; tested `boot.rs:1327-1337`), never the broad
+`crates/colonizer/src/egress.rs:337-348` places `ALWAYS_BLOCKED`
+(`egress.rs:106-129`) after the DNS allow and the harness's own port-scoped allows but ahead of
+every configured block and allow, so "no configuration can reopen a blocked
+destination" (fuzzed `egress.rs:591-675`). The colony reaches the gateway only via
+the port-scoped `allow@host:tcp:{port}` (`boot.rs:477-479`, default
+`127.0.0.1:41750` at `config.rs:92-107`; tested `boot.rs:2389-2458`), never the broad
 `host` profile. Inter-colony traffic is blocked by the Headscale ACL
-(`crates/colonizer/src/mesh.rs:299-302`, "VMs cannot reach each other") with
-single-use join keys (`mesh.rs:331-346`) and per-colony node deletion
-(`lifecycle.rs:68-70`). In-guest, `iptables`/`nftables` need `CAP_NET_ADMIN`
-(dropped, `harden.rs:59`); `CAP_NET_RAW` is deliberately kept for package managers
+(`policy_json`, `crates/colonizer/src/mesh.rs:535-553`, "VMs cannot reach each other") with
+single-use join keys (`mesh.rs:374-403`) and per-colony node deletion
+(`lifecycle.rs:105`). In-guest, `iptables`/`nftables` need `CAP_NET_ADMIN`
+(dropped, `harden.rs:62`); `CAP_NET_RAW` is deliberately kept for package managers
 (`harden.rs:5`), but the host policy still decides what leaves the VM, and breaking
 `resolv.conf` only breaks the colony's own name resolution.
 
@@ -155,17 +156,17 @@ trade-off, not an escape (host policy gates the wire).
 read `/proc/<pid>/{mem,environ,maps}` of host-reaching processes; signal abuse.
 
 *Result / mechanism.* The runner child is denied `ptrace`,
-`process_vm_readv`/`writev`, `pidfd_getfd`, `kcmp` (`harden.rs:83-85`);
-`CAP_SYS_PTRACE` is dropped (`:58-65`); `PR_SET_DUMPABLE` is gated (`:151-156`) and
-`RLIMIT_CORE` is 0 (`:264-273`). `agentd` self-guards non-dumpable + core-0 at
-startup (`crates/colonizer-agentd/src/main.rs:141-144`, `harden.rs:349-353`), and
+`process_vm_readv`/`writev`, `pidfd_getfd`, `kcmp` (`harden.rs:86-88`);
+`CAP_SYS_PTRACE` is dropped (`:61-68`); `PR_SET_DUMPABLE` is gated (`:154-159`) and
+`RLIMIT_CORE` is 0 (`:265-276`). `agentd` self-guards non-dumpable + core-0 at
+startup (`crates/colonizer-agentd/src/main.rs:176-181`, `harden.rs:357-363`), and
 `/proc` runs `hidepid` (vector 3), so the agent cannot read the daemon's
 `mem`/`environ`. `tailscaled`/`headscale` live on the host (a different kernel),
 unreachable from the VM.
 
 *Verdict.* **Blocked** for the runner child (ptrace-family denial + non-dumpable +
 hidepid; regression via the `harden.rs` probe tests and `agentd --exec-hardened`,
-`main.rs:136-139`). The seal closes the token-file route into the unfiltered PTY
+`main.rs:172-175`). The seal closes the token-file route into the unfiltered PTY
 (vector 2); the network route to the same token — raw-socket sniffing of agentd's
 plaintext traffic — is tracked separately (open verdicts). The shell stays
 unfiltered — it is the human's terminal.
@@ -179,16 +180,16 @@ directly to `api.anthropic.com` with the placeholder (must 401); DNS-rebind
 
 *Result / mechanism.* Secrets are provisioned as msb `--secret env@hosts`; the real
 value stays in msb's host process and the guest env holds only a placeholder
-(`sandbox.rs:62-67`; assembled `boot.rs:964-1001`, `CLAUDE_API_HOST =
-api.anthropic.com` at `app.rs:36`). The gateway token is 244-bit random, `0600`
-(`boot.rs:577-579`), compared constant-time (`gateway.rs:632-645`); an unknown
-token 401s before anything else (`gateway.rs:1148-1156`) and a valid token alone
-does not open an unrouted provider (`gateway.rs:1185-1199`). The colony's inbound
+(`sandbox.rs:62-67`; assembled `boot.rs:1550-1598`, `CLAUDE_API_HOST =
+api.anthropic.com` at `app.rs:37`). The gateway token is 244-bit random, `0600`
+(`boot.rs:1087`, `:1118`), compared constant-time (`gateway/mod.rs:723-744`); an unknown
+token 401s before anything else (`gateway/proxy.rs:264-277`) and a valid token alone
+does not open an unrouted provider (`gateway/proxy.rs:307-321`). The colony's inbound
 `x-api-key`/`authorization` are never forwarded — `FORWARD_HEADERS`
-(`gateway.rs:49`) — and the real credential is inserted host-side
-(`credential_header`, `gateway.rs:961-971`, `set_sensitive(true)`); placeholder
-creds "must never reach an upstream" is tested at `gateway.rs:2256-2262`. Upstream
-path traversal is rejected (`gateway.rs:949-958`).
+(`gateway/mod.rs:51`) — and the real credential is inserted host-side
+(`credential_header`, `gateway/stream.rs:408-419`, `set_sensitive(true)`); placeholder
+creds "must never reach an upstream" is tested at `gateway/tests.rs:513-519`. Upstream
+path traversal is rejected (`upstream_url`, `gateway/stream.rs:345-362`).
 
 *Verdict.* **Blocked** at the gateway (harness-asserted). The msb TLS-edge swap, the
 direct-to-`api.anthropic.com` 401 and DNS-rebinding of
@@ -202,24 +203,24 @@ are **KVM-verified**.
 fsmonitor, a non-regular `pr.md`, and FIFOs/sockets/devices in the worktree.
 
 *Result / mechanism.* At publish (`crates/colonizer/src/github.rs::publish`,
-`:2108-2136`) the kill-switch is checked first (`:2115`), then `restore_gitfile`
-(`:2121`, `:2218-2233`) replaces the worktree `.git` with a regular 0644 file
-holding the pre-VM recorded `gitdir:`, and `strip_nested_git` (`:2122`,
-`:2236-2265`) removes every non-root `.git`. Host git always runs with a clean
-config and a scrubbed environment (`git_hardened` `github.rs:222-237`, applied in
-`git_plain` `:125-128`): `GIT_CONFIG_GLOBAL=/dev/null` and
+`:2324-2360`) the kill-switch is checked first (`:2332`), then `restore_gitfile`
+(`:2337`, `:2439-2454`) replaces the worktree `.git` with a regular 0644 file
+holding the pre-VM recorded `gitdir:`, and `strip_nested_git` (`:2338`,
+`:2457-2481`) removes every non-root `.git`. Host git always runs with a clean
+config and a scrubbed environment (`git_hardened` `github.rs:230-260`, applied in
+`git_plain` `:122-127`): `GIT_CONFIG_GLOBAL=/dev/null` and
 `GIT_CONFIG_NOSYSTEM=1` so no filter driver or credential helper is defined for a
 worktree `.gitattributes` to select, an environment allowlist (`GIT_ENV_KEEP`
-`:193-216`) that keeps tokens and `GIT_*` overrides out, and `HOST_GIT_NO_EXEC`
-(`:164-173`): `core.hooksPath=/dev/null core.fsmonitor=false gc.auto=0
-maintenance.auto=false`, plus `--no-verify` on commit (`:1780`). Only `fetch`,
+`:206-228`) that keeps tokens and `GIT_*` overrides out, and `HOST_GIT_NO_EXEC`
+(`:173-185`): `core.hooksPath=/dev/null core.fsmonitor=false gc.auto=0
+maintenance.auto=false`, plus `--no-verify` on commit (`:1986`). Only `fetch`,
 `push`, `ls-remote` and `clone` run the authenticated variant
-(`git_remote`/`git_authed` `:139-155`), and they read no worktree content, so no
+(`git_remote`/`git_authed` `:140-157`), and they read no worktree content, so no
 credential rides on a command that does. `pr.md` (in the session dir, not the
 worktree) is read through `read_regular_file` with `O_NOFOLLOW|O_NONBLOCK` + fstat
-(`github.rs:2269-2290`); a symlink/FIFO/dir/oversized file falls back to the
-default title (tested `github.rs:3272-3330`). Placeholders are stripped before
-`git add -A` (`path_policy::remove_leftovers`, `github.rs:1717-1721`). Special
+(`github.rs:2490-2529`); a symlink/FIFO/dir/oversized file falls back to the
+default title (tested `github.rs:3575-3628`). Placeholders are stripped before
+`git add -A` (`path_policy::remove_leftovers`, `github.rs:1924-1928`). Special
 files (FIFO/socket/device) planted in the worktree are handled by `git add -A`,
 which does not stage non-regular files.
 
@@ -237,9 +238,10 @@ procedure.
   default mesh, though, `tailscaled` runs inside the guest, so the mothership's
   HTTP to agentd — plaintext, bearer token in the `Authorization` header —
   crosses the guest's own interfaces, and the runner keeps `CAP_NET_RAW`
-  (`harden.rs:58-65`) while the seccomp filter does not deny `socket`
-  (`harden.rs:72-94`): an `AF_PACKET` raw socket can sniff the token off the wire
-  and open `/v1/pty` with it, an unhardened root shell. Filed as a follow-up; a
+  (`harden.rs:61-68`) while the seccomp filter does not deny `socket`
+  (`harden.rs:75-97`): an `AF_PACKET` raw socket can sniff the token off the wire
+  and open `/v1/pty` with it, an unhardened root shell. Filed as a follow-up
+  ([#932](https://github.com/Colonizer-dev/harness/issues/932)); a
   Layer-3 hardening-completeness gap, not a microVM-boundary crossing.
 
 ## Closed follow-ups

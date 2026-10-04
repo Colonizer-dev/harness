@@ -38,6 +38,9 @@ out of one another's way:
 The module a hunter runs on defaults to `general` and can be set per run. Hunters are
 titled `Red-team hunter i/N: <focus>` and numbered from 1, matching what the UI shows.
 
+The swarm is the default hunter; a run can instead name `"hunter": "shannon"`, which sends a
+single colony rather than a swarm (see [Operating it](#operating-it)).
+
 ## The brief
 
 With autofix off — the default — the brief is explicit: hunt aggressively, reproduce each
@@ -199,16 +202,22 @@ figure) opens a three-step wizard scoped to that workspace:
 
 1. **Hunter.** A short "what is a red team" note, **Who hunts**, and the workspace's
    repositories (one run per repository; one that already has an active run is
-   skipped). Only the **colony swarm** can run. **Strix** and **Shannon** appear as
-   disabled cards marked "Coming soon" (Strix reads "Installed · runs coming soon" once
-   its binary is installed). They are not built as red-team hunters: Strix can be
-   installed and probed (see [security-hunters.md](security-hunters.md)), but no run
-   drives its scans, and Shannon is a manifest with no install or run behind it.
-   `POST /api/redteam/runs` with `"hunter": "strix"` or `"shannon"` returns 400:
-   *Strix cannot run as a red-team hunter in this build yet*.
+   skipped). The **colony swarm** and **Shannon** can run; **Strix** appears as a
+   disabled card marked "Coming soon" (it reads "Installed · runs coming soon" once
+   its binary is installed), because no run drives its scans. A Shannon run is one
+   colony per repository, so the swarm-size slider gives way to a note: the colony
+   starts the repository's app locally inside its microVM, runs the pinned
+   `npx @keygraph/shannon@3.3.0` command its brief carries, and leaves `report.sarif`
+   where the mothership reads it when the session ends — the host parses that SARIF and
+   files each finding through the same validation and `MAX_PER_COLONY` cap as a swarm
+   hunter's, so it counts in the tally and reaches synthesis. The mothership never runs
+   Shannon itself: the manifest stays a host-side stub and `hunters::scan` refuses it
+   (see [security-hunters.md](security-hunters.md)). `POST /api/redteam/runs` with
+   `"hunter": "strix"` returns 400: *Strix cannot run as a red-team hunter in this
+   build yet*; an unknown hunter says to use `"swarm"` or `"shannon"`.
 2. **Models.** A provider and model for the hunters and for their subagents, and the
-   number of hunters per repository (1–8). They reach each hunter as
-   `model_override` / `subagent_model_override` on `POST /api/sessions`.
+   number of hunters per repository (1–8; hidden, and always one, for a Shannon run). They reach
+   each hunter as `model_override` / `subagent_model_override` on `POST /api/sessions`.
 3. **Review.** A cost warning with an estimate from past runs (or average colony
    spend), "let hunters fix what they find" off unless ticked (a raid never merges
    unless autofix is on), and **Once, now**, **Weekly** or **Monthly** in local time, saved as
