@@ -239,7 +239,11 @@ pub(super) async fn reset(app: &Shared, id: &str) -> Result<(), String> {
 
 async fn restore(app: &Shared, id: &str) {
     app.update_session(id, |x| {
-        if matches!(x.status, SessionStatus::Stopped | SessionStatus::Failed) && x.pr_url.is_some() {
+        if matches!(
+            x.status,
+            SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::NoChanges
+        ) && x.pr_url.is_some()
+        {
             x.status = SessionStatus::PrOpened;
             x.resume_note = None;
         }

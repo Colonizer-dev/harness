@@ -240,6 +240,11 @@ main whose CI could not run is not red — no re-run, no fix colony — and with
 holds the repository with the reason. Branch protection still applies: if the refused jobs are
 required checks, GitHub refuses the merge and the report says so.
 
+When a repository flips into this mode — the first run that sees refused CI there — the owner is
+notified once through the notify module's channels (desktop, webhook, Web Push), with GitHub's
+reason, and once more when main's CI runs green again (issue #972). The mode is remembered in
+`merge-train-loop.json` (`ci_unavailable`), so a restart does not announce it again.
+
 **Dry run** reads everything and writes nothing: it lists what the loop would merge, update, rebase
 and skip, and why. With `COLONIZER_NO_EXTERNAL_EFFECTS` set, every run — scheduled or not — is a
 dry run, and its report says so.

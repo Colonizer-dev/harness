@@ -169,3 +169,33 @@ async fn main_moving_during_the_checks_holds_the_merge_and_a_dry_run_only_says_w
     assert!(dry.writes().is_empty(), "{:?}", dry.writes());
     assert!(item(&report, "s1").reason.contains("would run its local checks"));
 }
+
+/// Issue #972: entering CI-unavailable mode is announced once, staying in it is not, and leaving it
+/// — main's CI running green again — is announced once.
+#[tokio::test]
+async fn entering_and_leaving_ci_unavailable_mode_is_announced_once_each() {
+    let fake = Fake::new()
+        .main(vec![unavailable_main(), unavailable_main(), main_green(), main_green()])
+        .pr("s1", vec![Ok(reading(1, Mergeability::Conflicted, CiState::Failure, 0))]);
+    let mut mem = BTreeMap::new();
+    let mut notices = Vec::new();
+    for _ in 0..4 {
+        let r = run(&fake, &cfg_local(), &[session("s1", 1)], &mut mem, false).await;
+        notices.push(r.notices);
+    }
+    assert_eq!(notices[0].len(), 1);
+    assert!(
+        notices[0][0].starts_with("acme/web: GitHub CI can't run (the Actions spending limit"),
+        "{:?}",
+        notices[0]
+    );
+    assert!(notices[1].is_empty(), "still unavailable: said already");
+    assert_eq!(
+        notices[2],
+        vec!["acme/web: GitHub CI runs again; the merge train is back to merging on CI"]
+    );
+    assert!(notices[3].is_empty());
+    assert_eq!(mem["acme/web"].ci_unavailable, None);
+    // A run that never read main's CI changes nothing either way.
+    assert_eq!(ci_edge("a/b", Some("x"), None, false), (None, Some("x".to_string())));
+}

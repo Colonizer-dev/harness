@@ -803,6 +803,62 @@ async fn announce_judge(
     }
 }
 
+/// A host-level line from another module (issue #972: the merge-train loop's CI-unavailable edges),
+/// down the same channels and ledger as a provider event: `event` names it in the webhook payload
+/// and `topic` keys the ledger's cooldown. Nothing goes out while the notify module is off. The
+/// line names a repository and GitHub's own reason, never repository content.
+pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &str) {
+    let modules = app.modules.read().await.clone();
+    if !modules.notify.as_ref().is_some_and(|c| c.enabled) {
+        return;
+    }
+    let settings = effective_notify(&modules, &OrgSettings::default());
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok();
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic,
+        class: event.to_string(),
+        fact: None,
+        colony: None,
+        priority: false,
+    };
+    let verdict = app.ledger.check(&candidate, Utc::now());
+    if verdict != ledger::Verdict::Deliver {
+        app.ledger.record(&candidate, &verdict, Utc::now()).await;
+        return;
+    }
+    let text = truncate(line, MAX_TEXT);
+    let payload = json!({
+        "event": event,
+        "at": Utc::now().to_rfc3339(),
+        "text": text,
+        "colony": None::<Value>,
+        "pr_url": None::<Value>,
+        "provider": None::<Value>,
+    });
+    let delivered = deliver(
+        app,
+        client.as_ref(),
+        &text,
+        &payload,
+        None,
+        &settings,
+        &mut Reasons::default(),
+    )
+    .await;
+    let verdict = if delivered {
+        verdict
+    } else {
+        ledger::Verdict::Drop("undelivered")
+    };
+    app.ledger.record(&candidate, &verdict, Utc::now()).await;
+}
+
 /// The channels themselves: the desktop popup, the signed webhook POST, and Web Push. Nothing here
 /// is fatal: a channel that cannot be reached is a line in a log, and the next event tries again.
 /// `session` is the colony the event is about — provider events have none, and their channel
