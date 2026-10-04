@@ -1300,8 +1300,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // below). Without a session id — never reported, or the module stopped declaring resumability
     // since — the answer still rides the prompt, so it is delivered either way. A pre-warm boot
     // (issue #701) resumes too: no answer is riding it, but the transcript it continues is the one
-    // the question belongs to.
-    if (s.pending_answer.is_some() || s.prewarming())
+    // the question belongs to. A mid-task agent switch (issue #737) resumes as well: the transcript
+    // it wrote for the target module is the one this boot's runner must pick up.
+    if (s.pending_answer.is_some() || s.prewarming() || s.switch_note.is_some())
         && let Some(session_id) = &s.agent_session
     {
         runner_env.insert("COLONIZER_RESUME_SESSION".into(), Value::String(session_id.clone()));
@@ -1543,6 +1544,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // no turn, and the answer is delivered as a user message once it arrives.
     let initial_prompt = if s.prewarming() {
         String::new()
+    } else if let Some(note) = &s.switch_note {
+        // A mid-task agent switch (issue #737): the converted transcript carries the task brief, so
+        // the switch note alone is the first turn — it tells the new runner it is continuing another
+        // agent's session. It outranks a held answer, which cannot ride the same boot (the switch
+        // stops a waiting colony, clearing any held answer).
+        note.clone()
     } else {
         match (&s.pending_answer, &s.agent_session) {
             (Some(pa), Some(_)) => pa.prompt.clone(),
@@ -1934,6 +1941,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         if noted {
             app.session_log(id, "info", "resume note delivered to the agent".into()).await;
         }
+    }
+    // A switch note is consumed the same way (issue #737): the runner is up, so its first turn
+    // carried the note and it must not repeat on a later boot. Taken only here, after the runner
+    // linked, so a failed boot above leaves it for the retry.
+    if let Some((_, true)) = app.update_session(id, |x| x.switch_note.take().is_some()).await {
+        app.session_log(
+            id,
+            "info",
+            "agent switch note delivered: the new agent is continuing the converted session".into(),
+        )
+        .await;
     }
     Ok(())
 }
