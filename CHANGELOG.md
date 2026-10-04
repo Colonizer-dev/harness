@@ -18,7 +18,22 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.3] - 2026-10-04
+
+v0.2.2 was tagged but never published: the tagged commit did not compile (below), so it has no
+GitHub release and never reached crates.io. v0.2.3 is v0.2.2 plus this fix; everything listed under
+v0.2.2 ships for the first time here.
+
+### Fixed
+
+- **The harness compiles again.** Two pull requests that landed together both declared the
+  `observability` module, one as `observability/mod.rs` and one as `observability.rs`, so the
+  `colonizer` crate failed to build (`E0761`) at the v0.2.2 tag. The tailer submodules now live in
+  `observability/mod.rs`. ([#967])
+
 ## [v0.2.2] - 2026-10-04
+
+Tagged but never published; its changes ship in v0.2.3.
 
 ### Added
 
@@ -2185,6 +2200,8 @@ Macs. ([#74])
 [#935]: https://github.com/Colonizer-dev/harness/issues/935
 [#939]: https://github.com/Colonizer-dev/harness/issues/939
 [#940]: https://github.com/Colonizer-dev/harness/issues/940
+[#967]: https://github.com/Colonizer-dev/harness/issues/967
+[v0.2.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.3
 [v0.2.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.2
 [v0.2.1]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.1
 [v0.2.0]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.0

@@ -108,12 +108,30 @@ describe("the red-team wizard", () => {
       </ApiContext.Provider>,
     );
 
-  it("step 1 offers the swarm and shows Strix and Shannon as coming soon, not startable", () => {
+  it("step 1 offers the swarm and Shannon as startable, and Strix alone as coming soon", () => {
     const html = wizard(0);
     expect(html).toContain("Colony swarm");
+    expect(html).toMatch(/Shannon[\s\S]*Ready · runs in a colony/);
     expect(html).toMatch(/Strix[\s\S]*Coming soon/);
-    expect(html).toMatch(/Shannon[\s\S]*Coming soon/);
-    expect(html.match(/disabled=""/g)?.length).toBeGreaterThanOrEqual(2);
+    // Swarm is picked by default and Shannon is selectable (an enabled, unpressed button); Strix alone is disabled.
+    expect(html).toMatch(/<button type="button" aria-pressed="true" class="[^"]*">[\s\S]*?Colony swarm/);
+    expect(html).toMatch(/<button type="button" aria-pressed="false" class="[^"]*">[\s\S]*?Shannon/);
+    expect(html).toMatch(/<button type="button" aria-pressed="false" disabled=""[\s\S]*?Strix/);
+  });
+
+  it("picking Shannon selects its card, drops the swarm size and counts one colony per repository", () => {
+    // Static markup cannot click, so the picks are pinned through the same props as the step and preset.
+    const pinned = (step: 0 | 1 | 2) =>
+      renderToStaticMarkup(
+        <ApiContext.Provider value={api}>
+          <WizardBody org="acme" sessions={hunterSessions} runs={[]} onClose={noop} onDone={noop} onOpenHistory={noop} initialStep={step} initialHunter="shannon" />
+        </ApiContext.Provider>,
+      );
+    expect(pinned(0)).toMatch(/<button type="button" aria-pressed="true" class="[^"]*">[\s\S]*?Shannon/);
+    const models = pinned(1);
+    expect(models).not.toContain("Hunters per repository");
+    expect(models).toContain("there is no swarm size to set");
+    expect(pinned(2)).toMatch(/\(1 per repository × \d+\)/);
   });
 
   it("step 2 picks the hunter and subagent models", () => {

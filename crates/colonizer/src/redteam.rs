@@ -41,10 +41,23 @@ const DEFAULT_MODULE: &str = "general";
 /// The modules a run may name. Only the built-in one exists until module manifests land (#216); an
 /// unknown name is refused rather than run as if it were the default.
 const KNOWN_MODULES: &[&str] = &[DEFAULT_MODULE];
-/// Who hunts: the built-in swarm of colony hunters. The external hunter modules (Strix, Shannon —
-/// hunters.rs) install and probe, but a run does not drive their scans yet, so naming one is refused
-/// with the reason rather than quietly running the swarm instead.
+/// Who hunts: the built-in swarm of colony hunters (many briefs, many colonies), or the single named
+/// external hunter Shannon (hunters.rs), whose one colony runs `npx @keygraph/shannon` in its microVM
+/// and leaves a SARIF report for the host to read back ([`ingest_shannon`]). Strix is still not driven
+/// by a run, so naming it is refused with the reason rather than quietly running the swarm instead.
 const DEFAULT_HUNTER: &str = "swarm";
+/// The one external hunter a run drives today (see [`DEFAULT_HUNTER`]).
+const SHANNON: &str = "shannon";
+/// Where a Shannon colony writes its report in the guest: `/harness/out` is the session's `out/` on
+/// the host, so the host reads `<session_dir>/out/shannon`. The report, checkout and target URL follow.
+const SHANNON_OUT: &str = "/harness/out/shannon";
+const SHANNON_REPORT: &str = "report.sarif";
+const SHANNON_REPO: &str = "/workspace";
+const SHANNON_TARGET: &str = "<local-url>";
+/// The most a Shannon report may be read into memory; a larger one is refused, not parsed.
+const SHANNON_REPORT_CAP: u64 = 8 * 1024 * 1024;
+/// The most results one report may ingest; each costs a host-side model call, so a huge report is cut off.
+const MAX_SHANNON_FINDINGS: usize = findings::MAX_PER_COLONY * 2;
 
 /// The eight focus areas a run's hunters are drawn from, cycled as `i % 8`. Each brief names its own
 /// focus and lists the others, so the swarm keeps out of one another's way.
@@ -242,6 +255,9 @@ pub struct Hunter {
     /// The model tier the hunter booted on; `null` until #216 wires version reporting.
     pub version: Option<String>,
     pub focus: String,
+    /// Whether an external hunter's report was read back (Shannon's SARIF); set once, kept off the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ingested: bool,
 }
 
 /// A red-team run, persisted in `data/redteam.json`; the container-level `#[serde(default)]` keeps a
@@ -585,6 +601,47 @@ fn hunter_brief(run: &RedTeamRun, i: usize, n: usize, raid: &[RaidLead]) -> Valu
     })
 }
 
+/// The brief the single hunter colony of a `hunter: "shannon"` run gets: start the repository's app
+/// locally inside the microVM, run Shannon against it, and leave the SARIF where [`ingest_shannon`]
+/// reads it. `None` if the manifest is gone or its template will not render. The host never runs
+/// Shannon: only the command that fetches it is written here, never its code.
+fn shannon_brief(run: &RedTeamRun) -> Option<Value> {
+    let m = crate::hunters::find(SHANNON)?;
+    let command = crate::hunters::colony_command(&m, SHANNON_TARGET, SHANNON_REPO, SHANNON_OUT).ok()?;
+    let name = m.name;
+    let instructions = format!(
+        "You are a red-team security hunter raiding {} with {name}, Keygraph's AI pentester for web apps\n\
+         and APIs. Work entirely inside your microVM and stay within its egress.\n\
+         \n\
+         The repository is checked out at {SHANNON_REPO}. Get the app running locally first: follow its\n\
+         README to install and start it, and note the URL it listens on (usually http://127.0.0.1:<port>).\n\
+         \n\
+         Then run {name} against that local instance, writing its report where the harness reads it:\n\
+         \n\
+         {command}\n\
+         \n\
+         Replace {SHANNON_TARGET} with the URL you started, create {SHANNON_OUT} first, and leave\n\
+         {SHANNON_REPORT} there — the mothership reads it after your session ends and files what it\n\
+         contains, each finding validated on its own. Do NOT file findings yourself: report nothing\n\
+         with the findings tool. Attack only this repository and a local instance of it running inside\n\
+         your microVM — never a deployed environment, an external host or a third-party service.\n",
+        run.repo,
+    );
+    Some(json!({
+        "repo": run.repo,
+        "issue": null,
+        "title": format!("Red-team {name} scan: {}", run.repo),
+        "instructions": instructions,
+        "autopilot": false,
+        "allow_duplicate": true,
+        "model_tier": null,
+        "model_override": run.model,
+        "subagent_model_override": run.subagent_model,
+        "after": null,
+        "origin": REDTEAM_ORIGIN,
+    }))
+}
+
 /// The most pre-scan leads one hunter's brief carries.
 const PRESCAN_LEADS_PER_BRIEF: usize = 20;
 
@@ -734,7 +791,10 @@ async fn launch_hunter(app: Shared, brief: Value) -> Result<Session, String> {
 /// hunter and aborts, and the terminal-state guard refuses the attach write.
 pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
     let id = run.id.clone();
-    let n = run.swarm_size;
+    // A Shannon run launches exactly one colony whatever swarm size it was created with: Shannon is
+    // a single scanner, not a swarm of hunters.
+    let shannon = run.hunter == SHANNON;
+    let n = if shannon { 1 } else { run.swarm_size };
     let flipped = app
         .redteam
         .update(&id, |r| {
@@ -793,7 +853,17 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
         {
             break;
         }
-        let brief = hunter_brief(run, i, n, &raid);
+        let brief = if shannon {
+            match shannon_brief(run) {
+                Some(brief) => brief,
+                None => {
+                    eprintln!("redteam: run {}: no Shannon command renders", run.id);
+                    break;
+                }
+            }
+        } else {
+            hunter_brief(run, i, n, &raid)
+        };
         match launch_hunter(app.clone(), brief).await {
             Ok(session) => {
                 if session.status.is_live() {
@@ -802,9 +872,22 @@ pub(crate) async fn launch_run(app: &Shared, run: &mut RedTeamRun) {
                 hunters.push(Hunter {
                     session_id: session.id,
                     title: session.issue_title,
-                    module: run.modules[i % run.modules.len()].clone(),
-                    version: None,
-                    focus: names[i % names.len()].to_string(),
+                    module: if shannon {
+                        SHANNON.to_string()
+                    } else {
+                        run.modules[i % run.modules.len()].clone()
+                    },
+                    version: if shannon {
+                        crate::hunters::find(SHANNON).map(|m| m.pinned_version.to_string())
+                    } else {
+                        None
+                    },
+                    focus: if shannon {
+                        "web-app and API scan".to_string()
+                    } else {
+                        names[i % names.len()].to_string()
+                    },
+                    ingested: false,
                 });
             }
             Err(message) => eprintln!(
@@ -842,6 +925,64 @@ fn is_ended(status: SessionStatus) -> bool {
         status,
         SessionStatus::Merged | SessionStatus::Closed | SessionStatus::NoChanges | SessionStatus::Stopped | SessionStatus::Failed
     )
+}
+
+/// Reads the report each ended Shannon colony left under its out dir and files what it holds, once
+/// per hunter: the same SARIF parser `hunters::scan` uses, then each finding through
+/// [`crate::events::file_finding`] — orchestrator validation, the per-colony cap and issue filing —
+/// so Shannon's findings land in the hunter's ledger like any the colony reported itself. Runs in the
+/// tick before the counts and the `done` transition; a report that is missing or unreadable is no
+/// findings, and either way the hunter is marked ingested so this runs once.
+async fn ingest_shannon(app: &Shared, run: &mut RedTeamRun) {
+    for hunter in run.hunters.iter_mut() {
+        if hunter.ingested {
+            continue;
+        }
+        let ended = app.session(&hunter.session_id).await.is_some_and(|s| is_ended(s.status));
+        if !ended {
+            continue;
+        }
+        hunter.ingested = true;
+        let id = hunter.session_id.clone();
+        let path = app.session_dir(&id).join("out/shannon").join(SHANNON_REPORT);
+        // Read the way `pr.md` is: one `O_NOFOLLOW` handle refusing a symlink, non-regular file or file
+        // past [`SHANNON_REPORT_CAP`], so a link in `out/shannon` cannot point the host at a host file.
+        let artifact = match crate::github::read_regular_file(&path, SHANNON_REPORT_CAP) {
+            Ok(text) => text,
+            Err(e) => {
+                let missing = e.kind() == std::io::ErrorKind::NotFound;
+                let level = if missing { "info" } else { "warn" };
+                app.session_log(&id, level, format!("shannon: no report read from {}: {e}", path.display()))
+                    .await;
+                continue;
+            }
+        };
+        let findings = match crate::hunters::normalize(crate::hunters::FindingsFormat::Sarif, &artifact) {
+            Ok(findings) => findings,
+            Err(e) => {
+                app.session_log(
+                    &id,
+                    "warn",
+                    format!("shannon: could not parse {} as SARIF: {e:#}", path.display()),
+                )
+                .await;
+                continue;
+            }
+        };
+        // Each finding costs a host-side model call to validate: cap the batch so a report with
+        // hundreds of results cannot stall the tick, and say what was dropped.
+        let total = findings.len();
+        if total > MAX_SHANNON_FINDINGS {
+            let note = format!("shannon: {total} findings, {MAX_SHANNON_FINDINGS} ingested");
+            app.session_log(&id, "warn", note).await;
+        }
+        let rt = app.runtime(&id).await;
+        for finding in findings.into_iter().take(MAX_SHANNON_FINDINGS) {
+            // Shaped as the raw `finding` event an agentd runner emits, which `findings::parse` reads.
+            let event = json!({"type": "finding", "title": finding.title, "body": finding.body, "evidence": finding.evidence});
+            crate::events::file_finding(app.clone(), id.clone(), rt.clone(), event).await;
+        }
+    }
 }
 
 fn finish(run: &mut RedTeamRun) {
@@ -1407,6 +1548,12 @@ async fn one_step(app: &Shared, id: &str) {
             run.gate_reason = Some(gate_reason(live));
         }
     } else {
+        // An external hunter (Shannon) writes its report for the host to read rather than filing
+        // itself: ingest it before the state machine settles and before the counts, so a run that
+        // lands `done` this tick counts what was found.
+        if run.hunter == SHANNON {
+            ingest_shannon(app, &mut run).await;
+        }
         advance_state(&mut run, &sessions);
     }
     run.counts = counts_for(app, &run);
@@ -1480,11 +1627,11 @@ pub async fn create(State(app): State<Shared>, Json(req): Json<NewRedTeamRun>) -
     Ok(Json(start(&app, req, None).await?))
 }
 
-/// Which hunter a request names, checked: the swarm runs; a known external hunter is refused with
-/// why; anything else is unknown.
+/// Which hunter a request names, checked: the swarm runs, and so does Shannon (one colony the host
+/// reads a SARIF report back from). Strix is refused with why; anything else is unknown.
 fn check_hunter(raw: Option<&str>) -> Result<String, String> {
     let hunter = raw.map(str::trim).filter(|h| !h.is_empty()).unwrap_or(DEFAULT_HUNTER);
-    if hunter == DEFAULT_HUNTER {
+    if hunter == DEFAULT_HUNTER || hunter == SHANNON {
         return Ok(hunter.to_string());
     }
     match crate::hunters::builtin().into_iter().find(|m| m.id == hunter) {
@@ -1492,7 +1639,7 @@ fn check_hunter(raw: Option<&str>) -> Result<String, String> {
             "{} cannot run as a red-team hunter in this build yet: its scans are not driven by runs (install and probe it at /api/hunters/{}); use the swarm",
             m.name, m.id
         )),
-        None => Err(format!("unknown hunter {hunter:?}; use \"swarm\"")),
+        None => Err(format!("unknown hunter {hunter:?}; use \"swarm\" or \"shannon\"")),
     }
 }
 
@@ -1972,6 +2119,7 @@ mod tests {
     use crate::sessions::tests::colony;
     use crate::tests::test_app;
     use chrono::{Duration as ChronoDuration, TimeZone};
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("colonizer-redteam-{}", short_id()));
@@ -2719,6 +2867,7 @@ mod tests {
                 module: "general".into(),
                 version: None,
                 focus: "error handling and edge cases".into(),
+                ingested: false,
             }],
             counts: Counts::default(),
             synthesis: None,
@@ -2741,6 +2890,7 @@ mod tests {
         assert_eq!(value["state"], "armed");
         assert_eq!(value["hunters"][0]["module"], "general");
         assert!(value["hunters"][0]["version"].is_null(), "version stays null until #216");
+        assert!(value["hunters"][0].get("ingested").is_none(), "ingested stays off the wire");
         assert!(value["started_at"].is_null() && value["ended_at"].is_null() && value["gate_reason"].is_null());
         assert!(value["synthesis"].is_null(), "no synthesis before it fires");
         assert_eq!(value["created_at"], "1970-01-01T00:00:00Z", "timestamps are RFC 3339 strings");
@@ -2957,10 +3107,113 @@ mod tests {
     fn external_hunters_are_refused_with_the_reason_and_the_swarm_runs() {
         assert_eq!(check_hunter(None).unwrap(), "swarm");
         assert_eq!(check_hunter(Some(" swarm ")).unwrap(), "swarm");
+        // Shannon runs: a run drives its colony, and the host files the SARIF it writes.
+        assert_eq!(check_hunter(Some(" shannon ")).unwrap(), "shannon");
         let strix = check_hunter(Some("strix")).unwrap_err();
         assert!(strix.contains("Strix") && strix.contains("not driven by runs"), "{strix}");
-        assert!(check_hunter(Some("shannon")).unwrap_err().contains("Shannon"));
-        assert!(check_hunter(Some("nmap")).unwrap_err().contains("unknown hunter"));
+        let unknown = check_hunter(Some("nmap")).unwrap_err();
+        assert!(unknown.contains("unknown hunter") && unknown.contains("shannon"), "{unknown}");
+    }
+
+    /// A stub model provider: every request answered with `decision` as the model's text, so
+    /// `validation::validate` makes a real host-side call and gets a deterministic verdict.
+    async fn stub_model(decision: &str) -> String {
+        let body = json!({"content": [{"type": "text", "text": decision}]}).to_string();
+        let router = axum::Router::new().fallback(move |_b: axum::body::Bytes| {
+            let body = body.clone();
+            async move {
+                axum::response::Response::builder()
+                    .status(200)
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    /// An executable stand-in for a hunter on PATH (the stub `npx` below).
+    fn write_exe(path: &FsPath, body: &str) {
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A Shannon report with one high finding, the shape `hunters::normalize(Sarif, ..)` reads.
+    const SARIF: &str = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"shannon","rules":[{"id":"SHANNON-001"}]}},"results":[{"ruleId":"SHANNON-001","level":"error","message":{"text":"SQL injection in the login endpoint"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app/auth.js"},"region":{"startLine":42}}}]}]}]}"#;
+
+    /// A `hunter: "shannon"` run end to end, with no network but a stub model provider: one colony
+    /// whose brief names the pinned `npx` command, a stub `npx` on PATH writing the seeded SARIF where
+    /// the host reads it, and the tick that validates it into the ledger and lands the run done.
+    #[tokio::test]
+    async fn a_shannon_run_files_the_sarif_its_colony_writes_as_one_validated_finding() {
+        let root = temp_root();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        // The validation call is real: the stub answers "real", so the SARIF finding is filed validated.
+        let url = stub_model(r#"{"real": true, "severity": "high", "reason": "the login query is built from raw input"}"#).await;
+        let config = serde_json::to_vec(&[json!({"id": "stub", "name": "Stub", "base_url": url, "auth": "none"})]).unwrap();
+        std::fs::write(root.join("config/providers.json"), config).unwrap();
+        let app = test_app(&root);
+        {
+            let mut modules = app.modules.write().await;
+            modules.agent.settings.insert("model".into(), json!("stub/anything"));
+        }
+
+        let mut req = new_run("acme/repo", Some(5), false);
+        req.hunter = Some("shannon".into());
+        let run = create(State(app.clone()), Json(req)).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Running);
+        assert_eq!(run.hunter, "shannon");
+        assert_eq!(run.hunters.len(), 1, "one colony, whatever the swarm size");
+        assert_eq!(run.hunters[0].module, "shannon");
+        assert_eq!(run.hunters[0].version.as_deref(), Some("3.3.0"), "the version is pinned");
+        let hunter = run.hunters[0].clone();
+
+        // Run the command straight from the brief, as the colony does, against a stub `npx` on PATH
+        // that refuses a wrong package and writes the seeded SARIF to the `-o` dir it was handed.
+        let dir = app.session_dir(&hunter.session_id);
+        let out = dir.join("out/shannon");
+        let instructions = app.session(&hunter.session_id).await.unwrap().instructions;
+        let line = instructions.lines().map(str::trim).find(|l| l.starts_with("npx ")).unwrap();
+        let command = line
+            .replace(SHANNON_TARGET, "http://127.0.0.1:3000")
+            .replace(SHANNON_OUT, &out.to_string_lossy());
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_exe(
+            &bin.join("npx"),
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in *@keygraph/shannon@3.3.0*) ;; *) exit 3 ;; esac\n\
+                 for a in \"$@\"; do [ \"$prev\" = \"-o\" ] && out=\"$a\"; prev=\"$a\"; done\n\
+                 mkdir -p \"$out\"\ncat > \"$out/report.sarif\" <<'SARIF'\n{SARIF}\nSARIF\n"
+            ),
+        );
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("PATH={}:$PATH {command}", bin.display()))
+            .status()
+            .unwrap();
+        assert!(status.success() && out.join(SHANNON_REPORT).is_file(), "the report landed");
+
+        // The colony ends; the tick ingests the SARIF, counts it and lands the run done.
+        app.update_session(&hunter.session_id, |s| s.status = SessionStatus::Merged)
+            .await;
+        tick_once(&app).await;
+        let run = get(State(app.clone()), Path(run.id.clone())).await.unwrap().0;
+        assert_eq!(run.state, RedTeamState::Done, "the run lands done");
+        let counts = &run.counts;
+        assert!(counts.found >= 1 && counts.validated >= 1, "validated: {counts:?}");
+        assert!(run.hunters[0].ingested, "the hunter is marked ingested");
+
+        // A second tick does not ingest it again: the run is over and the hunter is marked.
+        tick_once(&app).await;
+        let ledger = std::fs::read_to_string(dir.join("findings.jsonl")).unwrap();
+        assert!(ledger.contains("SQL injection in the login endpoint"), "{ledger}");
+        assert_eq!(ledger.matches("validated").count(), 1, "ingested once: {ledger}");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
