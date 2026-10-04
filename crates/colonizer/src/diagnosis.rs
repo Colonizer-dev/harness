@@ -81,7 +81,9 @@ fn one_line(text: &str) -> String {
         .join(" ")
 }
 
-fn shorten(text: &str) -> String {
+/// One line, controls and whitespace collapsed, cut at [`MAX_SUMMARY`] plus `…`. Shared with the
+/// resume brief's subagent report (boot.rs, issue #756), so both shorten the same way.
+pub(crate) fn shorten(text: &str) -> String {
     let line = one_line(text);
     if line.chars().count() > MAX_SUMMARY {
         format!("{}…", line.chars().take(MAX_SUMMARY).collect::<String>())

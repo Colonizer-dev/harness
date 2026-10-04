@@ -1,0 +1,2 @@
+/api/telemetry/usage                                 GET    unauth=401    token=owner            activity=-
+/api/telemetry/usage                                 PUT    unauth=401    token=owner            activity=settings.save

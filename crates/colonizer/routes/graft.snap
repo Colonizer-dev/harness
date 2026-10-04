@@ -1,0 +1,2 @@
+/api/plugins/graft                                   GET    unauth=401    token=owner            activity=-
+/api/plugins/graft/download                          POST   unauth=401    token=owner            activity=-

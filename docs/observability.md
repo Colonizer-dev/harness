@@ -6,3 +6,5 @@ configure it, and it holds no credential of its own — the header a backend wan
 
 - [Settings and privacy](observability/settings.md): the module's settings, how to turn it on and
   off, what is sent, and what is never sent.
+- [Architecture](design/observability.md): the design decisions behind it — ids and spans, byte
+  budgets, the per-org content opt-in, and why the exporter is a separate add-on.
