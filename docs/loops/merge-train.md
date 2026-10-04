@@ -19,11 +19,16 @@ Each run follows the rules an operator would follow by hand:
 2. **Merge only on fresh CI.** A pull request merges only when it is behind its base by 0 and every
    check on that exact head is green. GitHub's CLEAN is not enough: it can reflect CI that ran on an
    older base.
-3. **One at a time.** After a merge, the next candidate is updated onto the new base
-   (`update-branch`, once per run) and the run waits up to `ci_wait_minutes` (default 20) for its
-   CI and main's before re-checking. At most `max_merges` merges per repository per run (default 4,
-   overridable per repository), at least `cooldown_secs` (default 120) between two merges in a
-   repository, even across runs. Every GitHub call is paced (`min_call_gap_ms`, default 1 s) and
+3. **One at a time.** After a merge, every candidate still waiting in the run that shares a file
+   with the one merged is brought onto the new base at once (`update-branch`, or the host's
+   mechanical rebase — or `needs_redo` — when it now conflicts), so a file the train just touched
+   does not leave the candidates behind it stale for their turn — and a candidate updated after one
+   merge is updated again after the next. This stops at the merge cap: a merge that reaches
+   `max_merges` ends the run, so nothing more is fanned out. The run waits up to `ci_wait_minutes`
+   (default 20) for the head candidate's CI and main's before re-checking. At most `max_merges`
+   merges per repository per run (default 4, overridable per repository), at least `cooldown_secs`
+   (default 120) between two merges in a repository, even across runs. Every GitHub call is paced
+   (`min_call_gap_ms`, default 1 s) and
    budgeted (`max_api_calls`, default 400 per run); any 403 or 429, abuse-detection or
    secondary-rate-limit answer **stops the run** there and then, and nothing is retried — the rest
    waits for the next run.

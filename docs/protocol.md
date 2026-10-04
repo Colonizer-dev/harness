@@ -109,6 +109,7 @@ Every heading of the single-page protocol, in its original order, and the area f
 | <a id="64-ui-additions"></a>6.4 UI additions | [protocol/web-ui.md](protocol/web-ui.md#64-ui-additions) |
 | <a id="65-provider-gateway-v12-issue-5"></a>6.5 Provider gateway (v1.2, issue #5) | [protocol/providers.md](protocol/providers.md#65-provider-gateway-v12-issue-5) |
 | <a id="66-findings"></a>6.6 Findings | [protocol/findings.md](protocol/findings.md#66-findings) |
+| <a id="66b-colony-to-colony-coordination"></a>6.6b Colony-to-colony coordination | [protocol/findings.md](protocol/findings.md#66b-colony-to-colony-coordination) |
 | <a id="67-red-team-runs"></a>6.7 Red-team runs | [protocol/red-team.md](protocol/red-team.md#67-red-team-runs) |
 | <a id="68-spend-per-org-and-per-day"></a>6.8 Spend (per org and per day) | [protocol/spend.md](protocol/spend.md#68-spend-per-org-and-per-day) |
 | <a id="get-apispendhistorydays30"></a><a id="get-apispendhistorydays30tz_offset_minutes0"></a>`GET /api/spend/history?days=30&tz_offset_minutes=0` | [protocol/spend.md](protocol/spend.md#get-apispendhistorydays30tz_offset_minutes0) |
