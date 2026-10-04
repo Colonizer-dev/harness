@@ -93,9 +93,10 @@ the pane uses — `GET /api/update` and `POST /api/update/apply`. Neither
 downloads anything itself: the mothership runs `scripts/install-release.sh`,
 shipped inside the app, which is the same installer the one-line install command
 runs. The download is checked against the release's `SHA256SUMS`, and against
-the build attestation when `gh` can reach a verdict. The installer gets 20
-minutes; past that the update is marked failed and the running version is left
-as it was.
+the build attestation when `gh` can reach a verdict — `gh` must be installed
+and logged in; the mothership passes the installer the GitHub token saved in
+settings when the environment carries none. The installer gets 20 minutes; past
+that the update is marked failed and the running version is left as it was.
 
 What happens, in order:
 
@@ -186,6 +187,7 @@ the same reason:
 | Running without an installed app directory | Same |
 | This is a development build (`v0.1.5-60-gd62bfb2`, a modified tree, or no tag): a release would replace work it does not contain | Update it from its checkout: `git pull && scripts/install.sh --install` |
 | Running `v0.1.6`, newer than the latest release `v0.1.5`: installing it would be a downgrade | Wait for a newer release, or pass `--force` to install `v0.1.5` anyway |
+| Provenance could not be checked because `gh` is not logged in (a note, or an update failure under `COLONIZER_REQUIRE_ATTESTATION=1`) | Run `gh auth login`, or set `GH_TOKEN`; the mothership passes the GitHub token saved in settings to the installer when the environment carries none |
 
 A source checkout is meant to be updated with git. Saying so is better than
 half-applying something.
