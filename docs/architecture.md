@@ -483,8 +483,9 @@ one Merge-train row per repository: next up, waiting on CI, needs rebase, skippe
 
 The **merge-train loop** ([loops.md](loops.md#merge-train), `merge_loop.rs`, issue #754) is the
 careful, scheduled driver for the same train: off by default, hourly, only in opted-in repositories,
-and — unlike the tick — it updates the next candidate after a merge and waits for its fresh CI, caps
-merges per run, spaces them with a cooldown, paces and budgets its GitHub calls and stops on any
+and — unlike the tick — after a merge it brings onto the new base every candidate of the run that
+shares a file with the one merged and waits for the head's fresh CI, caps merges per run, spaces
+them with a cooldown, paces and budgets its GitHub calls and stops on any
 403/429 or secondary rate limit, turns a conflicting mechanical rebase into `needs_redo` (and at
 most one redo colony), and can self-heal a main the train itself turned red. It reuses the train's
 `decide`, guards and merge invocation; a repository it drives is skipped by the tick.

@@ -144,6 +144,7 @@ this machine and read the same environment the mothership does:
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
+| `colonizer hotspots [--days N] [--top N]` | Ranks the files merged pull requests touched most, from a git repository on this machine ([docs/cli.md](cli.md)) |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
 

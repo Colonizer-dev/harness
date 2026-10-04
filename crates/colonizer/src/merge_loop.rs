@@ -8,8 +8,10 @@
 //!    is a wait too, never red.
 //! 2. **Merges only on fresh CI.** A pull request merges only when it is behind its base by 0 and
 //!    every check on that exact head is green; GitHub's CLEAN alone is not enough.
-//! 3. **Goes one at a time.** After a merge the next candidate is updated onto the new base and the
-//!    run waits (bounded) for its CI before re-checking. A per-run merge cap, a per-repository
+//! 3. **Goes one at a time.** After a merge every remaining candidate of the run that shares a file
+//!    with the one merged is brought onto the new base at once, so a file the train just touched does
+//!    not leave the candidates behind it stale for their turn, and the run waits (bounded) for the
+//!    head candidate's CI before re-checking. A per-run merge cap, a per-repository
 //!    cooldown between merges, a budget and a minimum gap for GitHub calls keep it gentle, and any
 //!    403/429, abuse or secondary-rate-limit answer stops the run on the spot — no retry.
 //! 4. **Merges only what it may:** colony pull requests (`colonizer/*` branches the mothership
@@ -809,6 +811,14 @@ fn title_of(s: &Session, reading: Option<&Reading>) -> String {
         .unwrap_or_else(|| s.issue_title.clone())
 }
 
+/// Whether two pull requests touched any of the same files. Plainer than the supersession test in
+/// `supersede.rs`, which asks whether two colonies are the *same* piece of work: here it only asks
+/// whether a merge could leave the other behind — or in conflict — the moment its turn comes. A
+/// side whose file list was never read cannot be said to overlap.
+fn shares_files(a: &[String], b: &[String]) -> bool {
+    !a.is_empty() && !b.is_empty() && a.iter().any(|p| b.contains(p))
+}
+
 struct Engine<'a, O: Ops> {
     ops: &'a O,
     cfg: &'a Settings,
@@ -910,7 +920,12 @@ impl<'a, O: Ops> Engine<'a, O> {
             }
         });
         let mut merges = 0u32;
-        let mut updated: HashSet<String> = HashSet::new();
+        // Which base tip each pull request was last updated onto, keyed per pull request *and* per
+        // tip (`""` is the main the run started on). A candidate brought up to date after one merge
+        // is brought up to date again after the next; while it still reads behind on the same tip,
+        // chasing it is the burst this loop exists to avoid.
+        let mut updated_on: BTreeMap<String, String> = BTreeMap::new();
+        let mut tip = String::new();
         let mut rounds = 0u32;
         loop {
             rounds += 1;
@@ -1064,6 +1079,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                         Ok(sha) => {
                             merges += 1;
                             let at = self.ops.now();
+                            tip = sha.clone().unwrap_or_else(|| format!("merge-{merges}"));
                             mem.last_merge_at = Some(at);
                             mem.last_train_merge = Some(TrainMerge {
                                 pr_url: s.pr_url.clone().unwrap_or_default(),
@@ -1077,6 +1093,55 @@ impl<'a, O: Ops> Engine<'a, O> {
                                 Action::Merged,
                                 format!("squash-merged: behind {base} by 0, every check on its head green, {base} green"),
                             );
+                            // Rule 3, and why the train does not leave the rest stale: a file this
+                            // merge touched may be one another candidate of the run also touched, so
+                            // its turn would find it behind — or in conflict — through no fault of
+                            // its own. Each such candidate is read again (the base just moved) and
+                            // brought onto the new base now: a conflicted one takes the mechanical
+                            // rebase, a behind one is updated in place. Its own failure is recorded
+                            // against it, and the run carries on with the others.
+                            for t in behind_head {
+                                // A merge that reached the cap ends the run: nothing more may merge,
+                                // so fanning the rest onto the new base would only wait out CI it can
+                                // no longer use. `Plan::Update` and the dry run stop at the cap too.
+                                if merges >= cap {
+                                    break;
+                                }
+                                if !shares_files(&s.changed_paths, &t.changed_paths) {
+                                    continue;
+                                }
+                                let reading = match gh!(self, self.ops.read_pr(t, &base)) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        items.add(t, &t.issue_title, Action::Waiting, e);
+                                        continue;
+                                    }
+                                };
+                                let title = title_of(t, Some(&reading));
+                                if reading.facts.info.mergeability == Mergeability::Conflicted {
+                                    let (action, why) = self.conflict(t, &base, mem).await?;
+                                    items.add(t, &title, action, why);
+                                    continue;
+                                }
+                                let behind = reading.facts.info.mergeability == Mergeability::Behind
+                                    || reading.facts.behind_base.is_some_and(|n| n > 0);
+                                if !behind {
+                                    continue;
+                                }
+                                let head_oid = reading.facts.info.head_ref_oid.clone().unwrap_or_default();
+                                if head_oid.is_empty() {
+                                    items.add(t, &title, Action::Waiting, "its head commit is unknown");
+                                    continue;
+                                }
+                                match gh!(self, self.ops.update_branch(t, &head_oid)) {
+                                    Ok(()) => {
+                                        updated_on.insert(t.id.clone(), tip.clone());
+                                    }
+                                    Err(e) => {
+                                        items.add(t, &title, Action::Waiting, format!("updating the branch failed ({e})"));
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             items.add(s, &title, Action::Waiting, format!("the merge failed ({e})"));
@@ -1102,9 +1167,11 @@ impl<'a, O: Ops> Engine<'a, O> {
                         items.add(s, &title, Action::Waiting, "its head commit is unknown");
                         return Ok(None);
                     }
-                    // One update per pull request per run: still behind after it means the base
-                    // moved again, and chasing it is the burst this loop exists to avoid.
-                    if updated.contains(&s.id) {
+                    // One update per pull request per base tip: still behind after it means GitHub
+                    // has not caught up with the tip it is already on, and chasing it is the burst
+                    // this loop exists to avoid. A base that moved again is a new tip, and updating
+                    // onto that is the point of the guard being keyed by tip rather than by run.
+                    if updated_on.get(&s.id) == Some(&tip) {
                         items.add(
                             s,
                             &title,
@@ -1117,7 +1184,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                         items.add(s, &title, Action::Waiting, format!("updating the branch failed ({e})"));
                         return Ok(None);
                     }
-                    updated.insert(s.id.clone());
+                    updated_on.insert(s.id.clone(), tip.clone());
                     match self.wait_ci(s, repo, &base).await? {
                         Waited::Settled | Waited::MainRed => continue,
                         Waited::Timeout => {
@@ -1134,7 +1201,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                     }
                 }
                 Plan::WaitCi => {
-                    let action = if updated.contains(&s.id) {
+                    let action = if updated_on.get(&s.id) == Some(&tip) {
                         Action::Updated
                     } else {
                         Action::Waiting

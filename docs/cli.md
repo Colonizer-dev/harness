@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `open`, `login-item`, `telemetry`, `hotspots`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -62,7 +62,21 @@ colonizer update --force      # also over a development build, or a build newer 
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)
 colonizer telemetry show      # anonymous usage reporting (on, off; no network, no daemon needed)
+colonizer hotspots            # the files merged pull requests touched most, over the last 30 days
+colonizer hotspots --days 7 --top 5      # a shorter window, fewer files
+colonizer hotspots --repo acme/app       # a repository's mirror instead of the current directory
 ```
+
+`hotspots` reads a git repository on this machine — no mothership — and ranks the files its
+merged pull requests touched most often: a header naming the window and the pull requests
+counted, then one `<count>  <path>` line per file, busiest first. It counts *distinct* pull
+requests, so one pull request editing a file many times counts once, and it drops the
+always-touched noise (`CHANGELOG.md`, `changelog.d/`, `Cargo.lock`, `*routes.snap`). `--days`
+sets the window (30 by default), `--top` how many files (15). The source is the repository in the
+current directory unless `--repo owner/repo` names a mirror in this machine's data dir or
+`--git-dir PATH` names a git directory (a mirror, or a worktree's `.git`); the two refuse to
+combine. The report is where parallel colonies collide and what to split; `--json` prints
+`{days, pull_requests, files}`.
 
 Colonies — the ids are what `list` and the cockpit show:
 
@@ -254,10 +268,11 @@ the `token` and `loop` commands; `logs` prints one JSON event per line, with or 
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
 stored map document — or, with `--find`, the search result — `fleet export --preview` and
-`fleet import <file> --preview` the bundle's manifest, and `answer` echoes the answer body
+`fleet import <file> --preview` the bundle's manifest, `hotspots` its `{days, pull_requests,
+files}` report, and `answer` echoes the answer body
 it sent. Scripts should prefer it to parsing the human columns. The local commands with no JSON
-rendering refuse it, like the two host flags above; `fleet export` and `fleet import` are local
-but do have one.
+rendering refuse it, like the two host flags above; `fleet export`, `fleet import` and `hotspots`
+are local but do have one.
 
 ## Exit codes
 
