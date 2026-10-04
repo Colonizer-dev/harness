@@ -1906,7 +1906,10 @@ pub(crate) async fn create_github_issue(app: &App, tag: &str, req: &NewIssue) ->
     )
     .await;
     let _ = tokio::fs::remove_file(&body_path).await;
-    let filed = filed.map_err(|e| client_error(StatusCode::BAD_GATEWAY, &format!("gh could not file the issue: {e:#}")))?;
+    let filed = filed.map_err(|e| {
+        let e = crate::github::write_denied(&format!("file the issue in {}", req.repo), "Issues: write", e);
+        client_error(StatusCode::BAD_GATEWAY, &format!("{e:#}"))
+    })?;
     if !filed.skipped.is_empty() {
         eprintln!(
             "issues: filed {} without the Source label(s) {} (they could not be created or added)",

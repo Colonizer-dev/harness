@@ -495,6 +495,24 @@ pub async fn access_error(app: &App, repo: &str, error: anyhow::Error) -> anyhow
     }
 }
 
+/// Rewrites a failed GitHub write (opening a pull request, filing an issue) into something
+/// actionable when it looks like a missing scope or a dead token: by the time a colony writes,
+/// the same credential has already worked for reads, so a 401/403 here means it cannot write
+/// rather than that it is wrong outright. `action` should read naturally after "GitHub refused
+/// to ", e.g. "open the pull request for o/r".
+pub fn write_denied(action: &str, needed: &str, error: anyhow::Error) -> anyhow::Error {
+    let raw = format!("{error:#}");
+    if matches!(classify(&raw), Some(Denial::BadCredential)) {
+        anyhow!(
+            "GitHub refused to {action}. The token may be missing {needed}, or may have been revoked \
+             — add the scope (or paste a fresh token) in Settings → Connections, then try again. \
+             (GitHub said: {raw})"
+        )
+    } else {
+        anyhow!("gh could not {action}: {raw}")
+    }
+}
+
 /// Whether a failed boot-step read looks transient — a blip worth riding out rather than a
 /// verdict.
 ///
@@ -2270,7 +2288,13 @@ impl PublishOps for GitPublishOps<'_> {
         if draft {
             create.arg("--draft");
         }
-        let pr = exec(&mut create).await?;
+        let pr = exec(&mut create).await.map_err(|e| {
+            write_denied(
+                &format!("open the pull request for {}", self.s.repo),
+                "Contents: write and Pull requests: write",
+                e,
+            )
+        })?;
         Ok(pr
             .lines()
             .rev()
@@ -3095,6 +3119,33 @@ mod tests {
         );
         // Anything else keeps its own message rather than being dressed up as an access problem.
         assert_eq!(classify("error connecting to api.github.com: dial tcp: i/o timeout"), None);
+    }
+
+    #[test]
+    fn write_failures_name_the_scope_or_keep_their_own_words() {
+        use super::write_denied;
+        // A 403 on a write that reads already worked: the token cannot write, so the message names
+        // the scope and where to add it rather than echoing `gh`'s line alone.
+        let friendly = write_denied(
+            "open the pull request for o/r",
+            "Contents: write and Pull requests: write",
+            anyhow::anyhow!("`gh pr create ...` failed (exit status: 1): gh: Resource not accessible (HTTP 403)"),
+        )
+        .to_string();
+        assert!(friendly.contains("Contents: write and Pull requests: write"), "{friendly}");
+        assert!(friendly.contains("Settings → Connections"), "{friendly}");
+
+        // Anything `classify` does not recognise keeps its own words under a consistent prefix.
+        let fallback = write_denied(
+            "open the pull request for o/r",
+            "Contents: write and Pull requests: write",
+            anyhow::anyhow!("error connecting to api.github.com: dial tcp: i/o timeout"),
+        )
+        .to_string();
+        assert_eq!(
+            fallback,
+            "gh could not open the pull request for o/r: error connecting to api.github.com: dial tcp: i/o timeout"
+        );
     }
 
     #[test]

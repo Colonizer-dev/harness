@@ -402,6 +402,20 @@ Each of these is used only when nothing is saved for it in Settings. A saved val
 
 A login item does not carry any of these ([above](#desktop-install-the-cockpit-as-an-app-start-at-login)).
 
+### GitHub token scopes
+
+Colonizer asks for only as much GitHub access as the feature in front of it needs. Start with a
+read-only token, or a plain `gh auth login` session. The first time a feature needs write access,
+Colonizer prompts for the exact scope to add instead of failing with a raw `gh` error.
+
+| Feature | Minimum scope |
+| :--- | :--- |
+| Issue intake and scouting (reading issues, browsing repositories) | Read-only: `Issues: read`, `Contents: read`. A classic PAT needs no scopes at all for public repositories |
+| Filing an issue | `Issues: write` |
+| Publishing a pull request | `Contents: write`, `Pull requests: write` |
+
+A token that is missing a scope gets a message naming exactly what to add, not a stack trace.
+
 ### Client commands
 
 `COLONIZER_TOKEN` is the API token the client commands (`list`, `launch`, `mcp` and the rest) send.
