@@ -1,0 +1,10 @@
+/api/redteam/runs                                    GET    unauth=401    token=owner            activity=-
+/api/redteam/runs                                    POST   unauth=401    token=owner            activity=redteam.start
+/api/redteam/runs/{id}                               GET    unauth=401    token=owner            activity=-
+/api/redteam/runs/{id}/report                        GET    unauth=401    token=owner            activity=-
+/api/redteam/runs/{id}/stop                          POST   unauth=401    token=owner            activity=redteam.stop
+/api/redteam/runs/{id}/synthesize                    POST   unauth=401    token=owner            activity=-
+/api/redteam/schedules                               GET    unauth=401    token=owner            activity=-
+/api/redteam/schedules                               POST   unauth=401    token=owner            activity=redteam.schedule
+/api/redteam/schedules/{id}                          DELETE unauth=401    token=owner            activity=redteam.unschedule
+/api/redteam/schedules/{id}                          PUT    unauth=401    token=owner            activity=redteam.schedule

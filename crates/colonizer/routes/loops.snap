@@ -1,0 +1,6 @@
+/api/loops                                           GET    unauth=401    token=read             activity=-
+/api/loops                                           POST   unauth=401    token=launch           activity=loop.create
+/api/loops/{id}                                      DELETE unauth=401    token=launch           activity=loop.delete
+/api/loops/{id}                                      PUT    unauth=401    token=launch           activity=loop.update
+/api/loops/{id}/run-now                              POST   unauth=401    token=launch           activity=loop.run_now
+/api/loops/{id}/runs                                 GET    unauth=401    token=read             activity=-

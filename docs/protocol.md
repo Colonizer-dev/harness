@@ -307,7 +307,7 @@ sign-in cookie; a cookie write also needs a same-origin `Origin`. Without either
 which authenticates by the one-time token in its body (below). A request naming a Host
 that is not allowed is **403** whatever it carries. A paired phone's cookie (Add your phone, below)
 authenticates like the owner's, except that its writes to `/api/phone`, `/api/tokens`,
-`/api/remote` and `/api/fleet` are **403**. `crates/colonizer/routes.snap` is the complete route
+`/api/remote` and `/api/fleet` are **403**. `crates/colonizer/routes/` is the complete route
 table: each method and path with what an unauthenticated request gets, which scoped-token
 class reaches it (Scoped API tokens, below) and the activity-log kind it records (§6.9). Routes
 not named in a scoped-token class are owner only.
@@ -316,7 +316,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 
 | Method & path | Purpose |
 | --- | --- |
-| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`/`draining` (whether the queue is held back while an update or a restart waits for the colonies still in flight, issue #880; absent from older builds, i.e. not draining). `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (routes.snap marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures, microVM counts and `kvm_ok`, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
+| `GET /api/status` | Connections (GitHub, Claude), sandbox, mesh summary, storage health: `storage` is `{ok: true}` while every write was confirmed and `sessions.json` loaded whole, else one alert `{ok, kind, message, ts, failures, recovered_at}`. `kind: "write"` is the latest failed write, `failures` counting the failed writes: `ok: false` with `recovered_at: null` while writes are failing, then `ok: true` with `recovered_at` set once one goes through again. The alert itself is sticky until a restart — `message`, `ts` and the cumulative `failures` stay, because the gap happened — and a new failure sets `ok: false` again. `kind: "load_damage"` is a `sessions.json` found damaged at startup, its `message` naming the `.corrupt-<ts>` copy: `ok: true` (writes go through) but `recovered_at` stays `null`, because the colonies it lost do not come back, and `failures` is always `1` (not a write count). An `orgs.json` or `providers.json` that will not parse raises the same kind while it lasts (defaults are in effect meanwhile); that alert takes precedence and clears as soon as the file reads cleanly again. A write failure that has not recovered is shown in its place, and the load damage is shown again once writes recover. Also carries `runtime` (below): whether this machine can boot a colony at all, `host` (below): what kind of machine it is and how full it is, and top-level `version`/`queue_depth`/`draining` (whether the queue is held back while an update or a restart waits for the colonies still in flight, issue #880; absent from older builds, i.e. not draining). `storage` also carries the last queue-tick free-space verdict: `free_bytes` (null before the first reading or when `df` fails), `warn_free_bytes` and `min_free_bytes` (0 = off), `low_disk` (below the higher of the two) and `admission_paused` (below the floor, so the queue holds new colonies). The `runtime` and `host` probes are cached for 10 s, `?fresh=1` re-probes them. Without the API token (the route table marks this route public) the answer is a reduced allowlist: `version`, `queue_depth`, `host` capacity figures, microVM counts and `kvm_ok`, `runtime.platform`/`runtime.os`, `storage.ok`, `runner.last_tick_age_s` and, on a fleet member, `fleet_sync` (issue #764) — never repositories, orgs, hostnames, host ids or accounts |
 | `GET /api/hosts` | Fleet visibility (below): `{"hosts": [HostSummary, ...]}`, this host first, then one row per `COLONIZER_FLEET_PEERS` entry and per fleet peer (Fleet pairing, below), polled on request. The one route a `fleet`-scoped token reaches, with `POST /api/fleet/peer/leave` |
 | `GET /api/fleet` | This mothership's fleet view (Fleet pairing, below): `{role, invites, pending, members, membership, joining}` (`membership` carries `history_sync`, the history push's consent) — everything the Settings → Fleet pane renders. Each member carries `health` (Member health, below) |
 | `POST /api/fleet/invites` · `DELETE /api/fleet/invites/{id}` | Mint a single-use invite — `{id, code, expires_at}`, the code shown once and kept only as SHA-256, 15 minutes to live; **409** while this mothership is itself in a fleet — and revoke an open one |
@@ -384,6 +384,7 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `POST /api/sessions/{id}/publish` | Publish the colony's own `colonizer/…` branch (never the base or default branch). A live colony is stopped and its microVM removed first; a `stopped`, `failed` or `no_changes` colony that kept its worktree publishes directly, with no new microVM. Each step runs only if it is still needed: commit only what is uncommitted (co-authored by Colonizer Settlers), push only when origin is behind, reuse an open PR instead of opening a second one, so a publish that failed part-way can just be retried. It answers the `Session` at once and publishes in the background. Only a `running`, `waiting_for_answer` or `idle` colony counts as live here; any other state, or a colony whose worktree is gone, is a **409**. The commit and the pull request body both carry the configured co-author trailer (`publish.co_author` in colonizer.toml, Colonizer Settlers by default — see README). **409** while external writes are blocked (`COLONIZER_NO_EXTERNAL_EFFECTS` / `COLONIZER_NO_WRITE`, §6.3) or the colony is suspended ([#562] — its microVM is gone by design and a held answer must stay restorable), before any of this runs; a suspended colony publishes once it is answered or resumed |
 | `POST /api/sessions/{id}/stop` | Stop and remove the VM, keep the worktree; a `queued` colony just leaves the queue. Answers the `Session` plus a `result`: `stopped` when this call stopped a live or queued colony, `already_stopped` — still a **200**, with `status` left as it was — for one already `stopped`, `failed`, `pr_opened`, `merged`, `closed` or `no_changes`, so a retried stop is not an error. **409** while `publishing`; **404** for an unknown colony |
 | `POST /api/sessions/{id}/resume` | Boot a fresh microVM on the kept worktree and brief the agent to continue (`stopped`/`failed`/`parked` colonies that still have their worktree, or a suspended colony waiting for an answer; **409** otherwise). Past the parallel limit the colony comes back `queued` (worktree kept) and boots when a slot frees. A superseded colony that is not kept is a **409** until it is kept (*Superseded colony work*, below) |
+| `POST /api/sessions/{id}/switch-agent` | `{module}` — switch the colony to another agent module mid-task ([#737]): a live colony is stopped, the stored conversation is converted from the source module's transcript to the target's with [txcript](https://crates.io/crates/txcript), written where the target runner resumes from, and the colony is booted on the target with a first turn telling the new agent it is continuing another agent's session (`switch_note`, below). Only `claude-code` ↔ `codex` are supported — the pairs txcript maps both ways — so an unsupported target, an unknown one, a target module that declares no `session_resume.dir` (its converted transcript would have nowhere to land), and a colony already on the target module are all a **400**. A queued colony, one mid-publish, one already over, one suspended waiting on an answer (the stop would discard it), one whose worktree is gone or was cleaned up, and one superseded but not kept (`resume` would refuse any of them) are a **409**. A restricted colony whose target module reaches no eligible provider is a **403** — the switch is never laxer than launching the colony on that module (*Sensitivity*, [providers.md](providers.md)). Losses are reported only as a heuristic (source and target record counts plus a per-direction caveat), never an exact figure |
 | `POST /api/sessions/{id}/keep` | Marks a superseded colony as kept (issue #673; *Superseded colony work*, below): `superseded.kept` goes true and the queue starts it as slots free. The supersession record itself stays, so the history still says what covered this work. **409** for a colony that is not superseded, or was kept already; **404** for an unknown colony |
 | `POST /api/sessions/{id}/cleanup` | Remove worktree + local branch. **409** while the colony is live, queued or publishing. Like automatic reclamation, the colony becomes unresumable: resume needs the worktree |
 | `POST /api/sessions/{id}/retain` | `{keep}` (default `true`) opts this colony's worktree out of (`true`) or back into (`false`) automatic reclamation → `Session` |
@@ -394,14 +395,14 @@ REST (JSON, errors as `{"error": "…"}` with a 4xx/5xx status):
 | `GET /api/sessions/{id}/behind` | How far the colony's branch is behind its base, after a best-effort fetch: `{behind_by, base, branch}`; `behind_by` and `base` are `null` for a colony with no base |
 | `POST /api/sessions/{id}/catch-up` | Merges the colony's base (`origin/<base>`, or the local branch for a stacked colony) into its worktree, as the `gh` user: `{session, merged, conflicts: [path], behind_by}`. A conflicting merge answers `merged: false` and leaves the conflicts in the worktree to resolve. **409** while the colony is queued, starting, running or publishing (stop it first), when it is merged or closed, has no worktree or base, or has uncommitted tracked changes; **502** when the fetch fails, so a stale base is never merged |
 | `GET /api/merge-train` | The merge train's view ([architecture.md](architecture.md#merge-train)), per repository it could merge in: `{"repos": [{repo, state: "on"\|"off"\|"denied", base\|null, base_ci: "green"\|"pending"\|"failing"\|"unknown", checked_at, last_merge: {pr_url, at}\|null, prs: [{session, pr_url, title, status: "next"\|"waiting_ci"\|"needs_rebase"\|"waiting"\|"skipped"\|"merged", reason}]}]}`. `state` is `"denied"` for a repository whose org sits on `merge_train_deny_orgs`; `base` is `null` when the train is off or denied for the repository, or its default branch could not be read; `reason` names why a pull request is waiting or was skipped — draft, a HOLD / do-not-merge / WIP label or title, checks pending, behind the base, a refused author or attribution, a colony superseded by another merge and not kept (issue #673). Read scope for API tokens |
-| `GET /api/merge-train/loop` | The merge-train loop (issue #754, [loops.md](loops.md#merge-train)): `{settings, next_run_at, running, writes_blocked, repos: {"owner/repo": {paused, last_merge_at, last_train_merge, needs_redo, redo_dispatched, …}}, last_report, history}`. `settings` is `{enabled, cadence, allow, never, max_merges, repo_max_merges, cooldown_secs, ci_wait_minutes, ci_poll_secs, flaky_checks, self_heal, revert_on_red, redo_on_conflict, max_api_calls, min_call_gap_ms, held}`; a report is `{started_at, finished_at, dry_run, forced_dry_run, stopped, api_calls, summary, lines, repos: [{repo, main, paused, heal, items: [{session, pr_url, title, action: "merged"\|"updated"\|"rebased"\|"red"\|"rerun"\|"needs_redo"\|"redo_dispatched"\|"waiting"\|"skipped", reason}]}]}`; `history` is newest first. Read scope for API tokens |
+| `GET /api/merge-train/loop` | The merge-train loop (issue #754, [loops.md](loops.md#merge-train)): `{settings, next_run_at, running, writes_blocked, repos: {"owner/repo": {paused, last_merge_at, last_train_merge, needs_redo, redo_dispatched, local_failed, resolving: {pr_url: {colony, attempts, base_sha, at, labeled, gave_up}}, ci_unavailable, …}}, last_report, history}`. `settings` is `{enabled, cadence, allow, never, max_merges, repo_max_merges, cooldown_secs, ci_wait_minutes, ci_poll_secs, flaky_checks, self_heal, revert_on_red, redo_on_conflict, max_api_calls, min_call_gap_ms, held, local_checks, resolve_conflicts, resolve_attempts}`; a report is `{started_at, finished_at, dry_run, forced_dry_run, stopped, api_calls, summary, lines, notices, repos: [{repo, main, paused, heal, ci_unavailable, ci_ran, items: [{session, pr_url, title, action: "merged"\|"updated"\|"rebased"\|"red"\|"rerun"\|"needs_redo"\|"redo_dispatched"\|"resolving"\|"waiting"\|"skipped", reason}]}]}`; `history` is newest first. Read scope for API tokens |
 | `PUT /api/merge-train/loop` | Replaces the loop's settings (the same shape); out-of-range limits, a malformed `allow`/`never` entry or `revert_on_red` without `self_heal` are a `400`. Switching it on books the next run one cadence away. Owner only |
 | `POST /api/merge-train/loop/run[?dry_run=true]` | A dry run (or any run while external writes are blocked) answers `{started: false, report}`; a real run starts in the background and answers `{started: true}`, `409` while one is going. Owner only |
 | `GET /api/sessions/{id}/egress` | What the colony's last boot was allowed to reach, as written to `<data>/sessions/<id>/egress.json`: `{mode: "open"\|"allowlist", allow, block, sources: {mode: "global"\|"org", allow (may list "module"), block}, module: {agent, allow}\|absent, always_blocked, rules, profiles, applied_at}` ([sandbox-network.md](sandbox-network.md#hosts-an-agent-module-declares)). `module` names the running agent module and the `egress` hosts it added to the allow list (#601); it is absent in `open` mode and for a module that declared nothing of its own. **404** for a colony booted before the record existed |
 | `GET /api/storage` | Disk breakdown plus the reclamation ledger: `reclaimable` (due next), `unpushed` (never auto-deleted), `orphans` (see below). Also carries `warn_free_bytes` and `admission_paused`. `totals` breaks the data dir down by category — `worktrees_bytes`, `repos_bytes`, `sessions_bytes` and `archive_bytes` (the log archive under `<data_dir>/archive`, [colonies.md](colonies.md#the-log-archive)) — plus `totals.microsandbox_bytes`: the size of microsandbox's home directory (`$MSB_HOME`, default `~/.microsandbox`), which holds the shared image cache — informational, never reclaimed (null when unknown) |
 | `GET /api/stream` | Cockpit push channel (below): one WebSocket per open tab, full snapshots then deltas |
 | `GET /api/redteam/runs` · `GET /api/redteam/runs/{id}` | `RedTeamRun` list / one (§6.7) |
-| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters); `strix` and `shannon` are known hunter modules that runs do not drive yet, so they are a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
+| `POST /api/redteam/runs` | `{repo, hunter?, model?, subagent_model?, swarm_size?, modules?, autofix?, arm?, preset?}` → `RedTeamRun`. `preset` is `general` (the default) or `security` (**400** otherwise; see [red-team.md](red-team.md#the-security-preset)). `hunter` is `swarm` (the default: colony hunters) or `shannon` (one colony per repository running the pinned `npx` Shannon, whose `report.sarif` the host reads back through validation); `strix` is a known hunter module that runs do not drive yet, so it is a **400** naming why. `model` / `subagent_model` become each hunter's `model_override` / `subagent_model_override`, validated the same way; the run records `hunter`, `model`, `subagent_model` and `schedule_id` (set when a schedule started it). With `arm` unset/`false` the run launches its hunters immediately and is refused with a **409** naming the count while any colony is live; with `arm: true` it is created `armed` and the tick launches it the next time no colony is live. `swarm_size` defaults to 3 and must be 1–8 (**400** otherwise); an unknown entry in `modules` is a **400** too. **409** when another run for the same repository is still active |
 | `GET /api/redteam/schedules` | `[RedTeamSchedule]`: `{id, org, repos, hunter, swarm_size, model, subagent_model, autofix, preset, cadence, enabled, next_run_at, last_run_at, last_result, created_at}`, saved in `<config_dir>/redteam-schedules.json`. `cadence` is UTC: `{"every":"weekly","weekday":0-6 (Monday=0),"hour","minute"}` or `{"every":"monthly","day":1-31,"hour","minute"}`; a monthly day past the month's end fires on its last day. Once a minute the mothership fires every enabled schedule whose `next_run_at` has passed: one `arm: true` run per repository through the same path as `POST /api/redteam/runs` (a repository with an active run is skipped), then records `last_run_at`, `last_result` (per repository: started, or why not) and the next `next_run_at` |
 | `POST /api/redteam/schedules` | `{org, repos, cadence, hunter?, swarm_size?, model?, subagent_model?, autofix?, preset?, enabled?}` → `RedTeamSchedule`, validated like a run (every repo must be in `org`; cadence ranges checked; **400** otherwise). `enabled` defaults to true |
 | `PUT /api/redteam/schedules/{id}` | Same body; replaces the settings, keeps `id`, `created_at` and the last firing, and recomputes `next_run_at`. **404** for an unknown schedule |
@@ -468,7 +469,7 @@ routed together).
   `GET /api/maps/…` reads, `GET /api/merge-train`, `GET /api/merge-train/loop`, `GET /api/supply-chain-loop`,
   `GET /api/ts-any-loop`, `POST /api/sessions/{id}/seen` (looking is not driving), and `GET /api/tokens/self`. The terminal
   WebSocket is owner only.
-- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|keep|prewarm`. Over the
+- `operate` adds driving colonies that exist: `POST /api/sessions/{id}/answer|messages|stop|resume|keep|prewarm|switch-agent`. Over the
   events WebSocket its commands work; a `read` token's commands are refused with a warn on the
   transcript, and no scope may switch a colony's model — that stays with the owner.
 - `launch` adds starting colonies — `POST /api/sessions`, and loops of its own: `POST /api/loops`,
@@ -528,7 +529,7 @@ All owner only. Tokens are never sent back to the browser.
 | `POST /api/push/answer` | A question notification's button tap as an answer: `{"token", "choice": <label>}` or `{"token", "other": <text>}` → `{answered}`. The token is minted as the question push is built — a question is notification-answerable only when it is the colony's exactly-one open question, single-select, with one to three options; any other question, and every device whose `answer_actions` preference is off, gets an empty `answer` and the notification only opens the cockpit (no token is minted when no receiving device shows buttons). The token is random and single-use (first tap wins — one token per push, so a second subscribed device's tap answers **401**), the mothership keeps only its SHA-256, in memory: it works for that colony and question only, expires after 24 hours or when the question closes or is replaced, and is gone on a restart. It is never an API token, and it is this route's only credential — no cookie or bearer is read (the Host allowlist above still applies). The answer rides the same path as `POST /api/sessions/{id}/answer`, so a suspended colony holds it until restore. **401** for an unknown, spent or expired token; **409** when the colony is no longer asking that question — answered in the cockpit first (exactly one answer lands), or a new question under the same id, since the token also pins the question's content — which burns the token or cannot take an answer; **400** for a bad body or a choice the push never offered; **404** for a colony that no longer exists |
 | `GET /api/archive` | The local log archive: when a colony ends, its session directory is packed to `<data>/archive/<org>/<repo>/<yyyy>/<mm>/<id>.tar.zst` (a later change adds `<id>.r2.tar.zst`, and so on), with a `.json` sidecar. `{root, count, bytes, entries: [{session, repo, org, issue, title, status, pr_url, cost_usd, model_usage, model_tier, agent, created_at, updated_at, archived_at, mothership, revision, bundle, bytes, fingerprint}]}`, newest first |
 | `POST /api/archive/retention` | The only thing that deletes from the archive. `{keep_days?, max_gb?, allow_single_copy? = false, dry_run? = true, expect?}`: plans the bundles older than `keep_days`, then the oldest until the archive fits `max_gb` (1 GB = 10⁹ bytes); neither limit, nothing planned. `{dry_run, remove: [{bundle, session, bytes, archived_at}], count, bytes, kept_single_copy}`. Without `allow_single_copy: true` nothing is removed, only counted in `kept_single_copy`. Applying (`dry_run: false`) needs `expect` set to the preview's `bundle` list: **409** when the plan changed since, **400** without it or for a negative limit |
-| `GET /api/hunters/{id}/probe` | A security hunter (`strix` or `shannon`): `{manifest, installed, probe: {runtime_ok, docker_ok, ready, detail}}`. Both hunters need Docker, which colonies do not have, so `ready` is always `false` today; red-team runs use colony hunters (§6.7). **404** for an unknown id |
+| `GET /api/hunters/{id}/probe` | A security hunter (`strix` or `shannon`): `{manifest, installed, probe: {runtime_ok, docker_ok, ready, detail}}`. Both hunters need Docker, which colonies do not have, so `ready` is always `false` today, which does not stop a run: the swarm uses colony hunters, and a Shannon run has its colony run Shannon inside its microVM (§6.7). **404** for an unknown id |
 | `POST /api/hunters/{id}/install` | Downloads the hunter binary pinned in `hunters.lock`, checks its sha256 and places it under `<data>/hunters/<id>/<version>/`. **Off by default**: **403** unless the mothership runs with `COLONIZER_HUNTER_INSTALL=1`. **400** for `shannon` (manifest only), **409** when nothing is pinned for this platform (only Linux x86_64 and aarch64 are) |
 
 ### `GET /api/stream`
@@ -701,7 +702,7 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 
 The example shows the common fields; the record carries more, and most optional ones are left out
 of the JSON while unset rather than sent as `null`. Among them: `placement`, `origin`, `suspended`,
-`parked`, `agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
+`parked`, `agent_session`, `pending_answer`, `switch_note`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
@@ -755,6 +756,13 @@ to `starting` and then `running` — the colony holds its slot again — but an 
 the runner is up. `prewarm_timeout_minutes` (default 5) with no answer, a mothership restart or a
 failed boot clears `prewarm` and leaves the colony suspended again, never failed; answering
 clears `prewarm`, `suspended` and `pending_answer` together once the answer is delivered.
+
+`switch_note` is set when the colony's agent module was switched mid-task ([#737], `POST
+/api/sessions/{id}/switch-agent`): the note the resumed runner is told first, telling the new agent
+it is continuing another agent's session and that the converted transcript may be missing detail.
+It is what the boot's resume trigger and first turn read, and it is cleared once the runner is up —
+persisted so a failed boot or a mothership restart never loses the switch, exactly like
+`pending_answer`.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never
@@ -900,8 +908,10 @@ reclaimed only once it is finished and pushed (`pr_opened`, `merged` or `closed`
 ended with nothing to push (`no_changes`), **and** is older than `COLONIZER_RECLAIM_RETENTION_HOURS`
 (default 12 h) past its last update. `stopped` and `failed` colonies are never reclaimed, since they can
 be resumed. The sweep runs every five minutes and also removes microVMs no colony owns. Reclaiming removes the worktree and local branch exactly like manual
-cleanup — and carries the same trade-off: a reclaimed colony is unresumable, because resume boots a
-fresh microVM on the kept worktree and there is no worktree left. A `parked` colony ([#213]) is
+cleanup. A reclaimed colony is still resumable while its pull request is open: `resume` re-creates the
+worktree from the branch on the remote — a fetch and the same checkout a first boot makes — before it
+boots ([#623]). Only a colony whose pull request is no longer open, or whose branch was itself deleted,
+is unresumable once reclaimed, because there is nothing left to re-create the worktree from. A `parked` colony ([#213]) is
 never reclaimed: it is paused, not finished, and its worktree is the run it may yet resume.
 
 What the sweeper never takes: a colony with no `pr_url` (other than `no_changes`, which has nothing to lose). Unpushed work may be the only copy of the
@@ -1906,6 +1916,19 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   credential, drop Anthropic OAuth betas from `anthropic-beta`, stream the response back unchanged.
   If the upstream has no `count_tokens`, answer `{"input_tokens": ceil(chars / 4)}`.
 - Everything else: forward to `https://api.anthropic.com` with headers unchanged.
+- Upstream timeouts (issue #983): 30 s to connect (`COLONIZER_ROUTER_CONNECT_TIMEOUT_SECS`), and an idle
+  timeout of 600 s by default (the module's `router_idle_timeout_secs`, `COLONIZER_ROUTER_IDLE_TIMEOUT_SECS`,
+  never below a route's `timeout_secs`) on the wait for the response headers and on every gap between two
+  chunks of the body. A streamed answer has no overall limit.
+- A request that gets no HTTP answer is answered with what happened: a DNS, connect or TLS failure is a 502
+  that says the upstream is unreachable and why; a silence past the idle timeout is a 504 `timeout_error`
+  ("timed out after N s"), or an SSE `error` event when the stream had already started; a connection that
+  broke once open is a 502 naming the error code. Upstream HTTP errors (401/403, 429 with `retry-after`,
+  5xx) pass through unchanged.
+- Every upstream failure, and every fallback, is a runner `log` event with `"source": "model_router"`:
+  `upstream failure: provider=… class=dns|connect|tls|timeout|connection|auth|rate_limit|upstream_5xx|client_error
+  status=… elapsed=…s model=… detail=…`. The mothership also writes those lines to its own output, with
+  the colony and the Claude account it chose (never a credential).
 
 ### 6.1b Per-task model tiers (mothership)
 
@@ -3128,6 +3151,44 @@ verdict?, pr?, behind_by?}`, `state` one of
 `validated|rejected|filed|duplicate|fix_colony|review|automerge|blocked|merged|error`. A
 good run is `validated → filed → fix_colony → review → merged`; rejections and failures stay too —
 append-only, one line per stage transition, folded by title in the UI.
+
+### 6.6b Colony-to-colony coordination
+
+Parallel colonies of one repository have no channel to each other, so two can append to the same file
+and one pull request conflicts the other. Coordination is that channel, over the colony gateway
+(`POST /coordinate`), authenticated exactly like recall (§6.5) with the colony's per-colony gateway
+token; a token that names no live colony is a `401`. The mothership sets `COLONIZER_COORD_URL` (the
+gateway's `/coordinate` URL) and `COLONIZER_COORD_TOKEN` for every colony its gateway token exists
+for — like `COLONIZER_IMAGE`, not tied to deja the way recall's are — and the runner exposes one
+in-process MCP server, `colonizer_coord`, with four tools (`claim`, `claims`, `send`, `inbox`), each
+posting one JSON object; the reply is JSON, and a bad op or input is a `4xx`.
+
+- `{"op":"claim","paths":["crates/colonizer/src/server.rs",…],"reason":"adding a route"}` — merges
+  the caller's paths into `sessions/<id>/claims.json` (each with its reason and a timestamp; capped at
+  200; trimmed and collapsed to one form — leading `./` or `/`, interior `/./` and duplicate slashes
+  gone, a `..` segment refused with a `400`; the reason redacted, since a colony's output is
+  untrusted). The reply names every other live same-repo colony whose non-expired claims (idle TTL
+  12 h) or pull-request file list overlap the claim — same path, or one a directory prefix of the
+  other:
+
+  ```jsonc
+  {"ok":true,"colony":"ab12cd34","claimed":["crates/colonizer/src/server.rs"],"total_claims":1,
+   "conflicts":[{"colony":"ef56gh78","issue":831,"paths":["crates/colonizer/src/server.rs"],
+                 "reason":"changed in its pull request"}],
+   "advice":"Another live colony …"}
+  ```
+
+  `advice` is present only when `conflicts` is non-empty. Both colonies' logs get a line naming the
+  other colony and its issue.
+- `{"op":"claims"}` — every live same-repo colony's paths, explicit and derived from its pull
+  request: `{ok, repo, colonies:[{colony, issue, self, paths:[{path, reason, at}]}]}`.
+- `{"op":"send","to":"<colony id | its prefix | 831 | #831>","text":"…"}` — delivers a redacted
+  message (≤ 4000 chars) to one live same-repo colony: `sessions/<recipient>/inbox.jsonl` gets
+  `{from, from_issue, text, at}`, and the sender's `sessions/<id>/sent.jsonl` records it. At most 20
+  sends per colony per rolling hour (`429` past that). `404` when `to` matches no live colony, `409`
+  when it matches more than one.
+- `{"op":"inbox"}` — the caller's messages, newest first, at most 50:
+  `{ok, colony, count, messages:[{from, from_issue, text, at}]}`.
 
 ### 6.7 Red-team runs
 

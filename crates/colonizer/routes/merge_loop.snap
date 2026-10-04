@@ -1,0 +1,3 @@
+/api/merge-train/loop                                GET    unauth=401    token=read             activity=-
+/api/merge-train/loop                                PUT    unauth=401    token=owner            activity=loop.update
+/api/merge-train/loop/run                            POST   unauth=401    token=owner            activity=loop.run_now

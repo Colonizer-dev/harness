@@ -881,5 +881,25 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/providers/{id}/quota-action", routing::post(quota_action))
 }
 
+/// This module's feature descriptor (`features.rs`): its routes and activity rules. Answering a
+/// card goes through the provider route, so it is a settings save — the arms that make it so live
+/// in `api_tokens::classify` (owner-only, like every other provider setting).
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "quota_cards",
+    routes,
+    token_scope: None,
+    activity: ACTIVITY,
+    kinds: &[],
+    start_tasks: None,
+};
+
+/// The activity line a card's answer records.
+const ACTIVITY: &[crate::activity::Rule] = &[crate::activity::rule(
+    "POST",
+    "/api/providers/{id}/quota-action",
+    "settings.save",
+    crate::activity::Target::Named("provider", "providers"),
+)];
+
 #[cfg(test)]
 mod tests;

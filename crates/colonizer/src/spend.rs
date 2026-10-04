@@ -231,19 +231,19 @@ pub(crate) fn spend_json(spend: &OrgSpend) -> Value {
 /// (`#[serde(default)]`), and a line that is not a row at all is skipped by the reader.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct SpendRow {
+pub(crate) struct SpendRow {
     ts: String,
-    day: String,
-    org: String,
+    pub(crate) day: String,
+    pub(crate) org: String,
     kind: String,
     /// The colony the row belongs to (`Session::id`) and the agent module — the harness — that ran
     /// it (issue #296), so spend can later be grouped per harness as well as per org. Colony-scoped
     /// rows carry both; chat rows carry neither, and rows a build before the fields existed wrote
     /// neither. Omitted while absent, never an empty string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    session: Option<String>,
+    pub(crate) session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    agent: Option<String>,
+    pub(crate) agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<String>,
     input_tokens: u64,
@@ -258,7 +258,7 @@ struct SpendRow {
     scoring_ms: Option<u64>,
 }
 
-fn spend_file(data_dir: &Path) -> PathBuf {
+pub(crate) fn spend_file(data_dir: &Path) -> PathBuf {
     data_dir.join("spend.jsonl")
 }
 
@@ -514,7 +514,7 @@ fn day_window(today: NaiveDate, days: u32) -> (String, String) {
 /// drops as it passes, and so does anything that would break a row: a malformed or torn line, an
 /// empty tail, or a row whose future keys its `#[serde(default)]` already absorbs. A file that is
 /// not there is not a failure: an install that has never run a colony has no spend.
-fn read_journal(data_dir: &Path, floor: &str, today: &str, offset_minutes: i32) -> Vec<SpendRow> {
+pub(crate) fn read_journal(data_dir: &Path, floor: &str, today: &str, offset_minutes: i32) -> Vec<SpendRow> {
     let Ok(file) = std::fs::File::open(spend_file(data_dir)) else {
         return Vec::new();
     };
@@ -536,8 +536,8 @@ fn read_journal(data_dir: &Path, floor: &str, today: &str, offset_minutes: i32) 
 /// One org's row in one day of the history: its spend plus how many colonies ran that day and how
 /// long the bench spent scoring there.
 #[derive(Clone, Debug, Default)]
-struct DayOrg {
-    spend: OrgSpend,
+pub(crate) struct DayOrg {
+    pub(crate) spend: OrgSpend,
     launched: u64,
     returned: u64,
     scoring_ms: u64,
@@ -592,7 +592,12 @@ fn aggregate(rows: &[SpendRow], today: NaiveDate, days: u32, offset_minutes: i32
 /// streams and windows the rows, [`aggregate`] does the summing, both filing each row under the day
 /// `offset_minutes` puts it in. A separate entry point so the blocking read and sum can move to the
 /// blocking pool as one unit, and tests can ask for any window without an HTTP round trip.
-fn journal_days(data_dir: &Path, today: NaiveDate, days: u32, offset_minutes: i32) -> Vec<(String, Vec<(String, DayOrg)>)> {
+pub(crate) fn journal_days(
+    data_dir: &Path,
+    today: NaiveDate,
+    days: u32,
+    offset_minutes: i32,
+) -> Vec<(String, Vec<(String, DayOrg)>)> {
     let (floor, today_str) = day_window(today, days);
     let rows = read_journal(data_dir, &floor, &today_str, offset_minutes);
     aggregate(&rows, today, days, offset_minutes)
@@ -1206,68 +1211,6 @@ mod tests {
         .await;
         let orgs = out["days"][0]["orgs"].as_array().unwrap();
         assert_eq!(orgs.iter().find(|o| o["org"] == "bench").unwrap()["scoring_ms"], json!(1500));
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    /// Reconciliation with the node half of issue #296: the shared fixture is read and summed the
-    /// exact way `GET /api/spend/history` reads and sums a `spend.jsonl`, and the sums must equal
-    /// the constants `scripts/test/colony-report.test.mjs` asserts for the same file (its
-    /// `--costs` reconciliation test). Change the fixture, or either side's expectations, and the
-    /// other two follow.
-    #[test]
-    fn the_shared_spend_fixture_sums_the_same_on_both_sides_of_the_language_split() {
-        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
-        let app = crate::tests::test_app(&root);
-        std::fs::write(
-            spend_file(&app.cfg.data_dir),
-            include_str!("../../../scripts/test/fixtures/spend-costs.jsonl"),
-        )
-        .unwrap();
-
-        // A fixed window wide enough for every day the fixture names (2026-09-14 and 2026-09-15),
-        // so the test does not age out as the real calendar moves.
-        let today = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
-        let days = journal_days(&app.cfg.data_dir, today, 30, 0);
-        assert_eq!(days.len(), 2, "the two days the fixture mentions, oldest first");
-        let (mut cost, mut routed, mut input, mut output, mut cache_read, mut cache_write) = (0.0, 0.0, 0, 0, 0, 0);
-        for (_, orgs) in &days {
-            for (_, org) in orgs {
-                cost += org.spend.cost_usd.unwrap_or_default();
-                routed += org.spend.routed_cost_usd.unwrap_or_default();
-                input += org.spend.input_tokens;
-                output += org.spend.output_tokens;
-                cache_read += org.spend.cache_read_tokens;
-                cache_write += org.spend.cache_write_tokens;
-            }
-        }
-        // Every dollar the fixture carries is a binary fraction, so the f64 sums are exact; the
-        // epsilon keeps the comparison honest should the fixture ever grow one that is not.
-        assert!(
-            (cost - 1.1875).abs() < 1e-9,
-            "usage-row dollars, chat and legacy included, got {cost}"
-        );
-        assert!((routed - 0.375).abs() < 1e-9, "the routed/gateway dollars, got {routed}");
-        assert_eq!(input, 1300);
-        assert_eq!(output, 305);
-        assert_eq!(cache_read, 200);
-        assert_eq!(cache_write, 0);
-
-        // The new-format rows name their colony and harness; the fixture's one legacy row and its
-        // chat row still parse, unnamed.
-        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", "2026-09-30", 0);
-        assert_eq!(rows.len(), 17, "the torn line is skipped, everything else reads");
-        assert!(
-            rows.iter()
-                .filter(|r| r.session.as_deref() == Some("claudeaa"))
-                .all(|r| r.agent.as_deref() == Some("claude-code")),
-            "the claudeaa rows carry their harness"
-        );
-        let legacy = rows.iter().find(|r| r.session.is_none() && r.day == "2026-09-14").unwrap();
-        assert_eq!(legacy.agent, None, "the fixture's legacy row parses unnamed");
-        let chat = rows.iter().find(|r| r.org == "chat").unwrap();
-        assert_eq!(chat.session, None);
-        assert_eq!(chat.agent, None);
 
         let _ = std::fs::remove_dir_all(root);
     }
