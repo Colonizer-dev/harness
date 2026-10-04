@@ -1,0 +1,2 @@
+/api/burn-down                                       GET    unauth=401    token=owner            activity=-
+/api/burn-down/stop                                  POST   unauth=401    token=owner            activity=burn_down.stop

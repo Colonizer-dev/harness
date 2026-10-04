@@ -1,5 +1,5 @@
 //! The `colonizer` command line, built on clap: the commands that run against this machine
-//! (`version`, `update`, `open`, `login-item`, `telemetry`), and the client commands that drive a
+//! (`version`, `update`, `open`, `login-item`, `telemetry`, `hotspots`), and the client commands that drive a
 //! mothership already running somewhere — here or across a tailnet (`launch`, `list`, `status`,
 //! `logs`, `diff`, `ask`, `answer`, `stop`, `resume`, `pr`, `map`, `loop`, `token`, `mcp`).
 //!
@@ -115,6 +115,22 @@ enum Command {
         /// show, on or off
         #[arg(value_enum)]
         action: TelemetryAction,
+    },
+    /// Show the files merged pull requests touched most often in a window — where parallel
+    /// colonies collide, and a hint at what to split (issue #831)
+    Hotspots {
+        /// The repository to read, as owner/repo: its bare mirror in this machine's data dir
+        #[arg(long, value_name = "OWNER/REPO", conflicts_with = "git_dir")]
+        repo: Option<String>,
+        /// A git directory to read instead: a bare mirror, or a worktree's .git
+        #[arg(long, value_name = "PATH", conflicts_with = "repo")]
+        git_dir: Option<PathBuf>,
+        /// How far back to look, in days
+        #[arg(long, value_name = "DAYS", default_value_t = crate::hotspots::DEFAULT_DAYS)]
+        days: u64,
+        /// How many files to list
+        #[arg(long, value_name = "N", default_value_t = crate::hotspots::DEFAULT_TOP)]
+        top: usize,
     },
     /// Copy this machine's colonies into another local session store (docs/session-store.md)
     MigrateStore {
@@ -682,6 +698,16 @@ enum MergeTrainCommand {
         /// Dispatch one redo colony for a pull request whose mechanical rebase conflicted
         #[arg(long, value_enum)]
         redo: Option<Toggle>,
+        /// Owners or owner/repos (comma-separated) whose checks run locally when GitHub CI cannot run;
+        /// an empty value clears the list
+        #[arg(long, value_name = "TARGETS")]
+        local_checks: Option<String>,
+        /// Resolve a conflicted pull request by merging main in and resuming its colony (never a rebase)
+        #[arg(long, value_enum)]
+        resolve: Option<Toggle>,
+        /// Resolve attempts per pull request before it is labelled needs-human (1-10)
+        #[arg(long, value_name = "N")]
+        resolve_attempts: Option<u32>,
     },
     /// Run it now in the background, or with --dry-run list what it would merge, update, rebase and skip
     Run {
@@ -1175,11 +1201,14 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 /// a flag that names a mothership (`--host`, `--token-file`) or asks for JSON means nothing to
 /// them. `update` is the one exception: it is a thin client of a running mothership, so it keeps
 /// `--host` and `--token-file` and refuses only `--json`, which it has no rendering for.
+/// `hotspots` reads a local repository and renders it, so it refuses the two host flags and keeps
+/// `--json` — like the local `fleet export`/`import`.
 const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("update", &["json"]),
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
+    ("hotspots", &["host", "token_file"]),
     ("migrate-store", &["host", "token_file", "json"]),
     ("version", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
@@ -1329,6 +1358,15 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 TelemetryAction::Off => crate::usage::cli_set(&cfg.config_dir, false),
             };
             await_local(result)
+        }
+        Command::Hotspots {
+            repo,
+            git_dir,
+            days,
+            top,
+        } => {
+            let json = cli.json;
+            await_local(crate::hotspots::command(repo.as_deref(), git_dir.as_deref(), days, top, json))
         }
         Command::MigrateStore { from, to, dry_run } => {
             let cfg = match Settings::from_env() {
@@ -2277,6 +2315,9 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
             self_heal,
             revert_on_red,
             redo,
+            local_checks,
+            resolve,
+            resolve_attempts,
         } => {
             if let Some(minutes) = every {
                 settings["cadence"] = json!({"every": "interval", "minutes": minutes});
@@ -2307,10 +2348,18 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
                 let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
                 settings["flaky_checks"] = json!(names);
             }
+            if let Some(n) = resolve_attempts {
+                settings["resolve_attempts"] = json!(n);
+            }
+            if let Some(targets) = local_checks {
+                let targets: Vec<String> = targets.split(',').map(norm).filter(|t| !t.is_empty()).collect();
+                settings["local_checks"] = json!(targets);
+            }
             for (key, toggle) in [
                 ("self_heal", self_heal),
                 ("revert_on_red", revert_on_red),
                 ("redo_on_conflict", redo),
+                ("resolve_conflicts", resolve),
             ] {
                 if let Some(t) = toggle {
                     settings[key] = json!(*t == Toggle::On);
@@ -2354,6 +2403,12 @@ fn describe_merge_loop(view: &Value) -> Vec<String> {
             s["max_merges"], s["cooldown_secs"], s["ci_wait_minutes"]
         ),
         format!("  known-flaky checks: {}", names("flaky_checks")),
+        format!("  local checks when CI cannot run: {}", names("local_checks")),
+        format!(
+            "  resolve conflicts with the colony: {} (at most {} attempts)",
+            on("resolve_conflicts"),
+            s["resolve_attempts"]
+        ),
         format!(
             "  self-heal: {}, revert on red: {}, redo colonies: {}",
             on("self_heal"),
@@ -2971,6 +3026,10 @@ mod tests {
             &["telemetry", "show"][..],
             &["telemetry", "on"][..],
             &["telemetry", "off"][..],
+            &["hotspots"][..],
+            &["hotspots", "--days", "7", "--top", "5"][..],
+            &["hotspots", "--repo", "acme/app"][..],
+            &["hotspots", "--git-dir", "/tmp/mirror.git"][..],
             &["completions", "bash"][..],
             &["man"][..],
             &["launch", "acme/app"][..],
@@ -3099,6 +3158,8 @@ mod tests {
             &["version", "--json"][..],
             &["--json", "telemetry", "show"][..],
             &["login-item", "enable", "--host", "h:1"][..],
+            &["hotspots", "--host", "h:1"][..],
+            &["hotspots", "--token-file", "/tmp/token"][..],
             &["completions", "bash", "--token-file", "/tmp/token"][..],
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],
@@ -3162,6 +3223,22 @@ mod tests {
         for flag in ["--host", "--token-file", "--json", "--parked"] {
             assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
+    }
+
+    /// `hotspots` is local but renders JSON: it refuses the two host flags and keeps `--json`.
+    #[test]
+    fn hotspots_is_local_but_keeps_json() {
+        let help = help_for("hotspots");
+        assert!(
+            !help.contains("--host") && !help.contains("--token-file"),
+            "`hotspots --help` should list neither host flag:\n{help}"
+        );
+        assert!(help.contains("--json"), "`hotspots --help` should list --json:\n{help}");
+        assert!(parse(&["hotspots", "--json"]).unwrap().json);
+        assert!(parse(&["--json", "hotspots"]).unwrap().json);
+        // --repo and --git-dir name the source, so they refuse to combine.
+        let err = parse(&["hotspots", "--repo", "acme/app", "--git-dir", "/tmp/x.git"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict, "{err}");
     }
 
     /// The launch flags arrive as the API body wants them, task included.
@@ -4113,6 +4190,9 @@ mod tests {
                 self_heal: Some(Toggle::On),
                 revert_on_red: None,
                 redo: Some(Toggle::Off),
+                local_checks: Some("Acme, ".into()),
+                resolve: Some(Toggle::On),
+                resolve_attempts: Some(2),
             },
         )
         .unwrap();
@@ -4123,6 +4203,11 @@ mod tests {
         assert_eq!(s["cadence"], json!({"every": "interval", "minutes": 120}));
         assert_eq!(s["repo_max_merges"], json!({"acme/web": 1}));
         assert_eq!(s["flaky_checks"], json!(["e2e*", "lint"]));
+        assert_eq!(s["local_checks"], json!(["acme"]));
+        assert_eq!(
+            (s["resolve_conflicts"].clone(), s["resolve_attempts"].clone()),
+            (json!(true), json!(2))
+        );
         assert_eq!(
             (s["self_heal"].clone(), s["redo_on_conflict"].clone()),
             (json!(true), json!(false))
@@ -4146,6 +4231,9 @@ mod tests {
             self_heal: None,
             revert_on_red: None,
             redo: None,
+            local_checks: None,
+            resolve: None,
+            resolve_attempts: None,
         };
         assert!(edit_merge_loop(&mut s, &bad).is_err());
 

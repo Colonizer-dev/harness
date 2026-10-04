@@ -1,0 +1,3 @@
+/api/ts-any-loop                                     GET    unauth=401    token=read             activity=-
+/api/ts-any-loop                                     PUT    unauth=401    token=owner            activity=loop.update
+/api/ts-any-loop/run                                 POST   unauth=401    token=owner            activity=loop.run_now

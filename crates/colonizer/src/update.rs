@@ -358,6 +358,19 @@ async fn install(app: &Shared, version: &str) -> Result<String> {
     if let Some(app_dir) = app_link() {
         command.env("COLONIZER_APP", app_dir);
     }
+    // The provenance step runs `gh`, which reads GH_TOKEN: on a headless host the
+    // mothership's own `gh` login may be absent, so pass on the token it saved in
+    // settings. Only when the environment carries neither name already — an
+    // inherited one reaches the child on its own. `env_nonempty` is the same test
+    // `App::github_token` uses, so an exported-but-empty name counts as absent
+    // here too. `script` is the installer in this install's own assets directory,
+    // not a fresh download, so the token is not handed to anything unverified.
+    if util::env_nonempty("GH_TOKEN").is_none()
+        && util::env_nonempty("GITHUB_TOKEN").is_none()
+        && let Some(token) = app.github_token()
+    {
+        command.env("GH_TOKEN", token);
+    }
 
     let output = tokio::time::timeout(INSTALL_TIMEOUT, command.output())
         .await

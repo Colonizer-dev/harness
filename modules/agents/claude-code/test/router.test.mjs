@@ -2,7 +2,17 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 
-import { fallbackBody, parseRoutes, routeEnv, routingPlan, startRouter, stripOauthBetas } from '../router.mjs';
+import {
+  classifyUpstreamError,
+  classifyUpstreamStatus,
+  fallbackBody,
+  parseRoutes,
+  routeEnv,
+  routingPlan,
+  startRouter,
+  stripOauthBetas,
+  upstreamTimeouts,
+} from '../router.mjs';
 
 /** A fake upstream that records requests and answers with `respond(req, body, res)`. */
 async function upstream(respond = (req, body, res) => {
@@ -251,7 +261,7 @@ test('falls back to the Claude model when the gateway reports the provider unava
     assert.equal(seen.headers.authorization, 'Bearer oauth-access-token');
     assert.equal(seen.headers['anthropic-beta'], claudeHeaders['anthropic-beta']);
     assert.equal(seen.headers['x-colonizer-colony'], undefined);
-    assert.deepEqual(logs, [{ level: 'warn', message: 'provider strix unavailable (queue_timeout); used claude-sonnet-5' }]);
+    assert.deepEqual(logs, [{ level: 'warn', message: 'provider strix unavailable (queue_timeout); used claude-sonnet-5', source: 'model_router' }]);
   } finally {
     await router.close();
     await gateway.close();
@@ -270,7 +280,8 @@ test('falls back when the gateway itself is unreachable', async () => {
     const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'strix/m' }) });
     assert.equal(res.status, 200);
     assert.equal(JSON.parse(anthropic.requests[0].body).model, 'claude-sonnet-5');
-    assert.match(logs[0].message, /gateway unreachable/);
+    assert.match(logs[0].message, /^upstream failure: provider=strix class=connect status=502 elapsed=[\d.]+s model=m detail=ECONNREFUSED$/);
+    assert.match(logs[1].message, /gateway unreachable/);
   } finally {
     await router.close();
     await anthropic.close();
@@ -347,4 +358,177 @@ test('route settings become Claude Code timeouts and a context limit for used ro
 
   assert.deepEqual(fallbackBody({ model: 'x', thinking: { type: 'adaptive' } }, 'claude-sonnet-5'), { model: 'claude-sonnet-5', thinking: { type: 'adaptive' } });
   assert.deepEqual(parseRoutes(JSON.stringify([{ prefix: 'p/', base_url: 'http://h', auth: 'none', headers: { 'X-Colonizer-Colony': 't', 'bad header': 'x', n: 1 }, timeout_secs: 900, context_tokens: -1 }])).routes[0].headers, { 'x-colonizer-colony': 't' });
+});
+
+// Issue #983: long generations must not be cut off, and what does fail must be named for what it is.
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** An Anthropic stand-in that thinks quietly for `thinkMs`, then streams `events` events `gapMs` apart. */
+const slowAnthropic = ({ thinkMs = 0, gapMs, events }) =>
+  upstream(async (req, body, res) => {
+    await sleep(thinkMs);
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+    for (let i = 0; i < events; i += 1) {
+      await sleep(gapMs);
+      if (res.destroyed) return;
+      res.write(`event: content_block_delta\ndata: {"type":"content_block_delta","index":${i}}\n\n`);
+    }
+    res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+  });
+
+test('a stream that runs far longer than the idle timeout, never silent that long, goes through whole', async () => {
+  // Scaled down: a 400 ms idle timeout stands in for the 600 s default, and the answer takes about
+  // 1.9 s (more than four idle timeouts), as an Opus answer outlasted the old fixed limits.
+  const anthropic = await slowAnthropic({ thinkMs: 250, gapMs: 150, events: 11 });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, idleTimeoutMs: 400, log: (entry) => logs.push(entry) });
+  try {
+    const startedAt = Date.now();
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5', stream: true }) });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.ok(Date.now() - startedAt > 4 * 400, 'the answer outlasted several idle timeouts');
+    assert.equal(text.match(/event: content_block_delta/g).length, 11);
+    assert.match(text, /message_stop/);
+    assert.deepEqual(logs, []);
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('an upstream silent past the idle timeout before answering is a 504 timeout, not "unreachable"', async () => {
+  const anthropic = await slowAnthropic({ thinkMs: 1500, gapMs: 0, events: 0 });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, idleTimeoutMs: 300, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5', stream: true }) });
+    assert.equal(res.status, 504);
+    const payload = await res.json();
+    assert.equal(payload.error.type, 'timeout_error');
+    assert.equal(payload.error.message, 'model router: Anthropic timed out after 0.3 s without sending anything');
+    assert.doesNotMatch(payload.error.message, /unreachable/);
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].source, 'model_router');
+    assert.equal(logs[0].level, 'error');
+    assert.match(logs[0].message, /^upstream failure: provider=anthropic class=timeout status=504 elapsed=[\d.]+s model=claude-opus-5-5 detail=UND_ERR_HEADERS_TIMEOUT$/);
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('a stream that goes silent past the idle timeout ends with an SSE timeout error', async () => {
+  const anthropic = await slowAnthropic({ gapMs: 1500, events: 1 });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, idleTimeoutMs: 300, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-sonnet-5', stream: true }) });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.match(text, /message_start/);
+    const event = JSON.parse(text.split('event: error\ndata: ')[1]);
+    assert.deepEqual(event, { type: 'error', error: { type: 'timeout_error', message: 'model router: Anthropic timed out after 0.3 s without sending anything' } });
+    assert.match(logs[0].message, /class=timeout status=504 .* detail=UND_ERR_BODY_TIMEOUT$/);
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('Anthropic error answers pass through unchanged, and are logged by class', async () => {
+  const answers = {
+    'auth': [401, {}, { type: 'authentication_error', message: 'invalid x-api-key' }],
+    'limit': [429, { 'retry-after': '17' }, { type: 'rate_limit_error', message: 'usage limit reached' }],
+    'over': [529, {}, { type: 'overloaded_error', message: 'Overloaded' }],
+  };
+  const anthropic = await upstream((req, body, res) => {
+    const [status, headers, error] = answers[JSON.parse(body).model];
+    res.writeHead(status, { 'content-type': 'application/json', ...headers });
+    res.end(JSON.stringify({ type: 'error', error }));
+  });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    for (const [model, [status, headers, error]] of Object.entries(answers)) {
+      const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model }) });
+      assert.equal(res.status, status);
+      assert.equal(res.headers.get('retry-after'), headers['retry-after'] ?? null);
+      assert.deepEqual(await res.json(), { type: 'error', error });
+    }
+    assert.deepEqual(
+      logs.map((entry) => [entry.level, entry.message.replace(/elapsed=[\d.]+s/, 'elapsed=Xs')]),
+      [
+        ['error', 'upstream failure: provider=anthropic class=auth status=401 elapsed=Xs model=auth detail=authentication_error'],
+        ['warn', 'upstream failure: provider=anthropic class=rate_limit status=429 elapsed=Xs model=limit detail=rate_limit_error retry-after=17'],
+        ['error', 'upstream failure: provider=anthropic class=upstream_5xx status=529 elapsed=Xs model=over detail=overloaded_error'],
+      ],
+    );
+    // No credential reaches the log.
+    assert.ok(logs.every((entry) => !/oauth-access-token|sk-ant/.test(entry.message)));
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('Anthropic refusing the connection is "unreachable", and says why', async () => {
+  const closed = await upstream();
+  const deadUrl = closed.url;
+  await closed.close();
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: deadUrl, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5' }) });
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { type: 'error', error: { type: 'api_error', message: 'model router: Anthropic is unreachable (connection failed: ECONNREFUSED)' } });
+    assert.match(logs[0].message, /class=connect status=502 .* detail=ECONNREFUSED$/);
+  } finally {
+    await router.close();
+  }
+});
+
+test('upstream failures are classified by cause', () => {
+  const fetchFailed = (cause) => new TypeError('fetch failed', { cause });
+  const coded = (code, message = code) => Object.assign(new Error(message), { code });
+  const opts = { target: 'Anthropic', connectMs: 30_000, idleMs: 600_000 };
+  const cases = [
+    [coded('ENOTFOUND'), 'dns', 502, 'model router: Anthropic is unreachable (DNS lookup failed: ENOTFOUND)'],
+    [coded('EAI_AGAIN'), 'dns', 502, 'model router: Anthropic is unreachable (DNS lookup failed: EAI_AGAIN)'],
+    [coded('UND_ERR_CONNECT_TIMEOUT'), 'connect', 502, 'model router: Anthropic is unreachable (no connection within 30 s)'],
+    [coded('ECONNREFUSED'), 'connect', 502, 'model router: Anthropic is unreachable (connection failed: ECONNREFUSED)'],
+    [Object.assign(new AggregateError([coded('ENETUNREACH'), coded('EHOSTUNREACH')]), { code: undefined }), 'connect', 502, 'model router: Anthropic is unreachable (connection failed: EHOSTUNREACH)'],
+    [coded('UNABLE_TO_VERIFY_LEAF_SIGNATURE'), 'tls', 502, 'model router: Anthropic is unreachable (TLS failed: UNABLE_TO_VERIFY_LEAF_SIGNATURE)'],
+    [coded('ERR_TLS_CERT_ALTNAME_INVALID'), 'tls', 502, 'model router: Anthropic is unreachable (TLS failed: ERR_TLS_CERT_ALTNAME_INVALID)'],
+    [coded('UND_ERR_HEADERS_TIMEOUT'), 'timeout', 504, 'model router: Anthropic timed out after 600 s without sending anything'],
+    [coded('UND_ERR_BODY_TIMEOUT'), 'timeout', 504, 'model router: Anthropic timed out after 600 s without sending anything'],
+    [coded('ECONNRESET'), 'connection', 502, 'model router: the connection to Anthropic failed (ECONNRESET)'],
+    [coded('UND_ERR_SOCKET', 'other side closed'), 'connection', 502, 'model router: the connection to Anthropic failed (UND_ERR_SOCKET)'],
+    [new Error('something odd'), 'connection', 502, 'model router: the connection to Anthropic failed (something odd)'],
+  ];
+  for (const [cause, expectedClass, status, message] of cases) {
+    const failure = classifyUpstreamError(fetchFailed(cause), opts);
+    assert.equal(failure.class, expectedClass, message);
+    assert.equal(failure.status, status, message);
+    assert.equal(failure.message, message);
+  }
+
+  assert.equal(classifyUpstreamStatus(401), 'auth');
+  assert.equal(classifyUpstreamStatus(403, 'permission_error'), 'auth');
+  assert.equal(classifyUpstreamStatus(429), 'rate_limit');
+  assert.equal(classifyUpstreamStatus(400, 'rate_limit_error'), 'rate_limit');
+  assert.equal(classifyUpstreamStatus(500), 'upstream_5xx');
+  assert.equal(classifyUpstreamStatus(529, 'overloaded_error'), 'upstream_5xx');
+  assert.equal(classifyUpstreamStatus(413, 'request_too_large'), 'client_error');
+  assert.equal(classifyUpstreamStatus(200), null);
+});
+
+test('upstream timeouts: a 30 s connect, and an idle timeout of at least 10 minutes', () => {
+  assert.deepEqual(upstreamTimeouts({}), { connectMs: 30_000, idleMs: 600_000 });
+  assert.deepEqual(upstreamTimeouts({ COLONIZER_ROUTER_CONNECT_TIMEOUT_SECS: '10', COLONIZER_ROUTER_IDLE_TIMEOUT_SECS: '1800' }), { connectMs: 10_000, idleMs: 1_800_000 });
+  assert.deepEqual(upstreamTimeouts({ COLONIZER_ROUTER_IDLE_TIMEOUT_SECS: 'soon' }), { connectMs: 30_000, idleMs: 600_000 });
+  // A slow provider's own timeout_secs is never undercut.
+  assert.equal(upstreamTimeouts({}, [{ timeout_secs: 900 }, { timeout_secs: null }]).idleMs, 900_000);
 });

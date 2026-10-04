@@ -1,0 +1,4 @@
+/api/claude-login                                    GET    unauth=401    token=owner            activity=-
+/api/claude-login/cancel                             POST   unauth=401    token=owner            activity=-
+/api/claude-login/code                               POST   unauth=401    token=owner            activity=-
+/api/claude-login/start                              POST   unauth=401    token=owner            activity=-

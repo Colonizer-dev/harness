@@ -133,6 +133,31 @@ main() {
   rm -rf "${dir:?}/$slot"
   mv "$tmp/unpack/colonizer" "$dir/$slot"
 
+  # The macOS Keychain ties each saved secret to the binary that wrote it, so an ad-hoc signed app
+  # loses that access the moment an update replaces it — and a mothership updating in place passes its
+  # own environment, which a cockpit-started update usually does not carry COLONIZER_CODESIGN_IDENTITY
+  # in. When an identity is known — the variable, or the one a previous install recorded beside the
+  # app — the new binary is signed before the switch, so the Keychain grant survives. A signing
+  # failure removes the new slot and stops before the switch: the old version, which the Keychain
+  # knows, stays installed and $app keeps pointing at it.
+  identity=${COLONIZER_CODESIGN_IDENTITY:-}
+  from_env=0
+  if [ -n "$identity" ]; then
+    from_env=1
+  elif [ -f "$dir/codesign-identity" ]; then
+    identity=$(cat "$dir/codesign-identity" 2>/dev/null || true)
+  fi
+  signed=0
+  if [ -n "$identity" ] && [ "$(uname -s)" = Darwin ]; then
+    say "signing colonizer as $identity"
+    if ! codesign --force --sign "$identity" --identifier dev.colonizer.mothership \
+         --timestamp=none "$dir/$slot/bin/colonizer"; then
+      rm -rf "${dir:?}/$slot"
+      fail "codesign failed for '$identity'; without it the macOS Keychain would ask for every saved secret again. Nothing was changed: the previous version is still installed."
+    fi
+    signed=1
+  fi
+
   if [ -L "$app" ] || [ ! -e "$app" ]; then
     relink "$slot" "$app"
   else
@@ -144,6 +169,16 @@ main() {
     parked=
     rm -rf "$app.old"
   fi
+
+  # Remember an identity that came in the environment, so an update started from the cockpit — whose
+  # installer child has no environment of its own — re-signs too. Written beside the app and renamed
+  # into place, so a reader never sees a half-written name. An identity that was only read back from
+  # this file is already in it. Delete the file to stop re-signing.
+  if [ "$from_env" = 1 ] && [ "$signed" = 1 ]; then
+    printf '%s\n' "$identity" > "$dir/codesign-identity.new"
+    mv -f "$dir/codesign-identity.new" "$dir/codesign-identity"
+  fi
+
   # Colonies mount vendored plugins straight out of the slot the mothership was
   # started from (sessions.rs resolves its assets through current_exe, which
   # canonicalises the symlink away), so removing it under a running colony takes
@@ -256,7 +291,7 @@ slot_pids() {
     exe_pids=$(for link in /proc/[0-9]*/exe; do
       real=$(readlink "$link" 2>/dev/null) || continue
       case "$real" in
-        "$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
+        ("$slot"*) pid=${link#/proc/}; printf '%s\n' "${pid%/exe}" ;;
       esac
     done)
   elif command -v lsof >/dev/null 2>&1; then
@@ -277,14 +312,15 @@ slot_pids() {
 #
 # Plain sh cannot verify a Sigstore bundle, so this needs gh, and when the check cannot reach a
 # verdict it is skipped with a note and the checksum-verified install goes on: gh missing, a gh from
-# before `gh attestation verify` existed, a COLONIZER_RELEASE_URL download, which the official repo's
-# attestation says nothing about, or a release that carries no attestation at all — every release
-# published before this check existed, which gh answers with "no attestations found".
+# before `gh attestation verify` existed, a gh installed but not logged in (the common case on a
+# headless host, which would otherwise fail every update), a COLONIZER_RELEASE_URL download, which the
+# official repo's attestation says nothing about, or a release that carries no attestation at all —
+# every release published before this check existed, which gh answers with "no attestations found".
 # COLONIZER_REQUIRE_ATTESTATION=1 turns those skips into failures. A check that ran and found
-# something wrong is a different thing and is fatal whatever the variable says: gh answered, and its
-# answer is that these checksums are not the ones the workflow signed. The downloads only just
-# succeeded over this network, so any other gh failure here is read as that answer, not as the
-# network being down.
+# something wrong is a different thing and is fatal whatever the variable says: a logged-in gh
+# answered, and its answer is that these checksums are not the ones the workflow signed. The downloads
+# only just succeeded over this network, so any other gh failure the auth probe below does not explain
+# is read as that answer, not as the network being down.
 #
 # "No attestations found" is a skip, not that failure: it means gh found no provenance to check, not
 # that the provenance is wrong — the state of every release published before this step existed. Nor
@@ -321,6 +357,13 @@ verify_provenance() {
       # An unattested release, not a wrong one — see the comment above the function for why this is
       # not a downgrade an attacker can steer a tampered file into.
       why="$(basename "$file") carries no build provenance; that is expected for releases published before the release workflow began signing, and would mean something was wrong on a current one"
+    elif printf '%s\n' "$out" | grep -qi 'gh auth login' || ! gh auth status >/dev/null 2>&1; then
+      # gh ran but could not reach a verdict because it has no credentials — the common case on a
+      # headless host, and a skip, not a rejection: it never fetched the attestation to reject it. gh
+      # points at `gh auth login` when it is not logged in; `gh auth status` confirms it when a gh
+      # words the failure differently. Only a gh that could have looked and disagreed — the branch
+      # below — is the wrong-signature failure.
+      why="gh is not logged in, so it cannot fetch the attestation; run 'gh auth login' or set GH_TOKEN to verify provenance"
     else
       printf '%s\n' "$out" >&2
       fail "the build attestation over $(basename "$file") does not verify: gh checked, and it is wrong — these checksums are not what $release_workflow signed; nothing was installed"
