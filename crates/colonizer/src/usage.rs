@@ -985,6 +985,7 @@ mod tests {
             keep_worktree: false,
             attention: None,
             suspended: None,
+            run_end_cause: None,
             parked: None,
             hold_resumes: 0,
             agent_session: None,

@@ -1091,6 +1091,11 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
     for (const block of content) {
       if (block?.type !== 'tool_result' || askIds.has(block.tool_use_id)) continue;
       const output = toolResultText(block.content);
+      // A subagent started in the background answers its Task call with an immediate launch ack,
+      // not a report — the SDK marks it `async_launched`, and the real result arrives later as a
+      // task_notification (below). Mark the ack so a resumed boot does not read the subagent as
+      // finished the moment it started (issue #756).
+      const background = msg.tool_use_result?.status === 'async_launched';
       // The denial layer only ever adds a `denial` field to errored results; is_error and the
       // output are exactly as they would be without it (denials.mjs).
       const event = annotateDenial(
@@ -1100,6 +1105,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
             tool_call_id: block.tool_use_id,
             output,
             is_error: Boolean(block.is_error),
+            ...(background ? { background: true } : {}),
           },
           parent,
         ),
@@ -1240,6 +1246,12 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
                   jevLivePairs = jevLivePairs.filter((pair) => !dropped.has(pair.tool_call_id));
                 }
               }
+            } else if (msg.subtype === 'task_notification' && msg.tool_use_id) {
+              // A background subagent settled (issue #756): recorded by the Task call that started
+              // it, so a resumed boot can tell one that finished from one a suspension left in
+              // flight. A `stopped` status is not a completion — like the pinned runner's "stopped
+              // by the user", the resume brief exists to report it.
+              emit({ type: 'subagent_end', tool_call_id: msg.tool_use_id, status: msg.status });
             }
             break;
         }

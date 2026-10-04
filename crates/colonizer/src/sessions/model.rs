@@ -102,6 +102,28 @@ impl Session {
         self.prewarm.as_ref().is_some_and(|p| p.started_at.is_some())
     }
 
+    /// The cause of the run that ended just before this boot (issue #756), for a resumed colony:
+    /// what [`run_end_cause`](Self::run_end_cause) recorded, or a suspension — the record the claim
+    /// has just cleared is kept, transiently, as `was_suspended`, so a colony suspended by a build
+    /// older than the field still reads as one.
+    pub(crate) fn resume_cause(&self) -> Option<RunEndCause> {
+        if self.was_suspended {
+            Some(RunEndCause::Suspended)
+        } else {
+            self.run_end_cause
+        }
+    }
+
+    /// Take the cause for the resume this boot is making, clearing the durable record (issue #756):
+    /// it names only the run just ended, and left behind it would make the next resume read its
+    /// own end — or its archive — as this one's. The transient `was_suspended` is left for the
+    /// restore below.
+    pub(crate) fn take_resume_cause(&mut self) -> Option<RunEndCause> {
+        let cause = self.resume_cause();
+        self.run_end_cause = None;
+        cause
+    }
+
     /// Whether this colony holds a microVM slot against the parallel limit — the predicate
     /// `queue::has_room` counts. Any live colony holds one, and so does a publish claimed from a
     /// live colony: the teardown inside the publish frees the microVM, but the slot stays claimed
@@ -165,6 +187,20 @@ pub(crate) const WAITING_FOR_ANSWER: &str = "waiting_for_answer";
 /// next user message. `sandbox::supports_memory_snapshot` is the seam a real snapshot enters at,
 /// and would record a different path here.
 pub(crate) const SESSION_RESUME: &str = "session_resume";
+
+/// Why a colony's previous run ended (issue #756): recorded when something other than the user cut
+/// the run short, so a resumed colony's brief can say so and not take the pinned runner's
+/// "stopped by the user" report for its subagents at face value. A user stop leaves it unset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunEndCause {
+    /// The colony was torn down to free its slot while it waited on its user (issue #562).
+    Suspended,
+    /// The mothership restarted and the colony's microVM was not running (`lifecycle::recover`).
+    Restart,
+    /// The microVM stopped on its own, or the host stopped it (`lifecycle::watch_sandboxes`).
+    Teardown,
+}
 
 /// A colony torn down while it waits on its user (issue #562). The status stays
 /// `waiting_for_answer` and the question answerable; `at` is when the microVM came down,
@@ -468,6 +504,13 @@ pub struct Session {
     /// holds no parallel slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended: Option<Suspension>,
+    /// Why the run before this boot ended, when something other than the user ended it (issue
+    /// #756): set by the suspension, the restart's reap and the sandbox watchdog's teardown, and
+    /// cleared by a user stop. `None` for a colony whose last run ended at the user's hand, or that
+    /// has never run. The brief reads it to tell a resumed colony its subagents were not stopped by
+    /// the user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_end_cause: Option<RunEndCause>,
     /// The colony's park record (issue #213), set when the status moves to `parked` and cleared
     /// when it resumes. Persisted in sessions.json, so a colony parked for a quota reset that
     /// lands tomorrow still carries the reason, the upstream reset time and whether its microVM
@@ -630,6 +673,7 @@ impl Default for Session {
             keep_worktree: false,
             attention: None,
             suspended: None,
+            run_end_cause: None,
             parked: None,
             hold_resumes: 0,
             agent_session: None,
@@ -726,6 +770,7 @@ mod tests {
         assert_eq!(s.suspended, None);
         assert_eq!(s.agent_session, None);
         assert_eq!(s.pending_answer, None);
+        assert_eq!(s.run_end_cause, None, "no recorded cause on a row that predates the field");
     }
 
     /// The suspension record and the held answer survive the trip to the wire and back intact —

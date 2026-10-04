@@ -76,6 +76,12 @@
         "default": true,
         "env": "COLONIZER_SUMMARIES"
       },
+      "relaunch_subagents": {
+        "type": "boolean",
+        "title": "Relaunch subagents a suspension or restart ended",
+        "description": "When a resumed colony's previous run ended because it was suspended, the harness restarted or its microVM was torn down, the brief tells the orchestrator which subagents were still in flight — with each one's task and last progress — and that nobody stopped them, so the runner's \"stopped by the user\" report for them is not taken at face value. On, it relaunches the unfinished ones without asking. Off, it asks you first. On by default.",
+        "default": true
+      },
       "background_model": {
         "type": "string",
         "title": "Background model",
