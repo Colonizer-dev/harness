@@ -217,6 +217,58 @@ pub struct Updates {
     client: reqwest::Client,
 }
 
+/// The release feed to ask: `COLONIZER_RELEASES_URL` when set, so a fork or a test does not ask
+/// about this repository.
+fn releases_url() -> String {
+    crate::util::env_nonempty("COLONIZER_RELEASES_URL").unwrap_or_else(|| RELEASES_URL.to_string())
+}
+
+/// The client every release request uses: short timeouts, and a user agent naming this build.
+fn client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(15))
+        .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
+        .build()?)
+}
+
+/// The one GitHub request: the latest release, with drafts and prereleases refused.
+///
+/// Shared by the background check and `colonizer update --check`, so a one-off check makes the
+/// same request the mothership would.
+async fn fetch_release(client: &reqwest::Client, url: &str) -> Result<Latest> {
+    let response = client.get(url).header("Accept", "application/vnd.github+json").send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("GitHub answered {status}");
+    }
+    let release: Value = serde_json::from_str(&body).context("the release feed was not JSON")?;
+    // A draft or prerelease is not something to nudge an operator towards.
+    if release["draft"].as_bool().unwrap_or(false) || release["prerelease"].as_bool().unwrap_or(false) {
+        anyhow::bail!("the latest release is a draft or prerelease");
+    }
+    let version = release["tag_name"].as_str().context("the release has no tag")?.to_string();
+    Ok(Latest {
+        version,
+        url: release["html_url"].as_str().unwrap_or_default().to_string(),
+        notes: util::truncate(release["body"].as_str().unwrap_or_default(), 4000),
+        published_at: release["published_at"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(Into::into),
+    })
+}
+
+/// Asks GitHub for the latest release right now, for `colonizer update --check`.
+///
+/// A fresh client and no stored state, so a one-off check needs no running mothership and
+/// nothing written to `<config>`. The same request and the same draft/prerelease rules as the
+/// mothership's own `fetch`.
+pub async fn latest_release() -> Result<Latest> {
+    fetch_release(&client()?, &releases_url()).await
+}
+
 impl Updates {
     pub fn new(config_dir: &Path) -> Result<Self> {
         let blocked = matches!(
@@ -224,18 +276,13 @@ impl Updates {
             Ok("0") | Ok("false") | Ok("off")
         )
         .then_some("COLONIZER_UPDATE_CHECK");
-        let url = crate::util::env_nonempty("COLONIZER_RELEASES_URL").unwrap_or_else(|| RELEASES_URL.to_string());
         Ok(Self {
             path: config_dir.join("updates.json"),
-            url,
+            url: releases_url(),
             blocked,
             choice: Mutex::new(Choice::load(&config_dir.join("updates.json"))),
             state: Mutex::new(LastCheck::default()),
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(15))
-                .user_agent(concat!("colonizer/", env!("CARGO_PKG_VERSION")))
-                .build()?,
+            client: client()?,
         })
     }
 
@@ -257,32 +304,7 @@ impl Updates {
 
     /// Asks GitHub for the latest release. Only ever called behind [`Updates::enabled`].
     async fn fetch(&self) -> Result<Latest> {
-        let response = self
-            .client
-            .get(&self.url)
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?;
-        let status = response.status();
-        let body = response.text().await?;
-        if !status.is_success() {
-            anyhow::bail!("GitHub answered {status}");
-        }
-        let release: Value = serde_json::from_str(&body).context("the release feed was not JSON")?;
-        // A draft or prerelease is not something to nudge an operator towards.
-        if release["draft"].as_bool().unwrap_or(false) || release["prerelease"].as_bool().unwrap_or(false) {
-            anyhow::bail!("the latest release is a draft or prerelease");
-        }
-        let version = release["tag_name"].as_str().context("the release has no tag")?.to_string();
-        Ok(Latest {
-            version,
-            url: release["html_url"].as_str().unwrap_or_default().to_string(),
-            notes: util::truncate(release["body"].as_str().unwrap_or_default(), 4000),
-            published_at: release["published_at"]
-                .as_str()
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(Into::into),
-        })
+        fetch_release(&self.client, &self.url).await
     }
 
     async fn check(&self) {

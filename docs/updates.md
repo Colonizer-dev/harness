@@ -57,6 +57,25 @@ says which variable is holding it off, and `PUT /api/update` answers `409`.
 A failed check keeps the last answer it had, so a flaky network does not hide a
 release you were already told about.
 
+## Checking without a mothership
+
+`colonizer update` needs a running mothership to install anything, but
+`colonizer update --check` does not: it asks GitHub there and then, honouring
+`COLONIZER_RELEASES_URL`, and prints one line. It installs nothing, needs no
+token, and ignores `--host` and `--token-file`. It is what a CI release health
+check runs against an installed build.
+
+```sh
+$ colonizer update --check
+v0.2.2 is available (this is v0.2.1); run `colonizer update` to install it.
+```
+
+The line is one of three: `{installed} is the newest release.` when there is
+nothing newer, the above when there is, and
+`this is a development build; the newest release is {latest}.` for a build that
+is not a release. Either non-error answer exits `0`; a failed fetch exits
+non-zero with the error. `--check` cannot be combined with `--force`.
+
 ## Updating in place
 
 **Settings → Updates** offers the newer release with its notes, and a button
