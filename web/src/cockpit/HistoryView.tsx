@@ -31,6 +31,7 @@ import {
 import type { ActivityEntry, Session } from "../types";
 import { FilterSelect, Pagination, SearchBox, Segmented, optionsBy } from "./ListControls";
 import { pageOf, usePagedFilter } from "./paging";
+import { TranscriptSearch } from "./TranscriptSearch";
 import {
   ACTOR_LABEL,
   HISTORY_ALL,
@@ -275,11 +276,14 @@ export function HistoryView({
   sessions,
   org,
   onOpenColony,
+  onOpenTurn,
   onOpenSection,
 }: {
   sessions: Session[];
   org: string | null;
   onOpenColony: (id: string) => void;
+  /** Opens a transcript hit at its colony and turn (issue #739); falls back to `onOpenColony` when absent. */
+  onOpenTurn?: (colony: string, turn: string | null) => void;
   /** Opens where a row's target lives: a settings section, `secrets`, `loops`, `memory`, `redteam`. */
   onOpenSection?: (section: string) => void;
 }): ReactElement {
@@ -377,6 +381,8 @@ export function HistoryView({
           </div>
         </div>
       </div>
+
+      <TranscriptSearch org={org} onOpen={onOpenTurn ?? ((id) => onOpenColony(id))} />
 
       <div className="overflow-hidden border-y border-border">
         <div className="grid [grid-template-columns:repeat(auto-fit,minmax(150px,1fr))]">

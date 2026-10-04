@@ -24,6 +24,7 @@ import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { COORDINATION_PROMPT_APPEND, COORDINATION_SERVER, createCoordinationServer } from './coordinate.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
 import { createGithubServer, GITHUB_PROMPT_APPEND, GITHUB_SERVER, githubDecision } from './github.mjs';
+import { createHistoryServer, HISTORY_PROMPT_APPEND, HISTORY_SERVER } from './history.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
@@ -465,6 +466,7 @@ export function backgroundRecordName(command) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
+ * @param {object} [extras.historyServer] in-process colony-history search MCP server, read-only (issue #739)
  * @param {object} [extras.coordinateServer]  in-process colony-to-colony coordination MCP server (issue #834)
  * @param {object} [extras.githubServer]  in-process host-proxied GitHub write MCP server (issue #778)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
@@ -473,7 +475,7 @@ export function backgroundRecordName(command) {
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, historyServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -490,6 +492,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   // Both halves of the recall credential: the mothership sets them only when deja is enabled for
   // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
+  // Both halves of the history credential, gated like shared memory: the mothership sets them only
+  // when colony history is enabled for this colony's org, so a half-set pair is a misconfiguration.
+  const history = Boolean(env.COLONIZER_HISTORY_URL && env.COLONIZER_HISTORY_TOKEN && historyServer);
   // Colony-to-colony coordination (issue #834): its own gateway URL and token, set for every colony
   // whose gateway token exists, so it is not tied to deja the way recall is.
   const coordinate = Boolean(env.COLONIZER_COORD_URL && env.COLONIZER_COORD_TOKEN && coordinateServer);
@@ -516,6 +521,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
+  if (history) appended.push(HISTORY_PROMPT_APPEND);
   if (coordinate) appended.push(COORDINATION_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
@@ -568,6 +574,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
+  if (history) mcpServers[HISTORY_SERVER] = historyServer;
   if (coordinate) mcpServers[COORDINATION_SERVER] = coordinateServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
@@ -1397,6 +1404,12 @@ async function main() {
     recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
   }
 
+  // Read-only search of the mothership's colony-history index: no emit, because nothing leaves the colony.
+  let historyServer;
+  if (process.env.COLONIZER_HISTORY_URL && process.env.COLONIZER_HISTORY_TOKEN) {
+    historyServer = createHistoryServer({ url: process.env.COLONIZER_HISTORY_URL, token: process.env.COLONIZER_HISTORY_TOKEN, createSdkMcpServer, tool, z });
+  }
+
   // Colony-to-colony coordination (issue #834): its own gateway URL and token, present whenever the
   // colony has a gateway token, whether or not recall is.
   let coordinateServer;
@@ -1440,6 +1453,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     recallServer,
+    historyServer,
     coordinateServer,
     findingsServer,
     loopServer,

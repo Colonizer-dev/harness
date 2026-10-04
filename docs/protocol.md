@@ -2120,6 +2120,22 @@ approved or revoked, and wrap their answer in a `<shared-memory>` frame that nam
 verify, not instructions. A note's title and summary are flattened to one line, so a note cannot start
 a line of the answer of its own.
 
+Memory answers from notes; a separate, read-only tool searches conversation history instead
+(issue #739), whenever memory is on for the colony:
+
+| Tool | Input | Answer |
+|---|---|---|
+| `colony_history_search` | `query`, `limit?` (default 20, at most 50) | Snippets from earlier colonies' conversations — `user_message` and `assistant_text` events — every whitespace-separated query term matching, any case. At most three hits a colony, newest colony first |
+
+The tool (Claude Code only so far, an in-process `colonizer_history` server) posts `{query, limit}` to
+`POST /history` on the colony gateway with the colony's token, and the gateway scopes the answer
+server-side: same-org colonies (org-less colonies of its own repository when it has no org), never the
+caller itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a caller
+that is `restricted` itself — an unknown class is hidden, failing closed. An empty query reads as empty
+hits. Results are other colonies' words, re-redacted on the way out and framed as untrusted data. It is
+a plain scan of `events.jsonl`, not an index: each log is read from its tail, at most the last 8 MiB a
+colony and 64 MiB a request, and a line over 256 KiB is skipped.
+
 **Kinds.** Every entry is one of `plan`, `decision`, `file_change` (a note about a change to specific
 files), `failure`, `architecture` (an architecture note) or `convention`. Notes stored before kinds
 existed, and proposals that name none, are `convention`; an unknown kind is refused.
@@ -2435,6 +2451,7 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/memory/candidates` | Fleet-wide candidates and their sightings (colony, repo, commit, confidence), including those not yet promoted |
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `GET /api/deja` · `GET /api/deja/search?org=&q=` | Transcript recall (deja, off by default, [colonies.md](colonies.md#recall-from-earlier-colonies-deja)): whether the deja binary is installed and, per org, whether recall is on, the index size and the last index time; the search runs the recall a colony of that org would get. Owner only. A colony reaches its own org's index through `POST /recall` on the colony gateway, with its colony token |
+| `GET /api/history/search?q=&repo=&org=&agent=&status=&since=&until=&limit=` | Search every colony's conversation (issue #739, always on with memory, [colonies.md](colonies.md#search-earlier-colonies-conversations)): `{hits: [{colony, repo, org, agent, status, created_at, seq, ts, turn, role, snippet}]}`. A hit is a `user_message` or `assistant_text` event whose text contains every whitespace-separated query term, any case; newest colony first, at most 50 hits and three a colony. `since`/`until` take RFC 3339, a naive `YYYY-MM-DDTHH:MM:SS` read as UTC, or a bare `YYYY-MM-DD`; an empty `q`, or a `since`/`until` that is none of these, is a **400**. Owner only. A colony searches its neighbours through `POST /history` on the colony gateway, with its colony token, scoped server-side to its org — org-less colonies of its own repository when it has no org — never itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a `restricted` caller |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 | `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |

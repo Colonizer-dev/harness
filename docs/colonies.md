@@ -22,6 +22,7 @@ read by the mothership when it starts.
 - [Conditional instructions](#conditional-instructions)
 - [Shared memory](#shared-memory)
 - [Recall from earlier colonies (deja)](#recall-from-earlier-colonies-deja)
+- [Search earlier colonies' conversations](#search-earlier-colonies-conversations)
 - [The repo-explorer subagent](#the-repo-explorer-subagent)
 - [Who caused each event](#who-caused-each-event)
 - [The log archive](#the-log-archive)
@@ -497,6 +498,35 @@ search a colony would.
 never answers another org's query. Before anything is written, every secret value the mothership
 knows is scrubbed, raw and JSON-escaped, for values of six characters and up, and deja's own
 pattern redaction runs on top. Base64- or percent-encoded forms of a secret are not caught.
+
+## Search earlier colonies' conversations
+
+**What it is.** Where deja recalls a finished colony's transcript, this searches every colony's
+conversation — your prompts and the agents' replies — at once, to find how an earlier colony met a
+problem before. A colony has the same reach, read-only, through the `colony_history_search` tool
+(Claude Code only so far, issue #739): it asks its own gateway, which scopes the answer server-side
+to same-org colonies — or, when it has no org, to org-less colonies of its own repository — and never
+to itself. Every query word must appear in a message, any case; a search returns at most 50 hits, 20
+by default, and no one colony may contribute more than three, newest colony first.
+
+**Turning it on.** Always on with memory: the mothership hands the colony the gateway URL and its
+token whenever memory is enabled for it. Nothing is indexed and no model is called — a search just
+reads conversation logs, so it costs nothing to leave on.
+
+**In the cockpit.** The panel at the top of History takes a query and filters by repo, org, agent,
+status and a date range. Each hit names its colony, role and turn; clicking one opens that colony
+and scrolls to and highlights the turn. It is backed by
+`GET /api/history/search?q=&repo=&org=&agent=&status=&since=&until=&limit=`, owner-only, which
+answers `{hits: [...]}` newest colony first. An empty `q`, or a `since`/`until` that is not a date,
+is a 400.
+
+**Limits.** This is a plain scan, not an index (a normalised transcript index is issue #736): each
+colony's `events.jsonl` is read in turn, from its tail — at most the last 8 MiB of each log and 64 MiB
+across one request, skipping any line over 256 KiB — so it is slower on a large data directory and
+finds only messages that carry their text inline. Every snippet is redacted again on the way out. Over
+the gateway a colony whose sensitivity is `restricted`, missing or unrecognised is visible only to a
+`restricted` caller, and one org's log never answers another org's query. It searches conversations,
+not code, issues or notes.
 
 ## The repo-explorer subagent
 

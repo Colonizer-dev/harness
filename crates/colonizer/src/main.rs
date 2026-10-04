@@ -62,6 +62,7 @@ mod gateway_audit;
 mod github;
 mod graft;
 mod headroom;
+mod history;
 mod hotspots;
 mod hunters;
 mod img_proxy;
