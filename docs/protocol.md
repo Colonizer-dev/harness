@@ -1925,7 +1925,14 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   ("timed out after N s"), or an SSE `error` event when the stream had already started; a connection that
   broke once open is a 502 naming the error code. Upstream HTTP errors (401/403, 429 with `retry-after`,
   5xx) pass through unchanged.
-- Every upstream failure, and every fallback, is a runner `log` event with `"source": "model_router"`:
+- The keep-alive race: when the connection is closed or reset under a request (`UND_ERR_SOCKET` "other
+  side closed", `ECONNRESET`, `EPIPE`, `UND_ERR_CLOSED`) before a single byte of the answer has arrived,
+  typically a pooled socket the other side had already closed, the router sends the same request once more,
+  at once, on a new connection, and logs `upstream retry: provider=… class=connection_retry elapsed=…s
+  model=… detail=…` at `warn`. Only if that attempt fails too is the failure answered and logged as above.
+  Nothing is replayed after any response byte, after a timeout, or after an HTTP answer. Idle pooled
+  sockets are reused for at most 4 s, or the server's `Keep-Alive: timeout=` hint less 2 s, capped at 30 s.
+- Every upstream failure, retry and fallback is a runner `log` event with `"source": "model_router"`:
   `upstream failure: provider=… class=dns|connect|tls|timeout|connection|auth|rate_limit|upstream_5xx|client_error
   status=… elapsed=…s model=… detail=…`. The mothership also writes those lines to its own output, with
   the colony and the Claude account it chose (never a credential).
