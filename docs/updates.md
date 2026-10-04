@@ -137,6 +137,19 @@ What happens, in order:
 
 The browser reconnects on its own; a colony's chat continues where it stopped.
 
+On macOS the Keychain ties each saved secret to the binary that wrote it, so the
+new binary is re-signed before the switch when this host knows an identity:
+`COLONIZER_CODESIGN_IDENTITY` in the environment, or the identity recorded beside
+the app, in `~/.local/share/colonizer/codesign-identity`, by the install that set
+it. A release install records an identity it was run with, so an update started
+from Settings — whose installer child has no environment of its own — re-signs
+too, and no update loses the Keychain access its owner already granted. If
+`codesign` fails the update stops before the symlink moves and the running
+version is left as it was, so nothing is switched to a binary the Keychain would
+not recognise. Delete the recorded file to stop re-signing; an identity in the
+environment still signs. See [The system
+keychain](configuration.md#the-system-keychain).
+
 ## The previous version is kept for a while
 
 An update applied in place, from Settings or with `colonizer update`, passes
