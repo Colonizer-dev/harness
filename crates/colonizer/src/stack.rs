@@ -32,6 +32,11 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
         | SessionStatus::WaitingForAnswer
         | SessionStatus::Idle
         | SessionStatus::Publishing => Stacked::Wait,
+        // Issue #982: a stopped or parked colony is paused rather than finished, and may be resumed
+        // and publish yet. Refusing here would retire the child — a cascade down the whole stack —
+        // for a parent that is merely paused, so the child waits instead, exactly as for a parent
+        // that has not published yet.
+        SessionStatus::Stopped | SessionStatus::Parked => Stacked::Wait,
         // A closed pull request still has its branch pushed, so it is stackable; whether building on
         // work that was closed is wise is the reviewer's call, not the queue's.
         SessionStatus::PrOpened | SessionStatus::Closed => {
@@ -53,14 +58,6 @@ pub(crate) fn stacked_on(parent_id: &str, parent: Option<&Session>) -> Stacked {
         SessionStatus::Merged => Stacked::Ready(None),
         SessionStatus::NoChanges => Stacked::Refuse(format!(
             "colony `{parent_id}` made no changes, so it has no branch to build on"
-        )),
-        // A stopped or parked colony is paused rather than finished: one paused before it published
-        // has nothing anywhere to build on, and one paused after still owns its branch but has a
-        // story that is not over — it may be resumed and keep working. Refuse either way (the
-        // message says only what is true of both), since a resumed or published parent can be
-        // stacked on again.
-        SessionStatus::Stopped | SessionStatus::Parked => Stacked::Refuse(format!(
-            "colony `{parent_id}` was stopped or parked, so it cannot be stacked on; resume it and try again"
         )),
         SessionStatus::Failed => Stacked::Refuse(format!("colony `{parent_id}` failed, so it has no branch to build on")),
     }
@@ -206,10 +203,9 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_stopped_or_changeless_parent_is_refused_by_name_and_reason() {
+    fn a_failed_or_changeless_parent_is_refused_by_name_and_reason() {
         for (status, why) in [
             (SessionStatus::Failed, "failed"),
-            (SessionStatus::Stopped, "was stopped"),
             (SessionStatus::NoChanges, "made no changes"),
         ] {
             let reason = refuses(stacked_on("parent", Some(&parent(status))));
@@ -219,26 +215,27 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_parent_is_refused_whatever_its_pull_request_did() {
-        // The old message claimed a stopped parent "was stopped before it opened a pull request" —
-        // false for one stopped after. The refusal covers both, and the wording must too.
-        let mut before = parent(SessionStatus::Stopped);
-        before.pr_url = None;
-        let reason = refuses(stacked_on("parent", Some(&before)));
-        assert!(
-            !reason.contains("before it opened"),
-            "no claim about the pull request: {reason}"
-        );
-        assert!(reason.contains("resume it"), "the way back is named: {reason}");
+    fn a_stopped_or_parked_parent_makes_the_child_wait_whatever_its_pull_request_did() {
+        // Issue #982: a stopped or parked colony is paused, not over — it may be resumed and
+        // publish yet — so the child waits rather than being refused out of the queue. Both a
+        // parent paused before it opened a pull request and one paused after it did.
+        for status in [SessionStatus::Stopped, SessionStatus::Parked] {
+            let mut before = parent(status);
+            before.pr_url = None;
+            assert!(
+                matches!(stacked_on("parent", Some(&before)), Stacked::Wait),
+                "a {} parent paused before it published may still publish",
+                status.as_str()
+            );
 
-        let mut after = parent(SessionStatus::Stopped);
-        after.pr_url = Some("https://github.com/acme/repo/pull/9".into());
-        let reason = refuses(stacked_on("parent", Some(&after)));
-        assert!(
-            !reason.contains("before it opened"),
-            "a parent stopped after its pull request opened is not accused otherwise: {reason}"
-        );
-        assert!(reason.contains("resume it"), "{reason}");
+            let mut after = parent(status);
+            after.pr_url = Some("https://github.com/acme/repo/pull/9".into());
+            assert!(
+                matches!(stacked_on("parent", Some(&after)), Stacked::Wait),
+                "a {} parent paused after its pull request opened may still be resumed",
+                status.as_str()
+            );
+        }
     }
 
     #[test]
