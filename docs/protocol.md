@@ -900,8 +900,10 @@ reclaimed only once it is finished and pushed (`pr_opened`, `merged` or `closed`
 ended with nothing to push (`no_changes`), **and** is older than `COLONIZER_RECLAIM_RETENTION_HOURS`
 (default 12 h) past its last update. `stopped` and `failed` colonies are never reclaimed, since they can
 be resumed. The sweep runs every five minutes and also removes microVMs no colony owns. Reclaiming removes the worktree and local branch exactly like manual
-cleanup — and carries the same trade-off: a reclaimed colony is unresumable, because resume boots a
-fresh microVM on the kept worktree and there is no worktree left. A `parked` colony ([#213]) is
+cleanup. A reclaimed colony is still resumable while its pull request is open: `resume` re-creates the
+worktree from the branch on the remote — a fetch and the same checkout a first boot makes — before it
+boots ([#623]). Only a colony whose pull request is no longer open, or whose branch was itself deleted,
+is unresumable once reclaimed, because there is nothing left to re-create the worktree from. A `parked` colony ([#213]) is
 never reclaimed: it is paused, not finished, and its worktree is the run it may yet resume.
 
 What the sweeper never takes: a colony with no `pr_url` (other than `no_changes`, which has nothing to lose). Unpushed work may be the only copy of the
