@@ -1,0 +1,3 @@
+/api/repos                                           GET    unauth=401    token=owner            activity=-
+/api/settings/github-token                           DELETE unauth=401    token=owner            activity=settings.remove
+/api/settings/github-token                           POST   unauth=401    token=owner            activity=settings.save

@@ -1,0 +1,3 @@
+/api/voice                                           GET    unauth=401    token=owner            activity=-
+/api/voice/key                                       PUT    unauth=401    token=owner            activity=settings.save
+/api/voice/transcribe                                POST   unauth=401    token=owner            activity=-

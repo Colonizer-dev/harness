@@ -5,10 +5,24 @@ use super::*;
 use crate::sessions::tests::colony;
 use chrono::TimeZone;
 
-const CARGO_AUDIT: &str = include_str!("../../tests/fixtures/supply-chain/cargo-audit.json");
-const NPM_AUDIT: &str = include_str!("../../tests/fixtures/supply-chain/npm-audit.json");
-const OSV_SCANNER: &str = include_str!("../../tests/fixtures/supply-chain/osv-scanner.json");
-const CARGO_DENY: &str = include_str!("../../tests/fixtures/supply-chain/cargo-deny.jsonl");
+// In-crate fixtures, named through the manifest dir so the path does not read as one that leaves
+// the crate (it never did: `tests/fixtures` sits beside `src`).
+const CARGO_AUDIT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/supply-chain/cargo-audit.json"
+));
+const NPM_AUDIT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/supply-chain/npm-audit.json"
+));
+const OSV_SCANNER: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/supply-chain/osv-scanner.json"
+));
+const CARGO_DENY: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/supply-chain/cargo-deny.jsonl"
+));
 
 fn utc(d: u32, h: u32) -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, d, h, 0, 0).unwrap()
