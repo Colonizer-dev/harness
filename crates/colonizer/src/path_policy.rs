@@ -41,6 +41,28 @@ pub(crate) const DEFAULT_PROTECTED: &[(&str, &str)] = &[
     (".idea/", "editor tasks and run configs"),
 ];
 
+/// The suffixes a credential file's name ends in to be an ordinary, committable example rather
+/// than the real thing (`.env.example`, `.env.local.sample`), as the guest exec policy already
+/// exempts them.
+const CREDENTIAL_TEMPLATES: [&str; 4] = [".example", ".sample", ".template", ".dist"];
+
+/// Whether `path`'s file name carries credentials by convention, at any directory depth — the
+/// names publish refuses to ADD when the repository does not already track them (issue #780). The
+/// check reads the name alone, never a file's contents: the dotenv family (its `.example` and
+/// friends are templates, not secrets), the shell and package-manager credential files, and an
+/// SSH private key. Deliberately not `.mcp.json` (repos commit it on purpose; it is a protected
+/// path) and not `*.pem`/`*.key` (test fixtures).
+pub(crate) fn credential_like(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match name {
+        ".env" => true,
+        _ if name.starts_with(".env.") => !CREDENTIAL_TEMPLATES.iter().any(|suffix| name.ends_with(suffix)),
+        ".envrc" | ".netrc" | "_netrc" | ".npmrc" | ".pypirc" | ".git-credentials" | ".pgpass" => true,
+        "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519" => true,
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Policy {
     /// Paths whose contents the colony never sees; a trailing `/` means the whole directory.
@@ -800,6 +822,51 @@ mod tests {
             );
         }
         assert!(p.unmasked.is_empty(), "nothing is opted out by default");
+    }
+
+    /// Issue #780: the names publish refuses to ADD, at any depth. Templates and public keys are
+    /// exempt, and a name that merely resembles one (`.environment`, `environment.ts`, `.envoy`,
+    /// `.mcp.json`) stays ordinary.
+    #[test]
+    fn credential_like_matches_the_credential_names_but_not_templates_or_lookalikes() {
+        for yes in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            "config/.env.local",
+            "apps/web/.env",
+            ".envrc",
+            ".netrc",
+            "_netrc",
+            ".npmrc",
+            ".pypirc",
+            ".git-credentials",
+            ".pgpass",
+            "id_rsa",
+            "id_dsa",
+            "id_ecdsa",
+            "home/.ssh/id_ed25519",
+        ] {
+            assert!(credential_like(yes), "{yes:?} must look like a credential");
+        }
+        for no in [
+            ".env.example",
+            ".env.local.sample",
+            ".env.template",
+            ".env.dist",
+            "app/.env.example",
+            "id_rsa.pub",
+            "environment.ts",
+            ".envoy",
+            ".environment",
+            "src/env.ts",
+            ".mcp.json",
+            "cert.pem",
+            "deploy/server.key",
+            "notes.txt",
+        ] {
+            assert!(!credential_like(no), "{no:?} must not look like a credential");
+        }
     }
 
     #[test]
