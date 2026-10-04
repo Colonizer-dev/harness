@@ -664,7 +664,9 @@ impl Gateway {
             .is_none_or(|v| !matches!(v.as_str(), "0" | "false"))
     }
 
-    fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
+    /// The colony's in-flight request counter — the one [`colony_busy`](Self::colony_busy) reads.
+    /// `pub(crate)` so a test can hold a colony busy directly (watchdog.rs, issue #878).
+    pub(crate) fn colony_counter(&self, colony: &str) -> Arc<AtomicU64> {
         self.colonies.lock().unwrap().entry(colony.to_string()).or_default().clone()
     }
 

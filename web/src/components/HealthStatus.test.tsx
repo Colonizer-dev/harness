@@ -4,8 +4,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { HealthStatus } from "./SettingsDialog";
-import type { ProviderHealth } from "../types";
+import { AutonomyHealth, HealthStatus } from "./SettingsDialog";
+import type { AutonomyStatus, ProviderHealth } from "../types";
 
 const probe = (over: Partial<ProviderHealth>): ProviderHealth => ({
   reachable: true,
@@ -45,5 +45,40 @@ describe("HealthStatus", () => {
     expect(markup(probe({ quota: { remaining: null, error: "quota endpoint answered HTTP 401" } }))).toContain(
       "quota endpoint answered HTTP 401",
     );
+  });
+});
+
+describe("AutonomyHealth (issue #875)", () => {
+  const now = new Date("2026-09-24T09:05:00Z");
+  const status = (over: Partial<AutonomyStatus> = {}): AutonomyStatus => ({
+    enabled: true,
+    model: "deepseek/deepseek-flash",
+    fallback_models: ["anthropic/claude-haiku-4-5"],
+    last_success: { at: "2026-09-24T09:00:00Z", model: "deepseek/deepseek-flash" },
+    last_error: null,
+    consecutive_failures: 0,
+    alerted: false,
+    ...over,
+  });
+  const show = (over: Partial<AutonomyStatus> = {}) => renderToStaticMarkup(<AutonomyHealth status={status(over)} now={now} />);
+
+  it("names the last successful answer and the model that gave it", () => {
+    const out = show();
+    expect(out).toContain("Last answered 5m ago by deepseek/deepseek-flash");
+    expect(out).not.toContain("text-warn");
+  });
+
+  it("warns with the run of failures and the provider's error", () => {
+    const out = show({
+      consecutive_failures: 4,
+      last_error: { at: "2026-09-24T09:04:00Z", model: "deepseek/deepseek-flash", kind: "provider_error", status: 402, message: "Insufficient Balance" },
+    });
+    expect(out).toContain("4 in a row");
+    expect(out).toContain("Failed 1m ago by deepseek/deepseek-flash · provider error · HTTP 402 · Insufficient Balance");
+    expect(out).toContain("text-warn");
+  });
+
+  it("says there is no answer yet before the judge has answered once", () => {
+    expect(show({ last_success: null })).toContain("No answer yet");
   });
 });

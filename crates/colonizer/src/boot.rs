@@ -14,8 +14,8 @@ use crate::{
     orgs, providers, resolve_guest_claude_bin,
     sandbox::{self, BootSpec, Mount, Secret},
     sessions::{
-        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, Session, SessionLogger, SessionStatus, agent_env, agent_needs_node, agentd_http,
-        apply_exec_policy, colony_image, findings_enabled,
+        AGENTD_NOT_READY, AGENTD_PORT, MeshInfo, ModelSubstitution, Session, SessionLogger, SessionStatus, agent_env,
+        agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
     },
     stack,
     util::{append_line, random_token, truncate, write_private},
@@ -133,6 +133,9 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             }
             s.status = SessionStatus::Failed;
             s.error = Some(truncate(&message, 2000));
+            // A refusal by policy is permanent: retrying would be refused the same way (issue #881).
+            s.failure_class = Some(crate::retry::FailureClass::Permanent);
+            s.retry_at = None;
             attention = s.clear_attention();
             true
         })
@@ -192,22 +195,85 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             app.note_cleared_attention(&id, attention).await;
             return;
         }
-        let mut attention = None;
+        // Classified (issue #881): a transient failure with retries left is retried, anything else
+        // fails the colony. The answer is not needed here either way.
+        fail_or_retry_boot(&app, &id, &message).await;
+    } else {
+        // A boot that lands ends the failing streak (issue #881), so the next failure starts fresh.
         app.update_session(&id, |s| {
-            s.status = SessionStatus::Failed;
-            s.error = Some(truncate(&message, 2000));
-            // A warm-up this failed boot was still carrying dies with it; a held answer stays for
-            // a manual resume to deliver.
-            s.prewarm = None;
-            attention = s.clear_attention();
+            s.retry_at = None;
+            s.failure_class = None;
+            s.boot_retries = 0;
         })
         .await;
-        app.note_cleared_attention(&id, attention).await;
-        // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
-        if let Some(s) = app.session(&id).await {
-            crate::claims::spawn_release_if_needed(app.clone(), &s);
-        }
     }
+}
+
+/// Handles a boot that failed with `message` (issue #881): a transient failure with retries left
+/// goes back to `Queued` and answers `true`; every other case fails the colony, classed, and
+/// answers `false` (only then freeing the issue for a retry).
+async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
+    let class = crate::retry::classify(message);
+    if class == crate::retry::FailureClass::TransientInfra && schedule_boot_retry(app, id, message).await {
+        return true;
+    }
+    let mut attention = None;
+    app.update_session(id, |s| {
+        s.status = SessionStatus::Failed;
+        s.error = Some(truncate(message, 2000));
+        // The class of the failure that ended the retries, and no retry left pending.
+        s.failure_class = Some(class);
+        s.retry_at = None;
+        // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
+        // manual resume to deliver.
+        s.prewarm = None;
+        attention = s.clear_attention();
+    })
+    .await;
+    app.note_cleared_attention(id, attention).await;
+    // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
+    if let Some(s) = app.session(id).await {
+        crate::claims::spawn_release_if_needed(app.clone(), &s);
+    }
+    false
+}
+
+/// Puts a colony whose boot failed transiently back in the queue for another attempt (issue #881):
+/// `Queued` with `retry_at` at now plus the next backoff and the attempt counted. Answers `false`
+/// once the budget is spent, so the caller fails the colony for real.
+async fn schedule_boot_retry(app: &Shared, id: &str, message: &str) -> bool {
+    let message = message.to_string();
+    let Some((attempt, delay)) = app
+        .update_session(id, |s| {
+            if s.status != SessionStatus::Starting {
+                return None;
+            }
+            let delay = crate::retry::retry_delay(s.boot_retries)?;
+            let attempt = s.boot_retries + 1;
+            s.status = SessionStatus::Queued;
+            s.error = Some(truncate(&message, 2000));
+            s.failure_class = Some(crate::retry::FailureClass::TransientInfra);
+            s.retry_at = Some(Utc::now() + delay);
+            s.boot_retries = attempt;
+            s.updated_at = Utc::now();
+            Some((attempt, delay))
+        })
+        .await
+        .and_then(|(_, scheduled)| scheduled)
+    else {
+        return false;
+    };
+    app.session_log(
+        id,
+        "warn",
+        format!(
+            "boot attempt {attempt} failed (transient): {message} — retrying in {} min (retry {attempt} of {})",
+            delay.num_minutes(),
+            crate::retry::BOOT_RETRY_DELAYS.len()
+        ),
+    )
+    .await;
+    true
 }
 
 /// Whether a boot that failed after its colony left `Starting` must still reap the microVM: only
@@ -506,6 +572,69 @@ fn tls_edge_hosts(secrets: &[sandbox::Secret]) -> Vec<String> {
 /// mothership's patience with it.
 const MAX_RESTORE_WAIT_SECS: u64 = 600;
 
+/// Resolve one model setting on the runner env against the colony's sensitivity class (issue #704):
+/// when the gateway would refuse the model the setting names, substitute `fallback`, log it (only
+/// when `announce` — a resume reruns this) and record it. A blank `fallback` clears the setting to
+/// inherit the harness default; with no eligible fallback the value is left and the boot warns.
+/// Returns the effective model, empty for an unset or cleared one.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_sensitivity_model(
+    log: &SessionLogger,
+    setting: &str,
+    var: &str,
+    inherit_label: &str,
+    runner_env: &mut Map<String, Value>,
+    sensitivity: crate::sensitivity::Sensitivity,
+    overrides: Option<&crate::sensitivity::SensitivityOverrides>,
+    providers: &[providers::Provider],
+    fallback: &str,
+    announce: bool,
+    substitutions: &mut Vec<ModelSubstitution>,
+) -> String {
+    let Some(value) = runner_env.get(var).and_then(Value::as_str).map(String::from) else {
+        return String::new();
+    };
+    let display = setting.replace('_', " ");
+    match providers::model_fix(sensitivity, overrides, providers, &value, fallback) {
+        providers::ModelFix::Keep => value,
+        providers::ModelFix::Substitute { model, reason } => {
+            let to = model.clone().unwrap_or_else(|| inherit_label.to_string());
+            match &model {
+                Some(model) => {
+                    runner_env.insert(var.to_string(), Value::String(model.clone()));
+                }
+                None => {
+                    runner_env.remove(var);
+                }
+            }
+            if announce {
+                log.info(format!(
+                    "{display} {value} is not eligible for this {}-sensitivity task ({reason}); using {to} instead",
+                    sensitivity.as_str()
+                ))
+                .await;
+            }
+            substitutions.push(ModelSubstitution {
+                setting: setting.to_string(),
+                from: value,
+                to,
+                reason,
+            });
+            model.unwrap_or_default()
+        }
+        providers::ModelFix::NoFallback { reason } => {
+            if announce {
+                log.warn(format!(
+                    "{display} {value} is not eligible for this {}-sensitivity task ({reason}) and no eligible model is configured to fall back to; the gateway will refuse it",
+                    sensitivity.as_str()
+                ))
+                .await;
+            }
+            value
+        }
+    }
+}
+
 async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let log = app.logger(id);
     // Phases close in order and partition the boot; see crates/colonizer/src/timing.rs.
@@ -716,6 +845,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if resume && let Some(story) = resume_digest(&dir).await {
         prompt.push_str(&story);
     }
+    // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
+    // for yourself" or an answer that arrived while the colony was parked — rides the brief. Cleared
+    // once the runner is up, below; a warm resume hands it over on its own prompt instead.
+    if let Some(note) = s.resume_note.as_deref() {
+        prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
+    }
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -873,6 +1008,61 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(model) = s.subagent_model_override.as_deref() {
         runner_env.insert("COLONIZER_SUBAGENT_MODEL".into(), Value::String(model.into()));
     }
+    // Sensitivity fallback (issue #704): the gateway refuses a task's class any provider that does
+    // not meet its mark, so a subagent/background/small model routed to such a provider would fail
+    // every call — a restricted colony whose subagents ran on an untrusted provider simply could not
+    // work. Resolve them here with the gateway's own rule instead of booting into calls that can only
+    // 403. The orchestrator goes first: it is the fallback the others land on, and a blank fallback
+    // clears the setting to inherit the harness default. An operator's named model is resolved the
+    // same way — the alternative is a colony that cannot work — but never silently.
+    let configured = app.providers();
+    let overrides = org_settings.sensitivity.as_ref();
+    let mut substitutions: Vec<ModelSubstitution> = Vec::new();
+    resolve_sensitivity_model(
+        &log,
+        "model",
+        "COLONIZER_MODEL",
+        "the agent module's default model",
+        &mut runner_env,
+        sensitivity,
+        overrides,
+        &configured,
+        &model,
+        !resume,
+        &mut substitutions,
+    )
+    .await;
+    let orchestrator = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    for (setting, var) in [
+        ("subagent_model", "COLONIZER_SUBAGENT_MODEL"),
+        ("background_model", "COLONIZER_BACKGROUND_MODEL"),
+        ("small_model", "COLONIZER_SMALL_MODEL"),
+    ] {
+        resolve_sensitivity_model(
+            &log,
+            setting,
+            var,
+            "the orchestrator's model",
+            &mut runner_env,
+            sensitivity,
+            overrides,
+            &configured,
+            &orchestrator,
+            !resume,
+            &mut substitutions,
+        )
+        .await;
+    }
+    // The effective model is what the runner will really use, so routing's record says it (#704).
+    effective_model = runner_env
+        .get("COLONIZER_MODEL")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
     // Conditional instructions (issue #473): the agent's instruction rules can be conditioned on the
     // task's labels, which only the mothership knows at boot; they travel as a comma-separated list.
     if !task_labels.is_empty() {
@@ -993,6 +1183,8 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.update_session(id, |x| {
         x.allowed_providers = Some(used.iter().map(|p| p.id.clone()).collect());
         x.allowed_models = Some(routing.used_models(&runner_env));
+        // What the sensitivity resolution above settled on, for the cockpit to show (issue #704).
+        x.model_substitutions = substitutions.clone();
     })
     .await;
     write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
@@ -1057,6 +1249,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
 
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
+    }
+    // A GitHub-needing loop's colony (issue #778): the read-only context is written into `vm_dir`
+    // (visible at /colonizer/github), and the guest is handed the host-proxied write tools.
+    if crate::loop_github::prepare(app, &s, &vm_dir, &log).await {
+        runner_env.insert("COLONIZER_GITHUB".into(), Value::String("true".into()));
     }
     // A loop's colony gets loop_stop, and loop_next when the loop is self-paced (loops.rs).
     if let Some(self_paced) = crate::loops::colony_self_paced(app, s.origin.as_deref()).await {
@@ -1527,7 +1724,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // The running agent module joins the allow list in allowlist mode (#601), so a colony reaches
     // its vendor's declared hosts without the operator restating them.
-    let resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    let mut resolved_egress = crate::egress::resolve(&modules, &org_settings, Some(&agent));
+    // The fleet floor (#690): when this mothership belongs to a fleet, the owner's policy clamps
+    // the colony's own — local tightens, never loosens. Refused loosenings are logged and recorded.
+    if let Some(floor) = crate::fleet_policy::load(&app.cfg.config_dir).and_then(|p| p.floor(&s.org, &s.repo)) {
+        let (clamped, refused) = crate::fleet_policy::enforce(&floor, resolved_egress.policy.clone());
+        for note in &refused {
+            log.warn(format!("fleet egress policy: {note}")).await;
+        }
+        resolved_egress.policy = clamped;
+        resolved_egress.fleet_refused = refused;
+    }
     let tls_hosts = tls_edge_hosts(&secrets);
     let (net_profiles, net_rules, egress_record) =
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
@@ -1568,6 +1775,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
     }
+    // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
+    // write into the microVM's discardable root filesystem from one into a host-backed path: only
+    // the writable mounts below survive the VM, so only they can still be the host's to protect.
+    // Written before the VM starts, like the path policy above (a failed write fails the launch; a
+    // missing list would leave the policy's conservative fallback — every absolute path asks).
+    std::fs::write(vm_dir.join(sandbox::HOST_MOUNTS_FILE), sandbox::host_mounts_text(&mounts))?;
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -1699,16 +1912,28 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
-    // stays for the next resume; a stop cleared it under its own claim.
-    let delivered = app.update_session(id, |x| x.pending_answer.take().is_some()).await;
-    if let Some((s, true)) = delivered {
-        app.session_log(
-            id,
-            "info",
-            "held answer delivered: the agent resumes its session with it".into(),
-        )
+    // stays for the next resume; a stop cleared it under its own claim. A resume note (issue #876)
+    // is spent the same way, for the same reason.
+    let delivered = app
+        .update_session(id, |x| {
+            let answer = x.pending_answer.take().is_some();
+            let note = x.resume_note.take().is_some();
+            (answer, note)
+        })
         .await;
-        crate::activity::record_restored(app, &s).await;
+    if let Some((s, (answered, noted))) = delivered {
+        if answered {
+            app.session_log(
+                id,
+                "info",
+                "held answer delivered: the agent resumes its session with it".into(),
+            )
+            .await;
+            crate::activity::record_restored(app, &s).await;
+        }
+        if noted {
+            app.session_log(id, "info", "resume note delivered to the agent".into()).await;
+        }
     }
     Ok(())
 }
@@ -1904,6 +2129,266 @@ mod tests {
             .filter(|e| e["level"] == level)
             .filter_map(|e| e["message"].as_str().map(String::from))
             .collect()
+    }
+
+    /// Put a colony back where a fresh boot attempt starts it, without a claim or a slot.
+    async fn back_to_starting(app: &Shared, id: &str) {
+        app.update_session(id, |s| s.status = SessionStatus::Starting).await;
+    }
+
+    /// A transient microVM failure with retries left does not fail the colony (issue #881): it goes
+    /// back to `Queued` with a future `retry_at` and the attempt counted, and the colony log says so
+    /// — no `Failed` transition, so nothing notifies and no claim is released.
+    #[tokio::test]
+    async fn a_transient_boot_failure_goes_back_to_the_queue() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        assert!(fail_or_retry_boot(&app, "rt", "microVM boot failed: connection refused").await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Queued, "not failed: waiting to try again");
+        assert_eq!(s.boot_retries, 1);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::TransientInfra));
+        assert!(s.retry_at.is_some_and(|at| at > Utc::now()), "the retry is in the future");
+        let warned = said(&app, "rt", "warn").await;
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.contains("retrying in 1 min") && w.contains("retry 1 of 3")),
+            "{warned:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The retry budget is three: each transient failure schedules the next, longer wait, and the
+    /// fourth has none left — the colony fails, still classed transient because that is what it was.
+    #[tokio::test]
+    async fn the_retry_budget_runs_out_and_transient_then_fails() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        let msg = "microVM boot failed: connection refused";
+        for expected in [1u32, 2, 3] {
+            back_to_starting(&app, "rt").await;
+            assert!(
+                fail_or_retry_boot(&app, "rt", msg).await,
+                "retry {expected} is still within budget"
+            );
+            let s = app.session("rt").await.unwrap();
+            assert_eq!(s.boot_retries, expected);
+            assert_eq!(s.status, SessionStatus::Queued);
+        }
+        let waited: Vec<i64> = said(&app, "rt", "warn")
+            .await
+            .iter()
+            .filter_map(|w| w.split("retrying in ").nth(1))
+            .filter_map(|w| w.split(' ').next())
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        assert_eq!(waited, vec![1, 5, 15], "the backoff grows 1, 5, 15 minutes");
+        // The fourth transient failure has no retry left: the colony is failed for real.
+        back_to_starting(&app, "rt").await;
+        assert!(!fail_or_retry_boot(&app, "rt", msg).await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(
+            s.failure_class,
+            Some(crate::retry::FailureClass::TransientInfra),
+            "a blip, not a verdict"
+        );
+        assert!(s.retry_at.is_none(), "no retry is pending");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A permanent failure — bad configuration, a missing credential, a policy refusal — fails the
+    /// colony at once, classed permanent, with no retry scheduled (issue #881).
+    #[tokio::test]
+    async fn a_permanent_boot_failure_fails_the_colony_at_once() {
+        for message in [
+            "invalid sandbox configuration: cpus must be >= 1",
+            "git asked for a GitHub credential and none was available",
+            "resume refused: not authorized (no grant)",
+        ] {
+            let (app, root) = crate::sessions::tests::app_with_colony("perm", SessionStatus::Starting).await;
+            assert!(!fail_or_retry_boot(&app, "perm", message).await, "{message:?}");
+            let s = app.session("perm").await.unwrap();
+            assert_eq!(s.status, SessionStatus::Failed, "{message:?}");
+            assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent), "{message:?}");
+            assert!(s.retry_at.is_none(), "{message:?} schedules no retry");
+            assert_eq!(s.boot_retries, 0, "{message:?} never counted a retry");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// The whole `boot` path on a failure it cannot retry: a fresh boot of a colony with no agent
+    /// installed fails through `boot_inner` and is recorded permanent, never queued for a retry.
+    #[tokio::test]
+    async fn boot_of_a_colony_with_no_agent_module_fails_permanently() {
+        let (app, root) = crate::sessions::tests::app_with_colony("noagent", SessionStatus::Starting).await;
+        boot(app.clone(), "noagent".into(), false, None).await;
+        let s = app.session("noagent").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent));
+        assert!(s.retry_at.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn provider(id: &str, trusted: bool) -> providers::Provider {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "base_url": "http://127.0.0.1:9", "auth": "none", "trusted": trusted,
+        }))
+        .unwrap()
+    }
+
+    /// One `resolve_sensitivity_model` call for a restricted colony, with the long argument list
+    /// (and the sensitivity bit every test here shares) spelled out once; the setting name is derived
+    /// from the variable, as the boot's own call sites do.
+    async fn resolve(
+        log: &SessionLogger,
+        var: &str,
+        env: &mut Map<String, Value>,
+        all: &[providers::Provider],
+        fallback: &str,
+        announce: bool,
+        substitutions: &mut Vec<ModelSubstitution>,
+    ) -> String {
+        let setting = var.strip_prefix("COLONIZER_").unwrap_or(var).to_lowercase();
+        resolve_sensitivity_model(
+            log,
+            &setting,
+            var,
+            "the orchestrator's model",
+            env,
+            crate::sensitivity::Sensitivity::Restricted,
+            None,
+            all,
+            fallback,
+            announce,
+            substitutions,
+        )
+        .await
+    }
+
+    /// The bug of issue #704: a restricted colony's subagent model on an untrusted provider is
+    /// rerouted onto the orchestrator's eligible model at boot, logged once, recorded for the cockpit,
+    /// and the gateway carries what it was substituted with.
+    #[tokio::test]
+    async fn a_restricted_colony_reroutes_an_untrusted_subagent_model() {
+        use crate::sensitivity::Sensitivity;
+        let root = std::env::temp_dir().join(format!("colonizer-subst-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst1";
+        let log = app.logger(id);
+        let all = vec![provider("trustedai", true), provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("trustedai/claude-sonnet-5"));
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        let orchestrator = resolve(&log, "COLONIZER_MODEL", &mut env, &all, "sonnet", true, &mut substitutions).await;
+        assert_eq!(orchestrator, "trustedai/claude-sonnet-5");
+        assert!(substitutions.is_empty(), "the orchestrator model already clears the bar");
+
+        let subagent = resolve(
+            &log,
+            "COLONIZER_SUBAGENT_MODEL",
+            &mut env,
+            &all,
+            &orchestrator,
+            true,
+            &mut substitutions,
+        )
+        .await;
+        assert_eq!(subagent, "trustedai/claude-sonnet-5");
+        assert_eq!(env["COLONIZER_SUBAGENT_MODEL"], json!("trustedai/claude-sonnet-5"));
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].setting, "subagent_model");
+        assert_eq!(substitutions[0].from, "zai/glm-5.3-flash");
+        assert_eq!(substitutions[0].to, "trustedai/claude-sonnet-5");
+        assert!(substitutions[0].reason.contains("trusted"), "{}", substitutions[0].reason);
+        // The gateway would carry the substituted model: the fix and the gate share one rule.
+        assert!(providers::model_eligible(Sensitivity::Restricted, None, &all, &subagent));
+        // Logged exactly once, for the substitution alone.
+        let info = said(&app, id, "info").await;
+        assert_eq!(info.len(), 1, "{info:?}");
+        assert!(
+            info[0].contains("subagent model zai/glm-5.3-flash is not eligible")
+                && info[0].contains("using trustedai/claude-sonnet-5 instead"),
+            "{}",
+            info[0]
+        );
+        assert!(said(&app, id, "warn").await.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With nothing eligible to fall back to, the value is left alone and the boot warns that the
+    /// gateway will refuse it, rather than inventing a model name (issue #704).
+    #[tokio::test]
+    async fn a_restricted_colony_leaves_a_model_it_cannot_replace_and_warns() {
+        let root = std::env::temp_dir().join(format!("colonizer-subst-none-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst2";
+        let log = app.logger(id);
+        let all = vec![provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        // The module's own model is the same untrusted one, so no fallback is eligible.
+        let value = resolve(
+            &log,
+            "COLONIZER_MODEL",
+            &mut env,
+            &all,
+            "zai/glm-5.3-flash",
+            true,
+            &mut substitutions,
+        )
+        .await;
+        assert_eq!(value, "zai/glm-5.3-flash");
+        assert_eq!(env["COLONIZER_MODEL"], json!("zai/glm-5.3-flash"));
+        assert!(substitutions.is_empty(), "nothing was substituted");
+        let warn = said(&app, id, "warn").await;
+        assert_eq!(warn.len(), 1, "{warn:?}");
+        assert!(
+            warn[0].contains("the gateway will refuse it") && warn[0].contains("zai/glm-5.3-flash"),
+            "{}",
+            warn[0]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The default setup, where the module setting `model` is blank: a subagent model on an untrusted
+    /// provider is cleared instead — subagents inherit the orchestrator, on the harness default and
+    /// eligible — recorded, logged once, not repeated by a resume (issue #704).
+    #[tokio::test]
+    async fn a_restricted_colony_clears_a_subagent_model_it_cannot_replace() {
+        let root = std::env::temp_dir().join(format!("colonizer-subst-blank-{}", crate::util::short_id()));
+        let app = crate::app::tests::test_app(&root);
+        let id = "subst3";
+        let log = app.logger(id);
+        let all = vec![provider("zai", false)];
+        let mut env = Map::new();
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut substitutions = Vec::new();
+
+        // COLONIZER_MODEL is absent because the module's `model` is blank, so the fallback is the
+        // harness default: eligible, with no model name to record.
+        let subagent = resolve(&log, "COLONIZER_SUBAGENT_MODEL", &mut env, &all, "", true, &mut substitutions).await;
+        assert_eq!(subagent, "", "cleared, so subagents inherit the orchestrator");
+        assert!(
+            !env.contains_key("COLONIZER_SUBAGENT_MODEL"),
+            "the variable is removed, not blanked"
+        );
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].to, "the orchestrator's model");
+        assert!(said(&app, id, "warn").await.is_empty());
+        assert_eq!(said(&app, id, "info").await.len(), 1);
+
+        // A resume runs the same resolution again, but does not repeat the line.
+        env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("zai/glm-5.3-flash"));
+        let mut again = Vec::new();
+        resolve(&log, "COLONIZER_SUBAGENT_MODEL", &mut env, &all, "", false, &mut again).await;
+        assert_eq!(again.len(), 1, "still recorded");
+        assert!(!env.contains_key("COLONIZER_SUBAGENT_MODEL"));
+        assert_eq!(said(&app, id, "info").await.len(), 1, "a resume does not repeat the line");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The observed outage: GitHub refusing (403, account suspended) or unreachable. A resume with
