@@ -1789,6 +1789,25 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
             .map_or(Duration::ZERO, |secs| Duration::from_secs(secs.min(MAX_RESTORE_WAIT_SECS)));
         restore = Some(crate::services::restore_json(s.was_suspended, &specs));
     }
+    // The operator vault (#777): a filtered, secret-scrubbed snapshot of the in-scope Markdown
+    // folders, written into the session directory — already the colony's read-only /colonizer
+    // mount, so nothing new is mounted. Staged before session.json so the guest's env can carry
+    // the path, and a staging problem never fails the boot: the colony just runs without a vault.
+    match crate::vault::stage_for_boot(app, &s.repo, &vm_dir.join("vault")) {
+        Ok(stats) => {
+            for warning in stats.warnings {
+                log.warn(format!("operator vault: {warning}")).await;
+            }
+            if stats.notes > 0 {
+                runner_env.insert("COLONIZER_VAULT_DIR".into(), Value::String("/colonizer/vault".into()));
+                log.info(format!("operator vault: {} notes staged", stats.notes)).await;
+            }
+        }
+        Err(e) => {
+            log.warn(format!("operator vault not staged ({e:#}); this colony starts without it"))
+                .await
+        }
+    }
     let mut session_json = json!({
         "session_id": id,
         "workspace": "/workspace",

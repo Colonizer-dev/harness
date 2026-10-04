@@ -10,6 +10,7 @@ Part of the [Colonizer protocol](../protocol.md).
 | `/colonizer/mesh-authkey` | ro | Headscale pre-auth key (absent when mesh disabled) |
 | `/colonizer/path-policy` | ro | The path policy the boot script enforces before the agent starts: files masked or pinned read-only in the worktree ([path-policy.md](../path-policy.md)). A missing list stops the boot |
 | `/colonizer/memory/{global,org,repo}/` | ro | Approved shared-memory notes (§6.2). Absent when memory is off |
+| `/colonizer/vault/` | ro | A filtered, secret-scrubbed snapshot of the operator's Markdown vault, with an `INDEX.md` ([colonies.md](../colonies.md#operator-vault)). Absent when no vault is configured or nothing is in scope |
 | `<data>/repos/<owner>/<name>.git` | ro | The mothership's bare clone, mounted at its host path; `GIT_DIR` points at the worktree's admin directory inside it |
 | `/opt/colonizer/bin/colonizer-agentd` | ro | Static agentd binary |
 | `/opt/colonizer/tailscale/{tailscale,tailscaled}` | ro | Static tailscale binaries |
@@ -48,7 +49,10 @@ last run, for it to continue that conversation (the Claude Code runner passes it
 
 `COLONIZER_SERVICES_DIR=/colonizer/services` reaches `agent.env` on every boot (#700): the
 directory the guest's service writers (`colonizer-svc`, a Claude Code background-Bash hook) record
-started services in, one JSON file per service. On a resume boot, `session.json` also gains a
+started services in, one JSON file per service. `COLONIZER_VAULT_DIR=/colonizer/vault` reaches
+`agent.env` on a boot that staged an operator vault (#777), absent otherwise: the read-only
+snapshot of the operator's in-scope Markdown notes
+([colonies.md](../colonies.md#operator-vault)). On a resume boot, `session.json` also gains a
 top-level `restore` key — absent on other boots, which is how the guest tells a restore from a
 fresh start:
 

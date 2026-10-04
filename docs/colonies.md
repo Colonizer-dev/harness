@@ -23,6 +23,7 @@ read by the mothership when it starts.
 - [Conditional instructions](#conditional-instructions)
 - [Shared memory](#shared-memory)
 - [Recall from earlier colonies (deja)](#recall-from-earlier-colonies-deja)
+- [Operator vault](#operator-vault)
 - [Search earlier colonies' conversations](#search-earlier-colonies-conversations)
 - [The repo-explorer subagent](#the-repo-explorer-subagent)
 - [Who caused each event](#who-caused-each-event)
@@ -578,6 +579,37 @@ search a colony would.
 never answers another org's query. Before anything is written, every secret value the mothership
 knows is scrubbed, raw and JSON-escaped, for values of six characters and up, and deja's own
 pattern redaction runs on top. Base64- or percent-encoded forms of a secret are not caught.
+
+## Operator vault
+
+Stage a filtered, secret-scrubbed snapshot of a local Markdown vault (an Obsidian vault, say)
+read-only into each colony at `/colonizer/vault/`, with an `INDEX.md`. Off by default; the
+mothership only ever reads the vault. Point it at the vault in `colonizer.toml` and allowlist the
+folders to stage, each scoped like
+[colony secrets](protocol/secrets.md#colony-secrets-post-apisecretscolony) — `all`, one `org` or one
+`repo`:
+
+```toml
+[vault]
+path = "/home/me/Obsidian/Work"
+[[vault.folders]]
+path = "Projects/web"
+scope = { kind = "repo", repo = "acme/web" }
+[[vault.folders]]
+path = "Decisions"
+scope = { kind = "all" }
+```
+
+A folder path is relative to the vault; `""` or `"."` is the whole vault. An absolute path, one with
+a `..` component, or one reached through a symlink is skipped with a warning. Only `*.md` files are
+staged: dot-named files and directories (`.obsidian/`, `.trash/`, `.git/`) and attachments stay out,
+a note whose frontmatter says `colonizer: false` is left out, and symlinks are never followed. One
+note over 256 KiB is skipped and the snapshot stops adding notes at 8 MiB. Every note — and its path
+— is scrubbed of the secret values the mothership knows, the same `deja` scrub as the transcript
+index, before anything is written, and the `INDEX.md` (titles, paths, tags, status, `[[links]]` and
+backlinks) is built from the scrubbed text. The snapshot is taken at each boot and resume, so a later
+edit needs a new boot to reach a colony; a folder out of scope stages nothing, so `/colonizer/vault/`
+is absent. Base64- or percent-encoded forms of a secret are not caught.
 
 ## Search earlier colonies' conversations
 

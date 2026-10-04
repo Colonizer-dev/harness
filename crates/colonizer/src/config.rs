@@ -467,6 +467,8 @@ where
 #[serde(default)]
 pub struct FileConfig {
     pub publish: PublishConfig,
+    /// The operator vault (#777): folders of Markdown staged read-only into each colony.
+    pub vault: crate::vault::VaultConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
