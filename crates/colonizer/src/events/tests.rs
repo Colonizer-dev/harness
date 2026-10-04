@@ -1043,3 +1043,48 @@ async fn a_path_policy_attempt_is_logged_once_and_sanitised() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Issue #983: the router's upstream failures reach the mothership's own log, with the colony and the
+/// account id it runs on, on one line — and no other event does.
+#[test]
+fn model_router_log_lines_reach_the_mothership_log() {
+    let failure = json!({
+        "type": "log",
+        "level": "error",
+        "source": "model_router",
+        "message": "upstream failure: provider=anthropic class=timeout status=504 elapsed=600.4s model=claude-opus-5-5 detail=UND_ERR_HEADERS_TIMEOUT",
+    });
+    assert_eq!(
+        model_router_line("77e58b29", Some("work"), &failure).as_deref(),
+        Some(
+            "model router: colony 77e58b29 account=work [error] upstream failure: provider=anthropic class=timeout \
+             status=504 elapsed=600.4s model=claude-opus-5-5 detail=UND_ERR_HEADERS_TIMEOUT"
+        )
+    );
+    // A colony launched without an account runs on the install's default one.
+    assert!(
+        model_router_line("c", None, &failure)
+            .unwrap()
+            .contains("account=default [error]")
+    );
+    // A guest writes the message: it stays one bounded line, and an unknown level is not echoed.
+    let injected =
+        json!({"type": "log", "level": "fatal\nX", "source": "model_router", "message": format!("a\nb{}", "x".repeat(900))});
+    let line = model_router_line("c", None, &injected).unwrap();
+    assert!(!line.contains('\n'));
+    assert!(line.contains("[info] a b"));
+    assert!(line.len() < 600);
+    // Other log lines, and other events, stay in the colony's own log.
+    assert_eq!(
+        model_router_line("c", None, &json!({"type": "log", "level": "warn", "message": "x"})),
+        None
+    );
+    assert_eq!(
+        model_router_line(
+            "c",
+            None,
+            &json!({"type": "status", "source": "model_router", "message": "x"})
+        ),
+        None
+    );
+}

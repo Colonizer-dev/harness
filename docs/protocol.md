@@ -1916,6 +1916,19 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   credential, drop Anthropic OAuth betas from `anthropic-beta`, stream the response back unchanged.
   If the upstream has no `count_tokens`, answer `{"input_tokens": ceil(chars / 4)}`.
 - Everything else: forward to `https://api.anthropic.com` with headers unchanged.
+- Upstream timeouts (issue #983): 30 s to connect (`COLONIZER_ROUTER_CONNECT_TIMEOUT_SECS`), and an idle
+  timeout of 600 s by default (the module's `router_idle_timeout_secs`, `COLONIZER_ROUTER_IDLE_TIMEOUT_SECS`,
+  never below a route's `timeout_secs`) on the wait for the response headers and on every gap between two
+  chunks of the body. A streamed answer has no overall limit.
+- A request that gets no HTTP answer is answered with what happened: a DNS, connect or TLS failure is a 502
+  that says the upstream is unreachable and why; a silence past the idle timeout is a 504 `timeout_error`
+  ("timed out after N s"), or an SSE `error` event when the stream had already started; a connection that
+  broke once open is a 502 naming the error code. Upstream HTTP errors (401/403, 429 with `retry-after`,
+  5xx) pass through unchanged.
+- Every upstream failure, and every fallback, is a runner `log` event with `"source": "model_router"`:
+  `upstream failure: provider=… class=dns|connect|tls|timeout|connection|auth|rate_limit|upstream_5xx|client_error
+  status=… elapsed=…s model=… detail=…`. The mothership also writes those lines to its own output, with
+  the colony and the Claude account it chose (never a credential).
 
 ### 6.1b Per-task model tiers (mothership)
 

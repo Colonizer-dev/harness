@@ -1368,7 +1368,8 @@ async function main() {
   for (const message of plan.warnings) emit({ type: 'log', level: 'warn', message });
   let router = null;
   if (plan.needsRouter) {
-    router = await startRouter({ routes: plan.routes, env: process.env, log: ({ level, message }) => emit({ type: 'log', level, message }) });
+    // `source` marks the router's lines, which the mothership also writes to its own log (#983).
+    router = await startRouter({ routes: plan.routes, env: process.env, log: ({ level, message, source }) => emit({ type: 'log', level, message, source }) });
     const served = plan.routes.map((route) => route.prefix).join(', ') || 'none';
     emit({ type: 'log', level: 'info', message: `model router listening on ${router.url} (provider routes: ${served})` });
   }
