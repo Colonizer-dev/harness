@@ -60,7 +60,7 @@ class.
 ## The gaps, in Colonizer terms
 
 **Core** — discovery/lifecycle, versioning, auth/errors, harnesses and session listing are served
-under `/uhp/v1` since #650 (`crates/colonizer/src/uhp.rs`, `crates/colonizer/routes.snap`), under
+under `/uhp/v1` since #650 (`crates/colonizer/src/uhp.rs`, `crates/colonizer/routes/`), under
 the same scoped-token limits as the `/api` routes. What keeps the core class is D-05, and what
 keeps D-05 is the missing half of the surface: creating and continuing responses
 (`POST /uhp/v1/responses`), SSE streaming (§7.4) and cancellation (§7.6) are still the follow-up,

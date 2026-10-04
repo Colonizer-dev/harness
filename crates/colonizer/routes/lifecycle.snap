@@ -1,0 +1,6 @@
+/api/sessions/{id}                                   DELETE unauth=401    token=owner            activity=colony.delete
+/api/sessions/{id}                                   GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/cleanup                           POST   unauth=401    token=owner            activity=colony.cleanup
+/api/sessions/{id}/keep                              POST   unauth=401    token=session>=operate activity=colony.keep
+/api/sessions/{id}/resume                            POST   unauth=401    token=session>=operate activity=colony.resume
+/api/sessions/{id}/stop                              POST   unauth=401    token=session>=operate activity=colony.stop

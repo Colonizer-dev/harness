@@ -1,10 +1,12 @@
 //! The mothership as a server: `serve` loads the state, assembles the router from every module's
 //! `routes()`, starts every module's background work and serves until a signal.
 //!
-//! Adding a module: give it `pub(crate) fn routes() -> Router<Shared>` with its own routes and
-//! layers and, if it runs in the background, `pub(crate) fn start_tasks(app: &Shared)`. Then add
-//! one line to the alphabetical list in `api_routes` and one to the list in `start_tasks`, and
-//! regenerate `routes.snap`. CONTRIBUTING.md has the whole recipe.
+//! Adding a feature: give it `pub(crate) fn routes() -> Router<Shared>` with its own routes and
+//! layers and, if it runs in the background, `pub(crate) fn start_tasks(app: &Shared)`, then either
+//! add one line to the alphabetical list in `api_routes` (and one to `start_tasks`) or, to keep
+//! those lists from being shared by every parallel pull request, migrate the feature to a
+//! `features::Feature` descriptor in its own file and one line in `features::ALL` (`features.rs`).
+//! Either way regenerate `crates/colonizer/routes/`. AGENTS.md and CONTRIBUTING.md have the recipe.
 
 use crate::app::{Boot, load_sessions};
 use crate::config::{ModulesConfig, Settings};
@@ -308,7 +310,8 @@ async fn api_not_found(req: Request, next: Next) -> Response {
 }
 
 /// Every API route, before any layer: `router` wraps them in the activity log's route layer and
-/// `host_guard`. Each module keeps its own routes in its `routes()`.
+/// `host_guard`. Each module keeps its own routes in its `routes()`, and a migrated feature's
+/// arrive through `features::routes()`.
 pub(crate) fn api_routes() -> Router<Shared> {
     // One line per module that serves API routes, kept in alphabetical order.
     Router::new()
@@ -328,6 +331,8 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::deps::routes())
         .merge(crate::docs_loop::routes())
         .merge(crate::egress::routes())
+        // The migrated features' routes (`features.rs`); each feature keeps its own.
+        .merge(crate::features::routes())
         .merge(crate::findings::routes())
         .merge(crate::fleet::routes())
         .merge(crate::fleet_history::routes())
@@ -342,11 +347,9 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::lifecycle::routes())
         .merge(crate::login_item::routes())
         .merge(crate::loops::routes())
-        .merge(crate::maps::routes())
         .merge(crate::memory::routes())
         .merge(crate::merge_loop::routes())
         .merge(crate::merge_train::routes())
-        .merge(crate::supply_chain_loop::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
         .merge(crate::orgs::routes())
@@ -355,7 +358,6 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::plugins::routes())
         .merge(crate::providers::routes())
         .merge(crate::publish::routes())
-        .merge(crate::quota_cards::routes())
         .merge(crate::push::routes())
         .merge(crate::reclaim::routes())
         .merge(crate::redteam::routes())
@@ -395,18 +397,24 @@ pub(crate) fn router(app: &Shared) -> Router {
 
 /// Every module's background work: recovery and the sandbox watchers, the queue, loops, red-team
 /// runs, the pull-request watch and backfills, notifications, telemetry and the rest. One line per
-/// module, kept in alphabetical order; each module's `start_tasks` spawns what it runs.
+/// module, kept in alphabetical order; each module's `start_tasks` spawns what it runs, and a
+/// migrated feature's is run from `features::ALL`.
 async fn start_tasks(app: &Shared, router: &Router) {
     crate::autonomy::start_tasks(app);
     crate::burn_down::start_tasks(app);
     crate::docs_loop::start_tasks(app);
+    // The migrated features' background work (`features.rs`); each feature keeps its own.
+    for feature in crate::features::ALL {
+        if let Some(start) = feature.start_tasks {
+            start(app);
+        }
+    }
     crate::fleet_sync::start_tasks(app);
     crate::gateway::start_tasks(app);
     crate::lifecycle::start_tasks(app);
     crate::loops::start_tasks(app);
     crate::merge_loop::start_tasks(app);
     crate::merge_train::start_tasks(app);
-    crate::supply_chain_loop::start_tasks(app);
     crate::mesh::start_tasks(app).await;
     crate::notify::start_tasks(app);
     crate::publish::start_tasks(app);

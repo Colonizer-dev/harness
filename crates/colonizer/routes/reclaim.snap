@@ -1,0 +1,2 @@
+/api/sessions/{id}/retain                            POST   unauth=401    token=owner            activity=colony.retain
+/api/storage                                         GET    unauth=401    token=owner            activity=-

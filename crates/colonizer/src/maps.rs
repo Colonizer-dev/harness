@@ -1152,6 +1152,43 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/sessions/{id}/diff", routing::get(session_diff))
 }
 
+/// This module's feature descriptor (`features.rs`): its routes, scoped-token rule, activity rules
+/// and kinds, read through `features::ALL` by `server` and `api_tokens`.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "maps",
+    routes,
+    token_scope: Some(token_scope),
+    activity: ACTIVITY,
+    kinds: &["map.create", "map.refresh"],
+    start_tasks: None,
+};
+
+/// The activity lines this module's writes record. The refresh (`map.refresh`) is written by the
+/// colony itself (`ingest`), not a route, so it is a kind, not a rule.
+const ACTIVITY: &[crate::activity::Rule] = &[crate::activity::rule(
+    "POST",
+    "/api/maps/{owner}/{name}",
+    "map.create",
+    crate::activity::Target::None,
+)];
+
+/// What a scoped token needs for a map route: read scope, then the repository against the token's
+/// limits — outside them the map reads as unknown (404), like an out-of-limits colony. The diff and
+/// `touched` routes are not map routes and stay the owner's (or the colony read's, `api_tokens`).
+fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crate::api_tokens::Need<'a>> {
+    match segs {
+        ["api", "maps", owner, name] if *method == axum::http::Method::GET && !owner.is_empty() && !name.is_empty() => {
+            Some(crate::api_tokens::Need::Map { owner, name })
+        }
+        ["api", "maps", owner, name, "files" | "file"]
+            if *method == axum::http::Method::GET && !owner.is_empty() && !name.is_empty() =>
+        {
+            Some(crate::api_tokens::Need::Map { owner, name })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

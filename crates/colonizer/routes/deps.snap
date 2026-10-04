@@ -1,0 +1,6 @@
+/api/orgs/{org}/packages/dependencies                GET    unauth=401    token=owner            activity=-
+/api/orgs/{org}/packages/published                   GET    unauth=401    token=owner            activity=-
+/api/orgs/{org}/packages/supply-chain                GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/dependencies               GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/published                  GET    unauth=401    token=owner            activity=-
+/api/repos/{owner}/{name}/supply-chain               GET    unauth=401    token=owner            activity=-

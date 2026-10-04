@@ -1,0 +1,8 @@
+/api/sessions/{id}/files                             GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/files/archive                     GET    unauth=401    token=session>=read    activity=-
+/api/sessions/{id}/files/{name}/content              GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/containers/{cid}/files/{fid}/content         GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions                                     GET    unauth=401    token=read             activity=-
+/uhp/v1/sessions/{id}/files                          GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions/{id}/files/archive                  GET    unauth=401    token=session>=read    activity=-
+/uhp/v1/sessions/{id}/files/{name}/content           GET    unauth=401    token=session>=read    activity=-

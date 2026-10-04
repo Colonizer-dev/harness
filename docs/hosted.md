@@ -16,7 +16,7 @@ Where a section says "follow-up", that sentence is the whole of what exists. Ter
 `COLONIZER_DEPLOYMENT` selects `local` (the default) or `hosted`; any other value counts as
 hosted. The API does not change with it:
 
-- **The routes are the same routes.** `crates/colonizer/routes.snap` is the route table, with
+- **The routes are the same routes.** `crates/colonizer/routes/` is the route table, with
   method, unauthenticated answer and token requirement per path. Both deployments serve it.
 - **The events are the same events.** One vocabulary on all three hops — runner, agentd,
   mothership, browser ([docs/protocol.md](protocol.md)); [agent-events.schema.json](agent-events.schema.json)

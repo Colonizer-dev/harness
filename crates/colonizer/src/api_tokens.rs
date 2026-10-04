@@ -16,7 +16,7 @@
 //! repository in their handler, where the body is parsed ([`ScopedToken::covers`]).
 
 use crate::{
-    ApiResult, App, Shared, client_error,
+    ApiResult, App, Shared, client_error, features,
     sessions::{Session, SessionStatus},
     util::{short_id, valid_repo},
 };
@@ -432,8 +432,9 @@ fn clean_repos(repos: &[String]) -> Result<Vec<String>, String> {
 // Enforcement: what a scoped token may call.
 // ---------------------------------------------------------------------------
 
-/// What a route needs from a scoped token.
-enum Need<'a> {
+/// What a route needs from a scoped token. `pub(crate)` so a migrated feature can declare its own
+/// scoped-token rule beside its handlers (`features.rs`).
+pub(crate) enum Need<'a> {
     /// Any scope at or above this may call it; nothing else to check.
     Bare(Scope),
     /// A colony-scoped route: the scope first, then the colony's org/repo against the token's
@@ -458,7 +459,8 @@ enum Need<'a> {
 /// inside a segment is one segment here exactly as it is there, and an encoded slash cannot rename
 /// one route into another. Everything unrecognized is owner-only: the allowlist is closed by
 /// default, so a route added to the API later is refused to scoped tokens until its scope is
-/// decided here.
+/// decided here — or, for a migrated feature, in its own `token_scope` beside its handlers, which
+/// this match asks first (`features.rs`).
 fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
     let segs: Vec<&'a str> = path.split('/').skip(1).collect();
     let get = method == Method::GET;
@@ -469,10 +471,6 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         // Reads: watch the install and its colonies, never drive them.
         ["api", "status" | "version"] if get => Need::Bare(Scope::Read),
         ["api", "sessions"] if get => Need::Bare(Scope::Read),
-        ["api", "maps", owner, name] if get && !owner.is_empty() && !name.is_empty() => Need::Map { owner, name },
-        ["api", "maps", owner, name, "files" | "file"] if get && !owner.is_empty() && !name.is_empty() => {
-            Need::Map { owner, name }
-        }
         ["api", "tokens", "self"] if get => Need::Bare(Scope::Read),
         // Colony-scoped: watch at read, drive (answer, stop, resume, prewarm) at operate.
         ["api", "sessions", id] if get && !id.is_empty() => Need::Session {
@@ -558,9 +556,6 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "loops", id, "runs"] if get && !id.is_empty() => Need::Bare(Scope::Read),
         // The merge train's last tick (issue #671): a watch, like the loops list.
         ["api", "merge-train"] if get => Need::Bare(Scope::Read),
-        // The built-in supply-chain loop's settings and last report: a watch. Changing its
-        // settings or pressing a run stays the owner's (it starts colonies on the allowlist).
-        ["api", "supply-chain-loop"] if get => Need::Bare(Scope::Read),
         ["api", "merge-train", "loop"] if get => Need::Bare(Scope::Read),
         ["api", "loops"] if post => Need::Launch,
         ["api", "loops", id] if (put || delete) && !id.is_empty() => Need::Launch,
@@ -574,8 +569,14 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
         ["api", "fleet", "peer", "rows"] if post => Need::Fleet,
         ["api", "fleet", "peer", "payloads", sha] if put && !sha.is_empty() => Need::Fleet,
         // Everything else — settings, secrets, provider keys, token management itself — stays
-        // with the owner: managing credentials is not a thing a credential may do.
-        _ => Need::Owner,
+        // with the owner: managing credentials is not a thing a credential may do. A migrated
+        // feature's routes are asked for their own rule first (`features.rs`); anything none of
+        // them claims is owner-only.
+        _ => features::ALL
+            .iter()
+            .filter_map(|feature| feature.token_scope)
+            .find_map(|scope| scope(method, &segs))
+            .unwrap_or(Need::Owner),
     }
 }
 

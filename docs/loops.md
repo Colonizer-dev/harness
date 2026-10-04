@@ -265,8 +265,8 @@ run the repository's own code on the host:
   crates that are not declared, and the repository's own CLI's subcommands and flags — for
   Colonizer, `colonizer` against `crates/colonizer/src/cli.rs`; elsewhere, the `[[cli]]` entries.
 - **Route drift** (Colonizer's own layout, or a `[routes]` entry with `snapshot` and `doc`): routes
-  `routes.snap` gained since the last run that `docs/protocol.md` does not name, and routes it lost
-  that the doc still names.
+  `crates/colonizer/routes/` gained since the last run that `docs/protocol.md` does not name, and
+  routes it lost that the doc still names.
 - **Changelog**: only where the repository keeps `changelog.d/` fragments or a `## Unreleased`
   section. With fragments it follows the repository's own `scripts/changelog.mjs check`: a change
   touching its `CODE_PATHS` (or code, without that script) that neither adds a fragment nor edits
