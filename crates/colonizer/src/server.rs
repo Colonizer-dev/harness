@@ -358,6 +358,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::merge_loop::routes())
         .merge(crate::merge_train::routes())
         .merge(crate::supply_chain_loop::routes())
+        .merge(crate::switch_agent::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
         .merge(crate::orgs::routes())
@@ -755,7 +756,7 @@ mod tests {
     async fn a_colony_gateway_token_is_not_an_api_token() {
         let root = temp_root();
         let app = test_app(&root);
-        // The token boot issues the colony for its gateway routes (gateway.rs checks it against the
+        // The token boot issues the colony for its gateway routes (gateway/mod.rs checks it against the
         // session dir) is not a credential for the cockpit API: presented as a Bearer there it is
         // just an unauthenticated request, on a loopback Host with no Origin.
         let token = crate::util::random_token();
