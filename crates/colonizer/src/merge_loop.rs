@@ -1690,7 +1690,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                     ),
                 ))
             }
-            SessionStatus::Stopped | SessionStatus::Failed if !self.dry => {
+            SessionStatus::Stopped | SessionStatus::Failed | SessionStatus::NoChanges if !self.dry => {
                 self.pace().await?;
                 let status = s.status.as_str();
                 match self.ops.reset_resolve(s).await {
