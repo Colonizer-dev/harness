@@ -290,6 +290,31 @@ pub(crate) struct RepoMemory {
     pub local_failed: BTreeMap<String, String>,
     /// Issue #968: conflicted pull requests a resolve colony was sent for, by URL.
     pub resolving: BTreeMap<String, Resolving>,
+    /// Issue #972: why GitHub CI could not run here, from the run that first saw it until main's CI
+    /// runs green again; its edges are announced once each.
+    pub ci_unavailable: Option<String>,
+}
+
+/// Issue #972: the announcement for a repository whose CI-unavailable reading changed this run, and
+/// the reading to remember. Entering needs a refused-CI reading; leaving needs main's CI to have
+/// run green — a run that read nothing changes nothing.
+pub(crate) fn ci_edge(repo: &str, was: Option<&str>, now: Option<&str>, ran: bool) -> (Option<String>, Option<String>) {
+    match (was, now) {
+        (None, Some(why)) => (
+            Some(format!(
+                "{repo}: GitHub CI can't run ({why}); the merge train merges there only on local checks"
+            )),
+            Some(why.to_string()),
+        ),
+        (Some(_), None) if ran => (
+            Some(format!(
+                "{repo}: GitHub CI runs again; the merge train is back to merging on CI"
+            )),
+            None,
+        ),
+        (Some(was), _) => (None, Some(was.to_string())),
+        (None, None) => (None, None),
+    }
 }
 
 /// One pull request's resolve attempts (issue #968).
@@ -367,6 +392,10 @@ pub(crate) struct RepoReport {
     /// What the run did about a red main (rule 6), in words.
     pub heal: Vec<String>,
     pub items: Vec<Item>,
+    /// Issue #972: why GitHub CI could not run here this run (main or a pull request), if it could not.
+    pub ci_unavailable: Option<String>,
+    /// Main's CI ran and passed this run: the reading that ends a CI-unavailable spell.
+    pub ci_ran: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -385,6 +414,8 @@ pub(crate) struct Report {
     /// The report in lines, as the CLI prints it.
     pub lines: Vec<String>,
     pub repos: Vec<RepoReport>,
+    /// Issue #972: the CI-unavailable edges this run crossed, one line each, announced once.
+    pub notices: Vec<String>,
 }
 
 /// The counts line: merged, updated (CI running), red, redo dispatched, skipped — every run says
@@ -1008,6 +1039,7 @@ impl<'a, O: Ops> Engine<'a, O> {
             out.main = main.describe();
             match &main {
                 MainCi::Green { .. } => {
+                    out.ci_ran = true;
                     if let Some(was) = mem.paused.take() {
                         out.heal
                             .push(format!("{base} is green again; the train resumes (it was paused: {was})"));
@@ -1022,6 +1054,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                 // Issue #969: CI that could not run is not red; with local checks on, the merged
                 // result of each candidate is checked instead, which covers main too.
                 MainCi::Unavailable { reason, .. } => {
+                    out.ci_unavailable.get_or_insert_with(|| reason.clone());
                     if let LocalChecks::Off(why) = self.local_cfg(repo, &base, &mut local).await? {
                         return Ok(Some(format!(
                             "GitHub CI could not run on {base} ({reason}), and {why}: merging nothing"
@@ -1056,6 +1089,9 @@ impl<'a, O: Ops> Engine<'a, O> {
                     }
                 };
                 let title = title_of(s, Some(&reading));
+                if let Some(why) = &reading.unavailable {
+                    out.ci_unavailable.get_or_insert_with(|| why.clone());
+                }
                 let plan = self.plan(&reading);
                 if plan != Plan::Rebase {
                     // No longer conflicted: whatever resolved it, its resolve record is done.
@@ -1953,6 +1989,14 @@ async fn run_all<O: Ops>(
         if let Err(Stop(why)) = engine.repo(&repo, &group, mem, &mut out).await {
             report.stopped = Some(why);
         }
+        let (notice, remembered) = ci_edge(
+            &repo,
+            mem.ci_unavailable.as_deref(),
+            out.ci_unavailable.as_deref(),
+            out.ci_ran,
+        );
+        mem.ci_unavailable = remembered;
+        report.notices.extend(notice);
         report.repos.push(out);
     }
     report.api_calls = engine.calls;
@@ -2376,6 +2420,13 @@ pub(crate) async fn execute(app: &Shared, dry_requested: bool) -> Result<Report,
         eprintln!("merge-train loop: could not save its report: {e:#}");
     }
     record(app, &report, &sessions).await;
+    // Issue #972: each CI-unavailable edge once, host-level like a provider's; a dry run's memory
+    // is not kept, so it announces nothing.
+    if !report.dry_run {
+        for line in &report.notices {
+            crate::notify::announce_line(app, "ci_unavailable", "merge-train:ci".to_string(), line).await;
+        }
+    }
     Ok(report)
 }
 
