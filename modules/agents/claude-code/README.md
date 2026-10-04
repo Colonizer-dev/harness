@@ -103,6 +103,13 @@ else passes through to `https://api.anthropic.com` unchanged, so a subscription 
 the orchestrator. Routed `count_tokens` calls the provider doesn't support get an estimate. Provider key
 variables are removed from Claude Code's own environment.
 
+Responses stream through as they arrive, with no overall time limit. The router gives an upstream 30 s
+to connect and lets it stay silent for up to `router_idle_timeout_secs` (600 s by default) before its
+answer starts or between two chunks of it. A failure is answered for what it is — unreachable (DNS,
+connect, TLS) as a 502, a timeout as a 504 `timeout_error`, a broken connection as a 502 with its error
+code — and logged with `source: "model_router"` (provider, class, status, elapsed time); upstream 401/403,
+429 and 5xx answers pass through unchanged. See docs/protocol.md §6.1 (issue #983).
+
 Claude Code sends its full request shape to routed providers, including `thinking`, `context_management`,
 `output_config`, `metadata`, every tool definition and betas such as `context-management-*` and
 `advisor-tool-*`. Providers that reject unknown fields need to ignore them; a provider on the gateway's

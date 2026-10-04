@@ -89,6 +89,14 @@
         "default": "",
         "env": "COLONIZER_BACKGROUND_MODEL"
       },
+      "router_idle_timeout_secs": {
+        "type": "integer",
+        "title": "Model request idle timeout (seconds)",
+        "description": "When a colony's model requests go through the model router, how long Anthropic or a provider may stay silent \u2014 before it starts answering, or between two parts of a streamed answer \u2014 before the request fails as timed out. A streamed answer has no overall limit. A provider's own timeout is never cut short. 600 by default.",
+        "minimum": 60,
+        "default": 600,
+        "env": "COLONIZER_ROUTER_IDLE_TIMEOUT_SECS"
+      },
       "route_per_task": {
         "type": "boolean",
         "title": "Route the model per task",
