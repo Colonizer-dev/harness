@@ -267,6 +267,43 @@ async fn colonizer_routes_drift_against_protocol_md() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[tokio::test]
+async fn colonizer_routes_drift_reads_the_split_protocol_directory() {
+    let dir = root("routes-split");
+    let app = crate::tests::test_app(&dir);
+    let f = Fixture::new(&dir);
+    let snap_v1 = "/api/loops      GET    unauth=401    token=owner    activity=-\n";
+    let index = "# Protocol\n\nThe routes live under [the routes area](protocol/routes.md).\n";
+    let area = "# Routes\n\n| `GET /api/docs-loop` | the docs loop |\n";
+    f.commit(
+        "Initial",
+        &[
+            (COLONIZER_ROUTES, snap_v1),
+            (COLONIZER_PROTOCOL, index),
+            ("docs/protocol/routes.md", area),
+            ("README.md", "# Colonizer\n"),
+        ],
+        2,
+    );
+    let snap_v2 = "/api/loops           GET    unauth=401    token=owner    activity=-\n\
+                   /api/docs-loop       GET    unauth=401    token=owner    activity=-\n\
+                   /api/undocumented    GET    unauth=401    token=owner    activity=-\n";
+    f.commit("Add two routes (#31)", &[(COLONIZER_ROUTES, snap_v2)], 0);
+    let bare = f.mirror(&app, "Colonizer-dev/harness");
+    let s = scan(&app, &bare, None, 24, Utc::now()).await.unwrap();
+    let routes: Vec<&String> = s
+        .findings
+        .iter()
+        .filter(|x| x.kind == Kind::RoutesDrift)
+        .map(|x| &x.message)
+        .collect();
+    // The route named only in `docs/protocol/routes.md` is documented; the one none lists is not.
+    assert_eq!(routes.len(), 1, "{:#?}", s.findings);
+    assert!(routes[0].contains("/api/undocumented is new"), "{routes:?}");
+    assert!(!routes.iter().any(|m| m.contains("/api/docs-loop")), "{routes:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn changelog_gaps_are_found_only_where_the_repository_keeps_one() {
     let code = |sha: &str, subject: &str, extra: &[&str]| Commit {

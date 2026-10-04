@@ -9,7 +9,7 @@
 //! - commands the docs show that no longer exist (`npm run` scripts, script paths, `make` targets,
 //!   `cargo -p` crates, and the repository's own CLI subcommands and flags);
 //! - for Colonizer itself, API routes added to or removed from `routes.snap` since the last run that
-//!   `docs/protocol.md` does not reflect;
+//!   `docs/protocol.md` and its `docs/protocol/` area files do not reflect;
 //! - where the repository keeps `changelog.d/` fragments or an `## Unreleased` section, merged
 //!   pull requests that changed code with no changelog entry.
 //!
@@ -392,7 +392,9 @@ pub struct CliSpec {
     pub sources: Vec<String>,
 }
 
-/// A route table snapshot and the doc that lists the routes.
+/// A route table snapshot and the doc that lists the routes. The doc may be split: its stem names a
+/// sibling directory of per-area Markdown files (`docs/protocol.md` → `docs/protocol/*.md`), whose
+/// text is read alongside the index.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutesSpec {
@@ -1946,6 +1948,26 @@ pub fn doc_routes(doc: &str) -> BTreeSet<String> {
     out
 }
 
+/// The text a route doc is read as: the index file itself, then every `*.md` directly in the sibling
+/// directory named after its stem (`docs/protocol.md` → `docs/protocol/*.md`), in path order. `None`
+/// when the index is not among the files read.
+fn route_doc_text(tree: &Tree, doc: &str) -> Option<String> {
+    let mut out = tree.text.get(doc)?.clone();
+    if let Some((stem, _)) = doc.rsplit_once('.') {
+        let prefix = format!("{stem}/");
+        for (path, text) in &tree.text {
+            if let Some(name) = path.strip_prefix(&prefix)
+                && !name.contains('/')
+                && name.ends_with(".md")
+            {
+                out.push('\n');
+                out.push_str(text);
+            }
+        }
+    }
+    Some(out)
+}
+
 /// Routes added since the last run that the doc does not name, and routes removed since that it
 /// still names.
 pub fn routes_findings(old_snap: Option<&str>, new_snap: &str, doc_path: &str, doc: &str) -> Vec<Finding> {
@@ -2272,13 +2294,13 @@ pub async fn scan(app: &Shared, bare: &FsPath, last_sha: Option<&str>, interval_
         })
     });
     if let Some(r) = routes
-        && let (Some(new_snap), Some(doc)) = (tree.text.get(&r.snapshot), tree.text.get(&r.doc))
+        && let (Some(new_snap), Some(doc)) = (tree.text.get(&r.snapshot), route_doc_text(&tree, &r.doc))
     {
         let old = match &since {
             Some(s) => git(app, bare, &["show", &format!("{s}:{}", r.snapshot)]).await.ok(),
             None => None,
         };
-        findings.extend(routes_findings(old.as_deref(), new_snap, &r.doc, doc));
+        findings.extend(routes_findings(old.as_deref(), new_snap, &r.doc, &doc));
     }
     let fragments_since = if tree.dirs.contains("changelog.d") {
         git(
