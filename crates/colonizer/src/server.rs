@@ -429,6 +429,12 @@ async fn start_tasks(app: &Shared, router: &Router) {
 /// background loops.
 pub(crate) async fn serve() -> Result<()> {
     let cfg = Settings::from_env()?;
+    // A `cargo install` binary has no assets beside it; when an installed app is there, hand this
+    // start over to it, so `colonizer` works from either binary (#905). A `None` target or the same
+    // binary leaves today's degraded run below, and the hint there names `colonizer setup`.
+    if let Some(error) = crate::update::hand_off(cfg.assets.as_deref()) {
+        eprintln!("colonizer: {error}");
+    }
     // The port first, before anything touches colonies: a second mothership (one started at login
     // while another runs by hand, or the reverse) must stop here, not after running recovery,
     // backfills or reaping against the same data directory.
@@ -504,7 +510,7 @@ pub(crate) async fn serve() -> Result<()> {
     println!("data: {}", app.cfg.data_dir.display());
     match &app.cfg.assets {
         Some(assets) => println!("assets: {}", assets.display()),
-        None => println!("assets: not found (run scripts/install.sh)"),
+        None => println!("assets: not found (run `colonizer setup`, or scripts/install.sh from a checkout)"),
     }
     // The sign-in link: printed always, opened when there is a browser to open in.
     let login_url = auth::login_url(&app.cfg.bind, &app.api_token);

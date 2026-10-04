@@ -91,6 +91,22 @@ must_install() { # release-url label
   install_from_release "$1" || bad "$2: the installer exited non-zero"
 }
 
+# A release whose tarball no longer matches the SHA256SUMS it ships: one byte appended after the
+# sums are written, exactly what a truncated or tampered download looks like to the installer.
+corrupt_release() { # version dir
+  fake_release "$1" "$2"
+  printf 'x' >> "$2/colonizer-linux-x86_64.tar.gz"
+}
+
+# Runs the installer expecting it to refuse, then insists the log says why and nothing was installed.
+refuse_install() { # release-url label
+  if install_from_release "$1"; then
+    bad "$2: the installer exited zero on a release its own SHA256SUMS do not match"
+  fi
+  grep -q "checksum mismatch" "$log" ||
+    bad "$2: expected the installer to report a checksum mismatch; its log says: $(cat "$log")"
+}
+
 # An install run with mv and ln shadowed by shims that share one counter file: every call is counted,
 # and the k-th call (SHIM_KILL_AT) kills the installer before exec-ing the real tool. The run exits
 # non-zero; the caller decides whether that is a problem.
@@ -292,5 +308,37 @@ expect_colonizer "restore with app.old behind a dangling app symlink" "colonizer
 expect_no_leftovers "restore with app.old behind a dangling app symlink"
 expect_one_slot "restore with app.old behind a dangling app symlink"
 note "ok: app.old behind a dangling app symlink was put back, and the install finished over it"
+
+# 6. A download that does not match the checksums travels with the release must install nothing. It
+#    is the release's own SHA256SUMS that turns a corrupted or swapped download into a refusal rather
+#    than a bad install, so the refusal is tested where nothing is installed yet, and over a working
+#    install that must be left exactly as it was.
+note "== a tarball that does not match SHA256SUMS installs nothing"
+
+corrupt_release 1 "$versions/corrupt-fresh"
+fresh_home
+refuse_install "$versions/corrupt-fresh" "checksum mismatch on a fresh home"
+if [ -e "$app" ] || [ -L "$app" ]; then
+  bad "checksum mismatch on a fresh home: an app was left at $app"
+fi
+if [ -e "$home/.local/bin/colonizer" ] || [ -L "$home/.local/bin/colonizer" ]; then
+  bad "checksum mismatch on a fresh home: the bin link was left behind"
+fi
+[ "$(count_slots)" = 0 ] ||
+  bad "checksum mismatch on a fresh home: a version directory was left beside the app"
+note "ok: a corrupted download on a fresh home was refused, and no app or link was left"
+
+fresh_home
+must_install "$versions/v1" "working install before a corrupted download"
+before=$(readlink "$app")
+corrupt_release 3 "$versions/corrupt-over"
+refuse_install "$versions/corrupt-over" "checksum mismatch over a working install"
+expect_colonizer "after a refused upgrade" "colonizer 1"
+[ "$(readlink "$app")" = "$before" ] ||
+  bad "checksum mismatch over a working install: the app symlink moved to $(readlink "$app")"
+expect_symlink_app "checksum mismatch over a working install"
+expect_no_leftovers "checksum mismatch over a working install"
+expect_one_slot "checksum mismatch over a working install"
+note "ok: a corrupted download over a working install left that install exactly as it was"
 
 note "all checks passed"

@@ -25,9 +25,26 @@ checked by sha256, so there is nothing else to install.
 
 ## Install a release
 
+With a Rust toolchain (1.88 or newer), install the crate and let it fetch its own release. The crate
+is on crates.io as `colonizer-harness` (`colonizer` there is another project), and what `cargo
+install` builds is only the `colonizer` binary — the app assets it needs live in the release, so
+`setup` installs them:
+
+```sh
+cargo install colonizer-harness --locked
+colonizer setup
+```
+
+Without a Rust toolchain, the installer script does the same in one line:
+
 ```sh
 curl -fsSL https://colonizer.dev/install.sh | sh
 ```
+
+Both run the same installer: `setup` downloads the release's `install.sh` for the version of the
+crate you installed (this build's own version, tagged `v<crate version>`), checks it against the
+release's `SHA256SUMS`, and only then runs it — so the cargo path gets the same checksum and
+attestation checks as the one-liner.
 
 Then run `colonizer`. It prints a sign-in link and opens it in your browser; `colonizer open` prints it
 again. Opening <http://127.0.0.1:7878> without that link asks you to sign in.
@@ -121,9 +138,10 @@ is published to `ghcr.io` and its digest is pinned in `crates/colonizer/images.l
 A third option, `--bundle`, is what the release workflow uses to build a release tarball; you don't
 need it.
 
-The crates are on crates.io (`colonizer-harness`, `colonizer-agentd`), but `cargo install` builds only
-the `colonizer` binary, without the app assets it needs beside it. The installer or a build from
-source is the way in.
+The crates are on crates.io (`colonizer-harness`, `colonizer-agentd`). `cargo install` builds only the
+`colonizer` binary, without the app assets it needs beside it — so run `colonizer setup` once, and it
+installs this version's release over the binary with the same checksum- and attestation-checked
+installer the one-liner runs. A build from source is the other way in.
 
 ## First run
 
@@ -143,6 +161,7 @@ this machine and read the same environment the mothership does:
 | `colonizer open` | Prints the cockpit sign-in link and opens it in a browser. It reads the token file `<config dir>/api-token`, creating it if there is none, so it works whether or not the mothership is running |
 | `colonizer version` | Prints the build: tag, commit, build time, and whether it is a development build ([docs/updates.md](updates.md)) |
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
+| `colonizer setup` | Installs this build's own release over a `cargo install` binary, which has no app assets beside it ([Install a release](#install-a-release)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
 | `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
@@ -369,9 +388,9 @@ mothership they talk to is `--host`, else `COLONIZER_BIND`. See [docs/cli.md](cl
 
 | Variable | Read by | Meaning |
 | :--- | :--- | :--- |
-| `COLONIZER_VERSION` | `install.sh` | Install that release tag instead of the latest |
-| `COLONIZER_APP` | `install.sh` | Install the app symlink there instead of `~/.local/share/colonizer/app` |
-| `COLONIZER_RELEASE_URL` | `install.sh` | Fetch the app from `<url>/<file>` instead of the GitHub release. The build attestation belongs to the official release, so it is skipped on that path |
+| `COLONIZER_VERSION` | `install.sh`, `colonizer setup` | Install that release tag instead of the latest |
+| `COLONIZER_APP` | `install.sh`, `colonizer setup` | Install the app symlink there instead of `~/.local/share/colonizer/app` |
+| `COLONIZER_RELEASE_URL` | `install.sh`, `colonizer setup` | Fetch the app from `<url>/<file>` instead of the GitHub release. The build attestation belongs to the official release, so it is skipped on that path |
 | `COLONIZER_REQUIRE_ATTESTATION` | `install.sh` | `1` makes a provenance check that comes back without a verdict a failure instead of a note |
 | `COLONIZER_KEEP_PREVIOUS` | `install.sh` | `1` keeps the slot being replaced; an in-place update sets it ([docs/updates.md](updates.md#the-previous-version-is-kept-for-a-while)) |
 | `COLONIZER_IMAGE` | both scripts, with `--pull-image` | The image to pull instead of the pinned `node:24-bookworm` |
