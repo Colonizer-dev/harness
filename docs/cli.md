@@ -3,9 +3,9 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `fleet`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `open`, `login-item`, `telemetry`, `migrate-store`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
-`resume`, `pr`, `map`, `loop`, `token`, `mcp`). Settings still come from the environment, never flags — every
+`resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
 
 ## Which mothership, which token
@@ -26,7 +26,7 @@ Every client command takes the same two global flags, before or after the subcom
 The local commands run against this machine and take none of the client flags. `update` is the
 exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
 like any client command — but it has no `--json`. The rest (`open`, `login-item`, `telemetry`,
-`version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
+`migrate-store`, `version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
 (exit 2), and their `--help` does not list them.
 
 `colonizer open` is local on purpose: it reprints the sign-in link and opens a browser on this
@@ -62,6 +62,9 @@ colonizer update --force      # also over a development build, or a build newer 
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)
 colonizer telemetry show      # anonymous usage reporting (on, off; no network, no daemon needed)
+colonizer migrate-store --to /new/data               # copy this install's colonies into another local store
+colonizer migrate-store --to /new/data --dry-run     # count what would move, write nothing
+colonizer migrate-store --from /old/data --to /new/data   # copy from a store other than this install's data dir
 ```
 
 Colonies — the ids are what `list` and the cockpit show:
@@ -70,6 +73,7 @@ Colonies — the ids are what `list` and the cockpit show:
 colonizer launch owner/repo "migrate the auth tests"   # a colony working the task you give it
 colonizer launch owner/repo --issue 42 --no-autopilot  # one issue; you open the pull request yourself
 colonizer list --org acme --status running             # colonies this token may see, newest first
+colonizer list --parked                                # only parked colonies (--status parked)
 colonizer status abc123                                # where it stands, what it costs, what it is doing now
 colonizer logs abc123 -f                               # recent events; -f streams until Ctrl-C
 colonizer diff abc123                                  # everything the colony changed, as a unified diff
@@ -187,13 +191,15 @@ days, still an interval), `14d@03:00` (every N days at a time of day), `daily@09
 and `--name`, with the prompt from `--prompt` or `--prompt-file PATH` (`-` reads stdin). The
 clock times are your local time, stored in UTC exactly as the cockpit's form stores them. The
 other flags mirror `launch`: `--model`, `--subagent-model`, `--autopilot`/`--no-autopilot`;
-`--max-runs N` ends the loop after N runs and `--disabled` creates it paused. Cadence ranges
+`--max-runs N` ends the loop after N runs, `--retry-failed-runs N` sets how many minutes after a
+run that failed for an infrastructure reason it is run once more (default 60; `0` switches the
+re-run off) and `--disabled` creates it paused. Cadence ranges
 (15 minutes to a week, days 1–365) are the mothership's to refuse, with its message.
 
 `loop stop` and `loop start` are the cockpit's switch: the loop's own settings are sent back
 with `enabled` flipped, so pausing keeps everything and re-enabling books the next run from the
 cadence. `loop list` shows the cadence in words with its times in your local time, the state
-(`enabled`, `paused`, `ended`) and when it runs next; an empty list prints a note to stderr, and
+(`enabled`, `paused`, `ended`), when it runs next and the last run's outcome; an empty list prints a note to stderr, and
 `--json` prints the raw records everywhere.
 
 ## Fleet export and import
@@ -250,7 +256,7 @@ Without consent a plain `fleet sync` fails with the 409 and says how to give it.
 
 `--json` is a global flag, like `--host`. It prints machine-readable JSON instead of the human rendering, where a command has one —
 what the mothership answered, pretty-printed, for `list`, `status`, `ask`, `stop`, `resume` and
-the `token` and `loop` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
+the `token`, `loop`, `redteam` and `fleet sync` commands; `logs` prints one JSON event per line, with or without `-f`; `launch` prints
 the new colony's record, `pr` a reduced `{id, pr_url, status, ci_state, merged_at}`, `diff` the
 diff response object (`{id, repo, base, files, added, removed, diff, truncated}`), `map` the
 stored map document — or, with `--find`, the search result — `fleet export --preview` and
@@ -315,13 +321,14 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 
 | Scope | What it may call |
 | :--- | :--- |
-| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}`, `/api/sessions/{id}/question`, `/api/sessions/{id}/diff`, `GET /api/loops` and `/api/loops/{id}/runs`, the events WebSocket, the `/api/maps/…` reads, and `GET /api/tokens/self` |
-| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/stop`, `/resume` |
+| `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops` and `/api/loops/{id}/runs`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
+| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm` |
 | `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,
-`POST /api/fleet/peer/leave`, and the history push's `POST /api/fleet/peer/rows` and
+`POST /api/fleet/peer/leave`, `GET /api/fleet/policy` (the owner's network floor), the dev-server
+preview proxy under `/api/previews/{id}/…`, and the history push's `POST /api/fleet/peer/rows` and
 `PUT /api/fleet/peer/payloads/{sha256}`.
 
 Everything else is the owner's at any scope — token management itself, settings, secrets, and

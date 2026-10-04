@@ -14,6 +14,9 @@ transmits are valid by construction. It is a separate question from the [live ma
 with its own switch and its own random id, kept in `~/.config/colonizer/usage.json` next to the map's
 `telemetry.json`.
 
+A [planned observability add-on](design/observability.md) is a third, separate and opt-in thing: it
+exports your own runs over OTLP to *your* backend, never to colonizer.dev.
+
 To switch it off, with or without the mothership running:
 
 ```sh
@@ -85,6 +88,7 @@ observations, not runs, so `outcome` is always `ok`, `error` always `none`, `dur
 | `boot_ms` | `boot.<phase>.<bucket>` | One event per boot phase with samples, in boot order — `issue`, `git`, `providers`, `mesh-start`, `image-pull`, `vm-boot`, `mesh-join`, `agentd` — each the median duration across the colonies this install has booted, bucketed. Phases with no samples are left out, and so are colonies whose boot never finished: a boot still under way or one that stopped part way has no `total_ms`, and counting it would put different colonies behind each phase's median. |
 | `providers` | `providers.<bucket>` | Model providers configured on the mothership. |
 | `error_kinds` | `error.<kind>.<bucket>` | How failures and attention reasons are distributed, as closed labels: `agentd_not_ready`, `harness_restarted`, `vm_stopped`, `publish_interrupted`, `publish_unconfirmed` (the fixed messages the harness itself writes), `stalled`, `waiting_for_answer`, `nudges_exhausted` (the watchdog's reasons), `autopilot_held`, `model_error` (the provider gateway's model or provider failure) and `agent_failed` (the agent's runner never started). A colony's own error text names no kind, so these events can cover less than `colonies.failed` does. |
+| `watchdog_turn_ends` | `watchdog.turn_end.<bucket>` | How many turns the watchdog had to finish because the runner said it was done but never ended the turn (it emitted a final `assistant_text` and then went silent). A lifetime count for the install, so it accumulates across colonies and restarts within the process's life. |
 
 The bucket edges, exactly as the code draws them:
 
@@ -235,7 +239,8 @@ lives longer than that even on an install that never touches the switch again.
 
 The sender composes Cratefield's telemetry module, not a bespoke HTTP client: the module asked for in
 `Cratefield/harness#413` and landed there on 2026-09-19 as `cratefield-module-telemetry`
-(`crates/module-telemetry`) is a pinned git dependency of `crates/colonizer`, and the batch is
+(`crates/module-telemetry`) is a crates.io dependency of `crates/colonizer`
+(`cratefield-module-telemetry = "0.2"`), and the batch is
 validated with its `Batch::parse` before it is shown or sent. What remains open is elsewhere:
 
 1. **colonizer.dev says the harness reports anonymous usage data** — the copy describing what is

@@ -46,10 +46,27 @@ pub struct Runtime {
     /// `pr.md` as of the last turn end, so autopilot publishes only when a turn wrote it.
     pub(crate) pr_mark: Mutex<Option<(std::time::SystemTime, u64)>>,
     pub(crate) interrupted: std::sync::atomic::AtomicBool,
+    /// When the runner last emitted a final, non-delta `assistant_text` — the colony's "it's done"
+    /// signal — and the tool calls it has opened and not yet answered (issue #878). A final answer
+    /// whose `turn_end` never came is a wedge the event stream cannot report, and these two are the
+    /// watchdog's evidence of it: any later sign of work (`events.rs` `note_turn_shape`) clears them.
+    /// In memory only, like `judged_questions`: a restart forgets a turn in flight, losing at worst
+    /// the recovery of one that was already ending.
+    pub(crate) final_text_at: Mutex<Option<DateTime<Utc>>>,
+    pub(crate) open_tool_calls: Mutex<HashSet<String>>,
+    /// The `final_text_at` the watchdog last logged "agentd is not answering" for, so a recovery it
+    /// is retrying logs once per final answer rather than once per tick (issue #878). In memory,
+    /// like the two above.
+    pub(crate) final_text_logged: Mutex<Option<DateTime<Utc>>>,
     /// Set once a run has been told its agent cannot resume a session, so the queue's suspension
     /// tick says so once instead of every 5 s (issue #562). In memory like the other cursors: a
     /// restart saying it again is a minor repeat, a per-tick drumbeat is the leak.
     pub(crate) suspend_skip_logged: std::sync::atomic::AtomicBool,
+    /// The last skip the autonomy judge logged for this colony — `<reason>` or `<reason>:<question
+    /// id>` (autonomy.rs, issue #875) — so a state that hides a question (parked, out of answers)
+    /// is one log line per question, not one every thirty-second tick. In memory, like the other
+    /// cursors: a restart repeating it once is a minor repeat.
+    pub(crate) judge_skip_logged: Mutex<Option<String>>,
     pub(crate) stop: watch::Sender<bool>,
     /// Set once, by `resume` on the retired run's Runtime only: pre-existing event sockets hold
     /// that Runtime and can never see the new run's events, so they close and reconnect into the
@@ -59,6 +76,9 @@ pub struct Runtime {
     pub(crate) file_lock: Mutex<()>,
     /// Serialises findings, so the per-colony cap holds when two arrive together.
     pub(crate) findings_lock: Mutex<()>,
+    /// Serialises a GitHub-needing loop's host-proxied writes (loop_github.rs), so the per-colony
+    /// cap holds when two arrive together, as `findings_lock` does for findings.
+    pub(crate) github_lock: Mutex<()>,
     /// Serialises completion-claim verifications (verify.rs): a second claim that lands mid-run
     /// queues behind it and then verifies the newer state, never concurrent with it.
     pub(crate) verify_lock: Mutex<()>,
@@ -118,7 +138,7 @@ impl Runtime {
         // The reconnect cursor is agentd's, not the file's: only lines the runner wrote count, each
         // at its own seq (a line `handle_agent_event` renumbered because it collided with a host
         // chain event keeps its true seq in `a_seq`). Host chain events are cut out by their type —
-        // the seven this build emits and the protocol reserves — so a restart mid-life asks agentd to
+        // the eight this build emits and the protocol reserves — so a restart mid-life asks agentd to
         // replay exactly the events it has missed, and cannot skip the ones that never landed.
         //
         // The same pass restores the open question. It is otherwise set only while live events are
@@ -196,6 +216,13 @@ impl Runtime {
                 logs_path.display()
             ));
         }
+        // A colony coming back from parked (or stopped) has just had its event log rotated aside, so
+        // this run starts with no events while an archive exists (issue #876). Its first completed
+        // turn counts as done even if the agent leaves an existing `pr.md` untouched, exactly as a
+        // fresh colony's first `pr.md` write does — so the mark starts empty and the first turn_end
+        // publishes. A restart of an ongoing run (events already on disk) is not a resume and keeps
+        // the ordinary compare against the mark on disk.
+        let resumed = events_bytes.is_empty() && crate::lifecycle::run_epoch_for_dir(dir) > 1;
         let (commands, commands_rx) = mpsc::unbounded_channel();
         Self {
             events: broadcast::channel(1024).0,
@@ -213,13 +240,22 @@ impl Runtime {
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
-            pr_mark: Mutex::new(github::pr_description_mark(&dir.join("out"))),
+            pr_mark: Mutex::new(if resumed {
+                None
+            } else {
+                github::pr_description_mark(&dir.join("out"))
+            }),
             interrupted: std::sync::atomic::AtomicBool::new(false),
+            final_text_at: Mutex::new(None),
+            open_tool_calls: Mutex::new(HashSet::new()),
+            final_text_logged: Mutex::new(None),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
+            judge_skip_logged: Mutex::new(None),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
             findings_lock: Mutex::new(()),
+            github_lock: Mutex::new(()),
             verify_lock: Mutex::new(()),
             path_policy_warned: Mutex::new(HashSet::new()),
             path_policy_seen: Mutex::new(HashSet::new()),
@@ -646,6 +682,31 @@ mod tests {
             "a colony that has never emitted an event has no events.jsonl, and that is not a failure"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #876: a colony resumed from parked has had its event log rotated aside, so a load starts
+    /// with no events but an archive. Its `pr.md` mark then starts empty, so the first turn end counts
+    /// as a write even when the agent leaves an existing description untouched; an ongoing run (events
+    /// on disk) and a fresh colony keep the mark of the file.
+    #[test]
+    fn a_resumed_colonys_pr_mark_starts_empty_so_its_first_turn_publishes() {
+        let dir = std::env::temp_dir().join(format!("colonizer-resumed-{}", short_id()));
+        std::fs::create_dir_all(dir.join("out")).unwrap();
+        std::fs::write(dir.join("out/pr.md"), "# the work\n").unwrap();
+        let seeded = |rt: &Runtime| rt.pr_mark.try_lock().unwrap().is_some();
+
+        // An ongoing run: events on disk, so the mark is the file's.
+        std::fs::write(dir.join("events.jsonl"), "{\"seq\":1,\"type\":\"status\"}\n").unwrap();
+        assert!(seeded(&Runtime::load(&dir)), "an ongoing run keeps the description's mark");
+
+        // A resume: no events, one archive. The mark starts empty.
+        std::fs::remove_file(dir.join("events.jsonl")).unwrap();
+        std::fs::write(dir.join("events-1.jsonl"), "{\"seq\":1,\"type\":\"turn_end\"}\n").unwrap();
+        assert!(
+            !seeded(&Runtime::load(&dir)),
+            "a resumed run starts with an empty mark, so its first turn publishes"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // -- org workspaces on and off --------------------------------------------------------------

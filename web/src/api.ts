@@ -90,6 +90,7 @@ import type {
   HunterProbe,
   Repo,
   ArchiveListing,
+  AutonomyStatus,
   RetentionPlan,
   RetentionRequest,
   SaveProviderRequest,
@@ -214,6 +215,11 @@ export interface SaveModuleRequest {
   provider: string;
   enabled: boolean;
   settings: Record<string, unknown>;
+  /**
+   * PUT /api/modules/autonomy (issue #875) refuses a save whose judge model fails a test call
+   * unless this is true: the "Save anyway" the pane offers alongside the provider's error.
+   */
+  save_anyway?: boolean;
 }
 
 /** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
@@ -248,6 +254,8 @@ export interface Api {
   hosts(): Promise<{ hosts: FleetHost[] }>;
   modules(): Promise<ModuleInfo[]>;
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
+  /** GET /api/autonomy/status (issue #875): the judge's recent health, for Settings and the header chip. */
+  autonomyStatus(): Promise<AutonomyStatus>;
   sandboxPull(): Promise<PullStatus>;
   sandboxPullStatus(): Promise<PullStatus>;
   headroom(): Promise<HeadroomStatus>;
@@ -410,8 +418,8 @@ export interface Api {
   quotaAction(provider: string, body: QuotaActionRequest): Promise<QuotaActionReply>;
   models(): Promise<ModelOption[]>;
   orgs(): Promise<OrgInfo[]>;
-  /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). */
-  spendHistory(days?: number): Promise<SpendHistory>;
+  /** GET /api/spend/history: per-org daily totals for the last `days` (default 30); the overview's sparklines (issue #209). `tzOffsetMinutes` (the browser's `-getTimezoneOffset()`) buckets the days by the reader's local calendar instead of UTC (issue #613). */
+  spendHistory(days?: number, tzOffsetMinutes?: number): Promise<SpendHistory>;
   /** GET /api/activity: the activity log newest first, one page at a time (docs/protocol.md §6.9). */
   activity(query?: ActivityQuery): Promise<ActivityPage>;
   /** GET /api/history/search (issue #739): the turns across colony transcripts matching `q`, at most 50; 400 on an empty query. */
@@ -696,6 +704,7 @@ export const httpApi: Api = {
   hosts: () => request("/api/hosts"),
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
+  autonomyStatus: () => request("/api/autonomy/status"),
   sandboxPull: () => post("/api/sandbox/pull"),
   sandboxPullStatus: () => request("/api/sandbox/pull"),
   headroom: () => request("/api/headroom"),
@@ -808,7 +817,8 @@ export const httpApi: Api = {
   quotaAction: (provider, body) => post(`/api/providers/${enc(provider)}/quota-action`, body),
   models: () => request("/api/models"),
   orgs: () => request("/api/orgs"),
-  spendHistory: (days) => request(`/api/spend/history?days=${days ?? 30}`),
+  spendHistory: (days, tzOffsetMinutes) =>
+    request(`/api/spend/history?days=${days ?? 30}${tzOffsetMinutes != null ? `&tz_offset_minutes=${tzOffsetMinutes}` : ""}`),
   activity: (q = {}) =>
     request(
       `/api/activity${query({ before: q.before?.toString(), limit: q.limit?.toString(), kind: q.kind, actor: q.actor, org: q.org, repo: q.repo, q: q.q })}`,

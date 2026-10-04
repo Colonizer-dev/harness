@@ -1,0 +1,30 @@
+{
+  "comment": "The host-backed paths a colony can write to (issue #877), driven against both copies of execpolicy.mjs. Writable host mounts from boot.rs; a write into anything else lives in the microVM's discarded root filesystem.",
+  "cwd": "/workspace",
+  "hostMounts": [
+    "/workspace",
+    "/harness/out",
+    "/root/.claude/projects",
+    "/colonizer/services",
+    "/var/cache/colonizer-shared"
+  ],
+  "cases": [
+    { "command": "mkdir -p /root/x", "decision": null },
+    { "command": "cp a /usr/local/bin/", "decision": null },
+    { "command": "mkdir -p /root/.cargo/bin && cp rustup-init /root/.cargo/bin/", "decision": null },
+    { "command": "echo x >> /root/.cargo/env", "decision": null },
+    { "command": "mv /workspace/target /root/t", "decision": null },
+    { "command": "touch /usr/share/x", "decision": null },
+    { "command": "mkdir /root/.claudefoo", "decision": null, "note": "a segment boundary: not under /root/.claude" },
+    { "command": "cp a /var/cache/colonizer-shared/x", "decision": "ask", "rule": "writes-outside-repo" },
+    { "command": "echo x > /harness/out/../out/y", "decision": "ask", "rule": "writes-outside-repo" },
+    { "command": "echo x > /harness/out/z", "decision": "ask", "rule": "writes-outside-repo" },
+    { "command": "touch /root/.claude/projects/x", "decision": "ask", "rule": "writes-outside-repo" },
+    { "command": "rm -rf /root/.claude", "decision": "ask", "rule": "writes-outside-repo", "note": "an ancestor of a mounted path" },
+    { "command": "rm -rf /root", "decision": "ask", "rule": "writes-outside-repo", "note": "an ancestor of a mounted path" },
+    { "command": "rm -rf /", "decision": "ask", "rule": "writes-outside-repo" },
+    { "command": "cat ~/.ssh/id_rsa", "decision": "deny", "rule": "secret-paths" },
+    { "command": "cat .env", "decision": "deny", "rule": "secret-paths" },
+    { "command": "cp .env.local /tmp/x", "decision": "deny", "rule": "secret-paths" }
+  ]
+}

@@ -130,7 +130,8 @@ An issue counts as an epic when any of these is true:
 `allow_epic: true`. The Colonize pane greys out epics and leaves them out of bulk hand-offs.
 
 **Limits.** If the GitHub lookup fails, the launch goes ahead. The guard helps you avoid a mistake.
-It is not an access control. There is no CLI or MCP override (see above). Details are in
+It is not an access control. The CLI (`--allow-epic`) and MCP (`allow_epic`) take the same
+override (see above). Details are in
 [protocol.md](protocol.md#duplicate-colony-prevention-and-issue-claims), under "Epics".
 
 ## Questions, and who answers them
@@ -209,6 +210,13 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   never suspended. Its agent — often a subagent — is blocked on the command in flight, and a
   resumed transcript cannot continue that call, so the agent would be lost. The question carries
   `kind: "exec_policy"`, and the colony keeps its microVM and its slot until you answer.
+
+  `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
+  write to `/root`, `/usr` or the rest of the microVM's own root filesystem — discarded with the
+  VM — no longer asks, while a write to a host mount outside the repository, such as `/harness/out`
+  or the agent's transcript directory, still does. The `secret-paths` and `script-egress` denies are
+  unchanged.
+
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
   permission request: the tool call that asked is blocked in flight, and suspending the colony
   would kill the agent and leave the answer with nobody to receive it. The question carries

@@ -955,6 +955,7 @@ mod tests {
             reason: "hold_timeout".into(),
             resets_at: None,
             vm_kept: true,
+            question_risk: None,
         });
         std::fs::create_dir_all(app.session_dir("burn-live")).unwrap();
         std::fs::create_dir_all(app.session_dir("burn-queued")).unwrap();

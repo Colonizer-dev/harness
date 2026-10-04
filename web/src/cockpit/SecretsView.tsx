@@ -476,6 +476,17 @@ function SecretItem({
                 </Button>
               )}
             </>
+          ) : row.id === "claude-token" ? (
+            // The legacy single token (#621) is delete-only: the default account now shadows it,
+            // so it can be removed here but never set.
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={onRemove}
+            >
+              Remove
+            </Button>
           ) : (
             <span className="text-[12px] text-faint">
               {row.env
