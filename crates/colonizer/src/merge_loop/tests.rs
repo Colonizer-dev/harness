@@ -8,6 +8,8 @@ use chrono::TimeZone;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod local;
+
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 30, 9, 0, 0).unwrap()
 }
@@ -32,6 +34,9 @@ struct Fake {
     /// Every call, in order: `main`, `read s1`, `merge s1`, `update s1`, `rerun 77`, `dispatch fix` …
     log: RefCell<Vec<String>>,
     merged_at: RefCell<Vec<DateTime<Utc>>>,
+    /// Issue #969: the repository's local-check settings (off when unset) and the local runs' answers.
+    local: RefCell<Option<LocalChecks>>,
+    local_runs: RefCell<VecDeque<LocalRun>>,
 }
 
 impl Fake {
@@ -52,7 +57,11 @@ impl Fake {
         self.log
             .borrow()
             .iter()
-            .filter(|l| !l.starts_with("main") && !l.starts_with("read") && !l.starts_with("guards") && !l.starts_with("branch"))
+            .filter(|l| {
+                !["main", "read", "guards", "branch", "config"]
+                    .iter()
+                    .any(|r| l.starts_with(r))
+            })
             .cloned()
             .collect()
     }
@@ -127,6 +136,22 @@ impl Ops for Fake {
         self.say(format!("dispatch {what}"));
         Ok("c0lony".to_string())
     }
+    async fn local_config(&self, _repo: &str, _base: &str, opted_in: bool) -> Result<LocalChecks, String> {
+        self.say(format!("config opted_in={opted_in}"));
+        Ok(self
+            .local
+            .borrow()
+            .clone()
+            .unwrap_or(LocalChecks::Off("local checks are off here".into())))
+    }
+    async fn local_run(&self, s: &Session, head: &str, _base: &str, commands: &[String]) -> LocalRun {
+        self.say(format!("local {} {head} [{}]", s.id, commands.join("; ")));
+        next(&mut self.local_runs.borrow_mut())
+    }
+    async fn post_status(&self, _repo: &str, sha: &str, state: &str, _description: &str) -> Result<(), String> {
+        self.say(format!("status {sha} {state}"));
+        Ok(())
+    }
 }
 
 fn session(id: &str, n: u64) -> Session {
@@ -169,6 +194,7 @@ fn reading(n: u64, mergeability: Mergeability, ci: CiState, behind: u64) -> Read
             base_is_default: true,
         },
         failing: Vec::new(),
+        unavailable: None,
     }
 }
 

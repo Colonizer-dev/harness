@@ -682,6 +682,10 @@ enum MergeTrainCommand {
         /// Dispatch one redo colony for a pull request whose mechanical rebase conflicted
         #[arg(long, value_enum)]
         redo: Option<Toggle>,
+        /// Owners or owner/repos (comma-separated) whose checks run locally when GitHub CI cannot run;
+        /// an empty value clears the list
+        #[arg(long, value_name = "TARGETS")]
+        local_checks: Option<String>,
     },
     /// Run it now in the background, or with --dry-run list what it would merge, update, rebase and skip
     Run {
@@ -2277,6 +2281,7 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
             self_heal,
             revert_on_red,
             redo,
+            local_checks,
         } => {
             if let Some(minutes) = every {
                 settings["cadence"] = json!({"every": "interval", "minutes": minutes});
@@ -2306,6 +2311,10 @@ fn edit_merge_loop(settings: &mut Value, command: &MergeTrainCommand) -> Result<
             if let Some(names) = flaky {
                 let names: Vec<&str> = names.split(',').map(str::trim).filter(|n| !n.is_empty()).collect();
                 settings["flaky_checks"] = json!(names);
+            }
+            if let Some(targets) = local_checks {
+                let targets: Vec<String> = targets.split(',').map(norm).filter(|t| !t.is_empty()).collect();
+                settings["local_checks"] = json!(targets);
             }
             for (key, toggle) in [
                 ("self_heal", self_heal),
@@ -2354,6 +2363,7 @@ fn describe_merge_loop(view: &Value) -> Vec<String> {
             s["max_merges"], s["cooldown_secs"], s["ci_wait_minutes"]
         ),
         format!("  known-flaky checks: {}", names("flaky_checks")),
+        format!("  local checks when CI cannot run: {}", names("local_checks")),
         format!(
             "  self-heal: {}, revert on red: {}, redo colonies: {}",
             on("self_heal"),
@@ -4113,6 +4123,7 @@ mod tests {
                 self_heal: Some(Toggle::On),
                 revert_on_red: None,
                 redo: Some(Toggle::Off),
+                local_checks: Some("Acme, ".into()),
             },
         )
         .unwrap();
@@ -4123,6 +4134,7 @@ mod tests {
         assert_eq!(s["cadence"], json!({"every": "interval", "minutes": 120}));
         assert_eq!(s["repo_max_merges"], json!({"acme/web": 1}));
         assert_eq!(s["flaky_checks"], json!(["e2e*", "lint"]));
+        assert_eq!(s["local_checks"], json!(["acme"]));
         assert_eq!(
             (s["self_heal"].clone(), s["redo_on_conflict"].clone()),
             (json!(true), json!(false))
@@ -4146,6 +4158,7 @@ mod tests {
             self_heal: None,
             revert_on_red: None,
             redo: None,
+            local_checks: None,
         };
         assert!(edit_merge_loop(&mut s, &bad).is_err());
 
