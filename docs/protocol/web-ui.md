@@ -7,11 +7,12 @@ Part of the [Colonizer protocol](../protocol.md).
 - Stack: Vite + React + TypeScript + Tailwind v4 + assistant-ui (`useExternalStoreRuntime`) + xterm.js.
   Built to `web/dist`; dev server proxies `/api` (incl. WebSockets) to `http://127.0.0.1:7878`.
 - Layout: the cockpit (`web/src/cockpit/Cockpit.tsx`) is one page with a navigation rail (a tab bar
-  on a phone) and these views: overview (the nest), launch, a colony view (status, branch, cost, host
+  on a phone) and these views: overview, the nest, launch, a colony view (status, branch, cost, host
   disk, the actions Create PR, Stop, Resume, Clean up; chat beside a terminal), Code, Chat, Loops,
-  Secrets, Host, Inbox and History, plus memory and settings. The Settings dialog has Setup,
-  Connections, Model providers, Runtime, Live map, Remote access, Add your phone, Updates, Usage
-  data, Notifications and Desktop, and the module settings.
+  Secrets, Host, Inbox (behind the bell) and History, plus memory and settings. The Settings dialog
+  has Setup, Connections, Model providers, Runtime, Live map, Remote access, Add your phone, API
+  tokens, Fleet, Updates, Usage data, Notifications and Desktop, the module settings, and one entry
+  per org workspace.
 - Events → assistant-ui messages: `user_message` → user message; `assistant_text(_delta)`, `thinking`,
   `tool_call` + `tool_result` → parts of the current assistant message; `question` → a tool-call part
   with `toolName: "ask_user"` rendered by a registered tool UI.

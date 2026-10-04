@@ -103,6 +103,7 @@ node scripts/check-doc-links.mjs                    # every relative link and #a
 node scripts/doc-index.mjs check                    # the docs/protocol/ and docs/loops/ indexes match their directories
 node scripts/changelog.mjs check                    # the changelog.d/ fragments are well-formed
 sh scripts/ci/check-exec-bits.sh
+sh scripts/ci/check-case-collisions.sh              # no two tracked paths differ only in letter case
 (cd web && npm ci && npm run build && npm test)     # when web/ changed
 (cd modules/agents/<id> && npm test)                # when that agent module changed; run npm ci first where it has a package-lock.json
 node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.json

@@ -805,6 +805,11 @@ async fn run(app: Shared) {
         _ = KICK.notified() => {}
     }
     loop {
+        // The fleet's egress floor (#690) rides the same cadence: it governs booting colonies, not
+        // history, so it is fetched whatever the history consent.
+        if let Err(e) = crate::fleet_policy::refresh(&app).await {
+            eprintln!("fleet policy: {e:#}");
+        }
         // Off unless this machine has joined a fleet and its operator consented: an owner, a
         // machine alone, or a member that has not said yes pushes nothing.
         if !disabled()

@@ -17,6 +17,7 @@ round — no peer reaches in). `{"hosts": [HostSummary, ...]}`:
       "platform": "linux-x86_64",
       "os": "Debian",
       "version": "0.1.5",
+      "kvm": true,
       "slots_in_use": 3,
       "slots_ceiling": 4,
       "queue_depth": 1,
@@ -47,8 +48,11 @@ peer's configured base URL: peers are polled without a token, so they answer the
 which names no host id or hostname. `platform`, `os`, `version`, `slots_in_use`,
 `slots_ceiling`, `queue_depth` and `disk_free_bytes` are read straight out of that peer's own
 `/api/status` (`runtime.platform`, `runtime.os.name`, `version`, `host.microvms_live`,
-`host.microvms_ceiling`, `queue_depth`, `host.disk_free_bytes`); a reachable peer that reports no
-platform or OS reads `"unknown"`, and a peer never reached has zeros, nulls and empty strings instead. `last_heartbeat` is an RFC 3339 timestamp for when this host last confirmed the
+`host.microvms_ceiling`, `queue_depth`, `host.disk_free_bytes`); `kvm` (issue #688) is the peer's
+`host.kvm_ok` — whether it can boot a colony microVM — and is omitted where there is no `/dev/kvm`
+to check, so a Mac or an older peer reads as unknown rather than incapable; a reachable peer that
+reports no platform or OS reads `"unknown"`, and a peer never reached has zeros, nulls and empty
+strings instead. `last_heartbeat` is an RFC 3339 timestamp for when this host last confirmed the
 peer was up — `null` only for a peer that has never once answered.
 
 `health` is `"online"` (the poll just succeeded, or this is the local host) or `"unreachable"` (the

@@ -154,12 +154,14 @@ events, pty and shutdown), so the boot spec is the only per-colony number about 
 figures are omitted rather than faked. `null` on colonies booted before these fields existed.
 
 The example shows the common fields; the record carries more, and most optional ones are left out
-of the JSON while unset rather than sent as `null`. Among them: `origin`, `suspended`, `parked`,
-`agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
+of the JSON while unset rather than sent as `null`. Among them: `placement`, `origin`, `suspended`,
+`parked`, `agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
-(§6.1b), `verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
+(§6.1b), `model_substitutions` (§6.1b — the models the boot resolved away from because the gateway
+would have refused them for the task's sensitivity class, as `[{setting, from, to, reason}]`),
+`verification` (§6.3), `attention` (§6.3, Watchdog) and `unseen_failure` — set when the
 colony moves into `failed` and cleared by the `seen` route above, so a failure stays in the
 needs-you count (the app badge's) until a person has opened the colony; colonies from before the
 field existed load as seen.
@@ -170,9 +172,17 @@ and `superseded` is set when a same-repository colony's pull request merged over
 Both are left out entirely on a colony they do not apply to.
 
 `origin` names what launched the colony: `burn_down` (§6.2c), `redteam` (§6.7), `map` or
-`map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), or `chat` / `colonize` for a
+`map:loop:<loop id>` (Architecture maps), `loop:<loop id>` (Loops), the built-in loops'
+`docs-loop`, `supply-chain:<ecosystem>`, `ts-any:<module>`, `merge-train:redo:<colony id>` and
+`merge-train:fix:<owner/repo>` (Loops, below), or `chat` / `colonize` for a
 colony a person started from the chat or the Colonize pane. It is taken from the create body, and
 absent for a plain launch.
+
+`placement` is why the fleet's placement policy put this colony where it runs, in the policy's own
+words — this member and its free capacity (`archlinux: 3 free slots`), `pinned to box-2`, or a note
+that a peer had room but cross-member launch is not built yet ([fleet.md](../fleet.md#placement)). It
+is recorded on a fresh launch and left out of colonies written before it existed or re-admitted
+from the queue; the cockpit shows it under the colony's status.
 
 `suspended` is set while the colony waits on its user with its microVM torn down
 ([#562]): `{at, snapshot, reason: "waiting_for_answer", path: "session_resume"}` — the status stays

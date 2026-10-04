@@ -74,6 +74,22 @@ models resolve through the same provider routes as `model` (§6.5's `used_by` co
 env variables are stripped from the colony's environment once the tier is chosen, so only the
 provider actually in use is probed at boot.
 
+Every model the boot settles on — the orchestrator (a tier pick or the operator's `model_override`),
+`subagent_model`, `background_model` and `small_model` — is then resolved against the task's
+sensitivity class before it is used (issue #704). The gateway refuses a class more sensitive than the
+provider's mark (§6.5), so a subagent model on a provider the class will not trust, or a `low`-tier
+model on one, would fail every call: the colony could not work. A model that fails the gate is
+replaced with the effective orchestrator model (for a subagent, background or small setting) or the
+module's `model` (for the orchestrator itself — what `medium` would run on if routing had not moved
+it); an operator's named `model_override`/`subagent_model_override` is resolved the same way. The
+fallback must itself be eligible, and the boot never invents a model name: when the fallback is blank
+— the default setup, where the module names no `model` — the setting is cleared, so the task inherits
+the harness default, and recorded as "the orchestrator's model"; when no eligible model exists at all
+the setting is left exactly as it is and the boot logs a `warn` that the gateway will refuse it. Each
+substitution is one `info` line in the colony's session log — not repeated by a resume, which resolves
+the same models again — and recorded as a `model_substitutions` entry on the session record (below),
+so the cockpit can show what the colony is really running on.
+
 Routing down is not always the cheaper run: the cheaper model reloads the task's context from
 scratch at its input price, which sometimes costs more than the output saved. When all three token
 estimates are set and both models have pricing on file, the cost gate prices the two ways of running

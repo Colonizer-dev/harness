@@ -167,10 +167,11 @@ code map of a repository — files, symbols and call edges — and answers `graf
 exact `file:line`. The skillset's `SKILL.md` teaches the agent to reach for it before grepping and
 reading files.
 
-**Not available yet.** `crates/colonizer/graft.lock` pins no bundle yet: no `graft-*` release
-has been published. Until a release is pinned, the Skillsets row says the skillset is not
-published for this machine yet, `GET /api/plugins/graft` reports `unavailable`, and a download
-request is refused with 409. An operator can still place their own `plugins/graft` directory.
+**Downloaded when asked.** `crates/colonizer/graft.lock` pins the published `graft-0.19.0-1`
+release for `linux-x86_64` and `linux-aarch64`, one row per colony architecture. On an
+architecture no release pins, the Skillsets row says the skillset is not published for this
+machine yet, `GET /api/plugins/graft` reports `unavailable`, and a download request is refused
+with 409. An operator can still place their own `plugins/graft` directory.
 
 | | |
 | --- | --- |

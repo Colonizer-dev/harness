@@ -209,6 +209,18 @@ past the timeout parks with `attention.reason` `hold_timeout`, so its microVM sl
 frees for queued colonies (one org's held colonies cannot block every other org past the timeout)
 while staying resumable. Within the timeout a held colony still counts against the parallel limits.
 
+One wedge the rules above cannot see is finished separately (issue #878): a running colony whose
+runner emitted its final, non-delta `assistant_text` — its "it's done" — and then never ended the
+turn. Two minutes past that final answer, with no tool call in flight, no open question and nothing
+through the gateway, the watchdog asks agentd's `/v1/health`. If agentd answers and its runner is
+still running, it ends the turn for it: a host-generated `watchdog_turn_end` event goes on the
+colony's `events.jsonl` (like the §6.6 host chain events, and cut out of the agentd reconnect cursor
+the same way) and the ordinary turn-end path runs, so spend, budget, verification and publish proceed
+as they would have. A later real `turn_end` for the same turn publishes nothing new (the description
+is unchanged), and a synthetic end carries no cost, so no spend is double-counted. If agentd does
+not answer, the watchdog keeps the final answer for the next tick to retry, logs once that it could
+not finish the turn, and leaves the colony to the stall handling above rather than restarting it.
+
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
 `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it

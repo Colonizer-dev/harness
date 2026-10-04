@@ -4,13 +4,14 @@ What ships today: one `Manifest` per hunter, a `hunters.lock` pin per platform, 
 opt-in (`COLONIZER_HUNTER_INSTALL=1`) guarding a Linux-only, race-free, checksum-verified
 on-demand install, a capability probe, and a manifest-driven scan runner (`hunters::scan`) that
 renders the `scan` template, runs the installed binary, and parses the artifacts back into
-`Finding`s. What is still missing is the red-team run stage that decides when scans happen (and
-which still refuses external hunters), and orchestrator validation of the findings.
-In the cockpit's red-team wizard, Strix and Shannon are still disabled cards marked "Coming soon",
-and the red-team API refuses them with a 400; only the colony swarm runs (see
-[red-team.md](red-team.md#operating-it)). For a security-focused raid today, run the colony swarm
-with the Security preset: security focus areas, a deterministic pre-scan and an operator checklist
-([red-team.md](red-team.md#the-security-preset)).
+`Finding`s. A red-team run now drives Shannon, one colony per repository (see below); Strix is
+installed and probed but no run drives its scans yet, and colonies have no Docker daemon.
+In the cockpit's red-team wizard the swarm and Shannon are selectable cards — Shannon reads
+"Ready · runs in a colony" — and Strix stays a disabled card marked "Coming soon"; the red-team API
+accepts `"hunter": "shannon"` and refuses Strix with a 400 (see
+[red-team.md](red-team.md#operating-it)). The colony swarm with the Security preset is still the
+way to a security-focused raid that needs no external hunter: security focus areas, a deterministic
+pre-scan and an operator checklist ([red-team.md](red-team.md#the-security-preset)).
 
 ## On demand, verified, never vendored
 
@@ -107,11 +108,11 @@ for the run's artifacts — at most three levels deep, never following symlinks.
   refuse to start a hunter whose probe is not ready, and a `needs_docker` hunter (Strix) still
   needs a Docker daemon inside the colony microVM (see above).
 
-## Planned, not implemented (tracked in #216)
+## Planned, not implemented (#216 closed with these left; see #933)
 
-- Findings flowing through orchestrator validation subject to `MAX_PER_COLONY`.
-- A red-team run driving hunters: refusing to start one whose probe is not ready, or serialising
-  installs (installs already serialise themselves per hunter; see above).
+- A red-team run driving Strix: it needs a Docker daemon inside the colony microVM, which colonies
+  do not have yet, so no run starts one (Shannon already runs this way; see
+  [red-team.md](red-team.md#operating-it)).
 
 ## How to add a hunter
 
@@ -126,14 +127,18 @@ for the run's artifacts — at most three levels deep, never following symlinks.
 
 Strix is phase one: manifest, pinned lock, opt-in install, probe, two parsers (`parse_strix`,
 `parse_sarif`), and a scan runner that wires them end to end — template to argv, artifacts to
-`Finding`s, cost into the outcome. Nothing decides when a scan happens yet, and colonies have no
-Docker daemon, so no scan runs today. Shannon is a manifest-only stub (phase 2): its manifest,
-install command, scan template and SARIF format are recorded, but there is no download and no
-driving run yet — `scan` refuses it. The cockpit module gallery will extend the existing
-`/api/plugins` surface rather than adding a parallel one, and the `logo` field is a name only
-until that gallery renders it.
+`Finding`s, cost into the outcome. No run drives a host-side scan yet, and colonies have no Docker
+daemon, so `hunters::scan` runs nothing today. Shannon is phase two: its manifest stays
+`available: false`, so host-side install and `scan` still refuse it as a manifest-only stub, but a
+`hunter: "shannon"` red-team run drives it inside a colony — the host writes the pinned, `npx`-based
+command into the colony's brief, the colony starts the app and runs Shannon against it in its
+microVM, and the host reads the SARIF it leaves behind back through orchestrator validation (see
+[red-team.md](red-team.md#operating-it)). Because Shannon is AGPL, the mothership never fetches or
+links it: only the in-colony command line is written. The cockpit module gallery will extend the
+existing `/api/plugins` surface rather than adding a parallel one, and the `logo` field is a name
+only until that gallery renders it.
 
-In the cockpit, the red-team wizard calls the probe for both hunters and shows them as disabled
-"Coming soon" cards with bundled logo images; the manifest's `logo` field is not used there.
-There is no hunter gallery and no install button in the cockpit: installing Strix is the
-`POST /api/hunters/strix/install` route above, with the opt-in set.
+In the cockpit, the red-team wizard calls the probe for both hunters and shows the swarm and
+Shannon as selectable cards with bundled logo images, Strix disabled; the manifest's `logo` field
+is not used there. There is no hunter gallery and no install button in the cockpit: installing
+Strix is the `POST /api/hunters/strix/install` route above, with the opt-in set.

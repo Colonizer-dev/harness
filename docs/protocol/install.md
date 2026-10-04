@@ -38,7 +38,9 @@ on (`telemetry.md`). `COLONIZER_RELEASES_URL` points the check elsewhere, for a 
 whose version cannot be placed is never told it is behind.
 
 `apply` reports an update being installed: `{phase, version, started_at, error, log, colonies: [{id,
-repo, outcome}], backup}`, `phase` one of `idle`, `installing`, `restarting` or `failed`. `can_apply` is
+repo, outcome}], backup}`, `phase` one of `idle`, `draining`, `installing`, `restarting` or `failed`
+(`draining` is the queue held back while the colonies still booting or publishing finish — the same
+flag `GET`/`POST /api/admin/drain` drives). `can_apply` is
 `{ok, reason}`: whether this install can update itself at all — a source checkout or a development build
 cannot, and says so.
 

@@ -75,7 +75,10 @@ character set plus `=` and `&`):
 - Other refusals, none of them with `x-colonizer-fallback`: `404` `not_found_error` for an unknown
   provider; `403` `sensitivity_error` when the task's sensitivity class exceeds the provider's mark —
   `vetted` work needs a provider marked `vetted`, `restricted` work one marked `trusted` (`trusted`
-  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md);
+  implies `vetted`), with an org's sensitivity overrides able to move the bar (docs/providers.md).
+  The launch resolves the orchestrator, subagent and background models against this class first
+  (§6.1b), substituting an eligible model rather than letting a colony boot into calls this gate can
+  only refuse; what it substituted is on the session's `model_substitutions`;
   `502` `api_error` when a keyed provider has no saved key; a second budget `403` when recorded spend
   plus in-flight estimates plus this request would pass the budget; `400`/`404` for a path or body
   the wire cannot carry.

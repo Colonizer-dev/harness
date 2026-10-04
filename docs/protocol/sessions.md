@@ -1,6 +1,55 @@
-# Sessions: events and terminal
+# Sessions: events, transcript and terminal
 
 Part of the [Colonizer protocol](../protocol.md).
+
+## `GET /api/sessions/{id}/transcript?format=common&limit=&cursor=`
+
+The colony's own agent session transcript — the conversation the module that ran it kept
+natively — read back and normalized to one message shape, whatever ran the colony. The agent's
+transcripts directory is host-mounted over the module's `session_resume.dir` at boot, so the
+harness reads it with `txcript`, one reader per format, and folds it through its canonical
+`Common` model:
+
+| agent module | harness | where its sessions live under `<session dir>/transcripts/` |
+| --- | --- | --- |
+| `claude-code` | `claude_code` | `<slug>/<uuid>.jsonl` (the projects root is the mount) |
+| `codex` | `codex` | `sessions/**/rollout-*.jsonl` (its home is the mount) |
+| `grok-build` | `grok` | `sessions/<encoded-cwd>/<id>/` (a session directory) |
+| `opencode` | `opencode` | `opencode.db` (one SQLite database at the mount root) |
+| `hermes` | `hermes` | `state.db` (one SQLite database at the mount root) |
+
+Only `claude-code` and `codex` declare `session_resume` today, so only they persist a transcript; a
+`grok-build`, `opencode` or `hermes` colony has nothing recorded and answers **404**. An `acp`,
+`pi` or unknown module has no reader and answers **422**. The mount is colony-writable, so the
+harness first copies only the files a reader needs — symlinks skipped, never followed — into a
+host-private directory and reads that, and a store past the caps (8 deep, 10 000 entries, 64 MiB a
+file, 256 MiB in sum) answers **413**.
+
+An unreadable native store reads the same as one never written (**404**), because discovery treats
+a store it cannot open as empty; only a store that opens but fails to parse or fold answers
+**500**, and its body does not echo the failure — that is logged, never returned, so no host path
+leaks.
+
+`format` is required and the only value served is `common`; anything else (or no `format`) is
+**400**, leaving room for other formats later. The answer is:
+
+```jsonc
+{
+  "agent": "claude-code",              // the module that ran the colony
+  "harness": "claude_code",            // the reader its transcript was folded through
+  "meta": { "id": "…", "timestamp": "…", "cwd": "…", "model": "…" }, // txcript Meta
+  "messages": [ { "role": "user|assistant", "content": [ /* text, thinking, tool_use, tool_result, … */ ], "timestamp": "…" } ],
+  "total": 128,                         // messages in the whole transcript
+  "next_cursor": "99"                   // null when the last page was reached
+}
+```
+
+Messages page the way the colony list does (§4 scoped API tokens): `limit` defaults to 100 and is
+clamped to at most 500, and `cursor` is the index of the last message already delivered, so the
+next page starts right after it and `next_cursor` is the page's last index while more follow, or
+`null` at the end. A `cursor` that names no message — not an integer, or past the last one — is a
+**400**. The route takes the same visibility guard as the diff and files routes, so a scoped token
+outside its org/repo limits reads an unknown colony (**404**).
 
 ## `GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket)
 

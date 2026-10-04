@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use std::path::{Path as FsPath, PathBuf};
 
 /// Whether `r` names something in the bare repo: `rev-parse --verify --quiet` answers in its exit
-/// status, so a missing ref is `false`, not an error.
-async fn ref_exists(app: &App, bare: &FsPath, r: &str) -> bool {
+/// status, so a missing ref is `false`, not an error. Shared with `maps` so the base branch is
+/// resolved the same way wherever it is measured against.
+pub(crate) async fn ref_exists(app: &App, bare: &FsPath, r: &str) -> bool {
     exec_status(app.git(bare).args(["rev-parse", "--verify", "--quiet", r]))
         .await
         .unwrap_or(false)

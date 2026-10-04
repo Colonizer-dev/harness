@@ -3,7 +3,7 @@
 The [Unified Harness Protocol](https://unifiedharnessprotocol.org/) (UHP) is an open wire contract
 for agent harnesses, extending the OpenAI Responses API so a Responses SDK could drive a harness
 unchanged. Colonizer's own wire names came first; [protocol.md](protocol.md) §7 maps them onto UHP
-and is proposal-only. This page is the measured state: what the protocol's conformance suite says
+and is partly implemented (the read side is served under `/uhp/v1`). This page is the measured state: what the protocol's conformance suite says
 about this repository as it is. The spec — `2026-09-12`, draft — and the suite live in
 [HarnessRouter/harnessrouter](https://github.com/HarnessRouter/harnessrouter)'s `protocol/` dir;
 the suite, `uhp-conformance` `2026.9.12.post2`, is not on PyPI and is installed pinned to commit

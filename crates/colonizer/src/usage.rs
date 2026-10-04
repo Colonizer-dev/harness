@@ -302,6 +302,36 @@ fn terminal_count(sessions: &[Session], status: SessionStatus) -> &'static str {
     bucket_count(sessions.iter().filter(|s| s.status == status).count())
 }
 
+/// Watchdog turn-ends synthesised for a wedged colony this install has seen (issue #878). A
+/// process-global counter, like the gateway's provider tallies: the report is about the install, not
+/// one colony, and no colony record carries it.
+#[cfg(not(test))]
+static WATCHDOG_TURN_ENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// Under test the tally is per thread: the test harness runs tests in parallel, and a process-global
+// counter moved by one test (a watchdog finish, the tally test) would race another test that builds
+// the batch twice and compares the two.
+#[cfg(test)]
+thread_local! {
+    static WATCHDOG_TURN_ENDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Records one watchdog-synthesised turn end for the usage batch (`watchdog.turn_end.<bucket>`).
+pub(crate) fn note_watchdog_turn_end() {
+    #[cfg(not(test))]
+    WATCHDOG_TURN_ENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    WATCHDOG_TURN_ENDS.with(|n| n.set(n.get() + 1));
+}
+
+/// The watchdog turn-ends recorded so far (see [`note_watchdog_turn_end`]).
+fn watchdog_turn_ends() -> u64 {
+    #[cfg(not(test))]
+    return WATCHDOG_TURN_ENDS.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    return WATCHDOG_TURN_ENDS.with(std::cell::Cell::get);
+}
+
 /// The pure half of [`build`]: the same plain values, mapped into Cratefield's payload JSON, with
 /// the declared vocabulary that names exactly the events it carries — so [`payload::Batch::parse`]
 /// can hold the result against the grammar the collector parses. docs/usage-data.md documents the
@@ -368,6 +398,12 @@ fn cratefield_value(
     for (kind, bucket) in &kinds {
         events.push(counted(format!("error.{kind}.{bucket}")));
     }
+    // How often the watchdog had to finish a turn the runner never ended (issue #878). A lifetime
+    // count for the install, so it is appended last with the other install-wide tallies.
+    events.push(counted(format!(
+        "watchdog.turn_end.{}",
+        bucket_count(watchdog_turn_ends() as usize)
+    )));
 
     let value = json!({
         "schema": payload::SCHEMA,
@@ -900,6 +936,7 @@ mod tests {
             stack_fork: None,
             origin: None,
             launched_by_token: None,
+            placement: None,
             worktree: "/home/me/.local/share/colonizer/worktrees/acme-corp/secret-project/issue-42-a1b2c3d4".into(),
             git_admin_dir: Some("/home/me/.local/share/colonizer/repos/git-admin".into()),
             sandbox: "colonizer-a1b2c3d4".into(),
@@ -917,6 +954,7 @@ mod tests {
             boot_attempt_started_at: None,
             mesh: None,
             local_port: None,
+            preview_port: None,
             agent: "claude-code".into(),
             autopilot: true,
             autofix: None,
@@ -942,13 +980,16 @@ mod tests {
             allowed_providers: None,
             allowed_models: None,
             sensitivity: None,
+            model_substitutions: Vec::new(),
             cleaned_up: false,
             keep_worktree: false,
             attention: None,
             suspended: None,
             parked: None,
+            hold_resumes: 0,
             agent_session: None,
             pending_answer: None,
+            resume_note: None,
             prewarm: None,
             supply_chain: None,
             superseded: None,
@@ -958,6 +999,9 @@ mod tests {
             boot_cpus: None,
             boot_memory: None,
             boot_image: None,
+            failure_class: None,
+            boot_retries: 0,
+            retry_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -1061,6 +1105,9 @@ mod tests {
         "boot",
         "providers",
         "error",
+        // The watchdog's own tally: turn-ends it synthesised for a turn the runner never ended.
+        "watchdog",
+        "turn_end",
         // Failure kinds: the harness's own names and the attention reasons it sets.
         "agentd_not_ready",
         "harness_restarted",
@@ -1727,6 +1774,22 @@ mod tests {
             error_kinds(&[errored]),
             BTreeMap::from([(crate::gateway::MODEL_ERROR_REASON, "1")]),
             "a colony the gateway flagged after an upstream 4xx/5xx buckets under model_error"
+        );
+    }
+
+    #[test]
+    fn the_watchdog_turn_end_tally_is_counted_and_reported() {
+        let before = watchdog_turn_ends();
+        note_watchdog_turn_end();
+        assert!(watchdog_turn_ends() > before, "the counter moves");
+        let batch = build(None, &[], &ModulesConfig::default(), &[], 0);
+        let name = names(&batch)
+            .into_iter()
+            .find(|name| name.starts_with("watchdog.turn_end."))
+            .expect("the tally is reported");
+        assert!(
+            name.split('.').all(|part| TOKENS.contains(&part)),
+            "a closed label, like every other count: {name}"
         );
     }
 

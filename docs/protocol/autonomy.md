@@ -89,6 +89,6 @@ Failures are quiet and never spike: unknown `allowance_usd` → `state: "unknown
 nothing launches; an unparseable `reset_time`/`reset_weekday` → `next_reset` null and the window
 never opens; a launch that fails is logged and retried on the next tick.
 
-Hunt colonies currently run a generic bug-hunt prompt — find real bugs, verify before filing, keep
-pull requests small; they will adopt the red-team runs of
-[#212](https://github.com/Colonizer-dev/harness/issues/212) when those land.
+Hunt colonies run a generic bug-hunt prompt — find real bugs, verify before filing, keep pull
+requests small. They do not use the red-team runs of
+[#212](https://github.com/Colonizer-dev/harness/issues/212) (§6.7), which shipped separately.

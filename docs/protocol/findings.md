@@ -57,8 +57,8 @@ transcript show the whole chain:
 ```
 
 These five are host-generated: the mothership appends them to the hunter colony's events.jsonl, the
-runner never emits them, and the runner-event schema in `docs/agent-events.schema.json` is unchanged —
-the runner events stay the §2 set plus `finding`. The publish gate's `verification` event (§6.3,
+runner never emits them, and they are not in `docs/agent-events.schema.json` — the runner events stay
+the §2 set plus `finding` and `github_action` (§6.12). The publish gate's `verification` event (§6.3,
 Autopilot) is host-generated the same way, on the writing colony's own event log. Every transition is
 also one line of the ledger,
 `sessions/<id>/findings.jsonl`, which the findings endpoints (§4) and the report read: records

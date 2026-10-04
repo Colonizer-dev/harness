@@ -39,7 +39,7 @@ the proposer's — a value outside this vocabulary, read as the proposer and nev
 ## `GET /v1/health`
 
 ```json
-{"ok": true, "version": "0.1.0", "agent": {"state": "working", "running": true, "last_seq": 42}}
+{"ok": true, "version": "0.2.0", "agent": {"state": "working", "running": true, "last_seq": 42}}
 ```
 
 ## `GET /v1/events?since=<seq>` (WebSocket)
