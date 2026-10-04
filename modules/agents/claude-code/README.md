@@ -108,7 +108,9 @@ to connect and lets it stay silent for up to `router_idle_timeout_secs` (600 s b
 answer starts or between two chunks of it. A failure is answered for what it is — unreachable (DNS,
 connect, TLS) as a 502, a timeout as a 504 `timeout_error`, a broken connection as a 502 with its error
 code — and logged with `source: "model_router"` (provider, class, status, elapsed time); upstream 401/403,
-429 and 5xx answers pass through unchanged. See docs/protocol.md §6.1 (issue #983).
+429 and 5xx answers pass through unchanged. A request whose connection is closed under it before any
+of the answer arrives (`UND_ERR_SOCKET`, the keep-alive race on a pooled socket) is sent once more on a
+new connection and logged as `class=connection_retry`. See docs/protocol.md §6.1 (issue #983).
 
 Claude Code sends its full request shape to routed providers, including `thinking`, `context_management`,
 `output_config`, `metadata`, every tool definition and betas such as `context-management-*` and
