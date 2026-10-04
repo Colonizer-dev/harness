@@ -2,7 +2,8 @@
 // same way — null is "—", a real zero is "$0.00" — and every sum goes through one rule.
 import { describe, expect, it } from "vitest";
 
-import { formatCost, formatTokens, modelMix, orgCost, sessionCost, sumCosts } from "./spend";
+import { formatCost, formatTokens, modelMix, orgCost, sessionCost, spendToday, sumCosts } from "./spend";
+import type { SpendDay } from "./types";
 
 describe("sumCosts", () => {
   it("is null only when every member is unmeasured", () => {
@@ -46,6 +47,51 @@ describe("orgCost", () => {
   it("sums the rollup's two fields under the same rule", () => {
     expect(orgCost(pair)).toBe(1.5);
     expect(orgCost({ cost_usd: null, routed_cost_usd: 0.3 })).toBe(0.3);
+  });
+});
+
+describe("spendToday", () => {
+  const spendDay = (day: string, ...costs: [number | null, number | null][]): SpendDay => ({
+    day,
+    orgs: costs.map(([cost_usd, routed_cost_usd], i) => ({
+      org: `org${i}`,
+      cost_usd,
+      routed_cost_usd,
+      tokens: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      models: [],
+      launched: 0,
+      returned: 0,
+    })),
+  });
+  // Noon on 2026-10-02 local, so the local day key is "2026-10-02" whatever the machine's zone.
+  const noon = new Date(2026, 9, 2, 12, 0, 0);
+
+  it("sums today's rows across their orgs", () => {
+    const rows = [spendDay("2026-10-02", [1.25, 0.25], [2, null])];
+    expect(spendToday(rows, noon)).toBe(3.5);
+  });
+
+  it("leaves out every day that is not today", () => {
+    const rows = [spendDay("2026-10-01", [9, 9]), spendDay("2026-10-03", [9, 9])];
+    expect(spendToday(rows, noon)).toBeNull();
+  });
+
+  it("picks the whole local calendar day, either side of midnight", () => {
+    const rows = [spendDay("2026-10-01", [1, 0]), spendDay("2026-10-02", [2, 0])];
+    expect(spendToday(rows, new Date(2026, 9, 2, 0, 0, 0))).toBe(2);
+    expect(spendToday(rows, new Date(2026, 9, 2, 23, 59, 59))).toBe(2);
+    expect(spendToday(rows, new Date(2026, 9, 3, 0, 0, 0))).toBeNull();
+  });
+
+  it("is null for an empty or absent journal, and for a today that measured nothing", () => {
+    expect(spendToday([], noon)).toBeNull();
+    expect(spendToday(null, noon)).toBeNull();
+    expect(spendToday(undefined, noon)).toBeNull();
+    expect(spendToday([spendDay("2026-10-02", [null, null])], noon)).toBeNull();
+  });
+
+  it("keeps a measured zero as $0, not unmeasured", () => {
+    expect(spendToday([spendDay("2026-10-02", [0, null])], noon)).toBe(0);
   });
 });
 

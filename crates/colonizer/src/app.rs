@@ -10,6 +10,7 @@ use crate::config::{ModulesConfig, Settings, setting_u64};
 use crate::mesh::{Mesh, Ports};
 use crate::modules::AgentModule;
 use crate::sessions::Session;
+use crate::store::SessionStore;
 use crate::util::{env_nonempty, exec_within, is_elf, is_plain_name, read_secret};
 use crate::{AnswerCache, claude_accounts, modules, reclaim, sessions, util};
 use anyhow::{Context, Result, anyhow, bail};
@@ -78,6 +79,10 @@ pub struct App {
     pub agent_problems: Vec<String>,
     pub sessions: RwLock<Vec<Session>>,
     pub(crate) session_persist: Mutex<()>,
+    /// Where the session index and the per-session files live: the default [`crate::store::LocalDirStore`]
+    /// over `cfg.data_dir`, threaded here so startup, the saves and the per-session appends all go
+    /// through one backend (docs/session-store.md). The reference memory backend stands in for tests.
+    pub(crate) store: Arc<dyn SessionStore>,
     /// Serialises the read-modify-write of `orgs.json` and `providers.json` (`orgs::put`,
     /// `providers::put`/`delete`), of `known-orgs.json` (`orgs::record_known_sightings`, which
     /// `mark_org_known` and the refresh's record update go through) and of `claude-accounts.json`
@@ -132,6 +137,9 @@ pub struct App {
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
+    /// The draining flag that holds the queue back while an update or a restart runs (drain.rs,
+    /// issue #880), plus when it was set.
+    pub drain: crate::drain::Drain,
     /// The execution seam (execution.rs): boots, removes and lists the microVMs colonies run on.
     /// Local microsandbox today; a remote outpost is a second backend behind the same trait.
     pub execution: Arc<dyn crate::execution::ExecutionBackend>,
@@ -158,6 +166,11 @@ pub struct App {
     pub http_cache: crate::cache_store::DiskCache,
     /// Avatars fetched by `/api/img` (`<data_dir>/cache/img`).
     pub img_cache: crate::cache_store::DiskCache,
+    /// The autonomy judge's health (issue #875, autonomy.rs): the last success, the last failure
+    /// with its classified reason, and how many primary-model failures have gone unanswered in a
+    /// row. In memory only — a restart re-learns it — and read by `GET /api/autonomy/status` and by
+    /// notify's one judge-degraded announcement.
+    pub judge_health: Mutex<crate::autonomy::Health>,
     /// The shared anti-spam ledger (`<data_dir>/ledger.json`): notify and the autonomy judge count
     /// every outbound proactive action against it, so the operator's attention is one bounded rate.
     pub ledger: crate::ledger::LedgerStore,
@@ -227,6 +240,9 @@ pub struct Boot {
     pub agent_problems: Vec<String>,
     pub load_damage: Option<StorageAlert>,
     pub api_token: String,
+    /// The store the startup's sessions were read through, kept on the `App` so saves and appends
+    /// go back through the same backend (docs/session-store.md).
+    pub(crate) store: Arc<dyn SessionStore>,
 }
 
 impl App {
@@ -240,6 +256,7 @@ impl App {
             agent_problems: boot.agent_problems,
             sessions: RwLock::new(boot.sessions),
             session_persist: Mutex::new(()),
+            store: boot.store,
             config_write: Mutex::new(()),
             config_damage: std::sync::Mutex::new(None),
             storage_alert: RwLock::new(None),
@@ -258,6 +275,7 @@ impl App {
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             deja: crate::deja::Deja::default(),
+            drain: crate::drain::Drain::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),
             fleet_cache: crate::fleet::FleetCache::new(),
             fleet_members: crate::fleet_members::FleetStore::load(&cfg.config_dir),
@@ -268,6 +286,7 @@ impl App {
             host_cache: Mutex::new(None),
             http_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), crate::cache_store::HTTP_MAX_BYTES),
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
+            judge_health: Mutex::new(crate::autonomy::Health::default()),
             ledger: crate::ledger::LedgerStore::load(&cfg.data_dir),
             login: Default::default(),
             disk_cleanup: Default::default(),
@@ -300,6 +319,12 @@ impl App {
         self.cfg.config_dir.join("modules.json")
     }
 
+    /// The session store this mothership writes through (docs/session-store.md): the index on
+    /// startup and every save, and the per-session files as they are appended.
+    pub(crate) fn store(&self) -> &dyn SessionStore {
+        self.store.as_ref()
+    }
+
     pub fn claude_token_file(&self) -> PathBuf {
         self.cfg.config_dir.join("claude-token")
     }
@@ -308,9 +333,12 @@ impl App {
         self.claude_cred_for(None)
     }
 
-    /// The credential for one Claude account: the requested account's stored secret, else the
-    /// single-token file a pre-accounts install left behind, else the environment. `None` selects
-    /// the install default, so `claude_cred` — every existing caller — keeps working unchanged.
+    /// The credential for one Claude account. Precedence: the named (else default) account's stored
+    /// secret, then the single-token file a pre-accounts install left behind, then
+    /// `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY`. `None` selects the install default, so
+    /// `claude_cred` — every existing caller — keeps working unchanged. The settings token route and
+    /// the claude-login flow save into the default account (`claude_accounts::save_default_token`),
+    /// so the legacy file only serves a token an older version left behind.
     pub fn claude_cred_for(&self, account: Option<&str>) -> Option<ClaudeCred> {
         let _ = claude_accounts::migrate_legacy(&self.cfg.config_dir);
         let meta = claude_accounts::load_meta(&self.cfg.config_dir);
@@ -645,40 +673,48 @@ impl AppError {
 
 pub type ApiResult<T> = Result<Json<T>, AppError>;
 
-/// Load the session list from `sessions.json`. A file we cannot read or parse as a list at all is
-/// moved aside to `sessions.json.corrupt-<unix-timestamp>` — never overwritten, so its bytes stay
-/// recoverable — and the harness starts with an empty list and a sticky alert: the colonies on that
-/// list are missing from it although their worktrees, branches and microVMs may still exist. A list
-/// where records are damaged — some or all of them — is salvaged instead: the good colonies load,
-/// and the original is copied aside untouched, so the next startup can salvage from it again if the
-/// harness stops before the next save. If even the aside fails, the next save would overwrite the
-/// file, so that is an error rather than a degraded start.
-pub(crate) fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> {
-    let data = match std::fs::read(path) {
-        // A missing file is a first run, not a corruption.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), None)),
+/// Load the session list through the session store. An index a store cannot read or parse as a list
+/// at all is quarantined — `store.quarantine_index`, moved aside to `sessions.json.corrupt-<unix-timestamp>`,
+/// never overwritten, so its bytes stay recoverable — and the harness starts with an empty list and a
+/// sticky alert: the colonies on that list are missing from it although their worktrees, branches and
+/// microVMs may still exist. A list where records are damaged — some or all of them — is salvaged
+/// instead: the good colonies load, and the original is copied aside untouched, so the next startup
+/// can salvage from it again if the harness stops before the next save. If even the aside fails, the
+/// next save would overwrite the file, so that is an error rather than a degraded start.
+///
+/// `index_path` must be the store's own index path — where `sessions.json` lives on disk for
+/// `LocalDirStore` — because it is where the salvage *copy* goes (`copy_corrupt_aside`, a local file
+/// op the store has no operation for) and what the alert's message names. The quarantine itself is
+/// the store's move-aside, whose name is resolved back onto `index_path` so the message still names
+/// a full path whatever the backend.
+pub(crate) async fn load_sessions(store: &dyn SessionStore, index_path: &FsPath) -> Result<(Vec<Session>, Option<StorageAlert>)> {
+    let data = match store.read_index().await {
+        // A missing index is a first run, not a corruption.
+        Ok(None) => return Ok((Vec::new(), None)),
+        Ok(Some(data)) => data,
+        // A read failure other than "not there" is the damage this startup quarantines: the bytes
+        // are moved aside rather than read around, exactly as the direct read used to.
         Err(e) => {
-            let saved = move_corrupt_aside(path)?;
-            return Ok(unusable(path, &saved, format!("could not be read ({e})")));
+            let saved = quarantine_aside(store, index_path).await?;
+            return Ok(unusable(index_path, &saved, format!("could not be read ({e})")));
         }
-        Ok(data) => data,
     };
     let values = match serde_json::from_slice::<Vec<Value>>(&data) {
         Ok(values) => values,
         Err(e) => {
-            let saved = move_corrupt_aside(path)?;
-            return Ok(unusable(path, &saved, format!("could not be parsed ({e})")));
+            let saved = quarantine_aside(store, index_path).await?;
+            return Ok(unusable(index_path, &saved, format!("could not be parsed ({e})")));
         }
     };
     let (sessions, damaged) = salvage(values);
     if damaged == 0 {
-        // Unchanged happy path: nothing damaged, so the file is left exactly as it is.
+        // Unchanged happy path: nothing damaged, so the index is left exactly as it is.
         return Ok((sessions, None));
     }
-    let saved = copy_corrupt_aside(path)?;
+    let saved = copy_corrupt_aside(index_path)?;
     let message = format!(
         "{} kept {} of {} records and copied the original to {}, but {} of them could not be loaded; those colonies are missing from the list, although their worktrees, branches and microVMs may still exist",
-        path.display(),
+        index_path.display(),
         sessions.len(),
         sessions.len() + damaged,
         saved.display(),
@@ -695,6 +731,18 @@ pub(crate) fn load_sessions(path: &FsPath) -> Result<(Vec<Session>, Option<Stora
             recovered_at: None,
         }),
     ))
+}
+
+/// An index a store could not read: quarantined, its aside's name resolved back onto `index_path`
+/// (the store returns a bare file name) so the alert can name a full path. The store's quarantine is
+/// the move-aside the startup always did, stamp and fault seam included; a quarantine that fails
+/// aborts startup with the store's own words, which already say to move the file aside by hand.
+async fn quarantine_aside(store: &dyn SessionStore, index_path: &FsPath) -> Result<PathBuf> {
+    match store.quarantine_index().await {
+        Ok(Some(name)) => Ok(index_path.with_file_name(name)),
+        Ok(None) => bail!("the index could not be read but there was none to move aside"),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// What a file with nothing usable in it turns into: an empty list and a sticky alert saying where
@@ -834,6 +882,7 @@ pub(crate) mod tests {
             // A throwaway token: these tests never bind a port, and each one reads the token it
             // needs off the App itself.
             api_token: crate::util::random_token(),
+            store: Arc::new(crate::store::LocalDirStore::new(root.join("data"))),
         };
         Arc::new(App::new(cfg, boot).unwrap())
     }
@@ -842,6 +891,15 @@ pub(crate) mod tests {
         let dir = std::env::temp_dir().join(format!("colonizer-load-{}", util::short_id()));
         std::fs::create_dir_all(dir.join("data")).unwrap();
         dir
+    }
+
+    /// A `LocalDirStore` over `root/data` and that store's index path — the pair every
+    /// `load_sessions` test drives.
+    fn store_and_index(root: &FsPath) -> (crate::store::LocalDirStore, PathBuf) {
+        (
+            crate::store::LocalDirStore::new(root.join("data")),
+            root.join("data/sessions.json"),
+        )
     }
 
     /// A session list with exactly the fields the format requires; everything else defaults.
@@ -865,33 +923,50 @@ pub(crate) mod tests {
         })
     }
 
-    #[test]
-    fn a_missing_sessions_file_loads_as_empty_with_no_alert() {
+    #[tokio::test]
+    async fn a_missing_sessions_file_loads_as_empty_with_no_alert() {
         let root = temp_root();
-        let (sessions, alert) = load_sessions(&root.join("data/sessions.json")).unwrap();
+        let (store, index) = store_and_index(&root);
+        let (sessions, alert) = load_sessions(&store, &index).await.unwrap();
         assert!(sessions.is_empty());
         assert!(alert.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn a_valid_sessions_file_loads_with_no_alert() {
+    #[tokio::test]
+    async fn a_valid_sessions_file_loads_with_no_alert() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         std::fs::write(&path, session_json()).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "abc123");
         assert!(alert.is_none());
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn a_corrupt_sessions_file_is_saved_aside_and_the_harness_starts_empty_with_an_alert() {
+    /// Startup goes through the store, not the file helper: an index held only in a memory backend —
+    /// no `sessions.json` on disk at all — still loads its colonies.
+    #[tokio::test]
+    async fn startup_loads_the_index_through_the_store() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let store = crate::store::MemoryObjectStore::new();
+        store.write_index(session_json().as_bytes()).await.unwrap();
+        let index = root.join("data/sessions.json");
+        assert!(!index.exists(), "the load must not read the file directly");
+        let (sessions, alert) = load_sessions(&store, &index).await.unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "abc123");
+        assert!(alert.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_sessions_file_is_saved_aside_and_the_harness_starts_empty_with_an_alert() {
+        let root = temp_root();
+        let (store, path) = store_and_index(&root);
         std::fs::write(&path, b"this is not json").unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert!(sessions.is_empty());
         let alert = alert.unwrap();
         assert_eq!(alert.kind, StorageAlertKind::LoadDamage);
@@ -914,15 +989,15 @@ pub(crate) mod tests {
 
     /// One damaged record must not cost the others: the good colonies load, the alert names the
     /// counts, and the original file stays on disk with a byte-identical copy beside it.
-    #[test]
-    fn a_damaged_record_is_salvaged_around_and_the_original_file_is_kept() {
+    #[tokio::test]
+    async fn a_damaged_record_is_salvaged_around_and_the_original_file_is_kept() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         let mut damaged = record_json("broken");
         damaged["cost_usd"] = json!("not a number");
         let file = json!([record_json("first"), damaged, record_json("third")]).to_string();
         std::fs::write(&path, &file).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert_eq!(sessions.len(), 2, "the good records survive the damaged one");
         assert_eq!(sessions[0].id, "first");
         assert_eq!(sessions[1].id, "third");
@@ -944,15 +1019,15 @@ pub(crate) mod tests {
     /// A file where every record is damaged still parses as a list, so it is salvaged, not moved
     /// aside: nothing is renamed, the original stays put for the next startup, the copy holds the
     /// bytes, and the alert says all the records were lost.
-    #[test]
-    fn a_file_where_every_record_is_damaged_is_salvaged_to_an_empty_list() {
+    #[tokio::test]
+    async fn a_file_where_every_record_is_damaged_is_salvaged_to_an_empty_list() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         let mut damaged = record_json("broken");
         damaged["cost_usd"] = json!("not a number");
         let file = json!([damaged, {"repo": "acme/app"}]).to_string();
         std::fs::write(&path, &file).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert!(sessions.is_empty(), "nothing was salvageable");
         let alert = alert.unwrap();
         assert!(alert.message.contains("kept 0 of 2 records"), "{}", alert.message);
@@ -970,13 +1045,13 @@ pub(crate) mod tests {
     /// With every field defaulting, an unrelated object would otherwise load as a blank colony, so a
     /// record whose `id` is not a plain name counts as damaged and is dropped; here the `id` is
     /// missing altogether and so defaults to empty.
-    #[test]
-    fn a_record_without_an_id_is_damaged_and_dropped() {
+    #[tokio::test]
+    async fn a_record_without_an_id_is_damaged_and_dropped() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         let file = json!([record_json("kept"), {"repo": "acme/app"}]).to_string();
         std::fs::write(&path, file).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "kept");
         let alert = alert.unwrap();
@@ -987,13 +1062,13 @@ pub(crate) mod tests {
     /// An `id` names the colony's directory under `data/sessions`, and deleting a colony removes that
     /// directory whole, so a traversal-shaped id must be refused at load: a record that deserializes
     /// fine but names a directory elsewhere counts as damaged and is dropped.
-    #[test]
-    fn a_record_with_a_traversal_id_is_damaged_and_dropped() {
+    #[tokio::test]
+    async fn a_record_with_a_traversal_id_is_damaged_and_dropped() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         let file = json!([record_json("kept"), record_json("../../victim")]).to_string();
         std::fs::write(&path, file).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "kept");
         let alert = alert.unwrap();
@@ -1004,12 +1079,12 @@ pub(crate) mod tests {
 
     /// The salvage copy must not fire on the happy path: a fully valid file loads with no alert and
     /// leaves no `.corrupt-*` file behind.
-    #[test]
-    fn a_fully_valid_file_loads_with_no_alert_and_no_copy_made() {
+    #[tokio::test]
+    async fn a_fully_valid_file_loads_with_no_alert_and_no_copy_made() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         std::fs::write(&path, session_json()).unwrap();
-        let (sessions, alert) = load_sessions(&path).unwrap();
+        let (sessions, alert) = load_sessions(&store, &path).await.unwrap();
         assert_eq!(sessions.len(), 1);
         assert!(alert.is_none());
         assert!(path.exists(), "the file is untouched");
@@ -1024,15 +1099,15 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn an_unsalvageable_sessions_file_stops_startup_and_is_left_untouched() {
+    #[tokio::test]
+    async fn an_unsalvageable_sessions_file_stops_startup_and_is_left_untouched() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         std::fs::write(&path, b"this is not json").unwrap();
         let _guard = util::faults::inject("sessions.json", util::faults::Op::Rename, || {
             std::io::Error::from_raw_os_error(5)
         });
-        let err = load_sessions(&path).unwrap_err();
+        let err = load_sessions(&store, &path).await.unwrap_err();
         assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
         assert_eq!(std::fs::read(&path).unwrap(), b"this is not json", "the file is untouched");
         let _ = std::fs::remove_dir_all(root);
@@ -1041,10 +1116,10 @@ pub(crate) mod tests {
     /// The salvage copy rides the same fault seam as the move-aside: inject a failure at the copy and
     /// startup must abort, because going on would leave the damaged bytes unpreserved and the next
     /// save would silently drop them. The original is left exactly as it was found.
-    #[test]
-    fn a_salvage_copy_that_fails_stops_startup_and_the_original_is_left_untouched() {
+    #[tokio::test]
+    async fn a_salvage_copy_that_fails_stops_startup_and_the_original_is_left_untouched() {
         let root = temp_root();
-        let path = root.join("data/sessions.json");
+        let (store, path) = store_and_index(&root);
         let mut damaged = record_json("broken");
         damaged["cost_usd"] = json!("not a number");
         let file = json!([record_json("first"), damaged]).to_string();
@@ -1052,7 +1127,7 @@ pub(crate) mod tests {
         let _guard = util::faults::inject("sessions.json", util::faults::Op::Write, || {
             std::io::Error::from_raw_os_error(5)
         });
-        let err = load_sessions(&path).unwrap_err();
+        let err = load_sessions(&store, &path).await.unwrap_err();
         assert!(err.to_string().contains("move it aside yourself"), "{err:#}");
         assert_eq!(std::fs::read(&path).unwrap(), file.as_bytes(), "the file is untouched");
         assert!(

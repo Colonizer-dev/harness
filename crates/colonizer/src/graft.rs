@@ -79,7 +79,7 @@ pub enum State {
     Downloading,
     Unpacking,
     Failed,
-    /// This build pins no bundle for this machine's architecture (none published yet, or an unsupported arch).
+    /// This build pins no bundle for this machine's architecture (no release pins it, or an unsupported arch).
     Unavailable,
     /// `<data>/plugins/graft` is the operator's own directory, not a downloaded bundle: it is used as is.
     Local,
@@ -294,17 +294,17 @@ mod tests {
     }
 
     #[test]
-    fn the_real_lock_pins_nothing_but_valid_rows() {
+    fn the_real_lock_pins_both_architectures() {
         for arch in ["x86_64", "aarch64"] {
-            if let Some(pin) = pin_for(LOCK, arch) {
-                assert!(
-                    pin.url
-                        .starts_with("https://github.com/Colonizer-dev/harness/releases/download/graft-"),
-                    "{arch}: {}",
-                    pin.url
-                );
-                assert!(pin.url.ends_with(&format!("-linux-{arch}.tar.gz")), "{arch}: {}", pin.url);
-            }
+            let pin = pin_for(LOCK, arch).unwrap_or_else(|| panic!("{arch} is not pinned in graft.lock"));
+            assert_eq!(pin.release, "0.19.0-1");
+            assert!(
+                pin.url
+                    .starts_with("https://github.com/Colonizer-dev/harness/releases/download/graft-"),
+                "{arch}: {}",
+                pin.url
+            );
+            assert!(pin.url.ends_with(&format!("-linux-{arch}.tar.gz")), "{arch}: {}", pin.url);
         }
     }
 

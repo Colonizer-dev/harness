@@ -5,7 +5,7 @@
 //! The autopilot decision itself is a pure function (`autopilot_step`) so the policy can be tested
 //! apart from the stream it acts on.
 
-use crate::{Shared, findings, github, memory, orgs, provider_quota, spend, util::append_line};
+use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -200,6 +200,52 @@ fn is_watchdog_progress(origin: Origin, kind: &str) -> bool {
     !matches!(kind, "status" | "model_changed") && !matches!(origin, Origin::Watchdog | Origin::Autonomy)
 }
 
+/// Tracks the shape of the turn the runner is in, for the watchdog's turn-end recovery (issue #878):
+/// when it last spoke its final answer, and which tool calls it has opened and not answered. Read off
+/// the raw line, like [`resolve_origin`], because most of these types never reach the dispatch below.
+/// A final `assistant_text` is the colony's "it's done"; every later sign of work clears it, so a
+/// stale one means the runner said it was finished and then went quiet. Only the lead agent's own
+/// text counts — a subagent's final block is its own turn's — and only pure telemetry is left
+/// standing, so the lines the runner emits around a withheld `turn_end` cannot fake an end.
+async fn note_turn_shape(rt: &Runtime, event: &Value) {
+    let kind = event["type"].as_str().unwrap_or_default();
+    match kind {
+        "tool_call" => {
+            if let Some(id) = event["tool_call_id"].as_str() {
+                rt.open_tool_calls.lock().await.insert(id.to_string());
+            }
+        }
+        "tool_result" => {
+            if let Some(id) = event["tool_call_id"].as_str() {
+                rt.open_tool_calls.lock().await.remove(id);
+            }
+        }
+        "turn_end" => rt.open_tool_calls.lock().await.clear(),
+        _ => {}
+    }
+    let mut final_text = rt.final_text_at.lock().await;
+    match kind {
+        // The lead agent's final, non-delta answer is the colony's "it's done". A delta is streaming,
+        // not final (§2), and a subagent's text is its own turn's, not the colony's answer — both
+        // fall through to clear below, which is right: the lead's turn is still moving.
+        "assistant_text" if event.get("agent").is_none() => *final_text = Some(Utc::now()),
+        // Pure telemetry that cannot mean new work, left standing so it cannot erase a "done" the
+        // wedge came after. The choice-card re-ask is the case that matters: the runner withholds
+        // `turn_end` on purpose and writes only a `log` line and a status, so a `log` must not clear
+        // it while a `status: working` must (below). The rest are the runner's forwarding-only
+        // telemetry: the session id, the model change, the path-policy report, the Jev ladder.
+        "log" | "model_changed" | "path_policy" | "agent_session" | "jev_ladder" => {}
+        // A status other than `working` is lifecycle, not work: idle before the next message, an
+        // exit the status path already handles.
+        "status" if event["state"].as_str() != Some("working") => {}
+        // Everything else — a delta, a thought, a tool call or result, a question, a `status:
+        // working`, a fresh `user_message` opening a new turn, or any type this build does not know —
+        // is the turn still moving. A wedged runner emits nothing at all, so clearing on anything
+        // ambiguous costs no recovery: the last event before the silence is what we read.
+        _ => *final_text = None,
+    }
+}
+
 pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
     let Ok(mut event) = serde_json::from_str::<Value>(line) else {
         return;
@@ -249,16 +295,26 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         // one re-serialisation the host makes on every line (agentd's own output is sorted-key JSON
         // too, so nothing else moves).
         let (file_seq, file_line);
+        // Through the store, so the line lands in `sessions/<id>/events.jsonl` by the same name a
+        // remote backend would answer by; the store adds the newline, as `append_line` did.
         let err = if seq <= rt.last_seq.load(Ordering::SeqCst) {
             event["seq"] = json!(rt.last_seq.load(Ordering::SeqCst) + 1);
             event["a_seq"] = json!(seq);
             file_seq = event["seq"].as_u64().unwrap_or(seq);
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         } else {
             file_seq = seq;
             file_line = event.to_string();
-            append_line(&rt.events_path, &file_line).await.err()
+            app.store()
+                .append(id, "events.jsonl", file_line.as_bytes())
+                .await
+                .map_err(anyhow::Error::from)
+                .err()
         };
         (
             match err {
@@ -312,13 +368,28 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // answer would otherwise stall-proof a colony that is only talking to itself. A person's
     // message and the agent working count, as before.
     if is_watchdog_progress(origin, event["type"].as_str().unwrap_or_default()) {
-        {
+        // A denied tool result is not progress (issue #609): the colony is circling a boundary it
+        // cannot cross, so the result neither restarts the stall clock nor spends a nudge, and its
+        // streak is on record for `decide` and the nudge. A successful result ends the streak, and
+        // so does anything that is a real break in the loop — a person's message, a question, a
+        // turn end. While the streak stands even real work — a retried call, a line of text — must
+        // not spend the nudges, or the loop would stall-proof itself: `last` still moves, so the
+        // cockpit's activity stamp stays truthful, and `decide` reads `denied_since` instead.
+        let progress = {
             let mut activity = rt.activity.lock().await;
-            activity.last = Utc::now();
-            activity.nudges = 0;
-            activity.last_nudge = None;
-        }
-        if app.session(id).await.is_some_and(|s| s.attention.is_some()) {
+            let kind = event["type"].as_str().unwrap_or_default();
+            let denied = crate::watchdog::note_denials(&mut activity, kind, &event);
+            if !denied {
+                activity.last = Utc::now();
+            }
+            let looping = activity.denials >= crate::watchdog::HINT_LOOP_DENIALS;
+            if !denied && !looping {
+                activity.nudges = 0;
+                activity.last_nudge = None;
+            }
+            !denied && !looping
+        };
+        if progress && app.session(id).await.is_some_and(|s| s.attention.is_some()) {
             app.update_session(id, |x| x.attention = None).await;
         }
     }
@@ -334,6 +405,9 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // a `Skill` call naming a watched pack, marks the item used. Shadow measurement only, and a
     // no-op unless the boot picker armed a watch.
     crate::brief_pick::note_event(app, id, rt, &event).await;
+    // The shape of the turn, read off the raw line for the watchdog's turn-end recovery (issue
+    // #878): a tool call in flight, or a final answer whose turn_end never came.
+    note_turn_shape(rt, &event).await;
 
     match deserialised.unwrap_or(AgentEvent::Other) {
         AgentEvent::Status { state, detail } => {
@@ -449,6 +523,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));
         }
+        // Spawned for the same reason: a GitHub-needing loop's write is a host-side `gh` call
+        // (loop_github.rs), validated, capped per colony and held back by the write kill-switch.
+        AgentEvent::GithubAction { .. } => {
+            tokio::spawn(crate::loop_github::perform(
+                app.clone(),
+                id.to_string(),
+                rt.clone(),
+                event.clone(),
+            ));
+        }
         AgentEvent::LoopNext { delay_minutes, reason } => {
             crate::loops::on_next(app, id, delay_minutes, &reason).await;
         }
@@ -476,140 +560,155 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             cost_usd,
             model_usage,
             ..
-        } => {
-            let cost = cost_usd;
-            let usage = model_usage.filter(|u| u.is_object());
-            // The spend journal is fed increments, not the cumulative the record is about to carry:
-            // appending cumulatives would re-add every earlier turn on the next one. So the record's
-            // values are captured before the overwrite and the difference is what gets filed.
-            let (old_cost, old_usage) = app
-                .session(id)
-                .await
-                .map(|s| (s.cost_usd, s.model_usage))
-                .unwrap_or((None, None));
-            if let Some((s, ())) = app
-                .update_session(id, |x| {
-                    if cost.is_some() {
-                        x.cost_usd = cost;
-                    }
-                    if usage.is_some() {
-                        x.model_usage = usage;
-                    }
-                })
-                .await
-            {
-                spend::record_turn_usage(app, &s, old_cost, old_usage.as_ref(), cost, s.model_usage.as_ref()).await;
-                // Claude's own cost just landed, so the budget can trip here exactly as it can in the
-                // gateway; checked before autopilot, which must not publish a colony the budget stopped.
-                enforce_budget(app, id).await;
-                let s = app.session(id).await.unwrap_or(s);
-                let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
-                let pr_written = {
-                    let mut last = rt.pr_mark.lock().await;
-                    let written = mark.is_some() && *last != mark;
-                    *last = mark;
-                    written
-                };
-                let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
-                let errored = is_error;
-                let open_question = rt.open_question.lock().await.is_some();
-                let step = autopilot_step(errored, interrupted, open_question, pr_written);
-                // #761: a description that redaction changed is published only after a person has
-                // looked — the colony had a secret in hand, and the diff is not redacted.
-                let secret_note = (step == Autopilot::Publish)
-                    .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
-                    .flatten();
-                if s.autopilot && s.status.is_live() {
-                    match step {
-                        Autopilot::Publish if secret_note.is_some() => {
-                            let note = secret_note.as_deref().unwrap_or_default();
-                            app.session_log(
-                                id,
-                                "warn",
-                                format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
-                            )
-                            .await;
-                            app.update_session(id, |x| {
-                                x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                            })
-                            .await;
-                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
-                        }
-                        // Issue #84: the kill-switch holds the publish without flagging the colony.
-                        Autopilot::Publish if crate::authority::external_writes_blocked() => {
-                            app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
-                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
-                        }
-                        Autopilot::Publish => {
-                            app.session_log(
-                                id,
-                                "info",
-                                "autopilot: the agent finished and wrote its PR description; verifying the claim \
-                                 before publishing"
-                                    .into(),
-                            )
-                            .await;
-                            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), true));
-                        }
-                        Autopilot::Wait(reason) => {
-                            app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
-                                .await
-                        }
-                        Autopilot::Hold(reason) => {
-                            // The recovery point (issue #586): holding for a person is the rule, and
-                            // when the point is on Jev may answer with a retry or a narrower task
-                            // instead. Off leaves this arm exactly as it was. A colony the gateway
-                            // already flagged as a provider error is that class, not a plain hold.
-                            let failure = if s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some("model_error") {
-                                crate::recovery::Failure::ProviderError
-                            } else {
-                                crate::recovery::Failure::AutopilotHeld
-                            };
-                            let (action, _) = crate::recovery::handle(app, &s, failure, "ask_human", false).await;
-                            // An option with a message talks to the agent instead of holding — the
-                            // message sets the next turn's work, and no attention flag goes up. An
-                            // option without one (`ask_human`, `stop`) holds as it always did.
-                            if let Some(text) = action.agent_message() {
-                                crate::recovery::send_user_message(rt, "recovery", text);
-                                app.session_log(
-                                    id,
-                                    "info",
-                                    format!(
-                                        "autopilot: Jev chose {} instead of holding; sent the agent a message",
-                                        action.as_str()
-                                    ),
-                                )
-                                .await;
-                            } else {
-                                app.session_log(
-                                    id,
-                                    "warn",
-                                    format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
-                                )
-                                .await;
-                                app.update_session(id, |x| {
-                                    x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
-                                })
-                                .await;
-                            }
-                        }
-                    }
-                } else if step == Autopilot::Publish && s.status.is_live() {
-                    // Issue #328: autopilot off still verifies and records the claim; publishing stays manual.
-                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
-                }
-            }
-            // A turn that died on an empty plan parks the colony instead of holding it: the error
-            // text is the only copy of the provider's answer the colony side ever sees.
-            if is_error
-                && let Some(text) = result.as_deref()
-                && let Some(hit) = provider_quota::classify_quota_exhaustion(0, "", text)
-            {
-                park_quota_colony(app, id, text, &hit).await;
-            }
-        }
+        } => finish_turn(app, id, rt, is_error, result, cost_usd, model_usage).await,
         // Forwarded to the browser above and acted on nowhere here.
         AgentEvent::UserMessage { .. } | AgentEvent::Other => {}
+    }
+}
+
+/// The effects of a turn ending — spend accounting, the budget check and the autopilot publish
+/// decision — split out of the dispatch so the watchdog can run them for a turn the runner never
+/// ended (issue #878, `watchdog::maybe_finish_turn`). `cost_usd`/`model_usage` are the real turn's
+/// cumulative figures, or `None` for a synthetic end, whose measured difference is zero and so
+/// moves no spend and re-adds nothing.
+pub(crate) async fn finish_turn(
+    app: &Shared,
+    id: &str,
+    rt: &Arc<Runtime>,
+    is_error: bool,
+    result: Option<String>,
+    cost_usd: Option<f64>,
+    model_usage: Option<Value>,
+) {
+    let cost = cost_usd;
+    let usage = model_usage.filter(|u| u.is_object());
+    // The spend journal is fed increments, not the cumulative the record is about to carry:
+    // appending cumulatives would re-add every earlier turn on the next one. So the record's
+    // values are captured before the overwrite and the difference is what gets filed.
+    let (old_cost, old_usage) = app
+        .session(id)
+        .await
+        .map(|s| (s.cost_usd, s.model_usage))
+        .unwrap_or((None, None));
+    if let Some((s, ())) = app
+        .update_session(id, |x| {
+            if cost.is_some() {
+                x.cost_usd = cost;
+            }
+            if usage.is_some() {
+                x.model_usage = usage;
+            }
+        })
+        .await
+    {
+        spend::record_turn_usage(app, &s, old_cost, old_usage.as_ref(), cost, s.model_usage.as_ref()).await;
+        // Claude's own cost just landed, so the budget can trip here exactly as it can in the
+        // gateway; checked before autopilot, which must not publish a colony the budget stopped.
+        enforce_budget(app, id).await;
+        let s = app.session(id).await.unwrap_or(s);
+        let mark = github::pr_description_mark(&app.session_dir(id).join("out"));
+        let pr_written = {
+            let mut last = rt.pr_mark.lock().await;
+            let written = mark.is_some() && *last != mark;
+            *last = mark;
+            written
+        };
+        let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
+        let errored = is_error;
+        let open_question = rt.open_question.lock().await.is_some();
+        let step = autopilot_step(errored, interrupted, open_question, pr_written);
+        // #761: a description that redaction changed is published only after a person has
+        // looked — the colony had a secret in hand, and the diff is not redacted.
+        let secret_note = (step == Autopilot::Publish)
+            .then(|| github::pr_description_secret_note(&app.session_dir(id).join("out"), &s))
+            .flatten();
+        if s.autopilot && s.status.is_live() {
+            match step {
+                Autopilot::Publish if secret_note.is_some() => {
+                    let note = secret_note.as_deref().unwrap_or_default();
+                    app.session_log(
+                        id,
+                        "warn",
+                        format!("autopilot: not publishing, {note}; press Create PR when the work is ready"),
+                    )
+                    .await;
+                    app.update_session(id, |x| {
+                        x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                    })
+                    .await;
+                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
+                }
+                // Issue #84: the kill-switch holds the publish without flagging the colony.
+                Autopilot::Publish if crate::authority::external_writes_blocked() => {
+                    app.session_log(id, "warn", AUTOPILOT_BLOCKED.into()).await;
+                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
+                }
+                Autopilot::Publish => {
+                    app.session_log(
+                        id,
+                        "info",
+                        "autopilot: the agent finished and wrote its PR description; verifying the claim \
+                                 before publishing"
+                            .into(),
+                    )
+                    .await;
+                    tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), true));
+                }
+                Autopilot::Wait(reason) => {
+                    app.session_log(id, "info", format!("autopilot: not publishing yet, {reason}"))
+                        .await
+                }
+                Autopilot::Hold(reason) => {
+                    // The recovery point (issue #586): holding for a person is the rule, and
+                    // when the point is on Jev may answer with a retry or a narrower task
+                    // instead. Off leaves this arm exactly as it was. A colony the gateway
+                    // already flagged as a provider error is that class, not a plain hold.
+                    let failure = if s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some("model_error") {
+                        crate::recovery::Failure::ProviderError
+                    } else {
+                        crate::recovery::Failure::AutopilotHeld
+                    };
+                    let (action, _) = crate::recovery::handle(app, &s, failure, "ask_human", false).await;
+                    // An option with a message talks to the agent instead of holding — the
+                    // message sets the next turn's work, and no attention flag goes up. An
+                    // option without one (`ask_human`, `stop`) holds as it always did.
+                    if let Some(text) = action.agent_message() {
+                        crate::recovery::send_user_message(rt, "recovery", text);
+                        app.session_log(
+                            id,
+                            "info",
+                            format!(
+                                "autopilot: Jev chose {} instead of holding; sent the agent a message",
+                                action.as_str()
+                            ),
+                        )
+                        .await;
+                    } else {
+                        app.session_log(
+                            id,
+                            "warn",
+                            format!("autopilot: not publishing, {reason}; press Create PR when the work is ready"),
+                        )
+                        .await;
+                        app.update_session(id, |x| {
+                            x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                        })
+                        .await;
+                    }
+                }
+            }
+        } else if step == Autopilot::Publish && s.status.is_live() {
+            // Issue #328: autopilot off still verifies and records the claim; publishing stays manual.
+            tokio::spawn(crate::verify::after_turn(app.clone(), id.to_string(), false));
+        }
+    }
+    // A turn that died on an empty plan parks the colony instead of holding it: the error text
+    // is the only copy of the provider's answer the colony side ever sees.
+    if is_error
+        && let Some(text) = result.as_deref()
+        && let Some(hit) = provider_quota::classify_quota_exhaustion(0, "", text)
+    {
+        park_quota_colony(app, id, text, &hit).await;
     }
 }
 
@@ -1009,7 +1108,14 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // Only a filed or matched finding counts toward the cap, so the line that carries the issue or
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
-        let recorded = append_line(&record, &crate::redact::redact_line(&entry.to_string())).await;
+        // Through the store, so the ledger line lands in `sessions/<id>/findings.jsonl` by the same
+        // name a remote backend would answer by; the store adds the newline, as `append_line` did.
+        let text = entry.to_string();
+        let recorded = app
+            .store()
+            .append(&id, "findings.jsonl", crate::redact::redact_line(&text).as_bytes())
+            .await
+            .map_err(anyhow::Error::from);
         if let Err(e) = recorded {
             // The finding was still filed on GitHub (that happened above); what failed is the
             // colony's own record of it, so say so instead of letting the gap pass silently.
@@ -1487,6 +1593,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Issue #878: the shape of the turn the watchdog reads off the raw lines. A final answer arms it;
+    /// any later sign of work — a tool call, a delta, thinking, a question — clears it; a tool result
+    /// closes its call; and a turn end clears both halves.
+    #[tokio::test]
+    async fn the_turn_shape_the_watchdog_reads_tracks_the_raw_lines() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let feed = |line: String| {
+            let (app, rt) = (app.clone(), rt.clone());
+            async move { handle_agent_event(&app, "abc", &rt, &line).await }
+        };
+
+        feed(r#"{"seq":1,"type":"assistant_text","message_id":"m","block_index":0,"text":"done"}"#.into()).await;
+        assert!(rt.final_text_at.lock().await.is_some(), "a final answer arms the watchdog");
+
+        feed(r#"{"seq":2,"type":"tool_call","message_id":"m","tool_call_id":"toolu_1","name":"Bash","input":{}}"#.into()).await;
+        assert!(
+            rt.final_text_at.lock().await.is_none(),
+            "a tool call means it is working again"
+        );
+        assert!(
+            rt.open_tool_calls.lock().await.contains("toolu_1"),
+            "the call is tracked open"
+        );
+
+        feed(r#"{"seq":3,"type":"tool_result","tool_call_id":"toolu_1","output":"ok","is_error":false}"#.into()).await;
+        assert!(rt.open_tool_calls.lock().await.is_empty(), "the result closes the call");
+
+        feed(r#"{"seq":4,"type":"assistant_text","message_id":"m","block_index":0,"text":"done"}"#.into()).await;
+        feed(r#"{"seq":5,"type":"assistant_text_delta","message_id":"m","block_index":0,"delta":"x"}"#.into()).await;
+        assert!(rt.final_text_at.lock().await.is_none(), "a streaming delta is not final");
+
+        // A subagent's final block is its own turn's, not the colony's answer.
+        feed(
+            r#"{"seq":6,"type":"assistant_text","message_id":"m","block_index":0,"text":"done","agent":{"id":"toolu_x","name":"Explore","description":""}}"#
+                .into(),
+        )
+        .await;
+        assert!(
+            rt.final_text_at.lock().await.is_none(),
+            "a subagent's text is not the colony's"
+        );
+
+        feed(r#"{"seq":7,"type":"assistant_text","message_id":"m","block_index":0,"text":"done"}"#.into()).await;
+        feed(r#"{"seq":8,"type":"tool_call","message_id":"m","tool_call_id":"toolu_2","name":"Bash","input":{}}"#.into()).await;
+        feed(r#"{"seq":9,"type":"turn_end","is_error":false,"result":null,"cost_usd":null,"duration_ms":null}"#.into()).await;
+        assert!(
+            rt.final_text_at.lock().await.is_none(),
+            "the turn end clears the final answer"
+        );
+        assert!(rt.open_tool_calls.lock().await.is_empty(), "and any call still open");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #878 review: the shapes that must not read as a finished turn. The claude-code runner's
+    /// choice-card re-ask withholds `turn_end` on purpose and writes only a `log` and a
+    /// `status: working`, so after a final answer the `log` must leave it standing while the
+    /// `status: working` must clear it — otherwise autopilot could publish mid-question. A
+    /// `user_message` opens a new turn, and pure telemetry (a log, a non-working status) never clears
+    /// on its own, so a wedge right after one still recovers.
+    #[tokio::test]
+    async fn a_re_ask_and_a_new_turn_are_not_a_finished_turn() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let feed = |line: &str| {
+            let (app, rt) = (app.clone(), rt.clone());
+            let line = line.to_string();
+            async move { handle_agent_event(&app, "abc", &rt, &line).await }
+        };
+
+        // The re-ask: a final answer, the runner's own log line, then the flip back to working.
+        feed(r#"{"seq":1,"type":"assistant_text","message_id":"m","block_index":0,"text":"shall I?"}"#).await;
+        feed(r#"{"seq":2,"type":"log","level":"info","message":"asked in plain text; asking for a choice card instead"}"#).await;
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "a log line alone is telemetry, not work, so a wedge right after it still recovers"
+        );
+        feed(r#"{"seq":3,"type":"status","state":"working"}"#).await;
+        assert!(
+            rt.final_text_at.lock().await.is_none(),
+            "the re-ask is a turn still moving, so it must not read as due"
+        );
+
+        // A non-working status is telemetry too, and a user message opens a new turn.
+        feed(r#"{"seq":4,"type":"assistant_text","message_id":"m","block_index":0,"text":"done"}"#).await;
+        feed(r#"{"seq":5,"type":"status","state":"idle"}"#).await;
+        assert!(
+            rt.final_text_at.lock().await.is_some(),
+            "idle before the next message is not work"
+        );
+        feed(r#"{"seq":6,"type":"user_message","id":"u1","text":"next task"}"#).await;
+        assert!(
+            rt.final_text_at.lock().await.is_none(),
+            "a new turn is not the old turn's end"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// Every branch of the origin resolver, against the line and the two things that cannot be read
     /// off it: the session's launch tag, and whether the judge sent the answer.
     #[test]
@@ -1694,6 +1898,105 @@ mod tests {
         );
         assert_eq!(activity.nudges, 1, "so the next tick nudges again");
         drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A denied tool result is not progress (issue #609): it neither restarts the stall clock nor
+    /// spends a nudge, and once the streak reaches the loop threshold the loop's own retried calls
+    /// do not either. A successful result ends the loop and is progress again.
+    #[tokio::test]
+    async fn a_denied_tool_result_is_not_watchdog_progress() {
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+        {
+            let mut activity = rt.activity.lock().await;
+            activity.last = stalled_since;
+            activity.nudges = 2;
+        }
+        let denied = |seq: u64| {
+            format!(
+                r#"{{"seq":{seq},"type":"tool_result","tool_call_id":"t","output":"blocked","is_error":true,"denial":{{"class":"egress","hint":"denied host example.com"}}}}"#
+            )
+        };
+        handle_agent_event(&app, "abc", &rt, &denied(1)).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.last, stalled_since, "a denial does not restart the stall clock");
+            assert_eq!(activity.nudges, 2, "and does not spend a nudge");
+            assert_eq!(activity.denials, 1);
+            assert_eq!(activity.denied_since, Some(stalled_since), "the loop's clock starts here");
+        }
+        handle_agent_event(&app, "abc", &rt, &denied(2)).await;
+        assert_eq!(rt.activity.lock().await.denials, 2, "two in a row reach the loop threshold");
+        // The loop's own retry is not progress either: it must not spend the nudges back.
+        let retry = r#"{"seq":3,"type":"tool_call","message_id":"m","tool_call_id":"t","name":"Bash","input":{}}"#;
+        handle_agent_event(&app, "abc", &rt, retry).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.nudges, 2, "a retried call in a hint loop does not spend the nudges");
+            assert!(activity.last > stalled_since, "but the activity stamp still moves");
+            assert_eq!(activity.denied_since, Some(stalled_since));
+        }
+        // A successful result ends the loop and is progress again.
+        let ok = r#"{"seq":4,"type":"tool_result","tool_call_id":"t","output":"fine","is_error":false}"#;
+        handle_agent_event(&app, "abc", &rt, ok).await;
+        let activity = rt.activity.lock().await;
+        assert_eq!(activity.denials, 0);
+        assert_eq!(activity.last_denial, None);
+        assert_eq!(activity.nudges, 0, "a success is progress again");
+        drop(activity);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A person's message, a question and a turn end break a running hint loop (issue #609): they
+    /// count as progress as before, so a maintainer's reply resets the nudges and clears the flag
+    /// rather than leaving the colony to be flagged `nudges_exhausted` right after they intervened.
+    #[tokio::test]
+    async fn a_hint_loop_breaks_on_a_persons_message_or_a_phase_break() {
+        async fn seed(app: &Shared, since: chrono::DateTime<Utc>) {
+            {
+                let rt = app.runtime("abc").await;
+                let mut activity = rt.activity.lock().await;
+                activity.last = since;
+                activity.nudges = 2;
+                activity.denials = 3;
+                activity.denied_since = Some(since);
+                activity.last_denial = Some(("egress".to_string(), "denied host example.com".to_string()));
+            }
+            app.update_session("abc", |x| x.attention = Some(json!({"reason": "stalled", "nudges": 2})))
+                .await;
+        }
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let rt = app.runtime("abc").await;
+        let stalled_since = Utc::now() - chrono::Duration::minutes(30);
+
+        let message = r#"{"seq":1,"type":"user_message","id":"m1","text":"try X instead"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, message).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a person's word ends the loop");
+            assert_eq!(activity.denied_since, None);
+            assert_eq!(activity.nudges, 0, "and spends the nudges");
+            assert!(activity.last > stalled_since, "and restarts the stall clock");
+        }
+        assert!(app.session("abc").await.unwrap().attention.is_none(), "the flag clears");
+
+        let turn_end = r#"{"seq":2,"type":"turn_end","is_error":false,"result":null,"cost_usd":0.0,"duration_ms":1.0}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, turn_end).await;
+        {
+            let activity = rt.activity.lock().await;
+            assert_eq!(activity.denials, 0, "a turn end ends the loop");
+            assert_eq!(activity.last_denial, None);
+        }
+
+        let question =
+            r#"{"seq":3,"type":"question","question_id":"q1","questions":[{"header":"pin","options":[]}],"risk":"read_only"}"#;
+        seed(&app, stalled_since).await;
+        handle_agent_event(&app, "abc", &rt, question).await;
+        assert_eq!(rt.activity.lock().await.denials, 0, "a question ends the loop");
         let _ = std::fs::remove_dir_all(root);
     }
 

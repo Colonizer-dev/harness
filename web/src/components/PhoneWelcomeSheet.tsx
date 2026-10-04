@@ -9,7 +9,9 @@ import { errorMessage, useApi, useToast } from "../context";
 import { notificationSupport, requestNotificationPermission, type NotificationPermissionState } from "../notifications";
 import { useInstallPrompt } from "../installApp";
 import { deviceLabel, pushSupported, subscribeThisDevice } from "../push";
-import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
+import { installPlatform, currentAddress } from "../cockpitAddress";
+import { InstallSteps } from "./InstallSteps";
+import { showIosInstallHint } from "./IosHomeScreenSheet";
 import { Button, Spinner } from "./ui";
 
 export function PhoneWelcomeSheet({ onClose }: { onClose: () => void }): ReactElement {
@@ -69,7 +71,7 @@ export function PhoneWelcomeSheet({ onClose }: { onClose: () => void }): ReactEl
             <span className="min-w-0 flex-1 text-[12.5px] text-muted">Its own icon; same cockpit, same sign-in.</span>
           </div>
         ) : showIosInstallHint() ? (
-          <IosHomeScreenSheet />
+          <InstallSteps platform={installPlatform(navigator.userAgent, false)} address={currentAddress()} />
         ) : (
           <p className="text-[12.5px] text-muted">Install later from Settings → Desktop, or the browser's install icon.</p>
         )}

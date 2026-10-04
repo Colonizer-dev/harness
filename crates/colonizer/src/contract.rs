@@ -153,7 +153,7 @@ pub fn spend_journal_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// 2026-09-30), summed the way `GET /api/spend/history` sums them.
 pub fn spend_fixture_totals(data_dir: &std::path::Path) -> SpendFixtureTotals {
     let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 30).expect("a real date");
-    let days = crate::spend::journal_days(data_dir, today, 30);
+    let days = crate::spend::journal_days(data_dir, today, 30, 0);
     let (mut cost, mut routed, mut input, mut output, mut cache_read, mut cache_write) = (0.0, 0.0, 0u64, 0u64, 0u64, 0u64);
     for (_, orgs) in &days {
         for (_, org) in orgs {
@@ -178,7 +178,7 @@ pub fn spend_fixture_totals(data_dir: &std::path::Path) -> SpendFixtureTotals {
 
 /// The fixture's journal rows, read back through the same window the endpoint uses.
 pub fn spend_fixture_rows(data_dir: &std::path::Path) -> Vec<SpendFixtureRow> {
-    crate::spend::read_journal(data_dir, "0000-01-01", "2026-09-30")
+    crate::spend::read_journal(data_dir, "0000-01-01", "2026-09-30", 0)
         .into_iter()
         .map(|row| SpendFixtureRow {
             day: row.day,

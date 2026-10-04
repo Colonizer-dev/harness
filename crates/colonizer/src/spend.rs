@@ -6,14 +6,15 @@
 //! `util::append_line` the routing ledger uses. Append-only is the point: a colony's cleanup or
 //! deletion must not lose the spend it left behind, so the file lives next to `sessions.json` and
 //! is never rewritten or touched by the handlers that forget a colony. Every row carries the UTC
-//! day it belongs to, so a day's rollup never changes after the fact.
+//! day it belongs to, so a day's rollup never changes after the fact; `GET /api/spend/history` can
+//! answer in the caller's local calendar instead, re-deriving each row's day from its timestamp.
 
 use crate::{App, Shared, sessions::Session, util::append_line};
 use axum::{
     Json,
     extract::{Query, State},
 };
-use chrono::{NaiveDate, Utc};
+use chrono::{Duration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -404,6 +405,7 @@ fn usage_rows(day: &str, s: &Session, delta: &TurnDelta) -> Vec<SpendRow> {
         if let Some(cost) = delta.cost {
             rows.push(colony_row(
                 SpendRow {
+                    ts: Utc::now().to_rfc3339(),
                     day: day.to_string(),
                     org: s.org.clone(),
                     kind: "usage".into(),
@@ -443,21 +445,55 @@ pub(crate) async fn record_turn_usage(
 // The reader: `GET /api/spend/history`.
 // ---------------------------------------------------------------------------
 
+/// The widest timezone offset a browser reports (UTC+14): a `tz_offset_minutes` beyond it is a
+/// mistake clamped away rather than a window that reaches into a day that cannot exist.
+const MAX_TZ_OFFSET_MINUTES: i32 = 14 * 60;
+
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     #[serde(default)]
     days: Option<i64>,
+    /// The caller's UTC offset in minutes (a browser's `-getTimezoneOffset()`), so the window and
+    /// each row's day sit in the reader's local calendar rather than UTC. 0 when absent; clamped
+    /// to ±14 h like `days` is clamped to 1..=365.
+    #[serde(default)]
+    tz_offset_minutes: Option<i32>,
 }
 
-/// `GET /api/spend/history?days=N`, the journal summed per org and day. Days default to 30 (at
-/// most 365 are kept), come back oldest first, and only days the journal actually mentions appear.
-/// The journal is an unbounded append-only file, so the whole read and sum move to the blocking
-/// pool; the handler never holds the async executor over a row's worth of disk.
+/// The reader's local day now: UTC moved by `offset_minutes`, the `today` the window ends on and
+/// every row's day is compared against.
+fn local_today(offset_minutes: i32) -> NaiveDate {
+    (Utc::now() + Duration::minutes(offset_minutes as i64)).date_naive()
+}
+
+/// The day a row belongs to in the reader's calendar: its UTC `ts` moved by `offset_minutes`, in
+/// the journal's `YYYY-MM-DD` spelling. A row with no `ts`, or one from a build before the field,
+/// falls back to the UTC `day` it was filed under.
+fn row_day(row: &SpendRow, offset_minutes: i32) -> String {
+    chrono::DateTime::parse_from_rfc3339(&row.ts)
+        .map(|ts| {
+            (ts.with_timezone(&Utc) + Duration::minutes(offset_minutes as i64))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|_| row.day.clone())
+}
+
+/// `GET /api/spend/history?days=N&tz_offset_minutes=M`, the journal summed per org and day. Days
+/// default to 30 (at most 365 are kept), come back oldest first, and only days the journal actually
+/// mentions appear. With `tz_offset_minutes` (a browser's `-getTimezoneOffset()`, clamped to ±14 h)
+/// the days are the reader's local ones, re-derived from each row's timestamp; 0 or absent keeps
+/// the UTC days. The journal is an unbounded append-only file, so the whole read and sum move to the
+/// blocking pool; the handler never holds the async executor over a row's worth of disk.
 pub(crate) async fn history(State(app): State<Shared>, Query(query): Query<HistoryQuery>) -> Json<Value> {
     let days = query.days.unwrap_or(30).clamp(1, 365) as u32;
-    let today = Utc::now().date_naive();
+    let offset = query
+        .tz_offset_minutes
+        .unwrap_or(0)
+        .clamp(-MAX_TZ_OFFSET_MINUTES, MAX_TZ_OFFSET_MINUTES);
+    let today = local_today(offset);
     let data_dir = app.cfg.data_dir.clone();
-    let response = tokio::task::spawn_blocking(move || journal_days(&data_dir, today, days))
+    let response = tokio::task::spawn_blocking(move || journal_days(&data_dir, today, days, offset))
         .await
         .unwrap_or_default();
     Json(history_json(response))
@@ -474,11 +510,11 @@ fn day_window(today: NaiveDate, days: u32) -> (String, String) {
 
 /// Reads the journal's rows streamed through a `BufReader`, one line at a time, so an unboundedly
 /// old append-only file never materializes in memory. A row the window would never answer — its day
-/// outside `floor`..=`today` — drops as it passes, and so does anything that would break a row: a
-/// malformed or torn line, an empty tail, or a row whose future keys its `#[serde(default)]`
-/// already absorbs. A file that is not there is not a failure: an install that has never run a
-/// colony has no spend.
-pub(crate) fn read_journal(data_dir: &Path, floor: &str, today: &str) -> Vec<SpendRow> {
+/// (re-derived from `ts` for `offset_minutes`, else the stored UTC day) outside `floor`..=`today` —
+/// drops as it passes, and so does anything that would break a row: a malformed or torn line, an
+/// empty tail, or a row whose future keys its `#[serde(default)]` already absorbs. A file that is
+/// not there is not a failure: an install that has never run a colony has no spend.
+pub(crate) fn read_journal(data_dir: &Path, floor: &str, today: &str, offset_minutes: i32) -> Vec<SpendRow> {
     let Ok(file) = std::fs::File::open(spend_file(data_dir)) else {
         return Vec::new();
     };
@@ -491,7 +527,8 @@ pub(crate) fn read_journal(data_dir: &Path, floor: &str, today: &str) -> Vec<Spe
             // UTF-8 is checked per line, as the routing ledger's reader does: a torn multi-byte
             // line costs that line and not the rest of the file.
             let row = serde_json::from_str::<SpendRow>(std::str::from_utf8(&line).ok()?).ok()?;
-            (!row.day.is_empty() && !row.org.is_empty() && row.day >= floor && row.day <= today).then_some(row)
+            let day = row_day(&row, offset_minutes);
+            (!day.is_empty() && !row.org.is_empty() && day >= floor && day <= today).then_some(row)
         })
         .collect()
 }
@@ -508,21 +545,19 @@ pub(crate) struct DayOrg {
 
 /// Sums the journal like the live org list would, plus the day's `launched` and `returned` counts,
 /// grouped by day (oldest first) and org (by name) — the two orderings the history answers sorted
-/// in. Days outside the window are skipped, and a row whose kind a newer build added is ignored
-/// rather than fatal. [`read_journal`] already dropped the out-of-window rows on the way in; the
-/// check stays here for any caller that hands over a fuller journal in hand.
-fn aggregate(rows: &[SpendRow], today: NaiveDate, days: u32) -> Vec<(String, Vec<(String, DayOrg)>)> {
+/// in, each row filed under the day `offset_minutes` puts it in. Days outside the window are
+/// skipped, and a row whose kind a newer build added is ignored rather than fatal. [`read_journal`]
+/// already dropped the out-of-window rows on the way in; the check stays here for any caller that
+/// hands over a fuller journal in hand.
+fn aggregate(rows: &[SpendRow], today: NaiveDate, days: u32, offset_minutes: i32) -> Vec<(String, Vec<(String, DayOrg)>)> {
     let (floor, today) = day_window(today, days);
     let mut days_map: BTreeMap<String, BTreeMap<String, DayOrg>> = BTreeMap::new();
     for row in rows {
-        if row.day.is_empty() || row.org.is_empty() || row.day < floor || row.day > today {
+        let day = row_day(row, offset_minutes);
+        if day.is_empty() || row.org.is_empty() || day < floor || day > today {
             continue;
         }
-        let org = days_map
-            .entry(row.day.clone())
-            .or_default()
-            .entry(row.org.clone())
-            .or_default();
+        let org = days_map.entry(day).or_default().entry(row.org.clone()).or_default();
         let spend = &mut org.spend;
         match row.kind.as_str() {
             "usage" => {
@@ -554,13 +589,18 @@ fn aggregate(rows: &[SpendRow], today: NaiveDate, days: u32) -> Vec<(String, Vec
 }
 
 /// Sums the journal for one window the way `GET /api/spend/history` answers it: [`read_journal`]
-/// streams and windows the rows, [`aggregate`] does the summing. A separate entry point so the
-/// blocking read and sum can move to the blocking pool as one unit, and tests can ask for any
-/// window without an HTTP round trip.
-pub(crate) fn journal_days(data_dir: &Path, today: NaiveDate, days: u32) -> Vec<(String, Vec<(String, DayOrg)>)> {
+/// streams and windows the rows, [`aggregate`] does the summing, both filing each row under the day
+/// `offset_minutes` puts it in. A separate entry point so the blocking read and sum can move to the
+/// blocking pool as one unit, and tests can ask for any window without an HTTP round trip.
+pub(crate) fn journal_days(
+    data_dir: &Path,
+    today: NaiveDate,
+    days: u32,
+    offset_minutes: i32,
+) -> Vec<(String, Vec<(String, DayOrg)>)> {
     let (floor, today_str) = day_window(today, days);
-    let rows = read_journal(data_dir, &floor, &today_str);
-    aggregate(&rows, today, days)
+    let rows = read_journal(data_dir, &floor, &today_str, offset_minutes);
+    aggregate(&rows, today, days, offset_minutes)
 }
 
 /// The `{"days": [...]}` document the endpoint answers with.
@@ -723,6 +763,33 @@ mod tests {
         assert_eq!(rows[0].cost_usd, Some(1.0));
     }
 
+    #[test]
+    fn every_usage_row_carries_a_parseable_timestamp() {
+        let mut s = colony("acme", SessionStatus::Running);
+        s.id = "col-1".into();
+        // A multi-model turn and a cost-only turn both file the un-modeled cost row.
+        let delta = turn_deltas(
+            None,
+            None,
+            Some(3.0),
+            Some(&json!({"a": {"input_tokens": 10}, "b": {"input_tokens": 20}})),
+        );
+        let mut rows = usage_rows("2026-09-20", &s, &delta);
+        let flat = json!({"a": {"input_tokens": 5}});
+        let only_cost = turn_deltas(Some(1.0), Some(&flat), Some(2.0), Some(&flat));
+        rows.extend(usage_rows("2026-09-20", &s, &only_cost));
+
+        for row in &rows {
+            assert!(!row.ts.is_empty(), "every row names when it was filed");
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(&row.ts).is_ok(),
+                "ts is RFC 3339 like the ledger's other rows: {}",
+                row.ts
+            );
+            assert_eq!(row.day, "2026-09-20", "the timestamp never moves a row's filed day");
+        }
+    }
+
     #[tokio::test]
     async fn journal_rows_group_by_day_and_survive_malformed_and_out_of_window_lines() {
         let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
@@ -766,6 +833,7 @@ mod tests {
         let mut raw = std::fs::read_to_string(&file).unwrap();
         let mut outside = base_row("returned", "acme");
         outside.day = "2000-01-01".into();
+        outside.ts = "2000-01-01T00:00:00Z".into();
         raw.push_str(&serde_json::to_string(&outside).unwrap());
         raw.push('\n');
         raw.push_str(&serde_json::to_string(&base_row("harvested", "acme")).unwrap());
@@ -776,10 +844,10 @@ mod tests {
         // 7 helper rows + 2 hand-written ones; the garbage line never parsed. A wide floor keeps the
         // 2000-01-01 row in hand so it is the aggregation, not the read, that drops it; the
         // narrow-window behaviour is the dedicated test below.
-        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &today);
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &today, 0);
         assert_eq!(rows.len(), 9);
 
-        let days = aggregate(&rows, Utc::now().date_naive(), 30);
+        let days = aggregate(&rows, Utc::now().date_naive(), 30, 0);
         assert_eq!(days.len(), 1, "one day has rows");
         let (day, orgs) = &days[0];
         assert_eq!(day, &today);
@@ -822,7 +890,14 @@ mod tests {
         )
         .await;
 
-        let Json(out) = history(State(app.clone()), Query(HistoryQuery { days: Some(0) })).await;
+        let Json(out) = history(
+            State(app.clone()),
+            Query(HistoryQuery {
+                days: Some(0),
+                tz_offset_minutes: None,
+            }),
+        )
+        .await;
         let days = out["days"].as_array().unwrap();
         assert_eq!(days.len(), 1, "days=0 clamps up to 1 and today still answers");
         let orgs = days[0]["orgs"].as_array().unwrap();
@@ -840,7 +915,14 @@ mod tests {
         assert_eq!(team["cost_usd"], Value::Null);
 
         // days=999 clamps down to 365; the same single day still answers.
-        let Json(out) = history(State(app.clone()), Query(HistoryQuery { days: Some(999) })).await;
+        let Json(out) = history(
+            State(app.clone()),
+            Query(HistoryQuery {
+                days: Some(999),
+                tz_offset_minutes: None,
+            }),
+        )
+        .await;
         assert_eq!(out["days"].as_array().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
@@ -883,7 +965,7 @@ mod tests {
             Some(&json!({"deepseek/deepseek-flash": {"input_tokens": 200}})),
         )
         .await;
-        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30);
+        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30, 0);
         assert_eq!(days.len(), 1);
         let (_, orgs) = &days[0];
         let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
@@ -905,28 +987,72 @@ mod tests {
         let app = crate::tests::test_app(&root);
         let today = Utc::now().date_naive();
 
-        // A usage row from a fortnight ago, filed under that week's day.
+        // A usage row from a fortnight ago, filed under that week's day and timestamp.
         let mut old = base_row("usage", "acme");
         old.day = today
             .checked_sub_signed(chrono::Duration::days(14))
             .unwrap()
             .format("%Y-%m-%d")
             .to_string();
+        old.ts = (Utc::now() - chrono::Duration::days(14)).to_rfc3339();
         old.model = Some("claude-opus-5".into());
         old.input_tokens = 100;
         old.cost_usd = Some(1.0);
         append_row(&app, old).await;
 
-        let days = journal_days(&app.cfg.data_dir, today, 5);
+        let days = journal_days(&app.cfg.data_dir, today, 5, 0);
         assert!(days.is_empty(), "a row outside the window never reaches the aggregation");
 
         // The same journal read with a window wide enough lands the row.
-        let days = journal_days(&app.cfg.data_dir, today, 20);
+        let days = journal_days(&app.cfg.data_dir, today, 20, 0);
         assert_eq!(days.len(), 1);
         let (_, orgs) = &days[0];
         let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
         assert_eq!(acme.spend.cost_usd, Some(1.0));
         assert_eq!(acme.spend.models.get("claude-opus-5").unwrap().tokens, 100);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `tz_offset_minutes` files each row under the reader's local day, re-derived from the row's
+    /// timestamp: a row at 23:30 UTC is the next day at UTC+02:00, and 0 (or no offset) keeps the
+    /// UTC day it was written under (issue #613).
+    #[tokio::test]
+    async fn tz_offset_files_rows_under_the_readers_local_day() {
+        let root = std::env::temp_dir().join(format!("colonizer-spend-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut row = base_row("usage", "acme");
+        row.ts = "2026-10-02T23:30:00Z".into();
+        row.day = "2026-10-02".into();
+        row.cost_usd = Some(1.0);
+        std::fs::write(
+            spend_file(&app.cfg.data_dir),
+            format!("{}\n", serde_json::to_string(&row).unwrap()),
+        )
+        .unwrap();
+
+        // 23:30 UTC on the 2nd is the 3rd two hours east, so a one-day window ending on the 3rd
+        // lands the row — the stored UTC day "2026-10-02" would have been outside that window.
+        let days = journal_days(&app.cfg.data_dir, NaiveDate::from_ymd_opt(2026, 10, 3).unwrap(), 1, 120);
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].0, "2026-10-03");
+
+        // No offset keeps the UTC day the row was written under: the same one-day window ends on the 2nd.
+        let days = journal_days(&app.cfg.data_dir, NaiveDate::from_ymd_opt(2026, 10, 2).unwrap(), 1, 0);
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].0, "2026-10-02");
+
+        // The handler clamps an absurd offset to ±14 h rather than shifting days off the calendar,
+        // and still answers.
+        let Json(out) = history(
+            State(app.clone()),
+            Query(HistoryQuery {
+                days: Some(1),
+                tz_offset_minutes: Some(100_000),
+            }),
+        )
+        .await;
+        assert!(out["days"].is_array());
 
         let _ = std::fs::remove_dir_all(root);
     }
@@ -958,7 +1084,7 @@ mod tests {
         record_chat_usage(&app, "chat", "claude-opus-5", 10, 5, None).await;
 
         let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
-        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &today);
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &today, 0);
         assert_eq!(rows.len(), 5);
         let named: Vec<&SpendRow> = rows.iter().filter(|r| r.session.as_deref() == Some("col-1")).collect();
         assert_eq!(named.len(), 3, "launched, routed and the turn's usage row");
@@ -973,7 +1099,7 @@ mod tests {
         assert_eq!(chat.agent, None);
 
         // The new fields ride along without changing what the history sums.
-        let days = aggregate(&rows, Utc::now().date_naive(), 30);
+        let days = aggregate(&rows, Utc::now().date_naive(), 30, 0);
         let (_, orgs) = &days[0];
         let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
         assert_eq!(acme.spend.cost_usd, Some(1.0));
@@ -1011,10 +1137,10 @@ mod tests {
         );
         std::fs::write(spend_file(&app.cfg.data_dir), legacy).unwrap();
 
-        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day);
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day, 0);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r.session.is_none() && r.agent.is_none()));
-        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30);
+        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30, 0);
         assert_eq!(days.len(), 1);
         let (_, orgs) = &days[0];
         let (_, acme) = orgs.iter().find(|(org, _)| org == "acme").unwrap();
@@ -1047,7 +1173,7 @@ mod tests {
         )
         .unwrap();
 
-        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day);
+        let rows = read_journal(&app.cfg.data_dir, "0000-01-01", &day, 0);
         assert_eq!(rows.len(), 3);
         let scored = rows.iter().find(|r| r.org == "bench" && r.scoring_ms.is_some()).unwrap();
         assert_eq!(scored.scoring_ms, Some(1500));
@@ -1064,7 +1190,7 @@ mod tests {
 
         // The history sums the scoring time under the bench org and leaves the colony spend alone;
         // the row without the field reads as none, not as an error.
-        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30);
+        let days = journal_days(&app.cfg.data_dir, Utc::now().date_naive(), 30, 0);
         assert_eq!(days.len(), 1);
         let (_, orgs) = &days[0];
         let (_, bench) = orgs.iter().find(|(org, _)| org == "bench").unwrap();
@@ -1075,7 +1201,14 @@ mod tests {
         assert_eq!(acme.spend.cost_usd, Some(1.0));
         assert_eq!(acme.spend.input_tokens, 100);
 
-        let Json(out) = history(State(app.clone()), Query(HistoryQuery { days: None })).await;
+        let Json(out) = history(
+            State(app.clone()),
+            Query(HistoryQuery {
+                days: None,
+                tz_offset_minutes: None,
+            }),
+        )
+        .await;
         let orgs = out["days"][0]["orgs"].as_array().unwrap();
         assert_eq!(orgs.iter().find(|o| o["org"] == "bench").unwrap()["scoring_ms"], json!(1500));
 

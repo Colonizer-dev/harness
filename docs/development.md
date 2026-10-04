@@ -10,6 +10,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd modules/agents/pi && npm test)
 (cd modules/agents/codex && npm test)
 (cd modules/agents/acp && npm test)
+(cd modules/agents/hermes && npm test)
+(cd modules/agents/grok-build && npm test)
 (cd services/telemetry && npm test)             # the live map's receiver
 (cd services/relay && npm test)                 # remote access relay
 (cd web && npm run build && npm test)           # tsc, vite, and the UI's own tests
@@ -23,6 +25,7 @@ node scripts/bench.mjs run --repo owner/bench --label before   # the fixed tasks
 node scripts/trajectory-monitor.mjs --session <id>  # post-hoc: was a resolved colony clean? (docs/trajectory-monitor.md)
 node scripts/evolve.mjs diagnose --bench bench-after.json  # offline evolver: failures → classes → proposals → retain (docs/evolver.md)
 sh scripts/test/build-scripts.test.sh           # the build scripts: here mode refused off Linux, no non-ELF artefact installed or served
+sh scripts/test/install-attestation.test.sh     # the installer's provenance step: a not-logged-in gh is a skip, a rejection is fatal
 sh scripts/test/install-release.test.sh         # the installer: an install interrupted at any point leaves a working colonizer, and the next one recovers
 (cd web && npm run dev)                         # UI dev server; proxies /api to 127.0.0.1:7878
 # http://127.0.0.1:5173/?mock=1                 # the UI against an in-browser mock backend
