@@ -22,6 +22,7 @@ import {
 } from './execpolicy.mjs';
 import { evaluatePathPolicy, loadPathPolicy } from './pathpolicy.mjs';
 import { createFindingsServer, FINDINGS_PROMPT_APPEND, FINDINGS_SERVER, findingDecision } from './findings.mjs';
+import { createHistoryServer, HISTORY_PROMPT_APPEND, HISTORY_SERVER } from './history.mjs';
 import { ConditionalInstructions, PATH_TOOLS_MATCHER, parseLabels } from './instructions.mjs';
 import { createLoopServer, LOOP_SERVER, loopDecision, loopPromptAppend } from './loop.mjs';
 import { createMemoryServer, MEMORY_PROMPT_APPEND, MEMORY_SERVER, memoryDecision } from './memory.mjs';
@@ -463,13 +464,14 @@ export function backgroundRecordName(command) {
  * @param {string} [extras.routerUrl]     local model router (docs/protocol.md §6.1)
  * @param {object} [extras.memoryServer]  in-process shared memory MCP server (§6.2)
  * @param {object} [extras.recallServer]  in-process deja-vu recall MCP server, read-only (issue #495)
+ * @param {object} [extras.historyServer] in-process colony-history search MCP server, read-only (issue #739)
  * @param {object} [extras.waitServer]    in-process wait MCP server, built for every colony (issue #181)
  * @param {string[]} [extras.hiddenEnv]   variables Claude Code must not inherit (provider keys)
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, recallServer, historyServer, findingsServer, loopServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -486,6 +488,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   // Both halves of the recall credential: the mothership sets them only when deja is enabled for
   // this colony's org, so a half-set pair is a misconfiguration, not a reason to half-serve it.
   const recall = Boolean(env.COLONIZER_RECALL_URL && env.COLONIZER_RECALL_TOKEN && recallServer);
+  // Both halves of the history credential, gated like shared memory: the mothership sets them only
+  // when colony history is enabled for this colony's org, so a half-set pair is a misconfiguration.
+  const history = Boolean(env.COLONIZER_HISTORY_URL && env.COLONIZER_HISTORY_TOKEN && historyServer);
   const findings = Boolean(env.COLONIZER_FINDINGS === 'true' && findingsServer);
   const loop = Boolean(env.COLONIZER_LOOP === 'true' && loopServer);
   // off: the orchestrator works alone. encourage: it is asked to delegate. enforce: it is only allowed
@@ -506,6 +511,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (env.COLONIZER_IMAGE) appended.push(environmentPrompt(env.COLONIZER_IMAGE, packageManager(process.cwd())));
   if (memory) appended.push(MEMORY_PROMPT_APPEND);
   if (recall) appended.push(RECALL_PROMPT_APPEND);
+  if (history) appended.push(HISTORY_PROMPT_APPEND);
   if (findings) appended.push(FINDINGS_PROMPT_APPEND);
   if (loop) appended.push(loopPromptAppend(env.COLONIZER_LOOP_SELF_PACED === 'true'));
   if (delegate !== 'off') appended.push(DELEGATE_PROMPT_APPEND);
@@ -556,6 +562,7 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, recal
   if (waitServer) mcpServers[WAIT_SERVER] = waitServer;
   if (memory) mcpServers[MEMORY_SERVER] = memoryServer;
   if (recall) mcpServers[RECALL_SERVER] = recallServer;
+  if (history) mcpServers[HISTORY_SERVER] = historyServer;
   if (findings) mcpServers[FINDINGS_SERVER] = findingsServer;
   if (loop) mcpServers[LOOP_SERVER] = loopServer;
   if (Object.keys(mcpServers).length) options.mcpServers = mcpServers;
@@ -1354,6 +1361,12 @@ async function main() {
     recallServer = createRecallServer({ url: process.env.COLONIZER_RECALL_URL, token: process.env.COLONIZER_RECALL_TOKEN, createSdkMcpServer, tool, z });
   }
 
+  // Read-only search of the mothership's colony-history index: no emit, because nothing leaves the colony.
+  let historyServer;
+  if (process.env.COLONIZER_HISTORY_URL && process.env.COLONIZER_HISTORY_TOKEN) {
+    historyServer = createHistoryServer({ url: process.env.COLONIZER_HISTORY_URL, token: process.env.COLONIZER_HISTORY_TOKEN, createSdkMcpServer, tool, z });
+  }
+
   let loopServer;
   if (process.env.COLONIZER_LOOP === 'true') {
     loopServer = createLoopServer({ emit, createSdkMcpServer, tool, z, selfPaced: process.env.COLONIZER_LOOP_SELF_PACED === 'true' });
@@ -1383,6 +1396,7 @@ async function main() {
     routerUrl: headroom?.url ?? router?.url,
     memoryServer,
     recallServer,
+    historyServer,
     findingsServer,
     loopServer,
     waitServer,

@@ -57,6 +57,8 @@ import type {
   HarnessStatus,
   HeadroomStatus,
   CreatedIssue,
+  HistoryHit,
+  HistorySearchQuery,
   Issue,
   IssueDraft,
   IssueDrafts,
@@ -412,6 +414,8 @@ export interface Api {
   spendHistory(days?: number): Promise<SpendHistory>;
   /** GET /api/activity: the activity log newest first, one page at a time (docs/protocol.md §6.9). */
   activity(query?: ActivityQuery): Promise<ActivityPage>;
+  /** GET /api/history/search (issue #739): the turns across colony transcripts matching `q`, at most 50; 400 on an empty query. */
+  historySearch(query: HistorySearchQuery): Promise<{ hits: HistoryHit[] }>;
   /** Returns `{org, settings}`; colony and memory counts come from the next `orgs()`. */
   saveOrg(org: string, settings: OrgSettings): Promise<Pick<OrgInfo, "org" | "settings">>;
   /** GET /api/secrets: every saved secret and where it lives; values never leave the mothership. */
@@ -808,6 +812,10 @@ export const httpApi: Api = {
   activity: (q = {}) =>
     request(
       `/api/activity${query({ before: q.before?.toString(), limit: q.limit?.toString(), kind: q.kind, actor: q.actor, org: q.org, repo: q.repo, q: q.q })}`,
+    ),
+  historySearch: (q) =>
+    request(
+      `/api/history/search${query({ q: q.q, repo: q.repo, org: q.org, agent: q.agent, status: q.status, since: q.since, until: q.until, limit: q.limit?.toString() })}`,
     ),
   saveOrg: (org, settings) => put(`/api/orgs/${enc(org)}`, { settings }),
   secrets: () => request("/api/secrets"),

@@ -702,6 +702,12 @@ export interface ThreadView {
   turns: Record<string, TurnSummary[]>;
   /** Memory proposals keyed the same way. */
   notices: Record<string, MemoryNotice[]>;
+  /**
+   * Every protocol message id mapped to the id of the bubble it renders in — itself for a user
+   * message, the group's first id for an assistant reply. History search carries a bare message id,
+   * so this is how the cockpit finds the element to scroll to (issue #739).
+   */
+  renderOf: Record<string, string>;
   hasOpenQuestion: boolean;
 }
 
@@ -906,5 +912,5 @@ export function buildThread(state: StreamState): ThreadView {
     i = Math.max(end, i + 1);
   }
 
-  return { messages, subagents, origins, turns, notices, hasOpenQuestion };
+  return { messages, subagents, origins, turns, notices, renderOf: Object.fromEntries(groupOf), hasOpenQuestion };
 }

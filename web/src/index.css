@@ -327,6 +327,13 @@ body {
   animation: pulse-soft 1.4s ease-in-out infinite;
 }
 
+/* Issue #739: a transcript-search hit's turn flashes once so the eye lands on it. */
+@keyframes turn-flash {
+  from { background: var(--accent-soft); box-shadow: 0 0 0 2px var(--accent-ring); }
+}
+.turn-flash { animation: turn-flash 1.6s ease-out; }
+@media (prefers-reduced-motion: reduce) { .turn-flash { animation: none; } }
+
 /* The dashboard's realtime dot (issue #446): ok-green, breathing while the stream is open. */
 .live-dot {
   height: 7px;

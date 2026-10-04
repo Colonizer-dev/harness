@@ -15,6 +15,7 @@ import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useToast } from "../context";
 import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
+import { usePendingTurn } from "../cockpit/turnFocus";
 import { useModels } from "../useModels";
 import {
   ASK_USER_TOOL,
@@ -140,6 +141,24 @@ export function ChatPanel({
     if (lastUserId) stickToBottom();
   }, [lastUserId, stickToBottom]);
 
+  // A transcript-search hit lands on its exact turn (issue #739). The request can arrive before the
+  // stream has replayed the turn, so the effect re-runs as the thread grows and scrolls only once
+  // the message is on screen. `renderOf` maps a bare message id to the bubble it folded into; the
+  // request's counter lets the same turn be focused again.
+  const focus = usePendingTurn();
+  const handledFocus = useRef(0);
+  useEffect(() => {
+    if (!focus.id || handledFocus.current === focus.n) return;
+    const rendered = thread.renderOf[focus.id] ?? focus.id;
+    const el = document.getElementById(`turn-${rendered}`);
+    if (!el) return;
+    handledFocus.current = focus.n;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.classList.remove("turn-flash");
+    void el.offsetWidth;
+    el.classList.add("turn-flash");
+  }, [focus, thread]);
+
   const runtime = useExternalStoreRuntime<ThreadMessageLike>({
     messages: thread.messages,
     isRunning,
@@ -231,7 +250,7 @@ export function ChatPanel({
             >
               <ThreadPrimitive.Messages>
                 {({ message }) => (
-                  <>
+                  <div id={`turn-${message.id}`}>
                     {message.role !== "user" ? (
                       thread.subagents[message.id] ? (
                         <SubagentMessage view={thread.subagents[message.id]} subagents={thread.subagents} live={live} />
@@ -249,7 +268,7 @@ export function ChatPanel({
                     {thread.notices[message.id]?.map((notice) => (
                       <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
                     ))}
-                  </>
+                  </div>
                 )}
               </ThreadPrimitive.Messages>
               {thread.turns[END_OF_THREAD]?.map((turn, i) => <TurnNotice key={i} turn={turn} />)}

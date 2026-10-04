@@ -64,6 +64,7 @@
 /api/fleet/sync/preview                              GET    unauth=401    token=owner            activity=-
 /api/headroom                                        GET    unauth=401    token=owner            activity=-
 /api/headroom/download                               POST   unauth=401    token=owner            activity=-
+/api/history/search                                  GET    unauth=401    token=owner            activity=-
 /api/hosts                                           GET    unauth=401    token=fleet            activity=-
 /api/hunters/{id}/install                            POST   unauth=401    token=owner            activity=-
 /api/hunters/{id}/probe                              GET    unauth=401    token=owner            activity=-

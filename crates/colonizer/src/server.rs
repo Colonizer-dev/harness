@@ -337,6 +337,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::github::routes())
         .merge(crate::graft::routes())
         .merge(crate::headroom::routes())
+        .merge(crate::history::routes())
         .merge(crate::hunters::routes())
         .merge(crate::img_proxy::routes())
         .merge(crate::lifecycle::routes())

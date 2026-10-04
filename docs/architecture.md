@@ -270,6 +270,13 @@ the colony, repository and commit it came from (`source.session_id`, `source.rep
 or `source.promoted_from` for a promoted note), so it can be traced and revoked; see
 [protocol §6.2](protocol.md#62-shared-memory-runner--mothership).
 
+Alongside the notes, a colony can search the conversations of earlier colonies when memory is on
+(issue #739): a read-only `colony_history_search` tool, scoped by the gateway to the caller's org —
+org-less colonies of its own repository when it has no org — never itself, and hiding a colony whose
+sensitivity is `restricted`, missing or unparseable from a caller that is not `restricted` (an
+unclassified log fails closed). Nothing it returns is injected into the prompt; a hit is quoted
+history, framed as data, and the search is a plain scan of the event logs, not an index.
+
 ## Session lifecycle
 
 This is the mechanism. What a colony looks like from the operator's side (launching, claims,

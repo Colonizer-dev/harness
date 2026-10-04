@@ -29,6 +29,7 @@ import { NavRail, type CockpitView } from "./NavRail";
 import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
+import { focusTurn } from "./turnFocus";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
@@ -625,6 +626,12 @@ export function Cockpit({
             sessions={inOrg}
             org={selectedOrg}
             onOpenColony={openColonyById}
+            onOpenTurn={(colony, turn) => {
+              // A transcript hit (issue #739): open its colony in-app, then ask the chat panel to
+              // land on the turn — a no-op when the hit named none.
+              openColonyById(colony);
+              focusTurn(turn);
+            }}
             onOpenSection={(section) => {
               // A row names where its target lives: a cockpit view, or a settings section.
               if (section === "secrets" || section === "loops" || section === "memory") setView(section);
