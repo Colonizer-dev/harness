@@ -24,13 +24,16 @@ already done.
 ## Install
 
 ```sh
-curl -fsSL https://colonizer.dev/install.sh | sh
+cargo install colonizer-harness --locked
+colonizer setup   # installs this version's release, with the app assets, beside the binary
 ```
 
-This crate is the harness's Rust source. It isn't an install on its own: `cargo install colonizer-harness`
-builds only the `colonizer` binary, and the app also needs microsandbox, the in-VM daemon, the agent
-module and the web UI beside it, which the installer puts there. The
-[install guide](https://colonizer.dev/docs/install) covers the installer and building from source. Linux
+This crate is the harness's Rust source. `cargo install colonizer-harness` builds only the `colonizer`
+binary, which has no app assets beside it — microsandbox, the in-VM daemon, the agent module and the
+web UI all live in the release. `colonizer setup` installs this version's release over that binary,
+checking the release's installer against its `SHA256SUMS` first; `curl -fsSL
+https://colonizer.dev/install.sh | sh` does the same without a Rust toolchain. The
+[install guide](https://colonizer.dev/docs/install) covers both and building from source. Linux
 x86_64 with KVM, or an Apple Silicon Mac.
 
 ## What it does

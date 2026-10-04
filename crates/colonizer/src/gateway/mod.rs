@@ -723,7 +723,7 @@ impl App {
 
     /// The live colony a gateway token belongs to, record and all: `proxy` needs the session itself,
     /// not just the id, to check which providers the colony may spend on; `coordination` uses it to
-    /// authenticate `POST /coordinate` the same way.
+    /// authenticate `POST /coordinate` and `history` to authenticate `POST /history` the same way.
     pub(crate) async fn colony_for_token(&self, token: &str) -> Option<crate::sessions::Session> {
         if token.len() < 32 {
             return None;
@@ -749,6 +749,7 @@ pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/providers/{id}/{*path}", any(proxy))
         .route("/recall", post(recall))
+        .route("/history", post(crate::history::history))
         .route("/coordinate", post(crate::coordination::coordinate))
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(app)
@@ -789,7 +790,7 @@ pub async fn flush_loop(app: Shared) {
 }
 
 /// An error in Anthropic's shape, so Claude Code reports it like any API error.
-fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallback: Option<&'static str>) -> Response {
+pub(crate) fn api_error(status: StatusCode, kind: &str, message: impl Into<String>, fallback: Option<&'static str>) -> Response {
     let mut response = (
         status,
         Json(json!({"type": "error", "error": {"type": kind, "message": message.into()}})),

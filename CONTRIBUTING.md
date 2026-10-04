@@ -130,5 +130,12 @@ each built-in loop is a page under `docs/loops/`, indexed from `docs/loops.md`. 
 a new file there plus `node scripts/doc-index.mjs write`, which refreshes the index; never edit the
 generated list by hand.
 
+CI wraps each test command in `scripts/ci/retry-flaky.mjs`: a failure is run once more, and one that
+passes on the retry is a flake — the job stays green but the run is reported, with a warning
+annotation, a line on the job summary and a `flakes-<job>` artifact, never silently. A test known to
+flake belongs in `scripts/flaky-tests.txt`, one `name  #<issue number>` line per entry (the issue is
+required, and CI's `scripts` job fails an entry without one). Listing a test does not skip it: it
+still runs, and its flake is reported, just marked as known.
+
 A new shebang script needs its executable bit in the index (`git update-index --chmod=+x <file>`);
 `check-exec-bits.sh` fails without it.

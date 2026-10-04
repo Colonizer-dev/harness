@@ -1,0 +1,1 @@
+/api/history/search                                  GET    unauth=401    token=owner            activity=-

@@ -1462,6 +1462,20 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
         runner_env.insert("COLONIZER_RECALL_TOKEN".into(), Value::String(gateway_token.clone()));
     }
+    // Cross-colony history search (issue #739): the same gateway base and per-colony token recall
+    // uses, so a colony's MCP tool can search other colonies' conversation logs. Set wherever memory
+    // is, like the memory directory above; the gateway scopes each query to the colony's org (or
+    // repository, when it has no org) server-side.
+    if memory_on {
+        runner_env.insert(
+            "COLONIZER_HISTORY_URL".into(),
+            Value::String(format!(
+                "http://host.microsandbox.internal:{}/history",
+                app.cfg.gateway_bind.port()
+            )),
+        );
+        runner_env.insert("COLONIZER_HISTORY_TOKEN".into(), Value::String(gateway_token.clone()));
+    }
     // Colony-to-colony coordination (issue #834): the /coordinate route and this colony's gateway
     // token, set for every colony the gateway token exists for — it needs no deja index, unlike
     // recall above.

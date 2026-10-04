@@ -3,6 +3,7 @@
 // gateway), and everything else passes through to Anthropic untouched. When the gateway reports that a
 // provider is unavailable, the request is retried on the route's Claude fallback model.
 
+import { subscribe } from 'node:diagnostics_channel';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 
@@ -27,6 +28,14 @@ const DEFAULT_TIMEOUT_SECS = 300;
 // event) and between two chunks of the body. Node's built-in fetch caps both silences at 300 s.
 const DEFAULT_CONNECT_TIMEOUT_SECS = 30;
 const DEFAULT_IDLE_TIMEOUT_SECS = 600;
+// Idle keep-alive sockets in the router's pool. A pooled socket that the server (or a NAT or egress
+// filter on the way) has already closed fails the next request on it at once with UND_ERR_SOCKET "other
+// side closed": the keep-alive race. Reusing a socket only within a few seconds of its last answer makes
+// that rare: 4 s when the server sends no `Keep-Alive: timeout=` hint (shorter than the idle close of any
+// common server or proxy, which is 5 s and up), otherwise the hint less a 2 s margin, and never more
+// than 30 s whatever the hint says, since a middlebox can drop an idle flow without telling either end.
+// Opening a new connection costs one TLS handshake; a failed turn costs far more.
+const KEEP_ALIVE = { keepAliveTimeout: 4_000, keepAliveTimeoutThreshold: 2_000, keepAliveMaxTimeout: 30_000 };
 export const LOG_SOURCE = 'model_router';
 
 const positiveInt = (value) => (Number.isInteger(value) && value > 0 ? value : null);
@@ -153,6 +162,37 @@ const DNS_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'EAI_NONAME', '
 const CONNECT_CODES = new Set(['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EHOSTDOWN', 'ENETDOWN', 'EADDRNOTAVAIL', 'ETIMEDOUT']);
 const TLS_CODE = /^(ERR_TLS_|ERR_SSL_|ERR_OSSL_|CERT_|UNABLE_TO_|SELF_SIGNED_|DEPTH_ZERO_|HOSTNAME_MISMATCH)/;
 const IDLE_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+// A connection that was closed or reset under the request: on a pooled socket, the keep-alive race.
+const RESET_CODES = new Set(['UND_ERR_SOCKET', 'ECONNRESET', 'EPIPE', 'UND_ERR_CLOSED']);
+
+// How many response bytes a failed request had received, tagged on undici's error before fetch rejects
+// with it. undici reports a socket closed under a request as UND_ERR_SOCKET whether nothing came back
+// or half the status line did, so the count comes from the socket: its bytesRead when the request was
+// written, against its bytesRead when the request failed. Only a request that got nothing is replayed.
+const BYTES_RECEIVED = Symbol('colonizer.router.bytesReceived');
+const written = new WeakMap(); // undici request -> { socket, bytesRead } when its headers were written
+let tracking = false;
+
+function trackReceivedBytes() {
+  if (tracking) return;
+  tracking = true;
+  // undici's documented diagnostics channels. They are process-wide (Node's own fetch publishes on them
+  // too), which is harmless: all this does is note a byte count.
+  subscribe('undici:client:sendHeaders', ({ request, socket }) => {
+    if (request && socket) written.set(request, { socket, bytesRead: socket.bytesRead });
+  });
+  subscribe('undici:request:error', ({ request, error }) => {
+    if (!request || !error || typeof error !== 'object') return;
+    const sent = written.get(request);
+    // A request never written to a socket can have received nothing.
+    const received = sent ? Math.max(0, (sent.socket.bytesRead ?? 0) - sent.bytesRead) : 0;
+    try {
+      Object.defineProperty(error, BYTES_RECEIVED, { value: received, configurable: true });
+    } catch {
+      // a frozen error: left untagged, so never replayed
+    }
+  });
+}
 
 /** The most specific error code in a fetch failure: fetch wraps the socket's error in `cause`. */
 function errorCode(err) {
@@ -168,6 +208,27 @@ function errorCode(err) {
     if (Array.isArray(e.errors)) queue.push(...e.errors);
   }
   return found;
+}
+
+function errorChain(err) {
+  const out = [];
+  for (let e = err; e && typeof e === 'object' && !out.includes(e); e = e.cause) out.push(e);
+  return out;
+}
+
+/**
+ * Whether a failed upstream request is safe to send again (the keep-alive race): the connection was
+ * closed or reset under it before a single byte of the answer arrived. A timeout, a connect, DNS or TLS
+ * failure, anything after the response began, and any request whose received byte count is unknown
+ * (an injected `fetchImpl`) are not.
+ */
+export function isConnectionReset(err) {
+  const chain = errorChain(err);
+  const tagged = chain.find((e) => Object.prototype.hasOwnProperty.call(e, BYTES_RECEIVED));
+  if (!tagged || tagged[BYTES_RECEIVED] !== 0) return false;
+  const code = errorCode(err);
+  if (code && RESET_CODES.has(code)) return true;
+  return !code && chain.some((e) => /other side closed/i.test(String(e.message ?? '')));
 }
 
 function rootMessage(err) {
@@ -263,7 +324,21 @@ export async function startRouter({
   const idleMs = idleTimeoutMs ?? timeouts.idleMs;
   // Our own pool rather than fetch's global one, whose 300 s header and body timeouts cut off long
   // generations. No total timeout: undici has none unless asked.
-  const dispatcher = fetchImpl ? null : new Agent({ connect: { timeout: connectMs }, headersTimeout: idleMs, bodyTimeout: idleMs });
+  if (!fetchImpl) trackReceivedBytes();
+  const agentOptions = { connect: { timeout: connectMs }, headersTimeout: idleMs, bodyTimeout: idleMs, ...KEEP_ALIVE };
+  const dispatcher = fetchImpl ? null : new Agent(agentOptions);
+  // Retries go out on a connection of their own, never on another pooled socket that may be just as
+  // stale. Each one-off pool closes once its single request is done (close() waits for the answer).
+  const oneOffs = new Set();
+  const freshFetch = (url, init) => {
+    const agent = new Agent({ ...agentOptions, connections: 1 });
+    oneOffs.add(agent);
+    const done = () => {
+      oneOffs.delete(agent);
+      agent.close().catch(() => {});
+    };
+    return undiciFetch(url, { ...init, dispatcher: agent }).finally(done);
+  };
   const upstreamFetch = fetchImpl ?? ((url, init) => undiciFetch(url, { ...init, dispatcher }));
   const say = (level, message) => log({ level, message, source: LOG_SOURCE });
   // One line per failed upstream request, for the mothership's log (issue #983). The colony never holds
@@ -303,14 +378,30 @@ export async function startRouter({
       for (const [name, value] of Object.entries(req.headers)) {
         if (!DROP_REQUEST.has(name) && value !== undefined) headers[name] = Array.isArray(value) ? value.join(', ') : value;
       }
-      const send = (target, sendHeaders, sendBody) =>
-        upstreamFetch(target, {
+      const send = async (target, sendHeaders, sendBody) => {
+        // A fresh init each time: the body is a Buffer, so a replay sends the same bytes again.
+        const init = () => ({
           method: req.method,
           headers: sendHeaders,
           body: req.method === 'GET' || req.method === 'HEAD' ? undefined : sendBody,
           redirect: 'manual',
           signal: abort.signal,
         });
+        try {
+          return await upstreamFetch(target, init());
+        } catch (err) {
+          // The keep-alive race (a pooled socket the other side had already closed): the request
+          // never got an answer, not even a byte of one, so it is sent once more on a new connection.
+          // Anything else, and a second failure, is reported by the caller as before.
+          if (fetchImpl || abort.signal.aborted || !isConnectionReset(err)) throw err;
+          const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+          const parts = [`upstream retry: provider=${provider}`, 'class=connection_retry', `elapsed=${elapsed}s`];
+          if (upstreamModel) parts.push(`model=${upstreamModel}`);
+          parts.push(`detail=${errorCode(err) ?? rootMessage(err)}`);
+          say('warn', parts.join(' '));
+          return freshFetch(target, init());
+        }
+      };
       // Claude Code's own headers go to Anthropic unchanged, as for any unrouted model.
       const toAnthropic = (sendBody) => send(joinUrl(anthropicBase, req.url), headers, sendBody);
       // A request that got no HTTP answer: logged, then told to Claude Code as what it was.
@@ -451,6 +542,7 @@ export async function startRouter({
         server.closeAllConnections?.();
       });
       await dispatcher?.destroy().catch(() => {});
+      await Promise.all([...oneOffs].map((agent) => agent.destroy().catch(() => {})));
     },
   };
 }

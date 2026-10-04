@@ -122,7 +122,7 @@ Every heading of the single-page protocol, in its original order, and the area f
 | <a id="pairing-get-apiremotepairing-post-apiremotepairingconfirm-post-apiremotepairingreject-delete-apiremoteowner"></a>Pairing: `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject`, `DELETE /api/remote/owner` | [protocol/remote-access.md](protocol/remote-access.md#pairing-get-apiremotepairing-post-apiremotepairingconfirm-post-apiremotepairingreject-delete-apiremoteowner) |
 | <a id="the-tunnel-version-1"></a>The tunnel, version 1 | [protocol/remote-access.md](protocol/remote-access.md#the-tunnel-version-1) |
 | <a id="611-fleet-export-bundle-687"></a>6.11 Fleet export bundle (#687) | [protocol/fleet-export.md](protocol/fleet-export.md#611-fleet-export-bundle-687) |
-| <a id="612-github-loops-issue-778"></a>6.12 GitHub loops (issue #778) | [protocol/loops.md](protocol/loops.md#612-github-loops-issue-778) |
+| <a id="612-github-loops-issue-778"></a><a id="612-github-loops-issue-778-pr-actions-issue-807"></a>6.12 GitHub loops (issue #778, PR actions issue #807) | [protocol/loops.md](protocol/loops.md#612-github-loops-issue-778-pr-actions-issue-807) |
 | <a id="7-standard-names-uhp"></a>7. Standard names (UHP) | [protocol/uhp.md](protocol/uhp.md#7-standard-names-uhp) |
 | <a id="71-rules-for-every-rename"></a>7.1 Rules for every rename | [protocol/uhp.md](protocol/uhp.md#71-rules-for-every-rename) |
 | <a id="72-harness-selection"></a>7.2 Harness selection | [protocol/uhp.md](protocol/uhp.md#72-harness-selection) |

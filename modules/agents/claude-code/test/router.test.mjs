@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 import { test } from 'node:test';
 
 import {
   classifyUpstreamError,
   classifyUpstreamStatus,
   fallbackBody,
+  isConnectionReset,
   parseRoutes,
   routeEnv,
   routingPlan,
@@ -414,6 +416,8 @@ test('an upstream silent past the idle timeout before answering is a 504 timeout
     assert.equal(logs[0].source, 'model_router');
     assert.equal(logs[0].level, 'error');
     assert.match(logs[0].message, /^upstream failure: provider=anthropic class=timeout status=504 elapsed=[\d.]+s model=claude-opus-5-5 detail=UND_ERR_HEADERS_TIMEOUT$/);
+    // A timeout is never replayed.
+    assert.equal(anthropic.requests.length, 1);
   } finally {
     await router.close();
     await anthropic.close();
@@ -531,4 +535,159 @@ test('upstream timeouts: a 30 s connect, and an idle timeout of at least 10 minu
   assert.deepEqual(upstreamTimeouts({ COLONIZER_ROUTER_IDLE_TIMEOUT_SECS: 'soon' }), { connectMs: 30_000, idleMs: 600_000 });
   // A slow provider's own timeout_secs is never undercut.
   assert.equal(upstreamTimeouts({}, [{ timeout_secs: 900 }, { timeout_secs: null }]).idleMs, 900_000);
+});
+
+// The keep-alive race: a pooled socket the other side had already closed fails the next request on it
+// at once with UND_ERR_SOCKET "other side closed". Nothing was answered, so it is sent once more.
+
+/** A raw TCP upstream: `onRequest(socket, n)` runs once the n-th request (1-based) has fully arrived. */
+async function rawUpstream(onRequest) {
+  let requests = 0;
+  const server = createTcpServer((socket) => {
+    let seen = '';
+    socket.on('data', (chunk) => {
+      seen += chunk.toString('latin1');
+      const end = seen.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      const length = Number(/content-length: *(\d+)/i.exec(seen.slice(0, end))?.[1] ?? 0);
+      if (seen.length < end + 4 + length) return;
+      seen = '';
+      requests += 1;
+      onRequest(socket, requests);
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${server.address().port}`,
+    requests: () => requests,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+const okAnswer = (body) => `HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n\r\n${body}`;
+
+test('a request whose connection is closed before any answer is retried once on a new connection', async () => {
+  const bodies = [];
+  const anthropic = await upstream(async (req, body, res) => {
+    bodies.push(body);
+    if (bodies.length === 1) {
+      req.socket.destroy(); // the keep-alive race: closed under the request, nothing written
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    const body = JSON.stringify({ model: 'claude-opus-5-5', messages: [{ role: 'user', content: 'hi' }] });
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true });
+    // The same request, body and credential headers both times.
+    assert.deepEqual(bodies, [body, body]);
+    assert.equal(anthropic.requests[1].headers.authorization, 'Bearer oauth-access-token');
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].source, 'model_router');
+    assert.equal(logs[0].level, 'warn');
+    assert.match(logs[0].message, /^upstream retry: provider=anthropic class=connection_retry elapsed=[\d.]+s model=claude-opus-5-5 detail=UND_ERR_SOCKET$/);
+    assert.ok(logs.every((entry) => !/oauth-access-token|sk-ant/.test(entry.message)));
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('a routed provider request is retried the same way', async () => {
+  const provider = await rawUpstream((socket, n) => {
+    if (n === 1) socket.destroy();
+    else socket.end(okAnswer('{"ok":true}'));
+  });
+  const logs = [];
+  const route = { provider: 'p', prefix: 'p/', base_url: provider.url, auth: 'none' };
+  const router = await startRouter({ routes: [route], env: {}, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', body: JSON.stringify({ model: 'p/m' }) });
+    assert.equal(res.status, 200);
+    assert.equal(provider.requests(), 2);
+    assert.match(logs[0].message, /^upstream retry: provider=p class=connection_retry .* model=m detail=UND_ERR_SOCKET$/);
+    assert.equal(logs.length, 1);
+  } finally {
+    await router.close();
+    await provider.close();
+  }
+});
+
+test('a retry that fails the same way is one 502 naming UND_ERR_SOCKET, with no third attempt', async () => {
+  const anthropic = await rawUpstream((socket) => socket.destroy());
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5' }) });
+    assert.equal(res.status, 502);
+    assert.deepEqual(await res.json(), { type: 'error', error: { type: 'api_error', message: 'model router: the connection to Anthropic failed (UND_ERR_SOCKET)' } });
+    await sleep(100); // room for a third attempt, were there one
+    assert.equal(anthropic.requests(), 2);
+    assert.deepEqual(
+      logs.map((entry) => [entry.level, entry.message.replace(/elapsed=[\d.]+s/, 'elapsed=Xs')]),
+      [
+        ['warn', 'upstream retry: provider=anthropic class=connection_retry elapsed=Xs model=claude-opus-5-5 detail=UND_ERR_SOCKET'],
+        ['error', 'upstream failure: provider=anthropic class=connection status=502 elapsed=Xs model=claude-opus-5-5 detail=UND_ERR_SOCKET'],
+      ],
+    );
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('no retry once any byte of the answer has arrived', async () => {
+  // Part of the status and headers, then a close: undici still says UND_ERR_SOCKET, but the upstream
+  // had begun to answer, so the request may have been acted on.
+  for (const partial of ['HTTP/1.1 2', 'HTTP/1.1 200 OK\r\ncontent-type: appl']) {
+    const anthropic = await rawUpstream((socket) => socket.end(partial));
+    const logs = [];
+    const router = await startRouter({ env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+    try {
+      const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5' }) });
+      assert.equal(res.status, 502, partial);
+      await res.arrayBuffer();
+      await sleep(50);
+      assert.equal(anthropic.requests(), 1, partial);
+      assert.equal(logs.length, 1, partial);
+      assert.match(logs[0].message, /^upstream failure: .* class=connection status=502 .* detail=UND_ERR_SOCKET$/, partial);
+    } finally {
+      await router.close();
+      await anthropic.close();
+    }
+  }
+});
+
+test('no retry once the response headers have been sent', async () => {
+  const anthropic = await rawUpstream((socket) => {
+    socket.write('HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n');
+    setTimeout(() => socket.destroy(), 50);
+  });
+  const logs = [];
+  const router = await startRouter({ env: {}, anthropicBase: anthropic.url, log: (entry) => logs.push(entry) });
+  try {
+    const res = await fetch(`${router.url}/v1/messages`, { method: 'POST', headers: claudeHeaders, body: JSON.stringify({ model: 'claude-opus-5-5', stream: true }) });
+    assert.equal(res.status, 200);
+    const text = await res.text();
+    assert.match(text, /event: error/);
+    await sleep(50);
+    assert.equal(anthropic.requests(), 1);
+    assert.ok(logs.every((entry) => !/connection_retry/.test(entry.message)));
+  } finally {
+    await router.close();
+    await anthropic.close();
+  }
+});
+
+test('only a reset with no answer received counts as the keep-alive race', () => {
+  const coded = (code, message = code) => Object.assign(new Error(message), { code });
+  // Untagged (no byte count known, as with an injected fetchImpl): never.
+  assert.equal(isConnectionReset(new TypeError('fetch failed', { cause: coded('UND_ERR_SOCKET') })), false);
+  assert.equal(isConnectionReset(coded('ECONNRESET')), false);
 });

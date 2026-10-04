@@ -43,6 +43,7 @@ pub(crate) struct Feature {
 /// router merges distinct routes and `classify` asks each feature for its own — it just keeps the
 /// list greppable and the conflicts between alphabetical neighbours.
 pub(crate) const ALL: &[&Feature] = &[
+    &crate::history::FEATURE,
     &crate::maps::FEATURE,
     &crate::quota_cards::FEATURE,
     &crate::supply_chain_loop::FEATURE,

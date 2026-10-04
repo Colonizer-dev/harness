@@ -117,9 +117,10 @@ Stated here rather than buried.
 - **Not ready for unattended work on sensitive repositories.** That is the v0.1.3 audit's verdict,
   real credentials included. It found four ways a colony could cross into the host, filed as draft
   security advisories and not fixed yet ([docs/audit.md](audit.md)).
-- **The crates are source, not an install.** `colonizer-harness` and `colonizer-agentd` are on
-  crates.io, but `cargo install colonizer-harness` gives only the `colonizer` binary, without
-  microsandbox, the in-VM daemon, the agent modules and the web UI beside it — use the installer.
+- **`cargo install` is now an install path.** `cargo install colonizer-harness --locked` builds only
+  the `colonizer` binary, without microsandbox, the in-VM daemon, the agent modules and the web UI
+  beside it, but `colonizer setup` installs this version's release over it, and a bare `colonizer`
+  start hands over to the installed app when it finds one. `colonizer-agentd` is still source only.
   Nothing is published to npm.
 - **CI runs every suite, including one that boots a real colony.** The Rust tests and clippy, the
   runner's, the live map receiver's and the web UI's all run on every pull request; releases are

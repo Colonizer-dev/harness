@@ -27,6 +27,22 @@ approved or revoked, and wrap their answer in a `<shared-memory>` frame that nam
 verify, not instructions. A note's title and summary are flattened to one line, so a note cannot start
 a line of the answer of its own.
 
+Memory answers from notes; a separate, read-only tool searches conversation history instead
+(issue #739), whenever memory is on for the colony:
+
+| Tool | Input | Answer |
+|---|---|---|
+| `colony_history_search` | `query`, `limit?` (default 20, at most 50) | Snippets from earlier colonies' conversations — `user_message` and `assistant_text` events — every whitespace-separated query term matching, any case. At most three hits a colony, newest colony first |
+
+The tool (Claude Code only so far, an in-process `colonizer_history` server) posts `{query, limit}` to
+`POST /history` on the colony gateway with the colony's token, and the gateway scopes the answer
+server-side: same-org colonies (org-less colonies of its own repository when it has no org), never the
+caller itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a caller
+that is `restricted` itself — an unknown class is hidden, failing closed. An empty query reads as empty
+hits. Results are other colonies' words, re-redacted on the way out and framed as untrusted data. It is
+a plain scan of `events.jsonl`, not an index: each log is read from its tail, at most the last 8 MiB a
+colony and 64 MiB a request, and a line over 256 KiB is skipped.
+
 **Kinds.** Every entry is one of `plan`, `decision`, `file_change` (a note about a change to specific
 files), `failure`, `architecture` (an architecture note) or `convention`. Notes stored before kinds
 existed, and proposals that name none, are `convention`; an unknown kind is refused.

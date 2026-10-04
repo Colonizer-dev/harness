@@ -122,10 +122,16 @@ pub fn app_link() -> Option<PathBuf> {
 /// `scripts/install.sh`; saying so is better than half-applying something.
 pub fn blocker(assets: Option<&Path>) -> Option<String> {
     let Some(assets) = assets else {
-        return Some("this mothership is running without an installed app directory".into());
+        // A `cargo install` binary lands here too: no assets were found beside it at all.
+        return Some(
+            "this mothership is running without an installed app directory; run `colonizer setup` to install one".into(),
+        );
     };
     if !installer(assets).is_file() {
-        return Some("this install has no scripts/install-release.sh, so it was not installed from a release".into());
+        return Some(
+            "this install has no scripts/install-release.sh, so it was not installed from a release; run `colonizer setup` to install one"
+                .into(),
+        );
     }
     match app_link() {
         Some(app) if app.is_symlink() => None,
@@ -134,34 +140,77 @@ pub fn blocker(assets: Option<&Path>) -> Option<String> {
     }
 }
 
+/// Hands a start that has no assets of its own over to the installed app, if there is one (#905).
+///
+/// A `cargo install` binary has nothing beside it, so the mothership comes up degraded. When the
+/// installer's app link holds a different binary, `exec` it with the same arguments instead. Resolved
+/// paths are compared, which makes it a one-way trip: the installed binary finds its own assets and
+/// never looks for the link again, so there is no loop. A binary under a cargo build tree
+/// ([`in_cargo_tree`]) is left alone, so `cargo run` from a checkout stays the checkout's.
+///
+/// `None` means there was nothing to hand off to (or this *is* the installed binary); `Some` is the
+/// message to print when the hand-off was attempted and `exec` failed.
+pub fn hand_off(assets: Option<&Path>) -> Option<String> {
+    if assets.is_some() {
+        return None;
+    }
+    let current = std::env::current_exe().ok()?;
+    // A developer running from a checkout is not hijacked into an installed release.
+    if in_cargo_tree(&current) {
+        return None;
+    }
+    let target = app_link()?.join("bin/colonizer").canonicalize().ok()?;
+    if !target.is_file() || target == current.canonicalize().ok()? {
+        return None;
+    }
+    eprintln!("colonizer: starting the installed app at {}", target.display());
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    // Only returns if exec failed: on success this process is already gone.
+    let error = exec(&target, &args);
+    Some(format!("could not start {}: {error}", target.display()))
+}
+
+/// Whether `exe` sits inside a cargo build tree: a `Cargo.toml` in one of its ancestor directories.
+///
+/// `cargo run` leaves the binary under `<checkout>/target/...`, whose ancestors hold the checkout's
+/// `Cargo.toml`; a `cargo install` binary lands in `~/.cargo/bin`, whose ancestors hold none. That
+/// is the difference between a developer working from source and an install that needs its assets.
+pub fn in_cargo_tree(exe: &Path) -> bool {
+    exe.ancestors().skip(1).any(|dir| dir.join("Cargo.toml").is_file())
+}
+
 /// The one refusal decision, shared by the route and `colonizer update` alike:
 /// why this build must not be replaced by `latest`, if it must not.
 ///
-/// A development build — commits after its last tag, a modified tree, or no tag
-/// at all — holds work the newest release does not, however much newer that
-/// release's number is. And a release newer than the latest one would be a
-/// downgrade, not an update. Both refuse unless `force` says the operator has
-/// read the reason and means it anyway; anything else is the caller's
-/// newer-or-nothing decision to make, not a refusal.
+/// One refusal holds even with `force`: a `latest` older than the release
+/// this build already contains is not an update under any name — installing
+/// it would throw away work the build already holds, forced or not (issue
+/// #820). Past that check, `force` skips the other one: a development build
+/// — commits after its last tag, a modified tree, or no tag at all — holds
+/// work the newest release does not, however much newer that release's
+/// number is, unless `force` says the operator has read the reason and means
+/// it anyway.
 ///
 /// The refusal names both versions, so either side can print it as is: the
 /// route only has the stamped build, and the command only has the JSON.
 pub fn refusal(build: &version::Build, latest: Option<&str>, force: bool) -> Option<String> {
+    let release = build.release.as_deref().and_then(version::Semver::parse);
+    let newest = latest.and_then(version::Semver::parse);
+    if let (Some(release), Some(newest), Some(latest)) = (release, newest, latest)
+        && newest < release
+    {
+        return Some(format!(
+            "the latest known release `{latest}` is older than the release `{}` this build already contains — refusing to downgrade, even with `--force`",
+            build.release.as_deref().unwrap_or_default(),
+        ));
+    }
     if force {
         return None;
     }
     if build.development {
         return Some(dev_refusal(&build.version, build.release.as_deref(), latest));
     }
-    let running = build.release.as_deref().and_then(version::Semver::parse);
-    let newest = latest.and_then(version::Semver::parse);
-    match (running, newest, latest) {
-        (Some(running), Some(newest), Some(latest)) if running > newest => Some(format!(
-            "running `{}`, newer than the latest release `{latest}` — refusing to downgrade; pass `--force` to install `{latest}` anyway",
-            build.version
-        )),
-        _ => None,
-    }
+    None
 }
 
 /// How many commits a `git describe` build sits ahead of its release, if it says so.
@@ -852,9 +901,11 @@ mod tests {
 
     #[test]
     fn a_source_checkout_says_why_it_cannot_update() {
-        // No assets at all: running from a build tree.
+        // No assets at all: running from a build tree, or a cargo install with no app beside it.
         let reason = blocker(None).expect("should refuse");
         assert!(reason.contains("installed app directory"), "{reason}");
+        // The cargo-install case lands here, so the message has to say how to fix it.
+        assert!(reason.contains("colonizer setup"), "{reason}");
     }
 
     #[test]
@@ -863,6 +914,20 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let reason = blocker(Some(&dir)).expect("should refuse");
         assert!(reason.contains("install-release.sh"), "{reason}");
+        assert!(reason.contains("colonizer setup"), "{reason}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The build-tree guard: a `Cargo.toml` among the ancestors means the binary came from a cargo
+    /// build directory and must not be hijacked; a bare bin directory must not be.
+    #[test]
+    fn a_binary_under_a_cargo_tree_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("colonizer-tree-{}", util::short_id()));
+        let bin = dir.join("target/debug");
+        std::fs::create_dir_all(&bin).unwrap();
+        assert!(!in_cargo_tree(&bin.join("colonizer")), "no Cargo.toml anywhere above it");
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        assert!(in_cargo_tree(&bin.join("colonizer")), "the checkout's Cargo.toml is above it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -900,9 +965,9 @@ mod tests {
     #[test]
     fn a_release_newer_than_the_latest_release_refuses_the_downgrade() {
         let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), false).expect("should refuse");
+        assert!(reason.contains("`v0.1.5`"), "{reason}");
         assert!(reason.contains("`v0.1.6`"), "{reason}");
-        assert!(reason.contains("newer than the latest release `v0.1.5`"), "{reason}");
-        assert!(reason.contains("`--force` to install `v0.1.5` anyway"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
     }
 
     #[test]
@@ -915,11 +980,37 @@ mod tests {
 
     #[test]
     fn force_proceeds_past_either_refusal() {
+        // Dev build, forced, reinstalling the exact release it already sits
+        // ahead of: not a downgrade, so force does what it says.
         assert_eq!(
             refusal(&a_build("v0.1.5-60-gd62bfb2", "v0.1.5", true), Some("v0.1.5"), true),
             None
         );
-        assert_eq!(refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true), None);
+        // A release build, forced, with a genuinely newer release: not a
+        // refusal at all, forced or not.
+        assert_eq!(refusal(&a_build("v0.1.5", "v0.1.5", false), Some("v0.1.6"), true), None);
+    }
+
+    #[test]
+    fn force_never_downgrades_past_the_release_this_build_already_contains() {
+        // What `--force` used to skip: a release build forced backwards to an
+        // older release. `force` bypasses the refusal below it, not this one.
+        let reason = refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true).expect("should still refuse");
+        assert!(reason.contains("`v0.1.5`"), "{reason}");
+        assert!(reason.contains("`v0.1.6`"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
+    }
+
+    #[test]
+    fn force_never_installs_a_release_older_than_a_dev_builds_base() {
+        // Issue #820's exact shape: a stale "latest" that is actually older
+        // than the tag this dev build already sits ahead of must not be
+        // treated as something `--force` can install.
+        let reason =
+            refusal(&a_build("v0.1.10-58-g9354d16", "v0.1.10", true), Some("v0.1.9"), true).expect("should refuse even forced");
+        assert!(reason.contains("`v0.1.9`"), "{reason}");
+        assert!(reason.contains("`v0.1.10`"), "{reason}");
+        assert!(reason.contains("even with `--force`"), "{reason}");
     }
 
     /// One `/api/update` read, as the command sees it.

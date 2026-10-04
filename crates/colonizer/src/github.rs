@@ -1329,9 +1329,29 @@ pub async fn pr_info(app: &App, url: &str) -> Result<PrInfo> {
     pr_info_from_json(&out)
 }
 
+/// Whether a pull request comes from a fork (`isCrossRepository`), its own call because only the
+/// colony merge gate (issue #807) reads it. Fails closed: a field `gh` leaves out reads as
+/// cross-repository, never as a licence to merge a stranger's branch.
+pub async fn pr_is_cross_repository(app: &App, url: &str) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Cross {
+        #[serde(rename = "isCrossRepository", default)]
+        is_cross_repository: Option<bool>,
+    }
+    let out = tokio::time::timeout(
+        Duration::from_secs(20),
+        exec(&mut app.gh(["pr", "view", url, "--json", "isCrossRepository"])),
+    )
+    .await
+    .context("GitHub API timed out")??;
+    let view: Cross = serde_json::from_str(&out).context("could not parse `gh pr view` output")?;
+    Ok(view.is_cross_repository.unwrap_or(true))
+}
+
 /// The paths a pull request changes, from `gh pr view --json files`, capped at
 /// [`crate::sessions::CHANGED_PATHS_CAP`]. Its own call, not a `PR_VIEW_FIELDS` field: the file list
-/// is read twice per PR (opened, merged), not on every watch tick.
+/// is read twice per PR (opened, merged), not on every watch tick. The cap truncates silently, so a
+/// caller that must see every path has to treat a list that comes back full as possibly cut short.
 pub async fn pr_files(app: &App, url: &str) -> Result<Vec<String>> {
     let out = tokio::time::timeout(
         Duration::from_secs(20),
@@ -1977,6 +1997,39 @@ impl PublishOps for GitPublishOps<'_> {
             self.log
                 .warn(format!("path policy: left {rel} out of the commit ({why})"))
                 .await;
+        }
+        // Issue #780: a masked or protected entry is only hidden while the policy lists it, so a
+        // colony that writes a credential file under a name the policy does not cover — an
+        // `.env.local`, an SSH key — would still publish it. Refuse the commit when staging would
+        // ADD such a path: a credential the repository already tracks is its own decision, but a
+        // new one is the colony's to keep out. `--no-renames` so a `git mv notes.txt .env.local`
+        // reads as a delete and an add, not a rename that skips the filter. The flagged paths are
+        // unstaged (never deleted, the way hold-back unstages) before the refusal, so an operator
+        // can delete them or ignore them and publish again — an ignore rule alone does not clear a
+        // path `git add -A` already indexed.
+        let added = crate::path_policy::z_paths(
+            &exec(self.wt_git().args([
+                "diff",
+                "--cached",
+                "--name-only",
+                "--no-renames",
+                "--diff-filter=A",
+                "-z",
+                "HEAD",
+            ]))
+            .await?,
+        );
+        let exposed: Vec<String> = added.into_iter().filter(|p| crate::path_policy::credential_like(p)).collect();
+        if !exposed.is_empty() {
+            let mut reset = self.wt_git();
+            reset
+                .args(["reset", "-q", "HEAD", "--"])
+                .args(exposed.iter().map(|p| crate::path_policy::literal_pathspec(p)));
+            exec(&mut reset).await?;
+            bail!(
+                "refusing to publish: the commit would add credential-looking files ({}); they are left in the worktree, unstaged — delete them or add them to .gitignore, then publish again",
+                exposed.join(", ")
+            );
         }
         // Issue #455: file tools rewrite files without their mode, so the `git add -A` above
         // stages `100755` → `100644` drops the colony never asked for; restore them here, before
@@ -5587,6 +5640,78 @@ mod tests {
         assert!(text.contains("left .env out of the commit (masked)"), "{text}");
         assert!(text.contains("removed the empty placeholder for .envrc"), "{text}");
         assert!(!text.contains("leaked"), "no file contents in the log");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Colony worktree at publish with new credential files the policy does not name (issue
+    /// #780): an untracked `config/.env.local` and a `git mv` into `config/.env.moved` (a rename
+    /// the `--no-renames` read still catches as an add) would ride along with the colony's own
+    /// `src/lib.rs`, while the `.pgpass` the repository already tracks is the repository's
+    /// decision, so editing it is not an add. Publishing refuses, names the added files alone, and
+    /// leaves them in the worktree but unstaged — while `src/lib.rs` stays staged.
+    #[tokio::test]
+    async fn a_publish_refuses_to_add_a_credential_file_the_repository_does_not_track() {
+        use crate::verify::tests::{git, git_commit};
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Stopped).await;
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".pgpass"), "db:5432:user:pass\n").unwrap();
+        std::fs::write(repo.join("notes.txt"), "scratch\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "base");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["checkout", "-q", "-b", "colonizer/work"]);
+        // The colony's own change, an edit to the tracked credential file, a new credential file
+        // under a name the path policy does not cover, and a rename into one.
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        std::fs::write(repo.join(".pgpass"), "db:5432:user:changed\n").unwrap();
+        std::fs::create_dir_all(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/.env.local"), "API_KEY=leaked\n").unwrap();
+        git(&repo, &["mv", "notes.txt", "config/.env.moved"]);
+
+        let s = app.session("abc").await.unwrap();
+        let log = app.logger("abc");
+        let ops = GitPublishOps {
+            app: &app,
+            s: &s,
+            log: &log,
+            admin: repo.join(".git"),
+            wt: repo.clone(),
+            bare: repo.join(".git"),
+            base: Mutex::new("main".into()),
+            lease: Mutex::new(None),
+            pending_base: Mutex::new(None),
+            session_dir: app.session_dir("abc"),
+        };
+        let err = ops.stage_all().await.expect_err("a new credential file refuses the publish");
+        let message = format!("{err:#}");
+        assert!(message.contains("config/.env.local"), "{message}");
+        assert!(
+            message.contains("config/.env.moved"),
+            "a rename into a credential name is caught too: {message}"
+        );
+        assert!(
+            !message.contains(".pgpass"),
+            "an edit to a tracked file is not an add: {message}"
+        );
+        // The flagged files are left in the worktree but unstaged; the colony's own work stays
+        // staged, so a retry stages the same tree once they are gone or ignored.
+        let staged = git(&repo, &["diff", "--cached", "--name-only"]);
+        assert!(staged.contains("src/lib.rs"), "{staged}");
+        assert!(
+            !staged.contains("config/.env.local"),
+            "the offending file is unstaged: {staged}"
+        );
+        assert!(
+            !staged.contains("config/.env.moved"),
+            "the renamed file is unstaged: {staged}"
+        );
+        assert!(
+            repo.join("config/.env.local").is_file() && repo.join("config/.env.moved").is_file(),
+            "the files are left on disk for the operator"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

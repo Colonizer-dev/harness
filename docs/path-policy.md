@@ -213,7 +213,13 @@ entry is also logged on the colony at warn level — *path policy: `<path>` is
 masked and changed during the session* — without file contents, once per
 colony so publish retries do not repeat the same lines. A changed protected
 path is reported and stays in the commit, which is the colony's; a masked one
-is held back as above.
+is held back as above. Staging also refuses a commit that would *add* a
+credential file the policy does not name — a `.env.local` or nested `.env` at
+any depth, an SSH private key, `.pgpass`, including one reached by a rename —
+naming the paths in the error; templates (`*.example`, `*.sample`,
+`*.template`, `*.dist`) and paths the repository already tracks are let
+through. The flagged files are unstaged and left in the worktree, so deleting
+them or adding them to `.gitignore` and publishing again clears the refusal.
 
 ## Not yet covered
 

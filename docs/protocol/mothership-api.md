@@ -88,6 +88,12 @@ marks the colonies superseded and leaves their pull requests open for a person. 
 validated as a repository name; the compare against a colony's repository is case-insensitive, and
 the close is skipped while external writes are blocked (§6.3).
 
+`merge_prs` (issue #807) is the same shape and the same not-inherited rule, for the other
+irreversible write: a list of this org's repositories, full `owner/name`, whose pull requests a
+colony in a GitHub loop may ask the mothership to merge (`pr_merge`, §6.12). Empty — the default —
+refuses every merge, so a repository merges only once the operator lists it here. Each entry is
+validated as a repository name, and the compare is case-insensitive like `close_superseded_prs`.
+
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
 allow list or add blocks but never remove a global block ([sandbox-network.md](../sandbox-network.md)).
@@ -109,6 +115,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
   "max_parallel": 2,
   "repo_max_parallel": 1,
   "close_superseded_prs": ["acme/api"],
+  "merge_prs": ["acme/web"],
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
@@ -161,6 +168,7 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/memory/candidates` | Fleet-wide candidates and their sightings (colony, repo, commit, confidence), including those not yet promoted |
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `GET /api/deja` · `GET /api/deja/search?org=&q=` | Transcript recall (deja, off by default, [colonies.md](../colonies.md#recall-from-earlier-colonies-deja)): whether the deja binary is installed and, per org, whether recall is on, the index size and the last index time; the search runs the recall a colony of that org would get. Owner only. A colony reaches its own org's index through `POST /recall` on the colony gateway, with its colony token |
+| `GET /api/history/search?q=&repo=&org=&agent=&status=&since=&until=&limit=` | Search every colony's conversation (issue #739, always on with memory, [colonies.md](../colonies.md#search-earlier-colonies-conversations)): `{hits: [{colony, repo, org, agent, status, created_at, seq, ts, turn, role, snippet}]}`. A hit is a `user_message` or `assistant_text` event whose text contains every whitespace-separated query term, any case; newest colony first, at most 50 hits and three a colony. `since`/`until` take RFC 3339, a naive `YYYY-MM-DDTHH:MM:SS` read as UTC, or a bare `YYYY-MM-DD`; an empty `q`, or a `since`/`until` that is none of these, is a **400**. Owner only. A colony searches its neighbours through `POST /history` on the colony gateway, with its colony token, scoped server-side to its org — org-less colonies of its own repository when it has no org — never itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a `restricted` caller |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 | `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |
