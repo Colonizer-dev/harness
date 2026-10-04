@@ -135,6 +135,10 @@ pub struct App {
     /// only: Settings re-renders the red "missing" row from every poll, so a binary installed while
     /// the harness runs must be picked up without a restart.
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
+    /// The per-account Claude health check's cache (claude_login.rs, issue #983): the latest verdict
+    /// and check time for each configured account, refreshed by a background task so the status poll
+    /// and the accounts list never call Anthropic on the request path.
+    pub claude_health: Mutex<HashMap<String, crate::claude_login::AccountHealth>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
     /// The draining flag that holds the queue back while an update or a restart runs (drain.rs,
@@ -274,6 +278,7 @@ impl App {
             api_tokens: crate::api_tokens::Registry::load(&cfg.config_dir),
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
+            claude_health: Mutex::new(HashMap::new()),
             deja: crate::deja::Deja::default(),
             drain: crate::drain::Drain::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),

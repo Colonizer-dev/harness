@@ -1,7 +1,31 @@
 import { ClaudeLoginSection, GithubTokenForm } from "../Connections";
 import { Avatar } from "../Avatar";
+import { Badge, timeAgo } from "../ui";
 import type { HarnessStatus } from "../../types";
 import { Code, ConnectionCard, Pane } from "./ui";
+
+// ---------------------------------------------------------------------------
+// The Claude card's health badge: the background per-account check's verdict (issue
+// #983), with when it last ran. No badge for an older mothership that sends none.
+// ---------------------------------------------------------------------------
+
+const CLAUDE_HEALTH: Record<NonNullable<HarnessStatus["claude"]["health_status"]>, { tone: "ok" | "err" | "warn" | "neutral"; label: string }> = {
+  ok: { tone: "ok", label: "Reachable" },
+  auth_expired: { tone: "err", label: "Token rejected" },
+  unreachable: { tone: "warn", label: "Unreachable" },
+  unchecked: { tone: "neutral", label: "Not checked yet" },
+};
+
+function ClaudeHealth({ status, checkedAt }: { status: HarnessStatus["claude"]["health_status"]; checkedAt: string | null | undefined }) {
+  if (!status) return null;
+  const health = CLAUDE_HEALTH[status];
+  return (
+    <p className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+      <Badge tone={health.tone}>{health.label}</Badge>
+      {checkedAt ? <span>checked {timeAgo(checkedAt)}</span> : null}
+    </p>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Connections: GitHub and Claude
@@ -58,6 +82,7 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
             </>
           }
         >
+          {claude?.configured && <ClaudeHealth status={claude.health_status} checkedAt={claude.health_checked_at} />}
           <ClaudeLoginSection claude={claude} onStatusChanged={onStatusChanged} />
         </ConnectionCard>
       </div>
