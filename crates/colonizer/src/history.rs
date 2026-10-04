@@ -343,7 +343,20 @@ pub(crate) async fn history(State(app): State<Shared>, headers: HeaderMap, Json(
     Json(json!({"hits": hits})).into_response()
 }
 
-pub(crate) fn routes() -> axum::Router<crate::Shared> {
+/// This module's feature descriptor (`features.rs`): its one owner route. No scoped-token rule on
+/// purpose — a search across every colony is an owner-level read, so scoped tokens fall to the
+/// legacy `classify` arms and are refused — and no activity rule, since a search changes nothing.
+/// The colony-facing `POST /history` lives on the gateway router, not here.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "history",
+    routes,
+    token_scope: None,
+    activity: &[],
+    kinds: &[],
+    start_tasks: None,
+};
+
+fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new().route("/api/history/search", routing::get(search_route))
 }
 

@@ -74,7 +74,7 @@ colonizer migrate-store --from /old/data --to /new/data   # copy from a store ot
 merged pull requests touched most often: a header naming the window and the pull requests
 counted, then one `<count>  <path>` line per file, busiest first. It counts *distinct* pull
 requests, so one pull request editing a file many times counts once, and it drops the
-always-touched noise (`CHANGELOG.md`, `changelog.d/`, `Cargo.lock`, `*routes.snap`). `--days`
+always-touched noise (`CHANGELOG.md`, `changelog.d/`, `Cargo.lock`, the route snapshots `crates/colonizer/routes/*.snap`). `--days`
 sets the window (30 by default), `--top` how many files (15). The source is the repository in the
 current directory unless `--repo owner/repo` names a mirror in this machine's data dir or
 `--git-dir PATH` names a git directory (a mirror, or a worktree's `.git`); the two refuse to

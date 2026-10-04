@@ -1,0 +1,12 @@
+[package]
+name = "repo-contracts"
+version = "0.1.11"
+edition = "2024"
+description = "Unpublished checks that need the whole Colonizer repository: docs against code, schemas against types, module manifests against presets, shared fixtures"
+license = "MIT"
+# Never published: it reads files outside `crates/colonizer`, which only exist in a checkout.
+publish = false
+
+[dependencies]
+colonizer-harness = { path = "../colonizer" }
+serde_json = "1.0.151"

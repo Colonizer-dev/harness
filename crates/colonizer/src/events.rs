@@ -159,7 +159,7 @@ pub(crate) async fn agent_link(app: Shared, id: String, rt: Arc<Runtime>, mut co
 /// off the line is handed in — the session's launch tag as `launch`, and, for a `question_answered`,
 /// whether the judge is the one who answered as `judged`. Anything unrecognisable stays a runner
 /// line (`agent`): an origin is provenance, never a contract a line can fail.
-pub(crate) fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
+pub fn resolve_origin(event: &Value, launch: Option<&str>, judged: bool) -> Origin {
     // A subagent's events carry the `agent` ref (§2 rules); the ref is the tell, whatever the type.
     if event.get("agent").is_some() {
         return Origin::Subagent;
@@ -244,6 +244,31 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
         // ambiguous costs no recovery: the last event before the silence is what we read.
         _ => *final_text = None,
     }
+}
+
+/// The mothership-log line for a colony's model-router `log` event (issue #983), `None` for any other
+/// event. The router names the provider, the failure class, the status and the elapsed time; this adds
+/// the colony and the Claude account it was launched with — the account's id, never its credential. The
+/// event arrives already redacted; the line is kept to one line and a bounded length, since a guest
+/// writes it.
+pub(crate) fn model_router_line(id: &str, account: Option<&str>, event: &Value) -> Option<String> {
+    if event["type"] != "log" || event["source"] != "model_router" {
+        return None;
+    }
+    let message: String = event["message"]
+        .as_str()?
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(500)
+        .collect();
+    let level = event["level"]
+        .as_str()
+        .filter(|level| matches!(*level, "info" | "warn" | "error"))
+        .unwrap_or("info");
+    Some(format!(
+        "model router: colony {id} account={} [{level}] {message}",
+        account.unwrap_or("default")
+    ))
 }
 
 pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>, line: &str) {
@@ -344,6 +369,15 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
         .await;
     }
     rt.broadcast(Some(file_seq), file_line.to_string());
+
+    // Router upstream failures and fallbacks reach the mothership's own output too (#983): they were
+    // only in the colony's event log, so a run of "Anthropic is unreachable" left nothing to read there.
+    if event["type"] == "log" && event["source"] == "model_router" {
+        let account = app.session(id).await.and_then(|s| s.claude_account.clone());
+        if let Some(line) = model_router_line(id, account.as_deref(), &event) {
+            eprintln!("{line}");
+        }
+    }
 
     // What the harness acts on is a type, not a bag of fields (docs/agent-events.schema.json). A line
     // outside the contract — a newer runner's event type, or a known one whose body is broken — lands

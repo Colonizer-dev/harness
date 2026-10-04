@@ -1,0 +1,2 @@
+/api/deja                                            GET    unauth=401    token=owner            activity=-
+/api/deja/search                                     GET    unauth=401    token=owner            activity=-

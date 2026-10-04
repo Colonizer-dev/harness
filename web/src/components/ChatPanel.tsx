@@ -60,6 +60,7 @@ import { InlineCode } from "./Markdown";
 import { EnterContext, useEnter, useFollowBottom, useSettled } from "./motion";
 import { SettlerCard, useStumble } from "./SettlerCard";
 import { Spinner, cx, formatDuration, store, stored } from "./ui";
+import "../cockpit/turnFocus.css";
 
 /** The harness sends the session's initial prompt as a user message with this id. */
 const BRIEF_ID = "initial";

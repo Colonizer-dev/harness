@@ -2043,5 +2043,43 @@ pub(crate) fn routes() -> axum::Router<Shared> {
         .route("/api/supply-chain-loop/run", routing::post(run_now))
 }
 
+/// This module's feature descriptor (`features.rs`): its routes, scoped-token rule, activity rules,
+/// kind and its background work, read through `features::ALL` by `server` and `api_tokens`.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "supply_chain_loop",
+    routes,
+    token_scope: Some(token_scope),
+    activity: ACTIVITY,
+    kinds: &["loop.supply_chain"],
+    start_tasks: Some(start_tasks),
+};
+
+/// The activity lines the loop's two writes record: a settings change, and pressing run.
+const ACTIVITY: &[crate::activity::Rule] = &[
+    crate::activity::rule(
+        "PUT",
+        "/api/supply-chain-loop",
+        "loop.update",
+        crate::activity::Target::Fixed(NAME, "loops"),
+    ),
+    crate::activity::rule(
+        "POST",
+        "/api/supply-chain-loop/run",
+        "loop.run_now",
+        crate::activity::Target::Fixed(NAME, "loops"),
+    ),
+];
+
+/// What a scoped token needs for the loop's settings and last report: a watch. Changing its
+/// settings or pressing a run stays the owner's (it starts colonies on the allowlist).
+fn token_scope<'a>(method: &axum::http::Method, segs: &[&'a str]) -> Option<crate::api_tokens::Need<'a>> {
+    match segs {
+        ["api", "supply-chain-loop"] if *method == axum::http::Method::GET => {
+            Some(crate::api_tokens::Need::Bare(crate::api_tokens::Scope::Read))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests;

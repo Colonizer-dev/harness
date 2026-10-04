@@ -59,7 +59,8 @@ const DEFAULT_LIMIT: usize = 100;
 const MAX_TEXT: usize = 240;
 
 /// Every kind a line can carry, grouped by the part before the dot. Closed: the reader refuses a
-/// filter naming anything else, listing these.
+/// filter naming anything else, listing these. A migrated feature's own kinds come after this list
+/// ([`kinds`], `features.rs`), so a feature adds one without editing here.
 pub(crate) const KINDS: &[&str] = &[
     "outcome.pr_opened",
     "outcome.merged",
@@ -81,7 +82,6 @@ pub(crate) const KINDS: &[&str] = &[
     "colony.retain",
     "colony.answer",
     "colony.prewarm",
-    "colony.switch_agent",
     "colony.path_policy",
     "chat.colony",
     "chat.issue",
@@ -98,7 +98,6 @@ pub(crate) const KINDS: &[&str] = &[
     "loop.resume",
     "loop.delete",
     "loop.run_now",
-    "loop.supply_chain",
     "loop.docs",
     "redteam.start",
     "redteam.stop",
@@ -119,9 +118,15 @@ pub(crate) const KINDS: &[&str] = &[
     "memory.note",
     "burn_down.stop",
     "app.update",
-    "map.create",
-    "map.refresh",
 ];
+
+/// Every kind, the module's own [`KINDS`] first and then each migrated feature's (`features.rs`).
+pub(crate) fn kinds() -> impl Iterator<Item = &'static str> {
+    KINDS
+        .iter()
+        .copied()
+        .chain(crate::features::ALL.iter().flat_map(|feature| feature.kinds.iter().copied()))
+}
 
 /// The actors a line names: a person through the API (`you`), or the colony itself.
 pub(crate) const ACTORS: &[&str] = &["you", "colony"];
@@ -379,9 +384,10 @@ pub(crate) async fn record_transition(app: &App, before: SessionStatus, after: &
 // Actions: the route layer.
 // ---------------------------------------------------------------------------
 
-/// What a recorded route is about, which decides how its line is filled in.
+/// What a recorded route is about, which decides how its line is filled in. `pub(crate)` so a
+/// migrated feature can build its own rules (`features.rs`).
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Target {
+pub(crate) enum Target {
     /// `{id}` names a colony; its record is read before the handler runs (a delete forgets it).
     Colony,
     /// The response is the colony just made.
@@ -407,15 +413,16 @@ enum Target {
 
 /// One recorded route: method, the route as its module's `routes()` registers it, the kind its line gets and what
 /// it is about. Routes not listed here are not recorded: reads, and writes that are not a person
-/// changing something (chat messages, drafts, uploads, probes).
-struct Rule {
-    method: &'static str,
-    route: &'static str,
-    kind: &'static str,
-    target: Target,
+/// changing something (chat messages, drafts, uploads, probes). `pub(crate)` so a migrated feature
+/// can keep its own rules beside its handlers (`features.rs`).
+pub(crate) struct Rule {
+    pub(crate) method: &'static str,
+    pub(crate) route: &'static str,
+    pub(crate) kind: &'static str,
+    pub(crate) target: Target,
 }
 
-const fn rule(method: &'static str, route: &'static str, kind: &'static str, target: Target) -> Rule {
+pub(crate) const fn rule(method: &'static str, route: &'static str, kind: &'static str, target: Target) -> Rule {
     Rule {
         method,
         route,
@@ -428,12 +435,6 @@ const RULES: &[Rule] = &[
     rule("POST", "/api/sessions", "colony.launch", Target::NewColony),
     rule("POST", "/api/sessions/{id}/stop", "colony.stop", Target::Colony),
     rule("POST", "/api/sessions/{id}/resume", "colony.resume", Target::Colony),
-    rule(
-        "POST",
-        "/api/sessions/{id}/switch-agent",
-        "colony.switch_agent",
-        Target::Colony,
-    ),
     rule("POST", "/api/sessions/{id}/keep", "colony.keep", Target::Colony),
     rule("DELETE", "/api/sessions/{id}", "colony.delete", Target::Colony),
     rule("POST", "/api/sessions/{id}/publish", "colony.publish", Target::Colony),
@@ -458,18 +459,6 @@ const RULES: &[Rule] = &[
     rule("PUT", "/api/loops/{id}", "loop.update", Target::Loop),
     rule("DELETE", "/api/loops/{id}", "loop.delete", Target::Loop),
     rule("POST", "/api/loops/{id}/run-now", "loop.run_now", Target::Loop),
-    rule(
-        "PUT",
-        "/api/supply-chain-loop",
-        "loop.update",
-        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
-    ),
-    rule(
-        "POST",
-        "/api/supply-chain-loop/run",
-        "loop.run_now",
-        Target::Fixed(crate::supply_chain_loop::NAME, "loops"),
-    ),
     rule(
         "PUT",
         "/api/merge-train/loop",
@@ -517,12 +506,6 @@ const RULES: &[Rule] = &[
     rule(
         "PUT",
         "/api/providers/{id}",
-        "settings.save",
-        Target::Named("provider", "providers"),
-    ),
-    rule(
-        "POST",
-        "/api/providers/{id}/quota-action",
         "settings.save",
         Target::Named("provider", "providers"),
     ),
@@ -676,7 +659,6 @@ const RULES: &[Rule] = &[
         "burn_down.stop",
         Target::Fixed("burn-down", ""),
     ),
-    rule("POST", "/api/maps/{owner}/{name}", "map.create", Target::None),
 ];
 
 /// The activity kind a route records, if any, for the route-table snapshot (server.rs's tests).
@@ -686,7 +668,17 @@ pub(crate) fn recorded_kind(method: &Method, route: &str) -> Option<&'static str
 }
 
 fn rule_for(method: &Method, route: &str) -> Option<&'static Rule> {
-    RULES.iter().find(|r| r.method == method.as_str() && r.route == route)
+    RULES
+        .iter()
+        .find(|r| r.method == method.as_str() && r.route == route)
+        // A migrated feature keeps its rules beside its handlers (`features.rs`); the central list
+        // is asked first, exactly as it was when they were one list.
+        .or_else(|| {
+            crate::features::ALL
+                .iter()
+                .flat_map(|feature| feature.activity)
+                .find(|r| r.method == method.as_str() && r.route == route)
+        })
 }
 
 /// What a request carries into the handler for the transition edge: who is acting, and the colonies
@@ -980,10 +972,16 @@ pub struct ListQuery {
     q: Option<String>,
 }
 
-/// The kind groups a filter may name: the part of each kind before the dot.
+/// The kind groups a filter may name: the part of each kind before the dot, each once, in the order
+/// [`kinds`] first spells it.
 fn kind_groups() -> Vec<&'static str> {
-    let mut groups: Vec<&'static str> = KINDS.iter().filter_map(|k| k.split('.').next()).collect();
-    groups.dedup();
+    let mut groups = Vec::new();
+    for kind in kinds() {
+        let group = kind.split('.').next().unwrap_or(kind);
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
     groups
 }
 
@@ -1005,13 +1003,14 @@ fn parse_filter(query: ListQuery) -> Result<Filter, String> {
         return Err(format!("limit is {limit}; use a number from 1 to {MAX_LIMIT}"));
     }
     let groups = kind_groups();
+    let vocabulary: Vec<&str> = kinds().collect();
     let mut kinds = Vec::new();
     for raw in query.kind.as_deref().unwrap_or_default().split(',') {
         let kind = raw.trim();
         if kind.is_empty() {
             continue;
         }
-        if !KINDS.contains(&kind) && !groups.contains(&kind) {
+        if !vocabulary.contains(&kind) && !groups.contains(&kind) {
             return Err(format!(
                 "unknown activity kind \"{kind}\"; use a kind such as colony.launch, or one of the groups {}",
                 groups.join(", ")
@@ -1372,8 +1371,23 @@ mod tests {
 
     #[test]
     fn every_kind_a_rule_writes_is_in_the_vocabulary() {
+        let vocabulary: Vec<&str> = kinds().collect();
         for rule in RULES {
-            assert!(KINDS.contains(&rule.kind), "{} is not in KINDS", rule.kind);
+            assert!(vocabulary.contains(&rule.kind), "{} is not in KINDS", rule.kind);
+        }
+        // The migrated features' rules and their own kinds count too (`features.rs`).
+        for feature in crate::features::ALL {
+            for rule in feature.activity {
+                assert!(
+                    vocabulary.contains(&rule.kind),
+                    "{}: {} is not in KINDS",
+                    feature.name,
+                    rule.kind
+                );
+            }
+            for kind in feature.kinds {
+                assert!(vocabulary.contains(kind), "{}: {kind} is not in KINDS", feature.name);
+            }
         }
         for extra in [
             "chat.colony",
@@ -1383,7 +1397,7 @@ mod tests {
             "workspace.disable",
             "colony.answer",
         ] {
-            assert!(KINDS.contains(&extra), "{extra}");
+            assert!(vocabulary.contains(&extra), "{extra}");
         }
     }
 

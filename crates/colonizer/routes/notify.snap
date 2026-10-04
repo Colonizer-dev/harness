@@ -1,0 +1,2 @@
+/api/notify/secret                                   GET    unauth=401    token=owner            activity=-
+/api/notify/secret                                   PUT    unauth=401    token=owner            activity=settings.save
