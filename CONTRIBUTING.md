@@ -129,5 +129,12 @@ node --test modules/agents/opencode/test/*.test.mjs  # opencode has no package.j
 `check-doc-links.mjs` takes file names to check only those (`node scripts/check-doc-links.mjs
 docs/cli.md`). If you rename a heading, search for its old anchor: other pages may link to it.
 
+CI wraps each test command in `scripts/ci/retry-flaky.mjs`: a failure is run once more, and one that
+passes on the retry is a flake — the job stays green but the run is reported, with a warning
+annotation, a line on the job summary and a `flakes-<job>` artifact, never silently. A test known to
+flake belongs in `scripts/flaky-tests.txt`, one `name  #<issue number>` line per entry (the issue is
+required, and CI's `scripts` job fails an entry without one). Listing a test does not skip it: it
+still runs, and its flake is reported, just marked as known.
+
 A new shebang script needs its executable bit in the index (`git update-index --chmod=+x <file>`);
 `check-exec-bits.sh` fails without it.

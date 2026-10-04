@@ -1925,7 +1925,14 @@ a local router on `127.0.0.1` and points Claude Code's `ANTHROPIC_BASE_URL` at i
   ("timed out after N s"), or an SSE `error` event when the stream had already started; a connection that
   broke once open is a 502 naming the error code. Upstream HTTP errors (401/403, 429 with `retry-after`,
   5xx) pass through unchanged.
-- Every upstream failure, and every fallback, is a runner `log` event with `"source": "model_router"`:
+- The keep-alive race: when the connection is closed or reset under a request (`UND_ERR_SOCKET` "other
+  side closed", `ECONNRESET`, `EPIPE`, `UND_ERR_CLOSED`) before a single byte of the answer has arrived,
+  typically a pooled socket the other side had already closed, the router sends the same request once more,
+  at once, on a new connection, and logs `upstream retry: provider=… class=connection_retry elapsed=…s
+  model=… detail=…` at `warn`. Only if that attempt fails too is the failure answered and logged as above.
+  Nothing is replayed after any response byte, after a timeout, or after an HTTP answer. Idle pooled
+  sockets are reused for at most 4 s, or the server's `Keep-Alive: timeout=` hint less 2 s, capped at 30 s.
+- Every upstream failure, retry and fallback is a runner `log` event with `"source": "model_router"`:
   `upstream failure: provider=… class=dns|connect|tls|timeout|connection|auth|rate_limit|upstream_5xx|client_error
   status=… elapsed=…s model=… detail=…`. The mothership also writes those lines to its own output, with
   the colony and the Claude account it chose (never a credential).
@@ -2119,6 +2126,22 @@ Both new tools read `notes.json`, the structured store the mothership rewrites t
 approved or revoked, and wrap their answer in a `<shared-memory>` frame that names the content data to
 verify, not instructions. A note's title and summary are flattened to one line, so a note cannot start
 a line of the answer of its own.
+
+Memory answers from notes; a separate, read-only tool searches conversation history instead
+(issue #739), whenever memory is on for the colony:
+
+| Tool | Input | Answer |
+|---|---|---|
+| `colony_history_search` | `query`, `limit?` (default 20, at most 50) | Snippets from earlier colonies' conversations — `user_message` and `assistant_text` events — every whitespace-separated query term matching, any case. At most three hits a colony, newest colony first |
+
+The tool (Claude Code only so far, an in-process `colonizer_history` server) posts `{query, limit}` to
+`POST /history` on the colony gateway with the colony's token, and the gateway scopes the answer
+server-side: same-org colonies (org-less colonies of its own repository when it has no org), never the
+caller itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a caller
+that is `restricted` itself — an unknown class is hidden, failing closed. An empty query reads as empty
+hits. Results are other colonies' words, re-redacted on the way out and framed as untrusted data. It is
+a plain scan of `events.jsonl`, not an index: each log is read from its tail, at most the last 8 MiB a
+colony and 64 MiB a request, and a line over 256 KiB is skipped.
 
 **Kinds.** Every entry is one of `plan`, `decision`, `file_change` (a note about a change to specific
 files), `failure`, `architecture` (an architecture note) or `convention`. Notes stored before kinds
@@ -2362,6 +2385,12 @@ marks the colonies superseded and leaves their pull requests open for a person. 
 validated as a repository name; the compare against a colony's repository is case-insensitive, and
 the close is skipped while external writes are blocked (§6.3).
 
+`merge_prs` (issue #807) is the same shape and the same not-inherited rule, for the other
+irreversible write: a list of this org's repositories, full `owner/name`, whose pull requests a
+colony in a GitHub loop may ask the mothership to merge (`pr_merge`, §6.12). Empty — the default —
+refuses every merge, so a repository merges only once the operator lists it here. Each entry is
+validated as a repository name, and the compare is case-insensitive like `close_superseded_prs`.
+
 `agent.claude_account` names the Claude account the org's colonies run on (Connections, §4).
 `egress` is `{mode, allow, block}` on top of the sandbox module's egress policy: an org can widen its
 allow list or add blocks but never remove a global block ([sandbox-network.md](sandbox-network.md)).
@@ -2383,6 +2412,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
   "max_parallel": 2,
   "repo_max_parallel": 1,
   "close_superseded_prs": ["acme/api"],
+  "merge_prs": ["acme/web"],
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
@@ -2435,6 +2465,7 @@ back to an initial. The same record is the seen-set behind the prompt:
 | `GET /api/memory/candidates` | Fleet-wide candidates and their sightings (colony, repo, commit, confidence), including those not yet promoted |
 | `GET /api/memory/mem0` | `{has_key, source, active}`: whether a key is set (`saved` or `MEM0_API_KEY`) and mem0 is the provider. Never the key |
 | `GET /api/deja` · `GET /api/deja/search?org=&q=` | Transcript recall (deja, off by default, [colonies.md](colonies.md#recall-from-earlier-colonies-deja)): whether the deja binary is installed and, per org, whether recall is on, the index size and the last index time; the search runs the recall a colony of that org would get. Owner only. A colony reaches its own org's index through `POST /recall` on the colony gateway, with its colony token |
+| `GET /api/history/search?q=&repo=&org=&agent=&status=&since=&until=&limit=` | Search every colony's conversation (issue #739, always on with memory, [colonies.md](colonies.md#search-earlier-colonies-conversations)): `{hits: [{colony, repo, org, agent, status, created_at, seq, ts, turn, role, snippet}]}`. A hit is a `user_message` or `assistant_text` event whose text contains every whitespace-separated query term, any case; newest colony first, at most 50 hits and three a colony. `since`/`until` take RFC 3339, a naive `YYYY-MM-DDTHH:MM:SS` read as UTC, or a bare `YYYY-MM-DD`; an empty `q`, or a `since`/`until` that is none of these, is a **400**. Owner only. A colony searches its neighbours through `POST /history` on the colony gateway, with its colony token, scoped server-side to its org — org-less colonies of its own repository when it has no org — never itself, and a colony whose sensitivity is `restricted`, missing or unparseable only to a `restricted` caller |
 | `PUT /api/memory/mem0` | `{api_key}`: save the key on the mothership (`config/memory-keys/mem0`, mode 0600); an empty string removes it |
 | `POST /api/memory/mem0/check` | `{ok, error?}`: try the key against the configured base URL |
 | `GET /api/voice` | `{provider, name, model, language, configured, has_key, source, key_optional, max_seconds, max_bytes}`: the voice module's active speech-to-text service. `provider` is `browser` when the module is unset or off; `source` is `saved`, the provider's env var (`OPENAI_API_KEY`, `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `ELEVENLABS_API_KEY`, `COLONIZER_VOICE_API_KEY`) or `provider:<id>` when a model provider's key on the same host is reused. Never the key |
@@ -3774,7 +3805,7 @@ before the join.
 deliberately *not* in version 1: optional categories (approved memory notes, loops and schedules,
 repo claims — off by default) and the cockpit's origin-host marking of imported colonies.
 
-### 6.12 GitHub loops (issue #778)
+### 6.12 GitHub loops (issue #778, PR actions issue #807)
 
 Some loops do GitHub's work (triaging issues, CI flakes, merged PRs), but a colony has no GitHub
 token. Such a loop sets `needs_github: true` on its definition (colony loops only; the map and
@@ -3793,23 +3824,39 @@ hours before a first run) and carrying the `since` timestamp. A fetch that fails
 that file and logs; it never fails the boot.
 
 **Host-proxied writes.** When the context was written, boot sets `COLONIZER_GITHUB=true`, which adds
-the runner's in-process MCP server `colonizer_github` — three write tools the orchestrator alone may
+the runner's in-process MCP server `colonizer_github` — six write tools the orchestrator alone may
 call (a subagent's call is refused by a `PreToolUse` hook, as with `finding_file`):
 
 ```jsonc
 {"type":"github_action","tool":"issue_label","issue":42,"labels":["bug","P1"]}
 {"type":"github_action","tool":"issue_comment","issue":42,"body":"markdown…"}
 {"type":"github_action","tool":"issue_close_duplicate","issue":43,"duplicate_of":42}
+{"type":"github_action","tool":"pr_comment","pr":219,"body":"markdown…"}
+{"type":"github_action","tool":"pr_label","pr":219,"labels":["needs-human"]}
+{"type":"github_action","tool":"pr_merge","pr":231,"head_sha":"<40 hex>","reason":"one line"}
 ```
 
 `github_action` is host-consumed (the web ignores it, like `loop_next`/`loop_stop`). The `loop_github`
-module validates it (positive issue numbers, ≤ 10 labels of ≤ 100 chars, a comment ≤ 20 000 chars, no
-self-duplicate), refuses it while external writes are blocked (§6.3: `ignored a github action:
-external writes are blocked …`), caps one colony at 30 writes counted from `sessions/<id>/github.jsonl`,
-and makes the `gh` call on the colony's own repository — the guest never names a repository. Every
-outcome, success or failure, is one ledger line `{ts, repo, issue, outcome, tool, …}` and one line of
-the colony log; the agent is told only that the call was handed over. Because the cap is counted from
-the ledger, a partial failure (a close-duplicate's comment written, its close refused) still counts.
+module validates it (positive issue/PR numbers, ≤ 10 labels of ≤ 100 chars, a comment ≤ 20 000 chars,
+a merge `reason` ≤ 500 chars and a full 40-hex `head_sha`, no self-duplicate), refuses it while
+external writes are blocked (§6.3: `ignored a github action: external writes are blocked …`), caps one
+colony at 30 writes counted from `sessions/<id>/github.jsonl`, and makes the `gh` call on the colony's
+own repository — the guest never names a repository.
+
+**Merge gates (issue #807).** `pr_merge` is refused unless the operator has enabled merges for this
+repository: the org setting `merge_prs` is a list of repos of that org, empty by default, set with
+`PUT /api/orgs/{org}`. Even then a merge is made only for an open, non-draft, same-repo pull request
+whose head is still `head_sha`, that is mergeable, with every check green, targeting the default
+branch, touching nothing under `.github/` and no credential-like file, and only up to 5 merges per
+colony inside the same 30-action cap. A refusal is recorded like any other action — one ledger line
+`{ts, repo, outcome:"refused", tool, …}` in `github.jsonl` and one line of the colony log. The kill
+switch `COLONIZER_NO_EXTERNAL_EFFECTS` covers these writes as it does the issue tools. `pr_update` (a
+fast-forward push to a PR branch) is not implemented yet.
+
+Every outcome, success or failure, is one ledger line `{ts, repo, issue, outcome, tool, …}` and one
+line of the colony log; the agent is told only that the call was handed over. Because the cap is
+counted from the ledger, a partial failure (a close-duplicate's comment written, its close refused)
+still counts.
 
 ---
 

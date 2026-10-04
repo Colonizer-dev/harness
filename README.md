@@ -13,7 +13,8 @@
 </p>
 
 ```sh
-curl -fsSL https://colonizer.dev/install.sh | sh
+cargo install colonizer-harness --locked && colonizer setup
+# no Rust toolchain? curl -fsSL https://colonizer.dev/install.sh | sh
 ```
 
 <p align="center">
@@ -54,9 +55,11 @@ curl -fsSL https://colonizer.dev/install.sh | sh
 
 You need `git`, `gh`, `curl` and `tar`. On Linux, give your user `/dev/kvm`
 (`sudo usermod -aG kvm "$USER"`, then log out and back in) and install native Claude Code, which
-colonies run. The install command at the top installs the latest
-[release](https://github.com/Colonizer-dev/harness/releases) and links `~/.local/bin/colonizer` (if
-`~/.local/bin` is not on your `PATH`, run that path); then:
+colonies run. Install the latest [release](https://github.com/Colonizer-dev/harness/releases) with a
+Rust toolchain (1.88 or newer), or without one by piping the installer script instead — the crate is
+on crates.io as `colonizer-harness`, and `setup` fetches that release's own installer for the version
+it installed. Either way the release is checked against its `SHA256SUMS` and its build attestation,
+and `~/.local/bin/colonizer` is linked (if `~/.local/bin` is not on your `PATH`, run that path); then:
 
 ```sh
 colonizer          # starts the mothership, prints a sign-in link and opens it

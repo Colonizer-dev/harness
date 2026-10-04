@@ -105,6 +105,8 @@ enum Command {
         #[arg(long, conflicts_with = "force")]
         check: bool,
     },
+    /// Install this version's release over a `cargo install` build, which has no app beside it
+    Setup,
     /// Print the cockpit sign-in link and open it in a browser
     Open,
     /// Start the mothership at login (macOS LaunchAgent, Linux systemd user unit)
@@ -1208,6 +1210,7 @@ fn choice(question: &QuestionBody, label: &str) -> Resolved {
 /// `--json` — like the local `fleet export`/`import`.
 const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("update", &["json"]),
+    ("setup", &["host", "token_file", "json"]),
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
@@ -1342,6 +1345,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             EXIT_OK
         }
         Command::Update { force, check } => await_local(update_command(cli, force, check).await),
+        Command::Setup => await_local(crate::setup::command().await),
         Command::Open => await_local(open()),
         Command::LoginItem { action } => {
             let cfg = match Settings::from_env() {
@@ -3179,6 +3183,7 @@ mod tests {
             &["completions", "bash", "--token-file", "/tmp/token"][..],
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],
+            &["setup", "--token-file", "/tmp/token"][..],
         ] {
             let err = parse(args).unwrap_err();
             assert_eq!(err.exit_code(), EXIT_USAGE, "{args:?} should be a usage error");
@@ -3223,7 +3228,7 @@ mod tests {
     /// host flags and hides only `--json`, and a client command still advertises all three.
     #[test]
     fn local_help_hides_the_client_flags() {
-        for command in ["open", "login-item", "telemetry", "version", "completions", "man"] {
+        for command in ["open", "setup", "login-item", "telemetry", "version", "completions", "man"] {
             let help = help_for(command);
             for flag in ["--host", "--token-file", "--json"] {
                 assert!(!help.contains(flag), "`{command} --help` should not list {flag}:\n{help}");

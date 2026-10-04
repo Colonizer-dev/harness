@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `open`, `login-item`, `telemetry`, `hotspots`, `migrate-store`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `migrate-store`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -25,7 +25,7 @@ Every client command takes the same two global flags, before or after the subcom
 
 The local commands run against this machine and take none of the client flags. `update` is the
 exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
-like any client command — but it has no `--json`. The rest (`open`, `login-item`, `telemetry`,
+like any client command — but it has no `--json`. The rest (`setup`, `open`, `login-item`, `telemetry`,
 `migrate-store`, `version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
 (exit 2), and their `--help` does not list them.
 
@@ -60,6 +60,7 @@ colonizer version             # what this build is, and whether it is a release 
 colonizer update              # install the newest release against a running mothership, restart into it
 colonizer update --force      # also over a development build, or a build newer than the latest release
 colonizer update --check      # say whether a newer release exists and stop; no mothership needed
+colonizer setup               # install this version's release over a cargo install (no app assets beside it)
 colonizer open                # reprint the cockpit sign-in link and open it in a browser
 colonizer login-item enable   # start the mothership at login (status, disable too; disable never stops one)
 colonizer telemetry show      # anonymous usage reporting (on, off; no network, no daemon needed)

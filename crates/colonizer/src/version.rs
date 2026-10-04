@@ -35,6 +35,14 @@ const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Long enough after start that it does not compete with booting colonies.
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(60);
 
+/// How stale the cache may be before a `/api/update` read forces a fresh
+/// check, rather than waiting for the next [`CHECK_EVERY`] tick. Short enough
+/// that a release published while the mothership was already running — the
+/// issue's "a few minutes" — is seen the next time anything asks; long enough
+/// that the Cockpit polling apply progress every few seconds does not turn
+/// into a burst of requests to GitHub.
+const STALE_AFTER: Duration = Duration::from_secs(5 * 60);
+
 /* ----------------------------------------------------------------- the build */
 
 /// What this binary was built from.
@@ -314,6 +322,23 @@ impl Updates {
         }
     }
 
+    /// Refreshes the cache when it is older than [`STALE_AFTER`], or has never
+    /// run. Called from every `/api/update` read, so `colonizer update` — and
+    /// the Cockpit — see a release published after the mothership started
+    /// without waiting for the periodic [`CHECK_EVERY`] tick (issue #820).
+    async fn refresh_if_stale(&self) {
+        if !self.enabled().await {
+            return;
+        }
+        let stale = match self.state.lock().await.last_checked {
+            Some(t) => Utc::now().signed_duration_since(t).num_seconds() >= STALE_AFTER.as_secs() as i64,
+            None => true,
+        };
+        if stale {
+            self.check().await;
+        }
+    }
+
     /// The latest release tag the check has seen, whether or not it is newer
     /// than what is installed. Applying needs it even when it is not newer:
     /// `--force` installs it anyway, and the refusal names it either way.
@@ -360,6 +385,7 @@ pub async fn status(State(app): State<Shared>) -> Json<Value> {
 /// `can_apply.ok` unconditionally — so flipping the switch blanked the screen
 /// until a refresh re-fetched the full shape.
 pub async fn full_status(app: &Shared) -> Value {
+    app.updates.refresh_if_stale().await;
     let mut view = app.updates.view().await;
     // The refusal names the latest release when there is one; read it
     // regardless of newer-ness, so a development build hears both versions.
@@ -574,6 +600,74 @@ mod tests {
         }
         assert_eq!(put["enabled"], false);
         assert!(put["can_apply"]["ok"].is_boolean());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_stale_cache_refreshes_on_the_next_read() {
+        use axum::{Json, Router, routing::get};
+
+        let mock = Router::new().route(
+            "/release",
+            get(|| async {
+                Json(json!({
+                    "tag_name": "v0.1.11",
+                    "html_url": "https://example.com/v0.1.11",
+                    "body": "notes",
+                    "published_at": "2026-10-02T12:00:00Z",
+                    "draft": false,
+                    "prerelease": false,
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!("colonizer-updates-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut updates = Updates::new(&dir).unwrap();
+        updates.url = format!("http://{addr}/release");
+        {
+            // The mothership's own scenario from issue #820: it checked once,
+            // a while ago, and only ever saw v0.1.10. A release published
+            // since then must not wait for the next six-hour tick.
+            let mut state = updates.state.lock().await;
+            state.last_checked = Some(Utc::now() - chrono::Duration::hours(1));
+            state.latest = Some(Latest {
+                version: "v0.1.10".into(),
+                ..Default::default()
+            });
+        }
+
+        updates.refresh_if_stale().await;
+
+        assert_eq!(updates.latest_known().await, Some("v0.1.11".into()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_fresh_cache_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("colonizer-updates-{}", crate::util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut updates = Updates::new(&dir).unwrap();
+        // Unreachable: if `refresh_if_stale` fetched anyway, this would
+        // record an error, which the assertion below would catch.
+        updates.url = "http://127.0.0.1:1/would-error".into();
+        {
+            let mut state = updates.state.lock().await;
+            state.last_checked = Some(Utc::now());
+            state.latest = Some(Latest {
+                version: "v0.1.10".into(),
+                ..Default::default()
+            });
+        }
+
+        updates.refresh_if_stale().await;
+
+        let state = updates.state.lock().await;
+        assert_eq!(state.latest.as_ref().map(|l| l.version.as_str()), Some("v0.1.10"));
+        assert!(state.error.is_none(), "a fresh cache must not trigger a fetch");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
