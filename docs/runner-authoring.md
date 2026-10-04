@@ -84,7 +84,7 @@ the existing `acp` module may already drive it; see [The ACP runner](#the-acp-ru
    `PostToolUseFailure` hook).
 4. **Preflight, naming the error.** Check the agent binary and everything it needs before the
    first turn, and refuse with a message naming the missing thing and the way out: the codex
-   runner's `preflight` (`modules/agents/codex/runner.mjs:55-84`) refuses a missing credential, a
+   runner's `preflight` (`modules/agents/codex/runner.mjs`, `export async function preflight`) refuses a missing credential, a
    missing binary (`CODEX_BINARY_MISSING`, with the path and the pinned install command) and a
    version other than the pin; Hermes refuses a terminal backend other than `local` by name.
    Report a refusal as an `error` log plus `status` `error` with the code as its `detail`. If the

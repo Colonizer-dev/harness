@@ -4,7 +4,7 @@
 // without drawing a number the host never measured, exactly like host.ts does for the self host.
 import { describe, expect, it } from "vitest";
 
-import { fleetHostFacts, timeSinceHeartbeat } from "./fleet";
+import { fleetHostFacts, timeSinceHeartbeat, unreachableNote } from "./fleet";
 import type { FleetHost } from "../types";
 
 const SELF: FleetHost = {
@@ -79,5 +79,37 @@ describe("timeSinceHeartbeat", () => {
 
   it("reads a never-reached peer as never, not a bogus duration", () => {
     expect(timeSinceHeartbeat(null, now)).toBe("never");
+  });
+});
+
+describe("unreachableNote", () => {
+  const down = (slots: number): FleetHost => ({
+    id: "peer-1",
+    name: "box-2",
+    platform: "linux-x86_64",
+    os: "Ubuntu",
+    version: "0.1.4",
+    slots_in_use: slots,
+    slots_ceiling: 4,
+    queue_depth: 0,
+    disk_free_bytes: null,
+    last_heartbeat: "2026-09-21T03:00:00Z",
+    health: "unreachable",
+  });
+
+  it("names the colonies a stalled host was last seen running", () => {
+    expect(unreachableNote(down(1))).toBe("host unreachable · 1 colony last seen running — not re-run elsewhere");
+  });
+
+  it("pluralizes and counts a busier host", () => {
+    expect(unreachableNote(down(3))).toBe("host unreachable · 3 colonies last seen running — not re-run elsewhere");
+  });
+
+  it("says nothing for a host that was idle when it went down", () => {
+    expect(unreachableNote(down(0))).toBeNull();
+  });
+
+  it("says nothing for an online host", () => {
+    expect(unreachableNote({ ...down(2), health: "online" })).toBeNull();
   });
 });

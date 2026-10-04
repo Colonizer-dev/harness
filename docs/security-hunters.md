@@ -107,7 +107,7 @@ for the run's artifacts — at most three levels deep, never following symlinks.
   refuse to start a hunter whose probe is not ready, and a `needs_docker` hunter (Strix) still
   needs a Docker daemon inside the colony microVM (see above).
 
-## Planned, not implemented (tracked in #216)
+## Planned, not implemented (#216 closed with these left; see #933)
 
 - Findings flowing through orchestrator validation subject to `MAX_PER_COLONY`.
 - A red-team run driving hunters: refusing to start one whose probe is not ready, or serialising

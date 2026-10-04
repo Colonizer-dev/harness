@@ -74,6 +74,11 @@ pub struct NewSession {
     /// `Some("burn_down")` so `POST /api/burn-down/stop` can find them again.
     #[serde(default)]
     pub origin: Option<String>,
+    /// Pin this colony to a named fleet member (issue #688): its id or its display name, or this
+    /// member's own. Cross-member execution is not built yet, so a pin to a peer is refused with the
+    /// reason; omitting it lets placement pick a member and record why, without moving the colony.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Opt in to overlap-aware queueing: queue behind a live same-repo colony that's already
     /// touching files, instead of developing against the same paths at once. Off by default —
     /// most callers would rather start immediately than have an unrelated colony's edits hold
@@ -525,6 +530,13 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
+    // The fleet as placement candidates (issue #688): this member plus the last-known row of every
+    // peer the fleet view has polled — cached data only, never a fresh poll. With no fleet this is
+    // just this member, and placement below changes nothing but the reason it records.
+    let (local, peers) = crate::fleet::placement_candidates(&app).await;
+    // The peers the fleet reads as unreachable: a claim their host left is still refused, but the
+    // refusal can say their colony is not being re-run here (issue #688).
+    let unreachable_ids: Vec<String> = peers.iter().filter(|c| !c.online).map(|c| c.id.clone()).collect();
     // A second mothership shares no memory with this one, so the local guard above cannot see its
     // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
     // local guard rather than refusing the launch.
@@ -547,7 +559,17 @@ pub async fn create(
                     .collect();
                 crate::claims::claim_wait_conflict(Some(&info), issue, &ours)
             } else {
-                Some(crate::claims::remote_conflict_message(&info, issue))
+                // A holder whose host the fleet reads as unreachable is named as such, so the
+                // operator knows its colony is not being re-run elsewhere (issue #688).
+                let mut message = crate::claims::remote_conflict_message(&info, issue);
+                let holder_down = info
+                    .host
+                    .as_deref()
+                    .is_some_and(|host| crate::claims::holder_host_unreachable(host, &unreachable_ids));
+                if holder_down {
+                    message.push_str(crate::claims::UNREACHABLE_HOLDER_NOTE);
+                }
+                Some(message)
             }
         } else {
             None
@@ -556,6 +578,32 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
+    // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
+    // executes remotely (issue #298), so an unpinned choice of a peer is recorded and the colony runs
+    // here, a pin to a peer is refused rather than silently moved, and an unknown pin is a bad request.
+    let host_pin = req.host.as_deref().map(str::trim).filter(|host| !host.is_empty());
+    let placement_reason = match crate::placement::place(host_pin, &local, &peers) {
+        Ok(chosen) if chosen.local => chosen.reason,
+        // A peer has room, but nothing launches on another member yet: say so, run here.
+        Ok(chosen) if host_pin.is_none() => {
+            format!("{}; running on another member is not built yet (#298)", chosen.reason)
+        }
+        // Pinned to a peer that can take the colony: refused; remote execution is not built.
+        Ok(chosen) => {
+            return Err(client_error(
+                StatusCode::CONFLICT,
+                &format!(
+                    "pinned to {}: running a colony on another member is not built yet (#298)",
+                    chosen.host_name
+                ),
+            ));
+        }
+        Err(unknown @ crate::placement::Refusal::UnknownHost { .. }) => {
+            return Err(client_error(StatusCode::BAD_REQUEST, &unknown.to_string()));
+        }
+        // A pinned member that cannot take the colony: refused, never moved elsewhere.
+        Err(refusal) => return Err(client_error(StatusCode::CONFLICT, &refusal.to_string())),
+    };
     let (owner, name) = repo.split_once('/').context("invalid repository name")?;
     // Past the limit a colony waits its turn rather than being refused; `run_queue` starts it later.
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
@@ -600,6 +648,7 @@ pub async fn create(
         stack_fork: None,
         origin: req.origin.clone(),
         launched_by_token: scoped.as_ref().map(|t| t.id.clone()),
+        placement: Some(placement_reason),
         worktree: app
             .cfg
             .data_dir
@@ -613,6 +662,7 @@ pub async fn create(
         sandbox: format!("colonizer-{id}"),
         mesh: None,
         local_port: None,
+        preview_port: None,
         agent: agent.id.clone(),
         autopilot: req.autopilot.unwrap_or_else(|| autopilot_default(&app.agents, &modules)),
         autofix: req.autofix,
@@ -654,6 +704,7 @@ pub async fn create(
         allowed_providers: None,
         allowed_models: None,
         sensitivity: None,
+        model_substitutions: Vec::new(),
         routed_cost_usd: None,
         routed_tokens: None,
         host_disk_bytes: None,
@@ -662,9 +713,11 @@ pub async fn create(
         attention: None,
         suspended: None,
         parked: None,
+        hold_resumes: 0,
         agent_session: None,
         pending_answer: None,
         switch_note: None,
+        resume_note: None,
         prewarm: None,
         supply_chain,
         superseded: None,
@@ -677,6 +730,9 @@ pub async fn create(
         boot_image: None,
         app_slot: None,
         boot_attempt_started_at: None,
+        failure_class: None,
+        boot_retries: 0,
+        retry_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -689,6 +745,10 @@ pub async fn create(
     // read lock, so two launches can both pass it before either inserts — the loser is refused with
     // the same 409 inside the lock, where check and insert are one atomic step. A scoped token's
     // caps are re-checked beside it for the same reason (`Admission`).
+    // Issue #880: while the mothership drains for an update or restart a fresh launch queues
+    // instead of booting, like a colony admitted by the queue's own gate. The drain is read again
+    // inside the lock, beside `room`: a drain that begins between here and the claim must not let a
+    // boot slip through.
     let claimed = with_slot(
         &app.sessions,
         owner,
@@ -704,7 +764,7 @@ pub async fn create(
             }
             Admission::Claimed(Box::new(try_claim_session(
                 sessions,
-                room,
+                room && !app.drain.draining(),
                 session,
                 &repo,
                 req.issue,
@@ -798,8 +858,15 @@ pub async fn create(
             } else {
                 format!(", behind {waiting} already waiting")
             };
-            let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
-            app.session_log(&id, "info", format!("queued: {limits}{ahead}")).await;
+            // Issue #880: while the mothership drains for an update or restart, say so rather than
+            // naming limits that are not what is holding the colony.
+            let why = if app.drain.draining() {
+                "the mothership is draining for an update or restart, so no colony starts yet".to_string()
+            } else {
+                let limits = crate::queue::limits_message(max_parallel, org_limit, repo_limit);
+                format!("queued: {limits}")
+            };
+            app.session_log(&id, "info", format!("{why}{ahead}")).await;
         }
     } else {
         tokio::spawn(boot(app.clone(), id, false, None));
@@ -966,6 +1033,7 @@ mod tests {
             after: None,
             stack: false,
             origin: None,
+            host: None,
             serialize,
         })
     }
@@ -1442,6 +1510,7 @@ mod tests {
                 after: None,
                 stack: false,
                 origin: None,
+                host: None,
                 serialize: None,
             }),
         )
@@ -1524,6 +1593,7 @@ mod tests {
                 after: None,
                 stack: false,
                 origin: None,
+                host: None,
                 serialize: None,
             }),
         )
@@ -1566,6 +1636,7 @@ mod tests {
             after,
             stack,
             origin: None,
+            host: None,
             serialize: None,
         })
     }

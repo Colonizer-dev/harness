@@ -209,6 +209,10 @@ pub struct ModulesConfig {
     /// colony's publish is a decision, not a default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen: Option<ModuleChoice>,
+    /// Sending logs, traces and metrics to a backend. Absent until it is configured, like `notify`:
+    /// exporting off the machine is something to switch on, not a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ModuleChoice>,
 }
 
 fn default_memory() -> ModuleChoice {
@@ -244,6 +248,9 @@ impl Default for ModulesConfig {
             voice: None,
             // Off until it is configured: holding publishes on findings is a decision, not a default.
             screen: None,
+            // Off until it is configured: sending logs, traces and metrics off the machine is a
+            // decision, not a default.
+            observability: None,
         }
     }
 }
@@ -312,6 +319,7 @@ impl ModulesConfig {
             "burn_down" => self.burn_down.as_ref(),
             "voice" => self.voice.as_ref(),
             "screen" => self.screen.as_ref(),
+            "observability" => self.observability.as_ref(),
             _ => None,
         }
     }
@@ -334,6 +342,13 @@ impl ModulesConfig {
             "burn_down" => Some(self.burn_down.get_or_insert_with(|| ModuleChoice::new("default"))),
             "voice" => Some(self.voice.get_or_insert_with(|| ModuleChoice::new(crate::voice::BROWSER))),
             "screen" => Some(self.screen.get_or_insert_with(|| ModuleChoice::new("promptdecode"))),
+            // Created on first save, and off until that save says otherwise: an install that never
+            // asked for observability exports nothing.
+            "observability" => Some(self.observability.get_or_insert_with(|| ModuleChoice {
+                provider: "otlp".into(),
+                enabled: false,
+                settings: Map::new(),
+            })),
             _ => None,
         }
     }
@@ -706,6 +721,24 @@ mod tests {
         assert!(
             serde_json::to_string(&modules).unwrap().contains("notify"),
             "created on first save"
+        );
+    }
+
+    #[test]
+    fn observability_is_absent_until_configured_and_off_when_first_created() {
+        let mut modules = ModulesConfig::default();
+        assert!(modules.get("observability").is_none(), "off until it is configured");
+        assert!(
+            !serde_json::to_string(&modules).unwrap().contains("observability"),
+            "not written into the modules.json of anyone who never asked for it"
+        );
+        let created = modules.get_mut("observability").unwrap();
+        assert_eq!(created.provider, "otlp", "the default provider is the OTLP endpoint");
+        assert!(!created.enabled, "and it is off until that save turns it on");
+        assert!(modules.get("observability").is_some(), "created on first save");
+        assert!(
+            serde_json::to_string(&modules).unwrap().contains("observability"),
+            "written once it exists"
         );
     }
 

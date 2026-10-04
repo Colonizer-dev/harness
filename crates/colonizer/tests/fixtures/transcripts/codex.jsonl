@@ -1,0 +1,5 @@
+{"timestamp":"2026-04-01T00:00:00Z","type":"session_meta","payload":{"id":"sess-1","cwd":"/repo","git":{"branch":"main"},"cli_version":"0.1","model":"gpt-5"}}
+{"timestamp":"2026-04-01T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list files"}]}}
+{"timestamp":"2026-04-01T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ls\"}","call_id":"call-shell"}}
+{"timestamp":"2026-04-01T00:00:04Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call-shell","aggregated_output":"file1\n","exit_code":0}}
+{"timestamp":"2026-04-01T00:00:10Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}

@@ -3,6 +3,8 @@
 // "unmeasured" can never be rendered as $0.00: null means no report ever measured a cost, and it is
 // shown as an em dash, not as a decimal. A measured zero ($0.00) stays a measured zero.
 
+import type { SpendDay } from "./types";
+
 /** The two independent cost reports a colony or org carries: the Claude-side `cost_usd` and the
  *  gateway's `routed_cost_usd`. Both are null/absent when nothing has been measured (a subscription
  *  colony). A `Session` and an `OrgSpend` are both assignable to this. */
@@ -32,6 +34,25 @@ export function sumCosts(values: (number | null)[]): number | null {
     total += value;
   }
   return measured ? total : null;
+}
+
+/** The local-calendar "YYYY-MM-DD" of a moment — the day key the spend journal files its rows
+ *  under, and the same key the cockpit's `dayKeyOfDate` renders. Kept here so this cost primitive
+ *  need not import back from the cockpit. */
+function localDayKey(now: Date): string {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+/** Today's spend from the spend journal (its per-day rows, GET /api/spend/history) — the rows filed
+ *  under the local calendar day of `now`, summed across their orgs. Null when the journal has no row
+ *  for today, or none of its orgs ever measured one: "unmeasured" stays null, never $0.00. */
+export function spendToday(rows: SpendDay[] | null | undefined, now: Date): number | null {
+  const key = localDayKey(now);
+  return sumCosts(
+    (rows ?? [])
+      .filter((row) => row.day === key)
+      .flatMap((row) => row.orgs.map((org) => sumCosts([org.cost_usd, org.routed_cost_usd]))),
+  );
 }
 
 /** Render a cost: "—" when unmeasured, else "$X.XX". A measured zero IS "$0.00". */

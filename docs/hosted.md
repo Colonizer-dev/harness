@@ -6,8 +6,9 @@ Colonizer inherits the local one's behaviour instead of growing a second API to 
 
 **Status.** The contract is the deliverable, and two of its pieces are in the code already:
 deployment-keyed credential storage (`COLONIZER_DEPLOYMENT`) and the pre-upload manifest
-(`GET /api/upload/manifest`). The hosted service itself, the outpost agent, the fleet view and
-multi-user sign-in are `PLANNED`: no code, no account system, no endpoint that talks to one.
+(`GET /api/upload/manifest`). The fleet view over several motherships has shipped since
+([fleet.md](fleet.md)). The hosted service itself, the outpost agent and multi-user sign-in are
+`PLANNED`: no code, no account system, no endpoint that talks to one.
 Where a section says "follow-up", that sentence is the whole of what exists. Terms as in
 [outposts.md](outposts.md); "hosted" is a mothership someone else runs for you.
 
@@ -106,8 +107,9 @@ same operation as recovery — re-entering — because there is no re-key comman
 1. Set the new `COLONIZER_MASTER_KEY` and restart the mothership.
 2. Re-enter each credential in Settings. Every save writes a fresh `.enc` under the new key and
    removes the stale one, so no separate cleanup is needed: the provider keys (`provider-keys/`),
-   the GitHub token (`github-token`), the Claude credential (`claude-token`, or
-   `claude-accounts/<account>` when you use several), colony secrets (`colony-secrets/<ENV>`),
+   the GitHub token (`github-token`), the Claude credential (`claude-accounts/<account>` — the
+   token routes save into the default account, and a pre-accounts `claude-token` is migrated into
+   `claude-accounts/default`), colony secrets (`colony-secrets/<ENV>`),
    the notification signing secret (`notify-secret`), the mem0 key (`memory-keys/mem0`), the
    voice keys (`voice-keys/<provider>`) and the web-push VAPID key (`push-vapid-key`).
 3. Alternatively, delete the stale `.enc` files under the config directory first and then
@@ -176,5 +178,5 @@ Each of these is unbuilt; naming them keeps them out of the contract above: the 
 itself, with the upload transfer and its confirmation dialog; the workspace credential, issued
 per workspace, bearer-only, managed in the UI; a re-key command, so key rotation stops meaning
 re-entering every secret; the outpost agent — enrollment, the colony-spec wire format, placement
-on real nodes; the fleet view over multiple motherships; multi-user auth — accounts and who may
+on real nodes; multi-user auth — accounts and who may
 see whose colonies; and the per-org record of the audit gate's deployment decision.

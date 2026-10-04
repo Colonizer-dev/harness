@@ -92,11 +92,17 @@ fn key_file(app: &App) -> PathBuf {
     app.cfg.config_dir.join("push-vapid-key")
 }
 
+/// Serialises the key's first use: two requests arriving together must settle on one key, or the
+/// loser's browser subscribes with a public key the stored private key no longer matches. Never an await.
+static VAPID_KEY: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 /// The VAPID signing key, generated on first use and kept like every other secret — base64 PKCS#8
 /// through `write_secret`, so the system keychain when it is available and a 0600 file otherwise,
 /// never in modules.json and never out through the API. One key signs for every device: it is this
 /// mothership's identity, and the browser shows it as the subscription's origin permission.
 pub fn signing_key(app: &App) -> Result<EcdsaKeyPair> {
+    // Held across the check, the generate and the write: the read and the write are one decision.
+    let _key = VAPID_KEY.lock().expect("the VAPID key lock");
     let rng = SystemRandom::new();
     if let Some(saved) = read_secret(&key_file(app)) {
         let der = b64_decode(saved.trim()).ok_or_else(|| anyhow!("the saved VAPID key is not base64"))?;
@@ -1076,7 +1082,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 pub(crate) mod tests {
     use super::*;
     use crate::notify::Event;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
     /// A colony as `sessions.json` holds one, with a sentinel in every free-text field: none of it
     /// may reach a push payload, because [`payload`] is only ever handed the one line and the id.
@@ -1394,6 +1400,56 @@ pub(crate) mod tests {
         assert!(!delete(&dir, &first.id).unwrap());
         assert_eq!(load(&dir).unwrap(), vec![other]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every concurrent first subscribe lands: `upsert` is a read-modify-write of one JSON file, so
+    /// without the store lock the last writer would drop the rows the others added.
+    #[test]
+    fn concurrent_subscriptions_all_persist() {
+        let dir = std::env::temp_dir().join(format!("colonizer-push-{}", short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let start = Barrier::new(16);
+        std::thread::scope(|scope| {
+            for i in 0..16 {
+                let endpoint = format!("https://fcm.googleapis.com/fcm/send/{i}");
+                let dir = &dir;
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    upsert(dir, check(new_subscription(&endpoint, None)).unwrap()).unwrap();
+                });
+            }
+        });
+        assert_eq!(load(&dir).unwrap().len(), 16, "a subscribe was lost");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every concurrent first key request settles on one key: without the lock two callers could
+    /// each generate and store one, leaving a browser subscribed with a public key the stored
+    /// private key no longer matches.
+    #[test]
+    fn concurrent_first_key_calls_return_one_key() {
+        let root = std::env::temp_dir().join(format!("colonizer-push-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let start = Barrier::new(16);
+        let keys: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| {
+                    let app = &app;
+                    let start = &start;
+                    scope.spawn(move || {
+                        start.wait();
+                        b64url(signing_key(app).unwrap().public_key().as_ref())
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect()
+        });
+        assert!(
+            keys.iter().all(|key| *key == keys[0]),
+            "one key for every first caller: {keys:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

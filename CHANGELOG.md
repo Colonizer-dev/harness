@@ -18,6 +18,282 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.2] - 2026-10-04
+
+### Added
+
+- **The graft skillset downloads and installs instead of always saying it is not published.** The
+  `graft-0.19.0-1` release is published and pinned in `crates/colonizer/graft.lock`, one row per
+  colony architecture (`linux-x86_64`, `linux-aarch64`), each checked against the release's
+  `SHA256SUMS`. On those architectures the Skillsets row offers **Download** instead of reporting
+  the skillset as unpublished, and the download unpacks graft to `<data>/plugins/graft` with its
+  own Node 22. An architecture no release pins still reports `unavailable`, and an operator's own
+  `plugins/graft` directory is still used as is. ([#607])
+- **Loops that work on GitHub now run instead of parking on a question.** A loop template like "Triage new issues" needs GitHub, but a colony has no GitHub token, so on a private repository the run booted a colony that could only ask what to do. A loop now carries a **Needs GitHub** switch, on by default for the triage, CI-flake and changelog templates. Before such a loop launches anything the mothership checks it can read the repository; if it cannot, no colony boots and the loop's note says what is missing and how to fix it ("connect a GitHub token with access to `<repo>`"). A run that does launch gets the inputs it used to fetch itself — open issues touched since the last run, failed runs on the default branch, and pull requests merged since the last run — as read-only JSON under `/colonizer/github`, plus three host-proxied tools (`issue_label`, `issue_comment`, `issue_close_duplicate`) the orchestrator may call; the mothership makes the call on the loop's own repository, capped per colony and held back by the external-writes kill-switch. ([#778])
+- **A new Observability module: send the harness's logs, traces and metrics to your own backend.**
+  Settings → Modules now offers an `observability` kind with two providers — an OTLP endpoint (Grafana
+  Cloud, a local collector, Datadog, Honeycomb, Elastic, SigNoz, New Relic or any OpenTelemetry
+  backend, over `http/protobuf` or `http/json`) and capped local files. It is off until you configure
+  it. The endpoint must be `http://` or `https://` with no credentials or query string, and a plain
+  `http://` is accepted only for loopback and private addresses unless you set `allow_insecure`; `grpc`
+  is refused in this build. Conversation content and agent thinking are off by default and turning
+  either on needs `"confirm_content": true` in the same save. A backend's header value lives in a new
+  **Observability headers** secret, never in the settings or a URL. Nothing is exported yet — this
+  issue lands the kind, its settings and the rules a save must pass. ([#840])
+- **A "Your cockpit" card tells you the address to bookmark, and the cockpit asks you to on first
+  sign-in.** Settings → Your cockpit (and a small header button, and the end of Setup) lists where
+  this cockpit can be reached — "On this computer", "On your network" or tailnet, and "Anywhere" once
+  remote access is on — each with Copy and a QR code. Every address is reduced to scheme, host and
+  base path, so the one-time sign-in link from your terminal (`?token=…`) and a phone pairing code
+  never ride into a bookmark or a QR code. On first sign-in a prompt offers a bookmark (with the
+  browser's shortcut) and, where the browser supports it, the app install; phones get their platform's
+  Add to Home Screen steps instead. Dismissing or installing is remembered per device, and the card's
+  **Add to this device** offers it again. ([#867])
+
+### Changed
+
+- **A colony parked on an outlived autopilot hold now resumes itself; a resumed autopilot colony
+  verifies and publishes like a fresh one.** When the autonomy judge is configured, a hold-parked
+  colony auto-resumes on a 1h/3h/9h backoff, and the resume note tells the agent to pick the
+  Recommended option and note it in `pr.md`; an answer sent while it sat parked resumes it with that
+  answer; a question above the judge's risk ceiling stays parked and notifies a person once; after
+  the last step a colony that parks again fails with `abandoned_question` and keeps its worktree.
+  A colony resumed from parked (or stopped) now verifies and publishes after its first completed
+  turn even when it leaves an existing `pr.md` untouched, so its work no longer waits on a hand-run
+  publish. `colonizer list --parked` lists the parked ones. ([#876])
+- **The `writes-outside-repo` exec policy no longer asks about writes into a colony's own microVM.** Its root filesystem is discarded when the colony stops, so `mkdir -p /root/target`, a rustup install under `/root/.cargo` or an install under `/usr` was never the host's to protect, and the built-in `ask` fired on nearly every build. The boot now writes the colony's writable host binds to `/colonizer/host-mounts`, and the rule asks only for a write at, under or above one of them (the worktree, `/harness/out`, the resume directory, `/colonizer/services`) — so a write to a host-backed path outside the repository still asks, and `rm -rf /root` asks while `/root/.claude/projects` is mounted. With no mount list (an older mothership, or a runner outside a VM) every absolute path outside the repository asks, as before. The `secret-paths` and `script-egress` denies are unchanged. ([#877])
+- **A run that died on an infrastructure blip is retried, and a loop re-runs it once.**
+
+  A colony whose microVM fails to start for an infrastructure reason — a runtime or image hiccup, a
+  timeout, a dropped connection, an HTTP 5xx — is retried with a backoff of 1, 5 and 15 minutes
+  before it is marked failed, so a blip no longer costs the work. A permanent failure (bad
+  configuration, missing credentials, a policy refusal, or a transient one whose budget is spent)
+  fails immediately as before. The class of the failure is recorded on the colony.
+
+  A loop follows the same idea across runs: when a run ends failed for an infrastructure reason, the
+  loop runs it once more within `retry_failed_runs` minutes of the run's start — 60 by default, `0`
+  to switch the re-run off — without counting it as a run or moving the next one. And `colonizer loop
+  list` now ends each row with the last run's outcome (`failed (transient_infra)`, `pr_opened`, …),
+  `-` when the loop has not run.
+  ([#881])
+- **The architecture, boundaries and trust-model pages match the code again.** The architecture diagram shows the CLI and MCP entry points, the modules, the model providers behind the gateway, the agent runners beyond Claude Code and fleet members on the mesh; the module tables list `resume`, `screen` and `voice` and the Codex, Grok Build and ACP runners; the mesh policy names the fleet rule; the packaging tree lists what `install.sh` actually stages; and stale line references in boundaries.md and decisions.md point at the current code.
+- **CLI, cockpit and Jev docs match the code again.** cli.md lists `redteam` and `fleet sync` as client commands, `migrate-store` among the local ones that refuse the client flags, `migrate-store --from`, and the full route set each token scope reaches (including the fleet scope's network policy and preview proxy); cockpit.md counts OpenCode among the modules that fetch their CLI on first boot; jev.md points at the shadow-only brief picks.
+- **Fleet, outposts, colonies, remote-access and good-first-issues docs match the code again.** The colony guide no longer says the CLI and MCP lack an epic override, outposts.md names fleet placement and the closed #298 gate, the tunnel contract's code references point at the current lines, the security review records that R1 is fixed and R2 narrowed, and the good-first-issues list drops the eight issues that have all closed.
+- **Install, configuration and hosted docs match the code again.** The Rust minimum for a build from source is 1.98, the local-commands table lists `fleet export`/`fleet import`, the config- and data-directory listings name `fleet.json`, `phones.json`, `deja/` and `fleet-imports/`, the credentials table says `OPENAI_API_KEY`/`XAI_API_KEY` also feed the codex and grok-build modules, development.md runs the hermes and grok-build suites, hosted.md no longer lists the shipped fleet view as planned, and usage-data.md names the telemetry crate as the crates.io dependency it now is.
+- **Protocol docs match the code again.** docs/protocol.md now lists every colony `origin` the built-in loops stamp, the read and operate routes a scoped API token actually reaches (`seen`, `keep`, the TypeScript any loop), the cockpit's current views and Settings sections, where model calls go (the provider gateway, or the module's own API), and that burn-down does not use the red-team runs ([#927]); docs/conformance.md no longer calls §7 proposal-only.
+- **Agent module docs match the code again.** The Pi and OpenCode READMEs name the Settings tab by its real label (Model providers), the ACP README drops a duplicated sentence in its Grok Build notes, the Claude Code README points at the Exec policy section below its table, and the runner-authoring checklist cites the codex `preflight` function instead of a stale line range.
+- **The security docs match the code again.** `docs/escape-vectors.md` and `docs/sandbox-network.md` cite current line numbers for every in-repo mechanism (they had drifted by hundreds of lines), the escape checklist lists the extra `/proc` and `/sys` masks the boot script applies and states the egress compile order precisely, and `docs/audit.md` says CI is a required check on `main` (it is, through branch protection that also requires `vulnerabilities`) and names the CI jobs that run today. Open questions went to issues: [#932], [#933], [#934], [#935].
+- **The vision page's Shape diagram matches today's harness.** Model calls go through the mothership's provider gateway (keys stay on the host) to any configured provider, the agent runner can be Claude Code, Codex, OpenCode or Pi, and the diagram now shows the modules (watchdog, autonomy, memory, notify, loops, merge train) and fleet members.
+
+### Fixed
+
+- **The ACP and Grok Build runner tests pass on macOS.** There `os.tmpdir()` is under `/var/folders/…`, a symlink to `/private/var/folders/…`, and the runners resolve paths with `realpath`, so a temp root made with a bare `mkdtempSync` disagreed with the resolved path a confinement or folder-trust assertion compared it against. Every such root in `modules/agents/acp/test/runner.test.mjs` and `modules/agents/grok-build/test/runner.test.mjs` is now built with `realpathSync(mkdtempSync(…))`, so the expected and actual values share one form. Test-only change: no production behaviour moves. ([#751])
+- **The autonomy judge no longer fails silently when its model is unreachable.** A judge model call that failed — a `402 Insufficient Balance`, a rate limit, a timeout — used to be swallowed: the judge simply stopped answering and nothing said why. Every call is now classified (`ok`, `provider_error`, `rate_limited`, `timeout`, `unreachable`, `refused`), the outcome lands in the colony's `harness.jsonl` and in the ledger's drop reason (`undelivered: provider_error`), and three consecutive provider failures on the primary model raise exactly one notification and one attention item naming the provider and the error. A new `fallback_models` setting (a comma-separated list of `provider/model` ids) lets the judge answer through a second model while the primary is down, and the harness line and the answer's attribution record which model answered. `GET /api/autonomy/status` reports the judge's model, its fallbacks, the last success and failure and the failure streak, and `PUT /api/modules/autonomy` now probes the primary model with a tiny test call before saving — refusing with the provider's own error (`The judge model deepseek/deepseek-flash failed a test call: deepseek/deepseek-flash 402 Insufficient Balance`) unless the body carries `"save_anyway": true`. Skips that can hide a problem (a suspended colony, answers exhausted, a missing question) are logged once per question and reason. ([#875])
+- **A colony whose agent said it was done but never ended its turn is finished for it.** The runner
+  emits its final answer as an `assistant_text` and only then a `turn_end`; when it wobbles between
+  the two, the turn never ended, nothing verified the claim, and autopilot never published — the
+  colony just sat there until the stall watchdog nudged an agent that had already stopped. Now, two
+  minutes past a final answer with no tool call in flight, no open question and nothing through the
+  gateway, the watchdog asks agentd whether it is alive; when it is, the turn is ended on the
+  colony's behalf, a `watchdog_turn_end` event is recorded, and verification and publish carry on as
+  they would have. A later real `turn_end` for the same turn publishes nothing new. If agentd itself
+  is not answering the colony is wedged: the recovery retries on the next tick and leaves the colony
+  to the existing stall handling. ([#878])
+- **An update or a restart drains the mothership first, so a colony that is booting is no longer killed by the restart.** `colonizer update` and the Settings button, and a SIGTERM stop, now hold the queue — no new boot starts, a launch or a resume asked for while draining waits — and wait up to five minutes (`COLONIZER_DRAIN_TIMEOUT_SECS`, default 300) for the colonies that are booting or publishing, then requeue any boot the wait gave up on with `interrupted_by_restart` on its log instead of leaving it stopped. A colony still publishing when the wait runs out is not interrupted: the update refuses there instead, clears the drain and says to try again once the publish finishes. Scripts can drive the flag with `GET`/`POST /api/admin/drain` (owner token) and poll `ready` before updating or killing the process. On a hand-run install, `scripts/install.sh` and `scripts/install-release.sh` no longer touch a slot a process is still running from: staging into a slot in use is refused, naming the slot and pid(s), and the previous slot is kept when a mothership or colony is still reading it, for the next start to sweep. A process started through a symlink outside the slot — the way `~/.local/bin/colonizer` starts the mothership, so `ps` shows the link, not the slot — is still found, by the real executable behind the link (`/proc/<pid>/exe` on Linux, `lsof` on macOS when installed) as well as by command line. The systemd user unit and the LaunchAgent now carry `KillMode=mixed` and `TimeoutStopSec=330` / `ExitTimeOut=330`, so the drain gets its time and only leftover helper processes (a boot's `msb`, `git-remote-http`, `gh`) are killed; an existing install re-writes the unit with `colonizer login-item enable`. ([#880])
+- **macOS updates keep the Keychain's grant.** A release install or an in-place update replaces the host binary, and the macOS Keychain ties each saved secret to the binary that wrote it — ad-hoc signing makes the new binary a stranger, so the mothership asked for every secret again after `colonizer update`. The installer now re-signs the new `bin/colonizer` with `COLONIZER_CODESIGN_IDENTITY` (from the environment, or the identity a source build with it set records in `~/.local/share/colonizer/codesign-identity`) before moving the `app` symlink. An identity that came in the environment is recorded there too, so an update started from the cockpit — whose installer has no environment of its own — re-signs as well; delete the file to stop re-signing. A `codesign` failure removes the staged slot and stops before the switch, leaving the previous, already-trusted version installed. ([#939])
+- **A `gh` that is installed but not logged in no longer makes an update look like a forged release.** The provenance step of `scripts/install-release.sh` ran `gh attestation verify` and read any non-zero exit as "these checksums are not what the release workflow signed" — so on a headless host, where `gh` prints `To get started with GitHub CLI, please run:  gh auth login` and exits non-zero, every update was refused with a false accusation of tampering. An unauthenticated `gh` is now a skip, like a missing `gh`: the checksum-verified install goes on and the note says: `gh is not logged in, so it cannot fetch the attestation; run 'gh auth login' or set GH_TOKEN to verify provenance`. Under `COLONIZER_REQUIRE_ATTESTATION=1` that skip is still fatal, with the same message. A logged-in `gh` that actually rejects the attestation remains the hard "it is wrong" failure, decided by the wording (`gh auth login`) or by `gh auth status` failing. The mothership also passes the GitHub token saved in settings to the installer as `GH_TOKEN` when the environment carries none, so a headless host with a saved token verifies provenance instead of skipping it. ([#940])
+- **The installers parse under macOS `/bin/sh` (bash 3.2).** The app-slot process walk that came
+  with update draining (above) put a `case` inside `$( … )`, which bash 3.2 cannot parse, so `curl …
+  | sh` on macOS and `scripts/install.sh --bundle` would have stopped with `syntax error near
+  unexpected token ';;'`. Caught before any release shipped it: the pattern now carries its optional
+  leading `(`, which every POSIX shell accepts.
+- **The vision page's Shape diagram shows how Claude calls really leave a colony.** Unrouted Claude models go straight to api.anthropic.com with a placeholder key swapped at the edge; only `<provider>/<model>` calls go through the mothership's provider gateway (modules/agents/claude-code/router.mjs).
+
+## [v0.2.1] - 2026-10-03
+
+v0.2.0 was tagged but never published: its release build failed on macOS (below), so it has no
+GitHub release and never reached crates.io. v0.2.1 is v0.2.0 plus this fix; everything listed under
+v0.2.0 ships for the first time here.
+
+### Fixed
+
+- **The web UI builds on macOS and Windows again.** `web/src/cockpit/fleetColonies.ts` sat next to
+  `FleetColonies.tsx`, names that differ only in letter case, so on a case-insensitive filesystem
+  `tsc` resolved the view's import to the wrong file and the build failed; that is what stopped the
+  v0.2.0 macOS release build. The model file is now `fleetColoniesModel.ts`, and CI fails any pull
+  request that adds tracked paths (or script modules, ignoring the extension) differing only in
+  case. ([#915])
+
+## [v0.2.0] - 2026-10-03
+
+Never published: the tag exists, but the release build failed and nothing reached GitHub releases or
+crates.io. These changes ship in [v0.2.1].
+
+### Added
+
+- **Jev's decision layer is generalised, with a ledger and a per-org switch.** Beyond the routing second opinion, the harness now has one shared place an external classifier can be consulted at any decision point: a point names its question, the closed set of options it may answer with, and a time budget, and each ask produces a pick or a miss saying why there was none. Every ask that is not off appends a row to the data dir's **`decisions.jsonl`** (`point`, `mode`, the `pick` or `miss`, `latency_ms`, and `did` — what the harness actually did, `jev` or `rule`) and one activity line (`decision.shadow`, `decision.act`, `decision.fallback`). Two hard limits ride along: a pick outside the options is never acted on, and a point whose id begins with `publish.`, `security.`, `delete.` or `destroy.` is refused before any network call. An org can now set `jev: false` to turn every point off for its colonies with no network call. Off remains the default. ([#582])
+- **Colonies can log which memory notes and skill packs Jev would have loaded at boot.** A new
+  claude-code setting, `jev_brief_shadow` (off by default), asks Jev at boot to pick up to five of the
+  colony's shared-memory notes and skill packs. Notes tagged `house-rule` or `security` are mandatory:
+  always loaded, never offered. Picks are recorded, never acted on — memory stays pull-only and nothing
+  a colony sees changes — to `<data dir>/brief_picks.jsonl`, alongside a `used` row each time the colony
+  is later seen to read a watched note or touch a watched skill pack. A new
+  `node scripts/bench.mjs brief` report grades the picks against those uses (true/false positives and
+  negatives, precision, recall, per run and overall); an `act` mode waits for the decision layer in
+  [#582] and a measured token saving on the bench. ([#585])
+- **Jev can now choose the recovery path when a step fails.** A second decision point, `recovery.path`, is consulted when a colony stops making progress or a turn ends with an error: from a closed set — `retry_same`, `retry_other_provider`, `narrow_task`, `nudge_agent`, `ask_human`, `stop` — the classifier may pick how to recover, offering `ask_human` and `stop` always and the other options by failure class. Nothing in the set pushes, publishes or deletes. **Shadow** mode (the shared `jev_shadow_mode`) asks and records Jev's pick beside the harness's own rule without applying it; **act** mode (`jev_recovery_act`) carries out a confident pick, with a per-colony cap (`jev_recovery_cap`, default 2) after which the colony is left for you — recoveries that ask a person or stop never count. Every decision is graded: ten minutes later a second `decisions.jsonl` row records whether the colony progressed (`{"progressed", "window_min"}`), in shadow as well as act. Off by default; a `JEV_API_KEY` secret is needed. ([#586])
+- **A colony image that carries bun and pnpm, so a done-claim verification stops calling those repositories unverifiable.** The default colony image is stock `node:24-bookworm`, which has npm, yarn classic and corepack but neither bun nor pnpm, so the verifier (`crates/colonizer/src/verify.rs`) reported a bun or pnpm repository's declared test command as `unverifiable` (exit 127). This adds `images/colony-node/Dockerfile`: the same base image (pinned by the digest already in `crates/colonizer/images.lock`) plus bun 1.4.2 (the `-baseline` x64 build, because colony microVMs may not expose AVX2) and pnpm 12.8.1, each fetched from its upstream release and checked against a sha256 recorded in the Dockerfile; yarn and corepack are left to the base image. `.github/workflows/colony-image.yml` checks the base digest against `images.lock`, builds the image, runs the verifier's exact bun and pnpm commands against the fixtures in `images/colony-node/test/`, and produces a CycloneDX SBOM and a Grype scan. Only a push to `main` publishes it, as `ghcr.io/colonizer-dev/colony-node:24-bookworm`, and prints the index digest for a follow-up to pin: **the node preset keeps using stock `node:24-bookworm` until that digest is in `images.lock`, so nothing changes for a colony until that follow-up lands.** The agent's brief also now names the repository's own package manager. ([#589])
+- **`colonizer launch` and the MCP `launch_colony` tool can pass the claim and epic overrides.** The cockpit and `POST /api/sessions` already took `allow_duplicate`, `queue_behind_holder` and `allow_epic`, but the CLI and the MCP tool did not, so a script hitting a held issue or an epic got a 409 (CLI exit 5) with no way through. `colonizer launch` now takes `--allow-duplicate`, `--queue-behind-holder` and `--allow-epic`, and `launch_colony` takes `allow_duplicate`, `queue_behind_holder` and `allow_epic`, sent as the matching body fields. The refusal texts now name the CLI flag alongside the field (`pass allow_duplicate (\`colonizer launch --allow-duplicate\`)`). ([#600])
+- **Codex, Grok Build and the ACP gemini preset now fetch their pinned CLI on first boot.** A colony on those agent modules no longer needs the agent CLI staged into its image: the runner downloads the pinned build — Codex's static musl tarball from the GitHub release assets (`github.com`, plus `release-assets.githubusercontent.com` / `objects.githubusercontent.com` for the served asset), Grok Build's gzip'd static ELF from `x.ai`, and the platform-independent `@google/gemini-cli` bundle from `registry.npmjs.org` — checks its sha256 from the module's lock file before extracting, and caches it under `$XDG_CACHE_HOME/colonizer/<agent>` (or `~/.cache/…`) for later boots. An operator running these colonies behind an egress allowlist must allow the hosts above. Hermes is unchanged: its CLI is still staged by nothing, so a stock preset image refuses a Hermes launch. ([#602])
+- **A provider's trusted mark, model map and disabled tools are now editable in Settings → Providers.**
+  All three already worked at the gateway, but the cockpit had no controls for them and `GET
+  /api/providers` left `trusted` out, so the form had nothing to prefill. The provider editor now has
+  a Connection policy group: a **Trusted** switch (lets the security-aware routing gate send
+  restricted-sensitivity paths — secrets, `.env` files, infra config — to this connection), a **Model
+  map** editor mapping a canonical model name to the name sent on the wire (blank rows are dropped),
+  and a **Disabled tools** list of Claude Code tools stripped from every request through it. `GET
+  /api/providers` now returns `trusted` (and already returned `model_map` and `disabled_tools`), so an
+  existing connection opens with its policy filled in and a save round-trips it — a field left out
+  keeps its saved value, an explicit empty one clears it. ([#605])
+- **A loop can be given an end date from the cockpit.** The loop form's new **Ends** field takes a
+  date and time in your local zone (`end_at`, stored as UTC), and the loop stops when its next run
+  would fall past it. A value that is not after now is refused in the form rather than by the
+  server, and the Loops list shows the day a dated loop ends. ([#608])
+- **The watchdog now notices a colony circling a denial, not only one that has gone quiet.** A run
+  of errored `tool_result` events that carry a `denial` (an egress or read-only refusal, a disabled
+  tool) with no successful result between them counts as no progress: from two in a row the watchdog
+  nudges on the clock of the last real progress rather than the loop's own activity, and the nudge
+  names the denied class and hint so the agent takes another route instead of retrying. The loop
+  cannot spend the nudges back, so the usual `max_nudges` flag still ends it; a successful result, a
+  person's message, a question or a turn end ends the loop and counts as progress as before. ([#609])
+- **A colony's records now go through one session store, and `colonizer migrate-store` copies that store elsewhere.** Startup reads the session index through the configured `SessionStore` instead of straight off disk, so an index it cannot read or parse is quarantined the same way as before, and every per-session write — the event log, the host chain's events, the findings ledger and the harness log — is appended through the store, landing at exactly the paths the file helpers wrote. The new `colonizer migrate-store --to DIR` copies this install's colonies into another local store (with `--from` defaulting to `COLONIZER_DATA_DIR`, and `--dry-run` to count what would move and write nothing); it refuses to run while something is listening on the mothership's port (most likely a running mothership) and prints the `COLONIZER_DATA_DIR` to switch to. What stays local is unchanged: the microVM's `vm/` secrets, the archive's copy and event rotation. ([#610])
+- **The inspector's pull request card now lists the changed files with their +/- counts.** Opening a
+  colony's card fetches `GET /api/sessions/{id}/diff` and shows each file's added and removed lines,
+  folding the list after five behind a "+N more" toggle; the answer is cached per colony for the tab,
+  so re-opening a card does not refetch. A colony with no diff (never booted, or cleaned up) simply
+  shows no file rows, and the branch and PR link are unchanged. ([#611])
+- **The overview header shows today's spend beside the running total.** The meta line under
+  "Overview" now reads "$N spent · $M today" when the spend journal has measured anything for the
+  current local day. The figure comes from the same `GET /api/spend/history` fetch the sparklines
+  already read — no extra request — and the history is now bucketed by the browser's local day (a
+  new `tz_offset_minutes` query param) rather than UTC, so the header, the sparklines and the
+  sparkline labels all agree on where a day ends. Today's figure is left out rather than shown as
+  $0.00 when today has no measured row. ([#613])
+- **Fleet placement: a colony records why it runs where it does, and a launch can pin a member.** A new
+  pure placement policy reads this member and the fleet's last-known peer summaries and decides where a
+  colony would go — this member when it has a free slot and can boot the image (a Linux peer needs a
+  working `/dev/kvm`, a Mac needs Apple Silicon), else the eligible peer with the most room, else back
+  here to queue — and the reason is stored on the colony as **`placement`** and shown under its status in
+  the cockpit. `POST /api/sessions` takes an optional **`host`** (a member's id or name) to pin a launch;
+  a peer's reduced `/api/status` now publishes its **`kvm_ok`** verdict so placement can read it.
+  Cross-member execution is not built yet (#298): an unpinned choice of a peer is recorded but still runs
+  here, and a pin to a peer is refused with the reason rather than moved. A duplicate-claim refusal also
+  says when the holding host is a fleet member the fleet currently reads as unreachable, so it is clear
+  its colony is not re-run here, and the fleet panel says the same of a member with colonies last seen
+  running. ([#688])
+- **The Overview now has a fleet colony list — every colony the fleet knows about, in one table.** Below the fleet panel, this host's own colonies (live from the session stream) sit beside the finished colonies members pushed to the owner. Each row shows the origin host, the colony (`repo#issue` and title), its status, what it is **waiting on** (`answer`, `slot`, `quota`, `ci` or `review`), its measured cost, and a link that opens the colony on its host — the cockpit's own `?colony=` deep link here, the member's cockpit URL for an imported row. Filters narrow by host, org and repository, and totals add cost up per repository, per host (member) and per day; a member that has pushed nothing shows as zero colonies and an em dash cost, never `$0.00`. Only finished colonies are imported (the same history Settings → Fleet history holds, newest five pages of a hundred), so an in-flight colony on another member is not listed yet. ([#689])
+- **A fleet owner can set one network policy for every member's colonies, and members can reach a
+  running colony's dev server.** The owner sets a fleet egress floor and a `reach` map with
+  `PUT /api/fleet/policy` (a member answers 409), stored as `fleet-policy.json`; each member fetches
+  it with its fleet token on the history-push cadence and clamps its colonies against it at boot, so
+  a member can tighten the floor (an allowlist under an open floor, extra blocks) but never loosen
+  it — a refused loosening is logged and listed in `GET /api/sessions/{id}/egress`. The owner's own
+  colonies are clamped too, and the always-blocked set is unchanged. Separately, the owner opens a
+  preview of a running colony's guest port with `POST /api/sessions/{id}/preview {"port": 5173}` and
+  reaches it at `/api/previews/{id}/…`, reverse-proxied plain HTTP to the guest over the mesh;
+  credentials are stripped before forwarding, it needs the owner's credentials or a fleet token
+  (403 unless the `reach` map lets a fleet caller through), and it is 404 once the colony stops.
+  Previews are mesh-only (409 with the mesh off), carry no WebSocket/HMR upgrade, and a dev server
+  serving absolute asset paths needs its base set to `/api/previews/<id>/`. ([#690])
+- **Memory snapshots for suspended colonies now have a host side, gated off for now.** A suspended
+  colony can be frozen in place and thawed with its conversation and open processes intact — but only
+  once the pinned microsandbox can restore a sandbox that has carried a `--secret`, which it cannot
+  today (see `sandbox::supports_memory_snapshot`), so nothing changes for a running colony yet. What is
+  in place behind that gate: a snapshot lives in `<session dir>/snapshots/`, sealed at rest with
+  ChaCha20-Poly1305 under a per-colony 256-bit key kept under the mothership's private state (never in
+  the snapshot directory), in 1 MiB chunks so a multi-gigabyte image is never held whole in memory.
+  Snapshots are kept only below an 8 GiB resident-memory cap and dropped after 48 h; a missing,
+  expired, corrupt or truncated snapshot — or a failed restore — falls back to today's transcript
+  resume. A restore re-mints the colony's gateway token (revoking the old one) and its tailnet VM
+  key. ([#702])
+- **Read a colony's own agent transcript over the API.** `GET /api/sessions/{id}/transcript?format=common` answers the conversation the agent module kept natively — the user turns, the assistant replies with their tool calls and results — normalized to one message shape whatever ran the colony (Claude Code, Codex, OpenCode, Grok or Hermes), with `meta`, a message `total` and the same `limit`/`cursor` paging as the colony list. The colony-writable mount is copied into a host-private directory, symlinks skipped and never followed, before anything reads it, so a planted link cannot reach a file outside the colony. Only `claude-code` and `codex` persist a transcript today; a module that has none, an unknown colony, or a store that cannot be read is a **404**, one with no reader is a **422**, a store over the size caps is a **413**, and a store that is there but will not parse is a **500**. Reading is behind the same token scope as the diff route (`read`). ([#736])
+
+### Changed
+
+- **In `allowlist` egress mode a colony now reaches the hosts its agent module declares.** Until now
+  an agent module's `egress` declaration in `module.json` was validated but unused, so allowlist mode
+  let a colony reach only what the operator listed in `egress_allow`; the agent's own vendor hosts had
+  to be restated there. Now the running module's `api`, `auth` and `extra` hosts join the allow list
+  (the union with the global and org `egress_allow`), so claude-code, codex, grok-build, acp and
+  opencode colonies reach their vendor's hosts on their own. The module's `telemetry` hosts stay out —
+  there is no opt-in for telemetry, so list one in `egress_allow` yourself if you want it. A declared
+  host is lowercased and validated like an operator entry, and it cannot reopen anything: the
+  always-blocked deny set and the operator's `egress_block` still compile ahead of every allow.
+  `open` mode is unchanged. Each colony's record at `<session dir>/egress.json`, served by
+  `GET /api/sessions/{id}/egress`, gains a `module` object naming the module and the entries it
+  contributed. ([#601])
+- **`GET /api/storage` now reports the log archive, and the Storage panel words its archive form
+  honestly.** Its `totals` gains `archive_bytes`, the size of the bundles under
+  `<data_dir>/archive`, so the archive sits beside worktrees, repos and sessions in the breakdown
+  (it already counted physically against the free-disk floor, which measures the data disk). The
+  panel's log-archive form was headed "Automatic cleanup", which read as if pressing it saved a
+  rule; it is now "Clean up now", with a line saying it runs once on request and that automatic
+  retention is the Disk cleanup loop's **Session archives** category (off by default). The archive
+  module docs and [colonies.md](docs/colonies.md) say the same. ([#606])
+- **The Inbox now shows what happened, one line per event, instead of one line per colony.** It reads
+  the same activity log History does (`GET /api/activity`), so a question, a returned pull request or
+  a failure keeps its own line at the time it happened, rather than being folded into the colony's
+  current state stamped with an `updated_at` that every housekeeping write moves. A line that has
+  been dealt with stays: an answered question is marked "answered", a pull request opened then merged
+  shows both lines with the opened one marked "handled", and merges and closes are marked as such —
+  dimmed, with a small tag, and never counted as unread. A colony that needs you now but has no line
+  in the log (the fetch failed, or the page does not reach back far enough) is still read off the
+  colony list, so an empty log shows the inbox as before. ([#612])
+- **The README is a short front page; the detail moved to docs/.** What the harness is, how to run it,
+  how it works and a table of every docs page. The trust model is now
+  [docs/trust-model.md](docs/trust-model.md), configuration and per-colony limits
+  [docs/configuration.md](docs/configuration.md), the test suites and scripts
+  [docs/development.md](docs/development.md); the modules and repository layout joined
+  [docs/architecture.md](docs/architecture.md), the roadmap, the argument and the diagram
+  [docs/vision.md](docs/vision.md), and what the harness does not do [docs/gaps.md](docs/gaps.md).
+
+### Fixed
+
+- **The relay test suite no longer flakes with "hello was never verified".** `services/relay/test/fakes.mjs` gave the fake relay a `helloTimeoutMs` of `2000` — the same value as the `within()` guard's default — so the relay's own hello-timeout timer and the test guard sat at the same duration, and under load the asynchronous Ed25519 hello verification could lose the race and have its socket closed before it finished. The fake's `helloTimeoutMs` is now `5000` (still below the production default of `10000`) and the `within()` guard is `10000`, so the handshake has comfortable headroom and the two timers no longer race. Test-only change: no production behaviour moves. ([#598])
+- **The ACP agent's `model` setting is applied.** The runner now reads `COLONIZER_MODEL` and sends `session/set_model` right after `session/new`, using the same request the cockpit's live `set_model` command already sent, so the agent starts on the model the module setting names (the gemini and grok presets advertise model selection; an agent that does not keeps its own default and the runner logs one warning instead of failing). ([#603])
+- **The local commands no longer silently ignore `--host`, `--token-file` and `--json`.** `colonizer
+  update` is a thin client of a running mothership, so it now honours `--host` and `--token-file`
+  and names the address it actually dialled when none answers; it refuses `--json`. The other local
+  commands — `open`, `login-item`, `telemetry`, `version`, `completions` and `man` — refuse all
+  three with a usage error (exit 2), and their `--help` no longer lists them. So `colonizer --host
+  <tailnet:7878> update` now reaches the mothership there instead of `127.0.0.1`, while `colonizer
+  open` stays local on purpose and always prints this machine's link. The client commands are
+  unchanged. ([#604])
+- **`colonizer update --force` now shows the real session and colony counts in its warning.** The warning read `GET /api/sessions` without the per-install bearer token the API has required since #421, so it always got a 401 and fell back to a vague "the sessions in sessions.json". The CLI now sends the same token it uses for the rest of `colonizer update`, and a non-2xx answer is turned into a definite error, so the count reads as unknown only when it genuinely is. ([#620])
+- **A Claude token saved after an account exists is no longer ignored.** `POST /api/settings/claude-token` and the "Log in with Claude subscription" flow wrote the legacy `<config>/claude-token`, which the resolver only fell back to when the default account had no secret — so once any account existed (or a legacy token had been migrated into `default`), a later-saved token sat unused. Both now save into the default Claude account, creating the `default` account (and making it the default) when none exists, and clear the legacy file so there is one source of truth. `DELETE /api/settings/claude-token` clears that account's secret and the legacy file but keeps the account record. Migration and account deletion now go through the secret store too, so a legacy token held in the keychain or as `claude-token.enc` is moved rather than missed, and deleting an account clears its keychain/`.enc` copy rather than leaving it behind. A token saved *before* this change, while accounts already existed, is still sitting in `<config>/claude-token` and is only used while the default account has no secret — re-saving it puts it in the default account. ([#621])
+- **Five small correctness fixes across the harness.** The live map no longer counts a suspended colony as running — its microVM is down, so it is counted with the same predicate the spend page already reported as parallel, and parked colonies no longer put a dot on the map. A spend row filed for a turn whose cost has no single owning model now carries a timestamp like every other row instead of an empty one. The provider editor now refuses a negative, NaN or infinite thinking-per-million rate, the same way it already refuses the other prices. A stacked colony whose base is another colony's branch — which has no `origin/` ref until it is pushed — now measures its diff against the local branch instead of failing with a 409, the same order catch-up merges by. And the VAPID signing key is now generated and stored under one lock, so two first-time subscribers can no longer race and each create a key (the push-subscriptions file was already locked; only the key race is fixed). ([#622])
+- **The README's `curl -fsSL https://colonizer.dev/install.sh | sh` no longer 404s.** That URL is a
+  redirect to the latest GitHub release's `install.sh`, and the graft and headroom bundle workflows
+  were publishing their releases as "latest", so the newest bundle (a release with no `install.sh`)
+  held the name and the app release went without. Both bundle workflows now pass
+  `gh release create --latest=false`, and the app release's final `gh release edit` that publishes
+  the draft now passes `--latest`, so a `v*` tag claims "latest" deterministically. The README and
+  docs/install.md also now say a Linux user has to be in the `kvm` group before the installer will run
+  (`sudo usermod -aG kvm "$USER"`, then log out and back in), and the README lists `curl`, `tar`,
+  native Claude Code and the `~/.local/bin/colonizer` path among the prerequisites. ([#685])
+- **A restricted-sensitivity colony no longer boots into subagent models the gateway will refuse.**
+  A task whose paths classify `restricted` (or `vetted`) had its subagent, background and small
+  models resolved against the class at launch: a model on a provider the class will not trust — a
+  subagent model on an untrusted provider, say — is now replaced with an eligible one (the
+  orchestrator's model, or the module's own `model` for the orchestrator itself) instead of the
+  colony failing every subtask. Where the eligible model is itself blank — the default setup, where
+  the module names no `model` — the setting is cleared so the task inherits the harness default, and
+  recorded as "the orchestrator's model". Each substitution is logged once (a resume does not repeat
+  it) and recorded on the colony as `model_substitutions`, which the cockpit shows on the colony view;
+  a model the operator named at launch is resolved the same way. When no eligible model exists the
+  setting is left as it is and the boot warns that the gateway will refuse it. ([#704])
+- **colonizer-harness publishes to crates.io again.** v0.1.10 and v0.1.11 never reached crates.io: the harness compiles in the guest Claude Code pin with `include_str!`, and that file lived in `vendor/`, outside the crate, so the source package `cargo publish` builds from did not contain it and the build failed. The pin now lives at `crates/colonizer/claude-code.lock`, inside the crate like `images.lock`, and every script, workflow and doc that read `vendor/claude-code.lock` reads it from there. CI now builds both published crates from their own packaged source (`cargo publish --dry-run`, in the release's order) on every pull request, so a file the package leaves out fails the pull request instead of the release. ([#818])
+
 ## [v0.1.11] - 2026-10-02
 
 ### Added
@@ -1796,11 +2072,33 @@ Macs. ([#74])
 [#564]: https://github.com/Colonizer-dev/harness/issues/564
 [#565]: https://github.com/Colonizer-dev/harness/pull/565
 [#566]: https://github.com/Colonizer-dev/harness/pull/566
+[#582]: https://github.com/Colonizer-dev/harness/issues/582
 [#583]: https://github.com/Colonizer-dev/harness/issues/583
 [#584]: https://github.com/Colonizer-dev/harness/issues/584
+[#585]: https://github.com/Colonizer-dev/harness/issues/585
+[#586]: https://github.com/Colonizer-dev/harness/issues/586
+[#589]: https://github.com/Colonizer-dev/harness/issues/589
 [#591]: https://github.com/Colonizer-dev/harness/issues/591
+[#598]: https://github.com/Colonizer-dev/harness/issues/598
+[#600]: https://github.com/Colonizer-dev/harness/issues/600
+[#601]: https://github.com/Colonizer-dev/harness/issues/601
+[#602]: https://github.com/Colonizer-dev/harness/issues/602
+[#603]: https://github.com/Colonizer-dev/harness/issues/603
+[#604]: https://github.com/Colonizer-dev/harness/issues/604
+[#605]: https://github.com/Colonizer-dev/harness/issues/605
+[#606]: https://github.com/Colonizer-dev/harness/issues/606
+[#607]: https://github.com/Colonizer-dev/harness/issues/607
+[#608]: https://github.com/Colonizer-dev/harness/issues/608
+[#609]: https://github.com/Colonizer-dev/harness/issues/609
+[#610]: https://github.com/Colonizer-dev/harness/issues/610
+[#611]: https://github.com/Colonizer-dev/harness/issues/611
+[#612]: https://github.com/Colonizer-dev/harness/issues/612
+[#613]: https://github.com/Colonizer-dev/harness/issues/613
 [#618]: https://github.com/Colonizer-dev/harness/issues/618
 [#619]: https://github.com/Colonizer-dev/harness/issues/619
+[#620]: https://github.com/Colonizer-dev/harness/issues/620
+[#621]: https://github.com/Colonizer-dev/harness/issues/621
+[#622]: https://github.com/Colonizer-dev/harness/issues/622
 [#624]: https://github.com/Colonizer-dev/harness/issues/624
 [#625]: https://github.com/Colonizer-dev/harness/issues/625
 [#626]: https://github.com/Colonizer-dev/harness/issues/626
@@ -1840,17 +2138,25 @@ Macs. ([#74])
 [#682]: https://github.com/Colonizer-dev/harness/issues/682
 [#683]: https://github.com/Colonizer-dev/harness/issues/683
 [#684]: https://github.com/Colonizer-dev/harness/issues/684
+[#685]: https://github.com/Colonizer-dev/harness/issues/685
 [#686]: https://github.com/Colonizer-dev/harness/issues/686
 [#687]: https://github.com/Colonizer-dev/harness/issues/687
+[#688]: https://github.com/Colonizer-dev/harness/issues/688
+[#689]: https://github.com/Colonizer-dev/harness/issues/689
+[#690]: https://github.com/Colonizer-dev/harness/issues/690
 [#700]: https://github.com/Colonizer-dev/harness/issues/700
 [#701]: https://github.com/Colonizer-dev/harness/issues/701
+[#702]: https://github.com/Colonizer-dev/harness/issues/702
+[#704]: https://github.com/Colonizer-dev/harness/issues/704
 [#707]: https://github.com/Colonizer-dev/harness/issues/707
 [#728]: https://github.com/Colonizer-dev/harness/issues/728
+[#736]: https://github.com/Colonizer-dev/harness/issues/736
 [#742]: https://github.com/Colonizer-dev/harness/issues/742
 [#743]: https://github.com/Colonizer-dev/harness/issues/743
 [#744]: https://github.com/Colonizer-dev/harness/issues/744
 [#745]: https://github.com/Colonizer-dev/harness/issues/745
 [#746]: https://github.com/Colonizer-dev/harness/issues/746
+[#751]: https://github.com/Colonizer-dev/harness/issues/751
 [#754]: https://github.com/Colonizer-dev/harness/issues/754
 [#759]: https://github.com/Colonizer-dev/harness/issues/759
 [#761]: https://github.com/Colonizer-dev/harness/issues/761
@@ -1861,6 +2167,27 @@ Macs. ([#74])
 [#766]: https://github.com/Colonizer-dev/harness/issues/766
 [#767]: https://github.com/Colonizer-dev/harness/issues/767
 [#774]: https://github.com/Colonizer-dev/harness/issues/774
+[#778]: https://github.com/Colonizer-dev/harness/issues/778
+[#818]: https://github.com/Colonizer-dev/harness/issues/818
+[#840]: https://github.com/Colonizer-dev/harness/issues/840
+[#867]: https://github.com/Colonizer-dev/harness/issues/867
+[#875]: https://github.com/Colonizer-dev/harness/issues/875
+[#876]: https://github.com/Colonizer-dev/harness/issues/876
+[#877]: https://github.com/Colonizer-dev/harness/issues/877
+[#878]: https://github.com/Colonizer-dev/harness/issues/878
+[#880]: https://github.com/Colonizer-dev/harness/issues/880
+[#881]: https://github.com/Colonizer-dev/harness/issues/881
+[#915]: https://github.com/Colonizer-dev/harness/issues/915
+[#927]: https://github.com/Colonizer-dev/harness/issues/927
+[#932]: https://github.com/Colonizer-dev/harness/issues/932
+[#933]: https://github.com/Colonizer-dev/harness/issues/933
+[#934]: https://github.com/Colonizer-dev/harness/issues/934
+[#935]: https://github.com/Colonizer-dev/harness/issues/935
+[#939]: https://github.com/Colonizer-dev/harness/issues/939
+[#940]: https://github.com/Colonizer-dev/harness/issues/940
+[v0.2.2]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.2
+[v0.2.1]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.1
+[v0.2.0]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.0
 [v0.1.11]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.11
 [v0.1.10]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.10
 [v0.1.9]: https://github.com/Colonizer-dev/harness/releases/tag/v0.1.9

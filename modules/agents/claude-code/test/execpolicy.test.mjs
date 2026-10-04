@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { buildOptions, runAgent } from '../runner.mjs';
 import { AsyncQueue } from '../runner.mjs';
 import {
+  HOST_MOUNTS_FILE,
   createExecAllowCache,
   defaultPolicy,
   evaluateExecPolicy,
@@ -73,7 +74,9 @@ test('the default layer denies a script that calls out, and allows a benign one'
 });
 
 test('the default layer asks when a command writes outside the repository, and not for /tmp', () => {
-  const policy = loadExecPolicy({});
+  // readFile: () => null keeps the mount list unknown, so the conservative fallback holds whatever
+  // a real /colonizer/host-mounts on the test machine would say (#877).
+  const policy = loadExecPolicy({}, { readFile: () => null });
   const ask = (command) => decide(policy, command, '/repo');
   assert.equal(ask('echo x > /etc/foo')?.decision, 'ask');
   assert.equal(ask('echo x >> /var/log/app.log')?.decision, 'ask');
@@ -87,6 +90,31 @@ test('the default layer asks when a command writes outside the repository, and n
   assert.equal(ask("sed 's/</>/g' f"), null, 'a `>` inside a quoted pattern is not a redirect');
   assert.equal(ask('echo x > inside.txt'), null);
   assert.equal(ask('echo x > /repo/inside.txt'), null);
+});
+
+// The vectors the ACP runner's test drives its own (byte-identical) copy of execpolicy.mjs with:
+// a colony whose microVM root filesystem is discarded, with only these host-backed mounts writable.
+const vmWrites = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-vm-writes.json', import.meta.url), 'utf8'));
+
+test('with the boot’s host mounts, only a write to a host-backed path asks (issue #877)', () => {
+  const mountsText = `${vmWrites.hostMounts.join('\n')}\n`;
+  const policy = loadExecPolicy({}, {
+    cwd: vmWrites.cwd,
+    readFile: (path) => (path === HOST_MOUNTS_FILE ? mountsText : null),
+  });
+  assert.deepEqual(policy.hostMounts, [...vmWrites.hostMounts], 'the mount list is parsed off the file');
+  for (const { command, decision, rule } of vmWrites.cases) {
+    const hit = evaluateExecPolicy(policy, command, { cwd: vmWrites.cwd });
+    assert.equal(hit?.decision ?? null, decision, command);
+    if (rule) assert.equal(hit.rule, rule, command);
+  }
+});
+
+test('without a host-mount list, every write outside the repository still asks (#877)', () => {
+  const policy = loadExecPolicy({}, { cwd: '/workspace', readFile: () => null });
+  assert.equal(policy.hostMounts, null, 'no file, no list');
+  assert.equal(decide(policy, 'mkdir -p /root/x', '/workspace')?.decision, 'ask');
+  assert.equal(decide(policy, 'echo x > /usr/local/bin/tool', '/workspace')?.decision, 'ask');
 });
 
 test('a later layer can narrow but never widen', () => {

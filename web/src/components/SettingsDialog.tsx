@@ -18,6 +18,7 @@ import { deviceLabel, pushSupported, subscribeThisDevice, thisDeviceSubscription
 import { PushDeviceList } from "./PushDevicePrefs";
 import { Avatar } from "./Avatar";
 import type {
+  AutonomyStatus,
   HarnessStatus,
   HeadroomStatus,
   Mem0Check,
@@ -75,6 +76,7 @@ import { isSafari, runningStandalone, useInstallPrompt } from "../installApp";
 import { IosHomeScreenSheet, showIosInstallHint } from "./IosHomeScreenSheet";
 import { OrgSettingsForm } from "./OrgSettingsDialog";
 import { PhonePane } from "./PhonePane";
+import { YourCockpitCard } from "./YourCockpitCard";
 import { GuideIcon, ModuleProviderMark, SectionHero, guideFor, isAdvancedField, type FlowChip, type FlowNode, type HeroStat } from "./settingsGuide";
 import { orgEnabled } from "../orgs";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputClass, meshBroken, sameOrg, seconds, timeAgo, useMediaQuery, type Tone } from "./ui";
@@ -84,7 +86,7 @@ import { Badge, Button, InfoButton, Spinner, Switch, cx, formatDuration, inputCl
 // Below 700px the list is the first screen and each section is a back-navigable page.
 // ---------------------------------------------------------------------------
 
-export type SectionId = "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
+export type SectionId = "cockpit" | "setup" | "connections" | "providers" | "runtime" | "live-map" | "remote" | "phone" | "tokens" | "fleet" | "updates" | "usage" | "notifications" | "desktop" | `module:${string}` | `org:${string}`;
 
 const PANE_TITLE_ID = "settings-pane-title";
 
@@ -104,6 +106,7 @@ const KIND_INFO: Record<string, { title: string; description: string }> = {
   burn_down: { title: "Burn-down", description: "Spend the weekly token plan down to a reserve before it resets" },
   screen: { title: "Prompt screening", description: "Screen the diff and PR body for hidden code points before publishing" },
   voice: { title: "Voice", description: "Speech-to-text for the composer's microphone" },
+  observability: { title: "Observability", description: "Send logs, traces and metrics to Grafana or any OpenTelemetry backend" },
 };
 
 const kindInfo = (kind: string) => KIND_INFO[kind] ?? { title: kind, description: "" };
@@ -349,6 +352,11 @@ export function SettingsBody({
       label: "General",
       items: [
         {
+          id: "cockpit",
+          label: "Your cockpit",
+          hint: "The address to bookmark for this cockpit",
+        },
+        {
           id: "setup",
           label: "Setup",
           hint: "The checklist for the first colony",
@@ -536,7 +544,14 @@ export function SettingsBody({
   };
 
   let pane: ReactNode = null;
-  if (active === "setup") {
+  // Your cockpit first: the address to bookmark, with Copy and a QR code, and the way into pairing.
+  if (active === "cockpit") {
+    pane = (
+      <Pane title="Your cockpit" subtitle="The address to bookmark for this cockpit" back={back}>
+        <YourCockpitCard remote={remote} onOpenPhone={() => select("phone")} />
+      </Pane>
+    );
+  } else if (active === "setup") {
     pane = (
       <SetupSection
         status={status}
@@ -551,6 +566,7 @@ export function SettingsBody({
         onDismiss={onSetupDismissed}
         onShown={onSetupShown}
         onOpenLiveMap={() => select("live-map")}
+        onOpenCockpit={() => select("cockpit")}
         back={back}
       />
     );
@@ -1196,7 +1212,7 @@ function UpdatesPane({
   // pane follows it until the answer stops coming.
   useEffect(() => {
     const phase = update?.apply.phase;
-    if (phase !== "installing" && phase !== "restarting") return;
+    if (phase !== "draining" && phase !== "installing" && phase !== "restarting") return;
     const timer = setInterval(() => {
       api
         .update()
@@ -1280,15 +1296,27 @@ function UpdatesPane({
               <div className="mt-2.5 flex flex-wrap items-center gap-2">
                 <Button
                   variant="primary"
-                  disabled={applying || !update.can_apply.ok || update.apply.phase === "installing" || update.apply.phase === "restarting"}
+                  disabled={
+                    applying ||
+                    !update.can_apply.ok ||
+                    update.apply.phase === "draining" ||
+                    update.apply.phase === "installing" ||
+                    update.apply.phase === "restarting"
+                  }
                   onClick={() => void install()}
                 >
-                  {update.apply.phase === "installing" || update.apply.phase === "restarting" ? <Spinner /> : null}
-                  {update.apply.phase === "installing"
-                    ? "Installing…"
-                    : update.apply.phase === "restarting"
-                      ? "Restarting…"
-                      : `Update to ${update.latest.version}`}
+                  {update.apply.phase === "draining" ||
+                  update.apply.phase === "installing" ||
+                  update.apply.phase === "restarting" ? (
+                    <Spinner />
+                  ) : null}
+                  {update.apply.phase === "draining"
+                    ? "Draining…"
+                    : update.apply.phase === "installing"
+                      ? "Installing…"
+                      : update.apply.phase === "restarting"
+                        ? "Restarting…"
+                        : `Update to ${update.latest.version}`}
                 </Button>
                 {!update.can_apply.ok && <span className="text-muted">{update.can_apply.reason}</span>}
               </div>
@@ -2139,6 +2167,7 @@ function ModulePane({
   const api = useApi();
   const toast = useToast();
   const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const providerId = useId();
   const headroom = useHeadroom(module.kind === "agent");
   const info = kindInfo(module.kind);
@@ -2146,18 +2175,43 @@ function ModulePane({
   const dirty = isDirty(module, draft);
   const providerInfo = module.providers.find((p) => p.id === draft.provider);
 
-  const save = async () => {
+  // The autonomy judge's health (issue #875): fetched when its pane opens and again after a save,
+  // since a save is the moment a broken judge is most likely to have just been configured.
+  const [judge, setJudge] = useState<AutonomyStatus | null>(null);
+  const loadJudge = useCallback(async () => {
+    try {
+      setJudge(await api.autonomyStatus());
+    } catch {
+      /* an older mothership has no /api/autonomy/status: there is no line to show */
+    }
+  }, [api]);
+  useEffect(() => {
+    if (module.kind === "autonomy") void loadJudge();
+  }, [module.kind, loadJudge]);
+
+  const save = async (anyway = false) => {
     setSaving(true);
     try {
-      const saved = await api.saveModule(module.kind, { provider: draft.provider, enabled: draft.enabled, settings: draft.settings });
+      const saved = await api.saveModule(module.kind, {
+        provider: draft.provider,
+        enabled: draft.enabled,
+        settings: draft.settings,
+        ...(anyway ? { save_anyway: true } : {}),
+      });
       onSaved(saved);
+      setSaveError(null);
       toast(`${info.title} module saved`);
       // Choosing a stack is the moment to download it, not the first launch.
       if (module.kind === "sandbox") void pull.start();
       // Switching Headroom on is the moment to download its bundle, too.
       if (module.kind === "agent" && saved.settings?.headroom === true) void headroom.start();
+      if (module.kind === "autonomy") void loadJudge();
     } catch (error) {
-      toast(errorMessage(error), "error");
+      const message = errorMessage(error);
+      toast(message, "error");
+      // The autonomy judge is the one module whose save runs a live test call, so its refusal is
+      // shown in the pane with a way past it (issue #875).
+      if (module.kind === "autonomy") setSaveError(message);
     } finally {
       setSaving(false);
     }
@@ -2223,7 +2277,7 @@ function ModulePane({
               Reset
             </Button>
           )}
-          <Button variant="primary" disabled={!dirty || saving} onClick={save}>
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => void save()}>
             {saving && <Spinner />} Save
           </Button>
         </>
@@ -2232,6 +2286,19 @@ function ModulePane({
       {module.kind === "sandbox" && (
         <div className="mb-1">
           <ImagePullRow pull={pull} />
+        </div>
+      )}
+      {module.kind === "autonomy" && (judge !== null || saveError !== null) && (
+        <div className="mb-3 flex flex-col gap-2">
+          {judge && <AutonomyHealth status={judge} />}
+          {saveError && (
+            <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+              <p className="[overflow-wrap:anywhere]">{saveError}</p>
+              <Button size="sm" className="mt-2" disabled={saving} onClick={() => void save(true)}>
+                {saving && <Spinner />} Save anyway
+              </Button>
+            </div>
+          )}
         </div>
       )}
       <div className={cx(!draft.enabled && "opacity-60")}>
@@ -3117,6 +3184,47 @@ function KeyBadge({ provider }: { provider: ModelProvider }) {
 }
 
 type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealth } | { state: "failed"; message: string };
+
+/**
+ * The autonomy judge's recent health (issue #875), shown above its settings: a compact line while
+ * it is answering, and the last provider error — with how long the run of failures is — when it is
+ * not. The pane renders it only for the autonomy module; a fetch failure (an older mothership) has
+ * nothing to show and renders nothing.
+ */
+export function AutonomyHealth({ status, now = new Date() }: { status: AutonomyStatus; now?: Date }) {
+  const failing = status.consecutive_failures > 0;
+  const answered = status.last_success
+    ? `Last answered ${timeAgo(status.last_success.at, now)} by ${status.last_success.model}`
+    : "No answer yet";
+  return (
+    <div
+      role="status"
+      className={cx(
+        "rounded-xl border px-4 py-3 text-[12.5px]",
+        failing ? "border-warn/40 bg-warn-soft text-warn" : "border-border bg-panel-2/40 text-muted",
+      )}
+    >
+      <p className="flex items-center gap-1.5">
+        <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", failing ? "bg-warn" : "bg-ok")} />
+        {answered}
+        {failing && <span>· {status.consecutive_failures} in a row</span>}
+      </p>
+      {status.last_error && <p className="mt-1 [overflow-wrap:anywhere]">{judgeErrorLine(status.last_error, now)}</p>}
+    </div>
+  );
+}
+
+/** The judge's last failure as one clause: when, which model, how it failed, and what the provider said. */
+function judgeErrorLine(error: NonNullable<AutonomyStatus["last_error"]>, now: Date): string {
+  return [
+    `Failed ${timeAgo(error.at, now)} by ${error.model}`,
+    error.kind.replace(/_/g, " "),
+    error.status !== null ? `HTTP ${error.status}` : null,
+    error.message || null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 export function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
   if (health.state === "checking") {

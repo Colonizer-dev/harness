@@ -5,7 +5,8 @@
 # the host's architecture), not the host's.
 #
 # Compiled into the mothership. Same columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
-# No bundle is published yet: push a `graft-0.19.0-1` tag to run the workflow, then pin its SHA256SUMS here
-# as two rows shaped like
-#   graft  0.19.0-1  linux-x86_64   bundle  <sha256>  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-x86_64.tar.gz
-#   graft  0.19.0-1  linux-aarch64  bundle  <sha256>  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-aarch64.tar.gz
+# The graft-0.19.0-1 release publishes both rows below; each sha256 is that release's SHA256SUMS entry. A
+# release is built by pushing a `graft-<version>-<build>` tag (the workflow refuses a tag whose version
+# differs from vendor/graft/package.json); pin its SHA256SUMS here by pull request, one row per architecture.
+graft  0.19.0-1  linux-x86_64   bundle  85c5375d0c33a212607b0bd9aae7daf47d870dd6c7ffd3d666f3f1dbc90e333e  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-x86_64.tar.gz
+graft  0.19.0-1  linux-aarch64  bundle  60844342c5eaada4fbbc9eb3ec6eb45c1363edd537056b85ef8b12dd47e6ba3b  https://github.com/Colonizer-dev/harness/releases/download/graft-0.19.0-1/graft-0.19.0-1-linux-aarch64.tar.gz

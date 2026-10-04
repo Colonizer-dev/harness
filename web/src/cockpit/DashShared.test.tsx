@@ -315,6 +315,14 @@ describe("ColonyRow", () => {
     expect(html).not.toContain("v3-flash");
     expect(html).not.toContain("v3-live-dot");
   });
+  it("shows the fleet scheduler's placement reason when it gave one (issue #688)", () => {
+    const html = renderToStaticMarkup(<ColonyRow session={{ ...session, placement: "archlinux: 3 free slots" } as Session} age="2m" flashed={false} bumped={false} />);
+    expect(html).toContain("archlinux: 3 free slots");
+  });
+  it("shows no placement line for a colony the scheduler left unaccounted", () => {
+    const html = renderToStaticMarkup(<ColonyRow session={session} age="2m" flashed={false} bumped={false} />);
+    expect(html).not.toContain("free slots");
+  });
 });
 
 describe("chartColor", () => {

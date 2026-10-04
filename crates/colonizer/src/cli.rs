@@ -88,7 +88,7 @@ Exit codes:
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`open`, `login-item`, `telemetry`) read them. The client commands take --host and --token-file,
+(`open`, `login-item`, `telemetry`, `migrate-store`) read them. The client commands take --host and --token-file,
 and so does `update` — a thin client of a running mothership; the other local commands refuse
 them (and --json), which only the client commands use.";
 
@@ -115,6 +115,18 @@ enum Command {
         /// show, on or off
         #[arg(value_enum)]
         action: TelemetryAction,
+    },
+    /// Copy this machine's colonies into another local session store (docs/session-store.md)
+    MigrateStore {
+        /// The store to copy from (default: this install's data dir, `COLONIZER_DATA_DIR`)
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+        /// The store to copy into; it must be empty
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Count what would move and write nothing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print a shell completion script for this command (source it from your shell's rc)
     Completions {
@@ -164,6 +176,9 @@ enum Command {
         /// Only colonies in this state: queued, running, waiting_for_answer, pr_opened, ...
         #[arg(long)]
         status: Option<String>,
+        /// Only colonies parked for a later resume — shorthand for `--status parked`
+        #[arg(long, conflicts_with = "status")]
+        parked: bool,
     },
     /// Show one colony: where it stands, what it costs, and what it is doing right now
     Status { id: String },
@@ -534,7 +549,8 @@ impl TokenScope {
 
 #[derive(Subcommand, Debug)]
 enum LoopCommand {
-    /// List every loop this token may see: id, name, repository, cadence, state and next run, in your local time.
+    /// List every loop this token may see: id, name, repository, cadence, state, next run and the
+    /// last run's outcome, in your local time.
     List,
     /// Create a loop: a saved prompt on a repository that launches a colony on a schedule
     ///
@@ -575,6 +591,10 @@ enum LoopCommand {
         /// End the loop after this many runs
         #[arg(long)]
         max_runs: Option<u32>,
+        /// Re-run a run that failed for an infrastructure reason within this many minutes of its
+        /// start; 0 switches the re-run off (default 60)
+        #[arg(long, value_name = "MINUTES")]
+        retry_failed_runs: Option<u32>,
         /// Create it paused: nothing runs until `loop start`
         #[arg(long)]
         disabled: bool,
@@ -1160,6 +1180,7 @@ const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("open", &["host", "token_file", "json"]),
     ("login-item", &["host", "token_file", "json"]),
     ("telemetry", &["host", "token_file", "json"]),
+    ("migrate-store", &["host", "token_file", "json"]),
     ("version", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
     ("man", &["host", "token_file", "json"]),
@@ -1309,6 +1330,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             };
             await_local(result)
         }
+        Command::MigrateStore { from, to, dry_run } => {
+            let cfg = match Settings::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => return await_local(Err(e)),
+            };
+            await_local(crate::store::cli_migrate(&cfg, from, to, dry_run, cli.json).await)
+        }
         Command::Completions { shell } => {
             // The generator writes straight through and panics on a failed write of its own, so
             // the script is buffered: a closed pipe (a `| head`) ends the copy, not the process.
@@ -1384,8 +1412,10 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             })
             .await
         }
-        Command::List { org, status } => {
+        Command::List { org, status, parked } => {
             let json = cli.json;
+            // `--parked` is `--status parked`, and the two conflict, so no merge is needed.
+            let status = if parked { Some("parked".to_string()) } else { status };
             client_command(cli, move |machine| async move {
                 let sessions = machine.get("/api/sessions").await?;
                 let filtered = filter_sessions(
@@ -1990,6 +2020,12 @@ fn limit_note(token: &Value) -> String {
 // Loops: the cockpit's Loops page, driven from a terminal.
 // ---------------------------------------------------------------------------
 
+/// The LAST column of `loop list`: the last run's outcome the server derived (issue #881), or `-`
+/// when the loop has not run.
+fn last_outcome(l: &Value) -> String {
+    l["last_run"]["outcome"].as_str().unwrap_or("-").to_string()
+}
+
 async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
     let json = cli.json;
     client_command(cli, move |machine| async move {
@@ -2026,13 +2062,14 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                         None => "?",
                     };
                     println!(
-                        "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {}",
+                        "{:<12}  {:<26}  {:<22}  {:<32}  {:<8}  {:<24}  {}",
                         l["id"].as_str().unwrap_or("?"),
                         util::truncate(l["name"].as_str().unwrap_or("?"), 26),
                         scope,
                         describe_cadence(&l["cadence"], offset),
                         state,
-                        next
+                        next,
+                        last_outcome(l)
                     );
                 }
                 Ok(EXIT_OK)
@@ -2049,6 +2086,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                 autopilot,
                 no_autopilot,
                 max_runs,
+                retry_failed_runs,
                 disabled,
             } => {
                 let offset = local_offset_minutes();
@@ -2083,6 +2121,7 @@ async fn loop_command(cli: &Cli, command: LoopCommand) -> i32 {
                     // No flag at all: the server's default (on) decides.
                     "autopilot": if autopilot { Some(true) } else if no_autopilot { Some(false) } else { None },
                     "max_runs": max_runs,
+                    "retry_failed_runs": retry_failed_runs,
                     "enabled": if disabled { Some(false) } else { None },
                 });
                 let created = machine
@@ -2427,6 +2466,7 @@ async fn set_loop_enabled(machine: &Machine, id: &str, enabled: bool, json: bool
         "subagent_model": l["subagent_model"],
         "autopilot": l["autopilot"],
         "max_runs": l["max_runs"],
+        "retry_failed_runs": l["retry_failed_runs"],
         "end_at": l["end_at"],
         "enabled": enabled,
     });
@@ -2935,6 +2975,7 @@ mod tests {
             &["man"][..],
             &["launch", "acme/app"][..],
             &["list", "--org", "acme", "--status", "running"][..],
+            &["list", "--parked"][..],
             &["status", "abc123"][..],
             &["logs", "abc123"][..],
             &["logs", "abc123", "-f"][..],
@@ -3118,7 +3159,7 @@ mod tests {
             "`update --help` should not list --json:\n{update}"
         );
         let list = help_for("list");
-        for flag in ["--host", "--token-file", "--json"] {
+        for flag in ["--host", "--token-file", "--json", "--parked"] {
             assert!(list.contains(flag), "`list --help` should list {flag}:\n{list}");
         }
     }
@@ -3513,6 +3554,23 @@ mod tests {
         assert_eq!(both.iter().map(|s| s["id"].as_str().unwrap()).collect::<Vec<_>>(), vec!["b"]);
     }
 
+    /// `list --parked` is `--status parked`: it sets the flag the handler reads, and the two
+    /// conflict so a caller cannot ask for a state and a park at once.
+    #[test]
+    fn list_parked_is_status_parked_and_conflicts_with_status() {
+        match parse(&["list", "--parked"]).unwrap().command {
+            Some(Command::List { parked, status, .. }) => {
+                assert!(parked);
+                assert!(status.is_none(), "no explicit status alongside --parked");
+            }
+            other => panic!("expected a list command, got {other:?}"),
+        }
+        assert!(
+            parse(&["list", "--parked", "--status", "parked"]).is_err(),
+            "--parked and --status conflict"
+        );
+    }
+
     /// A stored map document, as `GET /api/maps/{owner}/{name}`'s `map` carries it.
     fn map_doc() -> Value {
         json!({
@@ -3703,6 +3761,23 @@ mod tests {
         ] {
             assert!(parse_cadence(bad, 0).is_err(), "{bad:?} should not parse");
         }
+    }
+
+    /// `loop list`'s LAST column is the server-derived last-run outcome, `-` when there is none.
+    #[test]
+    fn the_last_outcome_column_reads_the_server_s_word() {
+        assert_eq!(
+            last_outcome(
+                &json!({"last_run": {"session": "s", "at": "2026-09-24T09:00:00Z", "outcome": "failed (transient_infra)"}})
+            ),
+            "failed (transient_infra)"
+        );
+        assert_eq!(
+            last_outcome(&json!({"last_run": {"session": "s", "at": "2026-09-24T09:00:00Z"}})),
+            "-"
+        );
+        assert_eq!(last_outcome(&json!({"last_run": null})), "-");
+        assert_eq!(last_outcome(&json!({})), "-");
     }
 
     /// `loop list` describes a cadence in words with its clock times in the viewer's zone.
