@@ -211,10 +211,14 @@ Three Sandbox settings control this. All are mothership-wide, with no per-org ov
   `kind: "exec_policy"`, and the colony keeps its microVM and its slot until you answer.
 
   `writes-outside-repo` now asks only for a write to a host-backed path outside the repository: a
-  write to `/root`, `/usr` or the rest of the microVM's own root filesystem — discarded with the
-  VM — no longer asks, while a write to a host mount outside the repository, such as `/harness/out`
-  or the agent's transcript directory, still does. The `secret-paths` and `script-egress` denies are
-  unchanged.
+  write to `/root`, `/usr`, a `CARGO_TARGET_DIR` such as `/root/colonizer-target`, or the rest of the
+  microVM's own root filesystem — discarded with the VM — no longer asks, while a write to a host
+  mount outside the repository, such as `/harness/out` or the agent's transcript directory, still
+  does. A write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
+  own `.git` asks too, and the card says why. An org can restore the older, stricter behaviour — any
+  absolute write outside the repository asks, the microVM's root filesystem included — with a policy
+  rule whose predicate is `"writes_outside": "strict"`. The `secret-paths` and `script-egress` denies
+  are unchanged.
 
 - The same holds for a question a **subagent** asks with `AskUserQuestion`, and for every ACP
   permission request: the tool call that asked is blocked in flight, and suspending the colony
