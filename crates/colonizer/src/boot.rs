@@ -1767,12 +1767,13 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // timeout, and opens the resumed turn saying what came back and what was lost. Warnings are
     // logged, never a failed boot; only a resume boot carries the key.
     let mut restore = None;
-    // The guest starts no runner — and serves no HTTP — until every restartable service answered
-    // or timed out (issue #700), so the health wait below must outlast the longest readiness wait
-    // it was handed: a manifest timeout beyond the base deadline would otherwise fail the boot
-    // while the guest was still waiting a service out. Only specs with a probe wait anything, and
-    // one without `timeout_secs` gets the guest's default. The cap keeps a manifest naming an
-    // absurd `timeout_secs` from hanging the boot — or overflowing the deadline arithmetic below.
+    // The guest serves HTTP as soon as agentd is up, but starts no runner until every restartable
+    // service answered or timed out (issue #700) and the repository's setup hook has run (#753), so
+    // the health wait below must outlast the longest readiness wait it was handed: a manifest
+    // timeout beyond the base deadline would otherwise fail the boot while the guest was still
+    // waiting a service out. Only specs with a probe wait anything, and one without `timeout_secs`
+    // gets the guest's default. The cap keeps a manifest naming an absurd `timeout_secs` from
+    // hanging the boot — or overflowing the deadline arithmetic below.
     let mut restore_wait = Duration::ZERO;
     if resume {
         let secrets: Vec<String> = colony_secrets.iter().map(|(_, value)| value.clone()).collect();

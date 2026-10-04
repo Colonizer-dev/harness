@@ -137,9 +137,11 @@ Two options:
   in CI.
 
 The image is the stock `node:24-bookworm`. A colony-node image — that base plus bun and pnpm, each
-pinned and checksum-verified at build time — is built and scanned by
-`.github/workflows/colony-image.yml`; the node preset keeps using the stock image until the built one
-is published to `ghcr.io` and its digest is pinned in `crates/colonizer/images.lock`.
+pinned and checksum-verified at build time, and a small shared toolbox (python3, jq, ripgrep, …) — is
+built and scanned by `.github/workflows/colony-image.yml`, along with a matching `colony-<preset>`
+toolbox image for the Python, Rust and Go presets; the presets keep using the stock images until the
+built ones are published to `ghcr.io` and their digests are pinned in
+`crates/colonizer/images.lock`.
 
 A third option, `--bundle`, is what the release workflow uses to build a release tarball; you don't
 need it.

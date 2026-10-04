@@ -33,10 +33,20 @@ ARG PNPM_EXE_SHA256_arm64=538533d8edc219d75555e436cbb81c21ad89374978d456eca6bcd4
 # out while the pinned base still shipped 3.0.20). The scan gate in colony-image.yml fails on a
 # Critical that has a fix; applying the archive's upgrades here is how this image picks the fix up
 # without waiting for upstream. apt verifies every package against Debian's signed archive.
+#
+# The toolbox every colony image preset promises (#753): a small, language-agnostic set a colony's
+# own build or verification may reach for. buildpack-deps already carries curl, git, make, unzip and
+# ca-certificates; naming them again keeps this image's promise in one place even if the base
+# changes. images/toolbox-test.sh exercises each tool, run against this image by colony-image.yml.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get -y upgrade --no-install-recommends; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-venv python3-yaml jq ripgrep curl git make unzip ca-certificates; \
     rm -rf /var/lib/apt/lists/*
+
+# Disposable VM: `pip3 install` may write past PEP 668 into Debian's externally-managed python3.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # base is buildpack-deps, so curl, ca-certificates and unzip are already present.
 RUN set -eux; \
