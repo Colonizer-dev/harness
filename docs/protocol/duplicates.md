@@ -155,7 +155,7 @@ figures are omitted rather than faked. `null` on colonies booted before these fi
 
 The example shows the common fields; the record carries more, and most optional ones are left out
 of the JSON while unset rather than sent as `null`. Among them: `placement`, `origin`, `suspended`,
-`parked`, `agent_session`, `pending_answer`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
+`parked`, `agent_session`, `pending_answer`, `switch_note`, `prewarm`, `instructions`, `model_tier`, `model_override`, `subagent_model_override`,
 `claude_account`, `launched_by_token` (scoped tokens, above), `queued_behind` and `claim_wait`
 (issue claims, below), `parent` and `stack` (a colony started with `after`), `needs_rebase`,
 `keep_worktree` (reclamation, below), `app_slot` (§4 `POST /api/update/apply`), `model_routing`
@@ -209,6 +209,13 @@ to `starting` and then `running` — the colony holds its slot again — but an 
 the runner is up. `prewarm_timeout_minutes` (default 5) with no answer, a mothership restart or a
 failed boot clears `prewarm` and leaves the colony suspended again, never failed; answering
 clears `prewarm`, `suspended` and `pending_answer` together once the answer is delivered.
+
+`switch_note` is set when the colony's agent module was switched mid-task ([#737], `POST
+/api/sessions/{id}/switch-agent`): the note the resumed runner is told first, telling the new agent
+it is continuing another agent's session and that the converted transcript may be missing detail.
+It is what the boot's resume trigger and first turn read, and it is cleared once the runner is up —
+persisted so a failed boot or a mothership restart never loses the switch, exactly like
+`pending_answer`.
 
 `parked` is set on a colony the host set aside for a reason it may outlive ([#213]): the status is
 `parked` — not live, so it holds no parallel slot, and not terminal either, so it is never

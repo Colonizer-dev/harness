@@ -469,6 +469,32 @@ same colonies (`colonizer migrate-store` copies one store into another). That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
 
+### Switching a colony's agent mid-task
+
+A colony runs on one agent module for its whole life. `POST /api/sessions/{id}/switch-agent`
+(`{"module": "codex"}`) moves a colony mid-task instead: it stops the current runner if it is live
+so its transcript is settled, converts the stored conversation with
+[txcript](https://crates.io/crates/txcript) — which maps each harness through a canonical model —
+writes the converted transcript where the target runner resumes from, updates the colony's `agent`,
+`agent_session` and `switch_note`, and boots the target module on the same worktree. The boot treats
+`switch_note` as a resume trigger and its first turn is that note, telling the new agent it is
+continuing another agent's session and to re-read the worktree before acting.
+
+Only two pairs are supported — claude-code ↔ codex — because those are the formats txcript maps both
+ways; anything else is a 400. The transcript lands where the target module's `session_resume.dir` is
+mounted: a Claude Code session at `<transcripts>/-workspace/<id>.jsonl` (the guest cwd is
+`/workspace`), a codex rollout at `<transcripts>/sessions/YYYY/MM/DD/rollout-*<id>.jsonl`, and the
+new `agent_session` is the id the target runner resumes by. txcript reports no loss figure, so the
+switch reports losses only as a heuristic — the source and target record counts plus a fixed
+per-direction caveat — and never claims an exact one.
+
+A restricted colony is refused unless the target module reaches a provider the gateway would let it
+use: the same `sensitivity::eligible` check the gateway applies per request, run up front against the
+providers the module's declared egress and secret hosts name, narrowed to the colony's routed
+providers (`allowed_providers`) and requiring every remaining candidate to be eligible, so a switch
+is never laxer than launching the colony on the target module would have been. A target module that
+resolves to no eligible provider is refused, not assumed safe.
+
 ### Merge train
 
 The publish module's optional merge train takes over after a pull request opens: a background tick, about
