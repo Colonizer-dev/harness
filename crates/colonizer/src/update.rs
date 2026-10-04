@@ -571,6 +571,36 @@ pub async fn command(force: bool, host: &str, token: &str) -> Result<()> {
     }
 }
 
+/// `colonizer update --check` — ask the release feed now, install nothing.
+///
+/// Unlike [`command`], this needs no mothership and no stored state: it asks
+/// GitHub (or `COLONIZER_RELEASES_URL`) fresh, and prints one line. `--host` and
+/// `--token-file` are ignored, so it works on a machine that has never run one.
+pub async fn check() -> Result<()> {
+    let latest = version::latest_release().await.context("checking for a newer release")?;
+    println!("{}", check_message(version::build(), &latest.version));
+    Ok(())
+}
+
+/// What `--check` prints, from the installed build and the release the feed named.
+///
+/// A development build is said plainly rather than compared: it holds work no
+/// release contains, so "newest" is not the question being asked. Elsewhere the
+/// installed version is the tag form, the same one `colonizer --version` shows.
+fn check_message(build: &version::Build, latest: &str) -> String {
+    if build.development {
+        return format!("this is a development build; the newest release is {latest}.");
+    }
+    if version::is_newer(Some(&build.version), latest) {
+        format!(
+            "{latest} is available (this is {}); run `colonizer update` to install it.",
+            build.version
+        )
+    } else {
+        format!("{} is the newest release.", build.version)
+    }
+}
+
 /// What `--force` is about to risk, in one line: the release going over the
 /// running build, and how many sessions were written by that build.
 ///
@@ -837,6 +867,41 @@ mod tests {
             None
         );
         assert_eq!(refusal(&a_build("v0.1.6", "v0.1.6", false), Some("v0.1.5"), true), None);
+    }
+
+    #[test]
+    fn check_reports_the_newest_release_when_installed_is_it() {
+        assert_eq!(
+            check_message(&a_build("v0.2.1", "v0.2.1", false), "v0.2.1"),
+            "v0.2.1 is the newest release."
+        );
+        // A build newer than the latest release is not told to update either.
+        assert_eq!(
+            check_message(&a_build("v0.3.0", "v0.3.0", false), "v0.2.1"),
+            "v0.3.0 is the newest release."
+        );
+    }
+
+    #[test]
+    fn check_offers_a_newer_release_and_names_the_installed_one() {
+        assert_eq!(
+            check_message(&a_build("v0.2.1", "v0.2.1", false), "v0.2.2"),
+            "v0.2.2 is available (this is v0.2.1); run `colonizer update` to install it."
+        );
+    }
+
+    #[test]
+    fn check_says_a_development_build_plainly() {
+        // A build after a tag names the newest release but is not compared against it,
+        // whether or not that release is newer than the tag it descends from.
+        assert_eq!(
+            check_message(&a_build("v0.2.1-5-gabc1234", "v0.2.1", true), "v0.2.2"),
+            "this is a development build; the newest release is v0.2.2."
+        );
+        assert_eq!(
+            check_message(&a_build("v0.2.1-5-gabc1234", "v0.2.1", true), "v0.2.1"),
+            "this is a development build; the newest release is v0.2.1."
+        );
     }
 
     /// One `/api/update` read, as the command sees it.

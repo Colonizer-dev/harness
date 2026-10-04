@@ -142,6 +142,7 @@ this machine and read the same environment the mothership does:
 | `colonizer open` | Prints the cockpit sign-in link and opens it in a browser. It reads the token file `<config dir>/api-token`, creating it if there is none, so it works whether or not the mothership is running |
 | `colonizer version` | Prints the build: tag, commit, build time, and whether it is a development build ([docs/updates.md](updates.md)) |
 | `colonizer update [--force]` | Asks the running mothership on `COLONIZER_BIND` to install the newest release and restart into it ([docs/updates.md](updates.md#updating-in-place)) |
+| `colonizer update --check` | Asks GitHub (or `COLONIZER_RELEASES_URL`) whether a newer release exists and prints one line; no mothership needed ([docs/updates.md](updates.md#checking-without-a-mothership)) |
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |

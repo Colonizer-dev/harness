@@ -68,6 +68,11 @@ CI (`scripts` job) validates the fragments and fails any other pull request that
 written under Unreleased into fragments. A deliberate correction to an already released entry takes
 the `changelog-edit` label.
 
+Once the release PR is merged and its tag pushed, the `Release` workflow builds and publishes the
+release; the `release-health` workflow then checks it (assets against `SHA256SUMS`, both crates on
+crates.io, an install on Linux and macOS, `colonizer update --check`, and colonizer.dev) and keeps a
+single `release-health` issue open while anything fails, closing it on the first run that passes.
+
 ## Adding a module to the mothership
 
 Every list you touch is alphabetical, one entry per line, so parallel pull requests add their lines
