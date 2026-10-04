@@ -89,6 +89,9 @@ in different places:
 4. Background work: `pub(crate) fn start_tasks(app: &Shared)` in your module, run from the feature
    descriptor or from `crate::<name>::start_tasks(app);` in `server::start_tasks`.
 
+A non-test Rust file stays under 2,000 lines; once it grows past that, split it into a directory
+module (`<name>/mod.rs` plus siblings) with its tests in `<name>/tests.rs` (issue #825).
+
 [docs/architecture.md](docs/architecture.md#adding-a-module) has the details.
 
 ## Tests
@@ -107,6 +110,7 @@ node --test scripts/test/*.test.mjs
 node scripts/check-doc-links.mjs                    # every relative link and #anchor in the Markdown resolves
 node scripts/changelog.mjs check                    # the changelog.d/ fragments are well-formed
 sh scripts/ci/check-exec-bits.sh
+sh scripts/ci/check-rust-file-size.sh               # non-test Rust files stay under 2,000 lines
 sh scripts/ci/check-case-collisions.sh              # no two tracked paths differ only in letter case
 (cd web && npm ci && npm run build && npm test)     # when web/ changed
 (cd modules/agents/<id> && npm test)                # when that agent module changed; run npm ci first where it has a package-lock.json

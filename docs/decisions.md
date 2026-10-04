@@ -46,7 +46,7 @@ mothership; the token is injected as a microsandbox `--secret` scoped to `api.an
 (`crates/colonizer/src/boot.rs:1562-1566`, `crates/colonizer/src/sandbox.rs:62-67`); the in-colony
 router forwards unrouted models to Anthropic with Claude Code's own headers
 (`modules/agents/claude-code/router.mjs:178-179`). The gateway only ever attaches a provider key, as
-`x-api-key` or `bearer` (`crates/colonizer/src/gateway.rs:1207-1213`, `credential_header`). Mothership-side judging holds to
+`x-api-key` or `bearer` (`crates/colonizer/src/gateway/stream.rs:408-419`, `credential_header`). Mothership-side judging holds to
 the same rule ([#143](https://github.com/Colonizer-dev/harness/issues/143)): the `autonomy` module
 sends a model to the provider configured for it and spends that provider's key — a plain id resolves
 only where a configured provider sits on Anthropic's API — and the mothership's Claude login is
