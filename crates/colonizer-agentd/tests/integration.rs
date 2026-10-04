@@ -211,10 +211,15 @@ async fn events_auth_replay_commands_shutdown_and_restart() {
         assert_eq!(pair[1]["seq"].as_u64().unwrap(), pair[0]["seq"].as_u64().unwrap() + 1);
         assert!(pair[1]["ts"].is_string());
     }
+    // Issue #753: the first prompt carries the brief followed by the toolbox note, so the agent
+    // stops probing for tools it already has; the fake runner echoes the whole text back verbatim.
     assert!(has(&first, |e| e["type"] == "user_message"
         && e["id"] == "initial"
-        && e["text"] == "hello"));
-    assert!(has(&first, |e| e["type"] == "assistant_text" && e["text"] == "echo: hello"));
+        && e["text"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("hello\n\nPreinstalled in this VM:"))));
+    assert!(has(&first, |e| e["type"] == "assistant_text"
+        && e["text"].as_str().is_some_and(|t| t.starts_with("echo: hello"))));
     assert!(
         has(&first, |e| e["type"] == "status" && e["detail"] == "hello-env"),
         "agent.env is merged"

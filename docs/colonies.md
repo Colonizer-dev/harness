@@ -10,6 +10,7 @@ a short summary and a link. Settings named here are module settings, changed in 
 read by the mothership when it starts.
 
 - [Launching a colony](#launching-a-colony)
+- [Tools in the colony image and the setup hook](#tools-in-the-colony-image-and-the-setup-hook)
 - [Claims: one colony per issue](#claims-one-colony-per-issue)
 - [When a merge supersedes a colony](#when-a-merge-supersedes-a-colony)
 - [Epics are refused](#epics-are-refused)
@@ -59,6 +60,54 @@ passes through.
 `--allow-epic`) and the MCP `launch_colony` tool (`allow_duplicate`, `queue_behind_holder`,
 `allow_epic`) take the same overrides the cockpit's checkboxes and `POST /api/sessions` do. Without
 one, a launch on a held issue or an epic is refused with a 409 (CLI exit code 5).
+
+## Tools in the colony image and the setup hook
+
+Every colony image carries a small, language-agnostic toolbox a repository's own build or
+verification may reach for: `python3` with pip and venv, `python3-yaml` (PyYAML), `jq`, `ripgrep`,
+`curl`, `git`, `make`, `unzip` and `ca-certificates`. The node image also carries bun, pnpm, yarn
+classic and corepack. The image is pinned by digest, so a tool the image does not carry is one a
+done-claim check reports unverifiable (see [Verifying "done"](#verifying-done)). On the Debian-based
+presets `pip3 install` works despite PEP 668 — the images set `PIP_BREAK_SYSTEM_PACKAGES=1` for a
+disposable VM — and an isolated `python3 -m venv` is the alternative.
+
+For a repository that needs more, add a `.colonizer/setup.sh` to it. The daemon runs `sh` on it — it
+need only be a file, not executable — as root, from the worktree, on every boot (a colony's microVM
+filesystem does not survive a suspend, so a resume runs it again), once its HTTP listener is up and
+before the coding agent starts:
+
+```sh
+#!/bin/sh
+# Idempotent: the install is a no-op once the tool is there.
+command -v shellcheck >/dev/null 2>&1 || apt-get install -y shellcheck
+```
+
+The hook runs as root with the VM's full capabilities, without the seccomp and capability hardening
+the agent's runner child gets — that hardening forbids `apt-get`, the hook's point. Treat
+`.colonizer/setup.sh` like a Dockerfile `RUN` step: repository-controlled code with more privilege
+than the agent, so add it only to a repository you trust, and write it to be idempotent — it reruns
+after every resume. It gets 600 s; past that it is killed, its whole process group with it. Its
+output goes to `/tmp/colonizer-setup.log`, and the outcome is a `log` event (elapsed time on success;
+exit code and log tail on failure); a failure or timeout never fails the boot, only adds a note to
+the agent's first prompt. A stop or restart while the hook runs kills it and skips the agent. The
+hook is subject to the colony's egress policy; in `allowlist` mode the package mirrors every preset's
+toolbox fetches from are always allowed (see
+[sandbox-network.md](sandbox-network.md#modes-and-settings)).
+
+**Cost.** With no hook present the check is one file test, effectively free; a hook costs its own
+runtime, logged per colony. The toolbox adds no boot-time work — the image is larger, paid once on
+the first `image-pull` and cached after. Measured with `apt-cache` against a `node:24-bookworm` base:
+the added packages are about 12 MB of downloads and 60 MB installed, almost all the Python 3
+interpreter and its pip/venv stack. It is an estimate, not a VM measurement.
+
+**What the agent is told.** On a fresh session the agent's first prompt gets one line naming the
+toolbox commands found on `PATH` (`Preinstalled in this VM: …`), plus `Missing: …` when any is
+absent; it is not repeated when the agent resumes its own session.
+
+**Limits.** It is one root script with a 600 s cap, and there is no package cache between boots. The
+`colony-<preset>` toolbox images are built and published, but the presets still boot the stock
+images until the published digests are pinned in `images.lock` — the same step the node preset has
+left.
 
 ## Claims: one colony per issue
 
@@ -410,8 +459,10 @@ owning most of the changed files — and whether it would have caught the failur
 that check first and stops at its failure. `off` records nothing. A confirmed verdict always needs
 every check to pass.
 
-**Limits.** If the colony image lacks the tool a check needs, that check is unverifiable. A branch
-that rewrites the file a check's command is read from (`scripts.test`, the Makefile) cannot grade
+**Limits.** If the colony image lacks the tool a check needs, that check is unverifiable — every
+image carries a small toolbox and a repository can add its own with a `.colonizer/setup.sh` hook
+(see [Tools in the colony image and the setup hook](#tools-in-the-colony-image-and-the-setup-hook)).
+A branch that rewrites the file a check's command is read from (`scripts.test`, the Makefile) cannot grade
 its own homework: that check comes back unverifiable and nothing runs. A check whose directory the
 branch deleted is skipped rather than run to a meaningless exit 1. A base result is remembered
 per repository, image, base commit and check, so a re-verification does not pay for it twice. The
