@@ -81,6 +81,9 @@ const AI_ATTRIBUTION: &[&str] = &[
 ];
 const GH_LIMIT: Duration = Duration::from_secs(60);
 
+mod local_checks;
+use local_checks::{LocalChecks, LocalRun};
+
 // ---------------------------------------------------------------------------------------------
 // Settings, memory and reports.
 // ---------------------------------------------------------------------------------------------
@@ -122,6 +125,9 @@ pub(crate) struct Settings {
     pub min_call_gap_ms: u64,
     /// Colony ids the operator holds out of the loop.
     pub held: Vec<String>,
+    /// Issue #969: `owner` or `owner/repo` entries where, when GitHub CI cannot run at all, the loop
+    /// runs the stack's checks itself (`.colonizer/merge.toml`'s `local_checks` wins, anywhere).
+    pub local_checks: Vec<String>,
 }
 
 impl Default for Settings {
@@ -143,6 +149,7 @@ impl Default for Settings {
             max_api_calls: 400,
             min_call_gap_ms: 1000,
             held: Vec::new(),
+            local_checks: Vec::new(),
         }
     }
 }
@@ -171,6 +178,7 @@ pub(crate) fn normalize(mut s: Settings) -> Result<Settings, String> {
     };
     tidy(&mut s.allow, "allow")?;
     tidy(&mut s.never, "never")?;
+    tidy(&mut s.local_checks, "local_checks")?;
     let bound = |value: u64, lo: u64, hi: u64, what: &str| -> Result<(), String> {
         if (lo..=hi).contains(&value) {
             Ok(())
@@ -268,6 +276,9 @@ pub(crate) struct RepoMemory {
     pub redo_dispatched: BTreeSet<String>,
     /// `pr_url@head` pairs whose known-flaky checks were already re-run once.
     pub flaky_reruns: BTreeSet<String>,
+    /// Issue #969: pull requests whose local checks failed, as `head@base sha`: not run again until
+    /// either moves.
+    pub local_failed: BTreeMap<String, String>,
 }
 
 /// What a run did (or, in a dry run, would do) with one pull request.
@@ -467,12 +478,19 @@ pub(crate) enum MainCi {
         run_ids: Vec<u64>,
         detail: String,
     },
+    /// Issue #969: red only because GitHub refused to start its jobs (billing, no runner, Actions
+    /// off) — never red for the train, and never a heal.
+    Unavailable {
+        sha: String,
+        reason: String,
+    },
 }
 
 impl MainCi {
     fn describe(&self) -> String {
         match self {
             MainCi::Green { sha } => format!("green at {}", short(sha)),
+            MainCi::Unavailable { sha, reason } => format!("GitHub CI could not run at {} ({reason})", short(sha)),
             MainCi::Pending { reason } => format!("not green yet ({reason}); merging nothing"),
             MainCi::Red { sha, detail, .. } => format!("red at {} ({detail})", short(sha)),
         }
@@ -687,6 +705,8 @@ pub(crate) enum Plan {
     WaitCi,
     /// Conflicted: the host's mechanical rebase, or `needs_redo`.
     Rebase,
+    /// Issue #969: mergeable but for CI that could not run (why): merge once local checks pass.
+    LocalMerge(String),
     Red(String),
     Wait(String),
     Skip(String),
@@ -718,6 +738,8 @@ pub(crate) fn plan_pr(facts: &PrFacts, guards: &Guards) -> Plan {
 pub(crate) struct Reading {
     pub facts: PrFacts,
     pub failing: Vec<FailingCheck>,
+    /// Issue #969: why GitHub CI could not run on the head, when every check is a refused start.
+    pub unavailable: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -767,6 +789,11 @@ trait Ops {
     async fn rerun(&self, repo: &str, run_id: u64) -> Result<(), String>;
     async fn failure_log(&self, repo: &str, run_id: u64) -> Result<String, String>;
     async fn dispatch(&self, d: Dispatch) -> Result<String, String>;
+    /// Issue #969: whether, and with what, the repository's local checks run.
+    async fn local_config(&self, repo: &str, base: &str, opted_in: bool) -> Result<LocalChecks, String>;
+    /// Runs them on `head` merged with the base's tip, in a microVM.
+    async fn local_run(&self, s: &Session, head: &str, base: &str, commands: &[String]) -> LocalRun;
+    async fn post_status(&self, repo: &str, sha: &str, state: &str, description: &str) -> Result<(), String>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -900,6 +927,7 @@ impl<'a, O: Ops> Engine<'a, O> {
             Err(e) => return Ok(Some(format!("the default branch could not be read ({e})"))),
         };
         let cap = self.cap(repo);
+        let mut local: Option<LocalChecks> = None;
         let mut queue: Vec<&Session> = group.to_vec();
         queue.sort_by(|a, b| a.pr_opened_at.cmp(&b.pr_opened_at).then(a.id.cmp(&b.id)));
         queue.retain(|s| match eligibility(self.sessions, s, self.cfg) {
@@ -941,6 +969,15 @@ impl<'a, O: Ops> Engine<'a, O> {
                     self.heal(&base, &main, mem, out).await?;
                     return Ok(Some(format!("{base} is red: the train merges nothing until it is green")));
                 }
+                // Issue #969: CI that could not run is not red; with local checks on, the merged
+                // result of each candidate is checked instead, which covers main too.
+                MainCi::Unavailable { reason, .. } => {
+                    if let LocalChecks::Off(why) = self.local_cfg(repo, &base, &mut local).await? {
+                        return Ok(Some(format!(
+                            "GitHub CI could not run on {base} ({reason}), and {why}: merging nothing"
+                        )));
+                    }
+                }
                 // Right after this run's own merge, main's CI on the new tip is naturally still
                 // running: the next candidate is updated meanwhile, and nothing merges until both
                 // are green (`wait_ci`). Otherwise a main that is not green holds everything.
@@ -949,7 +986,10 @@ impl<'a, O: Ops> Engine<'a, O> {
                 }
                 MainCi::Pending { .. } => {}
             }
-            let main_green = matches!(main, MainCi::Green { .. });
+            let (main_green, main_sha) = match &main {
+                MainCi::Green { sha } | MainCi::Unavailable { sha, .. } => (true, sha.clone()),
+                _ => (false, String::new()),
+            };
             // Read the queue; the first mergeable-or-almost pull request is the head of the train,
             // everything else is settled on its own reading or waits its turn behind the head.
             let mut head: Option<(&Session, Reading, Plan)> = None;
@@ -966,7 +1006,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                     }
                 };
                 let title = title_of(s, Some(&reading));
-                match plan_pr(&reading.facts, &self.guards) {
+                match self.plan(&reading) {
                     Plan::Skip(why) => items.add(s, &title, Action::Skipped, why),
                     Plan::Wait(why) => items.add(s, &title, Action::Waiting, why),
                     Plan::Red(_) => {
@@ -977,7 +1017,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                         let (action, why) = self.conflict(s, &base, mem).await?;
                         items.add(s, &title, action, why);
                     }
-                    plan @ (Plan::Merge | Plan::Update(_) | Plan::WaitCi) => {
+                    plan @ (Plan::Merge | Plan::LocalMerge(_) | Plan::Update(_) | Plan::WaitCi) => {
                         if head.is_none() {
                             head = Some((s, reading, plan));
                         } else {
@@ -994,13 +1034,13 @@ impl<'a, O: Ops> Engine<'a, O> {
             let wait = self.wait_minutes();
             // Rule 1 again: a candidate that reads mergeable while main is still running merges
             // only once main is green — it waits for both first.
-            let plan = if plan == Plan::Merge && !main_green {
+            let plan = if matches!(plan, Plan::Merge | Plan::LocalMerge(_)) && !main_green {
                 Plan::WaitCi
             } else {
                 plan
             };
             match plan {
-                Plan::Merge => {
+                plan @ (Plan::Merge | Plan::LocalMerge(_)) => {
                     if merges >= cap {
                         items.add(
                             s,
@@ -1008,6 +1048,26 @@ impl<'a, O: Ops> Engine<'a, O> {
                             Action::Waiting,
                             format!("green and current, but this run's merge cap ({cap}) is reached; it merges on the next run"),
                         );
+                        return Ok(None);
+                    }
+                    let local_why = match plan {
+                        Plan::LocalMerge(why) => Some(why),
+                        _ => None,
+                    };
+                    if let Some(why) = &local_why
+                        && self.dry
+                    {
+                        let (action, reason) = match self.local_cfg(repo, &base, &mut local).await? {
+                            LocalChecks::On { commands, source } => (
+                                Action::Waiting,
+                                format!(
+                                    "GitHub CI could not run ({why}); would run its local checks ({source}: {}) on its head merged with {base}, and merge if they pass",
+                                    commands.join("; ")
+                                ),
+                            ),
+                            LocalChecks::Off(off) => (Action::Skipped, format!("GitHub CI could not run ({why}); {off}")),
+                        };
+                        items.add(s, &title, action, reason);
                         return Ok(None);
                     }
                     if self.dry {
@@ -1049,6 +1109,25 @@ impl<'a, O: Ops> Engine<'a, O> {
                         );
                         return Ok(None);
                     }
+                    let mut merged_reason =
+                        format!("squash-merged: behind {base} by 0, every check on its head green, {base} green");
+                    if let Some(why) = &local_why {
+                        match self
+                            .local_gate(s, repo, &base, &head_oid, &main_sha, why, mem, &mut local)
+                            .await?
+                        {
+                            Ok(()) => {
+                                merged_reason = format!(
+                                    "squash-merged on local checks: GitHub CI could not run ({why}); {} passed on its head merged with {base}",
+                                    local_checks::CONTEXT
+                                )
+                            }
+                            Err((action, reason)) => {
+                                items.add(s, &title, action, reason);
+                                continue;
+                            }
+                        }
+                    }
                     // The cooldown between two merges in one repository, across runs too.
                     if let Some(at) = mem.last_merge_at {
                         let ready = at + ChronoDuration::seconds(self.cfg.cooldown_secs as i64);
@@ -1071,12 +1150,7 @@ impl<'a, O: Ops> Engine<'a, O> {
                                 sha,
                                 at,
                             });
-                            items.add(
-                                s,
-                                &title,
-                                Action::Merged,
-                                format!("squash-merged: behind {base} by 0, every check on its head green, {base} green"),
-                            );
+                            items.add(s, &title, Action::Merged, merged_reason);
                         }
                         Err(e) => {
                             items.add(s, &title, Action::Waiting, format!("the merge failed ({e})"));
@@ -1170,7 +1244,7 @@ impl<'a, O: Ops> Engine<'a, O> {
             if matches!(main, Ok(MainCi::Red { .. })) {
                 return Ok(Waited::MainRed);
             }
-            if matches!(main, Ok(MainCi::Green { .. })) {
+            if matches!(main, Ok(MainCi::Green { .. } | MainCi::Unavailable { .. })) {
                 let reading = gh!(self, self.ops.read_pr(s, base));
                 // Settled: the checks on a current head finished, or it conflicts now. Still
                 // behind is GitHub catching up with the update: keep waiting.
@@ -1187,6 +1261,122 @@ impl<'a, O: Ops> Engine<'a, O> {
                 return Ok(Waited::Timeout);
             }
         }
+    }
+
+    /// The train's plan for a reading; a head whose CI could not run (issue #969) is planned as if it
+    /// were green, and only a merge becomes a merge on local checks — every other guard still holds.
+    fn plan(&self, r: &Reading) -> Plan {
+        let ci = r.facts.info.ci;
+        let Some(why) = r
+            .unavailable
+            .as_ref()
+            .filter(|_| matches!(ci, CiState::Failure | CiState::NoChecks))
+        else {
+            return plan_pr(&r.facts, &self.guards);
+        };
+        let mut facts = r.facts.clone();
+        facts.info.ci = CiState::Success;
+        match plan_pr(&facts, &self.guards) {
+            Plan::Merge => Plan::LocalMerge(why.clone()),
+            other => other,
+        }
+    }
+
+    /// The repository's local-check settings, read once per run and only when CI could not run.
+    async fn local_cfg(&mut self, repo: &str, base: &str, slot: &mut Option<LocalChecks>) -> Result<LocalChecks, Stop> {
+        if let Some(c) = slot {
+            return Ok(c.clone());
+        }
+        let opted_in = listed(&self.cfg.local_checks, repo);
+        let c = match gh!(self, self.ops.local_config(repo, base, opted_in)) {
+            Ok(c) => c,
+            Err(e) => LocalChecks::Off(format!("its local-check settings could not be read ({e})")),
+        };
+        *slot = Some(c.clone());
+        Ok(c)
+    }
+
+    /// Issue #969: the local checks a merge on unavailable CI needs — run on the head merged with
+    /// the base, posted as the `colonizer/local-checks` status, and passing only when the base the
+    /// merge lands on is the one they ran against. `Err` is the item for a pull request that does
+    /// not merge.
+    #[allow(clippy::too_many_arguments)]
+    async fn local_gate(
+        &mut self,
+        s: &Session,
+        repo: &str,
+        base: &str,
+        head: &str,
+        main_sha: &str,
+        why: &str,
+        mem: &mut RepoMemory,
+        local: &mut Option<LocalChecks>,
+    ) -> Result<Result<(), (Action, String)>, Stop> {
+        let commands = match self.local_cfg(repo, base, local).await? {
+            LocalChecks::On { commands, .. } => commands,
+            LocalChecks::Off(off) => return Ok(Err((Action::Skipped, format!("GitHub CI could not run ({why}); {off}")))),
+        };
+        let url = s.pr_url.clone().unwrap_or_default();
+        if mem.local_failed.get(&url) == Some(&format!("{head}@{main_sha}")) {
+            return Ok(Err((
+                Action::Red,
+                format!(
+                    "GitHub CI could not run ({why}); its local checks already failed on this head and {base}, and run again when either moves"
+                ),
+            )));
+        }
+        let note = "Running the repository's checks locally: GitHub CI could not run";
+        let _ = gh!(self, self.ops.post_status(repo, head, "pending", note));
+        // The run fetches and pushes nothing, but it is the slowest step: it counts like a call.
+        self.pace().await?;
+        let (state, description, result) = match self.ops.local_run(s, head, base, &commands).await {
+            LocalRun::Passed { base_sha } => {
+                // The merge lands on the base as it is now, which must be what the checks ran on.
+                let now = match gh!(self, self.ops.main_ci(repo, base)) {
+                    Ok(MainCi::Green { sha } | MainCi::Unavailable { sha, .. }) => Some(sha),
+                    _ => None,
+                };
+                if now.as_deref() != Some(base_sha.as_str()) {
+                    return Ok(Err((
+                        Action::Waiting,
+                        format!("its local checks passed, but {base} moved or went red while they ran; they run again next run"),
+                    )));
+                }
+                let description = format!("Passed on the head merged with {base} (GitHub CI could not run)");
+                ("success", description, Ok(()))
+            }
+            LocalRun::Failed { base_sha, command, tail } => {
+                mem.local_failed.insert(url, format!("{head}@{base_sha}"));
+                let last = tail.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or_default().trim();
+                let reason = format!(
+                    "GitHub CI could not run ({why}); local check `{command}` failed on its head merged with {base}: {}",
+                    truncate(last, 200)
+                );
+                (
+                    "failure",
+                    format!("`{command}` failed on the head merged with {base}"),
+                    Err((Action::Red, reason)),
+                )
+            }
+            LocalRun::Unrunnable(e) => {
+                let reason =
+                    format!("GitHub CI could not run ({why}), and its local checks could not run ({e}); tried again next run");
+                ("error", format!("Could not run: {e}"), Err((Action::Waiting, reason)))
+            }
+        };
+        if let Err(e) = gh!(self, self.ops.post_status(repo, head, state, &description))
+            && result.is_ok()
+        {
+            // The pull request must show why it merged: a pass that could not say so waits.
+            return Ok(Err((
+                Action::Waiting,
+                format!(
+                    "its local checks passed, but posting {} failed ({e}); it merges on a later run",
+                    local_checks::CONTEXT
+                ),
+            )));
+        }
+        Ok(result)
     }
 
     /// Rule 7: a red pull request is re-run once when everything failing is known-flaky.
@@ -1601,7 +1791,13 @@ impl Ops for GhOps<'_> {
         let runs = self
             .get_json(&format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=50"))
             .await?;
-        Ok(main_ci_from(&sha, &runs))
+        match main_ci_from(&sha, &runs) {
+            MainCi::Red { sha, run_ids, detail } => match local_checks::head_unavailable(self.app, repo, &sha, false).await {
+                Some(reason) => Ok(MainCi::Unavailable { sha, reason }),
+                None => Ok(MainCi::Red { sha, run_ids, detail }),
+            },
+            other => Ok(other),
+        }
     }
 
     async fn read_pr(&self, s: &Session, base: &str) -> Result<Reading, String> {
@@ -1622,7 +1818,18 @@ impl Ops for GhOps<'_> {
         } else {
             Vec::new()
         };
-        Ok(Reading { facts, failing })
+        let ci = facts.info.ci;
+        let unavailable = match facts.info.head_ref_oid.as_deref() {
+            Some(head) if matches!(ci, CiState::Failure | CiState::NoChecks) => {
+                local_checks::head_unavailable(self.app, &s.repo, head, ci == CiState::NoChecks).await
+            }
+            _ => None,
+        };
+        Ok(Reading {
+            facts,
+            failing,
+            unavailable,
+        })
     }
 
     async fn update_branch(&self, s: &Session, head: &str) -> Result<(), String> {
@@ -1747,6 +1954,24 @@ impl Ops for GhOps<'_> {
             }
             Err(e) => Err(e.message().to_string()),
         }
+    }
+
+    async fn local_config(&self, repo: &str, base: &str, opted_in: bool) -> Result<LocalChecks, String> {
+        local_checks::config(self.app, repo, base, opted_in).await
+    }
+
+    async fn local_run(&self, s: &Session, head: &str, base: &str, commands: &[String]) -> LocalRun {
+        let Some(n) = pr_number(s.pr_url.as_deref().unwrap_or_default()) else {
+            return LocalRun::Unrunnable("no pull request number".into());
+        };
+        local_checks::run(self.app, &s.repo, n, head, base, commands).await
+    }
+
+    async fn post_status(&self, repo: &str, sha: &str, state: &str, description: &str) -> Result<(), String> {
+        if authority::external_writes_blocked() {
+            return Err(crate::publish::BLOCKED.to_string());
+        }
+        local_checks::post_status(self.app, repo, sha, state, description).await
     }
 }
 

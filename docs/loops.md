@@ -171,6 +171,37 @@ Each run follows the rules an operator would follow by hand:
    the activity log (one `publish.merge_train` line per repository) and to each colony's own log.
    The card shows the last report.
 
+### When GitHub CI cannot run
+
+When CI cannot run at all — the org's Actions billing failed or its spending limit was reached, no
+runner picked the jobs up, or Actions is switched off — nothing would ever merge, so the loop can
+run the repository's checks itself (issue #969). It tells **could not run** from **ran and failed**
+by GitHub's own words on the refused jobs ("The job was not started because…", "…not acquired by
+Runner…"), or, for a pull request with no checks at all, by Actions or every workflow being
+disabled. One check that ran and failed, or one still running, and the pull request is not
+"unavailable": a real CI failure is never merged this way.
+
+It is **opt-in per repository**, read from the base branch, never from the pull request:
+
+- `.colonizer/merge.toml` with `local_checks = ["npm ci", "npx tsc --noEmit", "npx vitest run"]`
+  turns it on with those commands; `local_checks = []` keeps it off whatever the loop says.
+- The loop's `local_checks` list (`owner` or `owner/repo`;
+  `colonizer loop merge-train set --local-checks acme,acme/web`) turns it on with commands detected
+  from the stack: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+  and `cargo test --workspace` for a root `Cargo.toml`; for a root `package.json`, the install and
+  test command the [verifier](colonies.md#verifying-done) would run, then its `typecheck`, `lint` and `build`
+  scripts; `make test` otherwise.
+
+For a pull request that would merge but for its refused CI, the loop merges the head with the
+current base on the host (`git merge-tree`: objects only, nothing runs), runs the commands one after
+another in a one-shot microVM from the colony image, and posts the result as the
+`colonizer/local-checks` commit status on the head — `pending`, then `success`, `failure` (naming the
+command) or `error`. It merges only when every command passed **and** the base has not moved since,
+pinned to the head that was checked; a failure is not run again until the head or the base moves. A
+main whose CI could not run is not red — no re-run, no fix colony — and without local checks it
+holds the repository with the reason. Branch protection still applies: if the refused jobs are
+required checks, GitHub refuses the merge and the report says so.
+
 **Dry run** reads everything and writes nothing: it lists what the loop would merge, update, rebase
 and skip, and why. With `COLONIZER_NO_EXTERNAL_EFFECTS` set, every run — scheduled or not — is a
 dry run, and its report says so.
@@ -183,6 +214,7 @@ colonizer loop merge-train allow acme/web          # opt a repository in (or `al
 colonizer loop merge-train never acme/upstream     # never merge here
 colonizer loop merge-train set --every 120 --max-merges 2 --repo-cap acme/web=1 --flaky 'e2e*,lint'
 colonizer loop merge-train set --self-heal on --redo on
+colonizer loop merge-train set --local-checks acme # run acme's checks locally when GitHub CI cannot run
 colonizer loop merge-train run --dry-run           # what it would do, and why
 colonizer loop merge-train on                      # switch it on; `off` switches it off
 ```

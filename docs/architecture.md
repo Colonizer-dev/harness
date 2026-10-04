@@ -517,7 +517,10 @@ careful, scheduled driver for the same train: off by default, hourly, only in op
 and — unlike the tick — it updates the next candidate after a merge and waits for its fresh CI, caps
 merges per run, spaces them with a cooldown, paces and budgets its GitHub calls and stops on any
 403/429 or secondary rate limit, turns a conflicting mechanical rebase into `needs_redo` (and at
-most one redo colony), and can self-heal a main the train itself turned red. It reuses the train's
+most one redo colony), and can self-heal a main the train itself turned red. When GitHub CI cannot
+run at all (billing, no runner, Actions off), it can run an opted-in repository's checks itself in a
+microVM on the head merged with main and merge on those, posting `colonizer/local-checks`
+([loops.md](loops.md#when-github-ci-cannot-run), issue #969). It reuses the train's
 `decide`, guards and merge invocation; a repository it drives is skipped by the tick.
 
 ## Per-colony limits
