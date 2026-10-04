@@ -489,6 +489,13 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The note the next boot hands a colony whose agent module was switched mid-task (issue #737):
+    /// the switch sets it with the new `agent` and `agent_session`, the boot that follows treats it
+    /// as a resume trigger and uses it as the turn prompt, and it is cleared once the runner is up —
+    /// the same delivery as `pending_answer`, and for the same reason: it survives a failed boot and
+    /// a mothership restart, so a switch whose boot has not run is never lost. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_note: Option<String>,
     /// A one-shot note the next resume hands the agent (issue #876): the hold-timeout backoff writes
     /// what to do about the timed-out question here, and an answer given while parked writes the
     /// answer itself. Delivered on a cold resume (the brief) and a warm one (the prompt), then
@@ -634,6 +641,7 @@ impl Default for Session {
             hold_resumes: 0,
             agent_session: None,
             pending_answer: None,
+            switch_note: None,
             resume_note: None,
             prewarm: None,
             supply_chain: None,

@@ -58,7 +58,9 @@ tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
 # Native agent session transcripts (issue #736, transcript.rs): read a colony's own Claude Code,
 # Codex, OpenCode, Grok or Hermes session off disk and normalize it to one shape. Minimal feature
-# set — the file-backed readers plus the two SQLite ones; no live HTTP sources or WASM.
+# set — the file-backed readers plus the two SQLite ones; no live HTTP sources or WASM. Also
+# converts a session between agent modules when a colony switches agent mid-task (switch_agent.rs,
+# issue #737).
 txcript = { version = "=0.14.4", default-features = false, features = ["opencode", "hermes"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 

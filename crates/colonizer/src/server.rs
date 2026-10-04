@@ -357,6 +357,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::merge_loop::routes())
         .merge(crate::merge_train::routes())
         .merge(crate::supply_chain_loop::routes())
+        .merge(crate::switch_agent::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
         .merge(crate::orgs::routes())
