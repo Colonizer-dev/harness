@@ -13,11 +13,15 @@
 
 import { openSync, readSync, closeSync, statSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, normalize, posix } from 'node:path';
 
 export const EXEC_POLICY_DECISIONS = ['deny', 'ask', 'allow'];
 export const EXEC_POLICY_REPO_FILE = join('.colonizer', 'exec-policy.json');
+/** Where the boot mounts the writable-bind list (boot.rs writes `vm_dir/host-mounts`, exposed at
+ * guest `/colonizer`, alongside `path-policy`). */
+export const HOST_MOUNTS_FILE = '/colonizer/host-mounts';
 const EXEC_POLICY_MAX_BYTES = 64 * 1024; // a policy file is rules, not data; more is a mistake
+const HOST_MOUNTS_MAX_BYTES = 64 * 1024; // the list is paths, not data; more is a mistake
 const SCRIPT_MAX_BYTES = 256 * 1024;
 const REGEX_MAX_CHARS = 500; // a rule regex is a pattern, not a program; longer is a mistake — the
 // only cheap handle on ReDoS here, so a repo-layer rule does not get to be one either
@@ -32,6 +36,28 @@ const WRITE_TARGET_FLAGS = /^(-|--|[a-zA-Z]=)/;
 // Write targets that are never "outside the repository": scratch space and the kernel's own sinks.
 const NEVER_OUTSIDE = [/^\/tmp(\/|$)/, /^\/var\/tmp(\/|$)/, /^\/dev\/(?:null|stdout|stderr|fd)\b/, /^\/run\/user\//];
 
+// Some of the guest's read-only host mounts (boot.rs): the mothership's vm_dir at `/colonizer` and
+// the agent's binaries, runner and plugins at `/opt/colonizer`. A write onto one is still the
+// host's, so it asks. Matched by ancestor like a mount, and checked after the writable mounts, so a
+// nested writable bind like `/colonizer/services` keeps the host-backed reason. Not exhaustive: a
+// read-only bind added elsewhere in boot.rs is not listed here, and the bare repository's own mount
+// lives at a host data-dir path this file cannot name.
+const READ_ONLY_ROOTS = ['/colonizer', '/opt/colonizer'];
+
+// Read-only host mounts of a single file (boot.rs mounts the vendored Claude Code and node
+// runtimes read-only). Matched exactly, with a separator, so `/opt/node/bin/node_modules` is not
+// `/opt/node/bin/node`.
+const READ_ONLY_FILES = ['/opt/claude/bin/claude', '/opt/node/bin/node'];
+
+// What a segment writes outside the checkout, ranked most severe first. `git` is a write into the
+// checkout's own `.git`; `readonly` a write onto a [`READ_ONLY_ROOTS`]/[`READ_ONLY_FILES`] path;
+// `host` a write onto a writable host mount (or, with no mount list at all, any absolute path
+// outside the repo); and `vmlocal` a write into the microVM's discarded root filesystem — nothing
+// asks for that by default (see #877), only a `"writes_outside": "strict"` rule does (#750).
+const WRITE_SEVERITY = { git: 4, readonly: 3, host: 2, vmlocal: 1 };
+const GIT_REASON = "the command writes into the repository's .git internals";
+const HOST_REASON = 'the command writes to a host-backed path outside the repository';
+
 // Call-shaped egress, not bare URLs: a script that calls out is what the rule is about. The direct
 // `curl` command is deliberately NOT blocked by default — the colony's egress policy governs that.
 const SCRIPT_EGRESS = [
@@ -43,7 +69,10 @@ const SCRIPT_EGRESS = [
 
 // The first layer, present for every colony. It mirrors the path policy's DEFAULT_MASKED
 // (crates/colonizer/src/path_policy.rs): ~/.ssh and the credential files the path policy masks are
-// denied in the command and in any script it runs; writing outside the repository asks.
+// denied in the command and in any script it runs; writing to a host-backed path outside the
+// repository asks (a write into the microVM's discarded root filesystem does not — see #877), as
+// does a write onto a read-only host mount (`/colonizer`, `/opt/colonizer`) or into the checkout's
+// own `.git` (#750). A layer can restore the pre-#877 strictness with `"writes_outside": "strict"`.
 export function defaultPolicy() {
   return {
     rules: [
@@ -63,7 +92,7 @@ export function defaultPolicy() {
       {
         id: 'writes-outside-repo',
         decision: 'ask',
-        reason: 'the command writes outside the repository',
+        reason: 'the command writes to a host-backed path outside the repository',
         writes_outside: true,
       },
     ],
@@ -120,7 +149,11 @@ export function parsePolicy(input) {
         .map((p) => pathGlobRe(p.slice(1)));
       if (touches.length) rule.predicates.push({ kind: 'touches', globs: touches, res: touches.map(pathGlobRe), keepOut });
     }
-    if (raw.writes_outside === true) rule.predicates.push({ kind: 'writes_outside' });
+    if (raw.writes_outside === true || raw.writes_outside === 'strict') {
+      const strict = raw.writes_outside === 'strict';
+      rule.predicates.push({ kind: 'writes_outside', strict });
+      rule.writes = strict ? 'strict' : 'outside'; // which per-path reason the hit reports
+    }
     // A rule with none of the four known predicates would match every command by accident, so it
     // is dropped; a deliberate catch-all is `"command": "."` (or `""`).
     if (rule.predicates.length) rules.push(rule);
@@ -129,10 +162,42 @@ export function parsePolicy(input) {
 }
 
 /**
+ * The guest targets of the colony's writable host mounts, one absolute path per line (boot.rs
+ * writes `vm_dir/host-mounts`). Blank lines and `#` comments are skipped; each path is normalized
+ * and deduplicated. Every entry is a path the host still owns after the microVM dies — the only
+ * place outside the repository a write can matter.
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function parseHostMounts(text) {
+  const mounts = [];
+  const seen = new Set();
+  for (const line of String(text ?? '').split('\n')) {
+    const entry = line.trim();
+    if (!entry || entry.startsWith('#') || !entry.startsWith('/')) continue;
+    const path = normalize(entry).replace(/\/+$/, '') || '/';
+    if (!seen.has(path)) {
+      seen.add(path);
+      mounts.push(path);
+    }
+  }
+  return mounts;
+}
+
+/** The writable host-mount list the boot wrote, or null when the file is absent — a runner outside
+ * a microVM, or a mothership predating the mount list. */
+function loadHostMounts(env, readFile) {
+  const file = env.COLONIZER_HOST_MOUNTS || HOST_MOUNTS_FILE;
+  const text = readFile(file, HOST_MOUNTS_MAX_BYTES);
+  return text ? parseHostMounts(text) : null;
+}
+
+/**
  * The colony's policy, layered: default → install → org → repo. Called once at runner start; the
  * repo file read here is the one the whole run keeps, so the agent rewriting it mid-run cannot
  * widen anything (and the layering would not let it anyway). A layer that does not parse is
- * dropped with a warning, never fatal: the default keeps enforcing.
+ * dropped with a warning, never fatal: the default keeps enforcing. `hostMounts` (the writable
+ * bind list, or null when unknown) rides on the result for [`evaluateExecPolicy`] to read.
  */
 export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFile = readTextCapped } = {}) {
   const layers = [{ name: 'default', rules: parsePolicy({ rules: defaultPolicy().rules }).rules }];
@@ -149,26 +214,33 @@ export function loadExecPolicy(env = process.env, { cwd = process.cwd(), readFil
   if (env.COLONIZER_EXEC_POLICY_ORG) add('org', env.COLONIZER_EXEC_POLICY_ORG);
   const repo = readFile(join(cwd, EXEC_POLICY_REPO_FILE), EXEC_POLICY_MAX_BYTES);
   if (repo) add('repo', repo);
-  return { layers, warnings };
+  return { layers, warnings, hostMounts: loadHostMounts(env, readFile) };
 }
 
 /**
  * The decision for one Bash command, or null when no rule matches. Within a layer the first
  * matching rule wins; across layers the strictest decision wins, and on a tie the earlier layer's
  * rule is the one reported (the default names itself first, which is the one an operator reads).
- * @param {{ layers: {name: string, rules: object[]}[] }} policy   as loadExecPolicy returned
+ * @param {{ layers: {name: string, rules: object[]}[], hostMounts?: string[]|null }} policy
+ *        as loadExecPolicy returned; its `hostMounts` narrows `writes_outside` (#877)
  * @param {string} command                                         the Bash tool's command
  * @param {object} [opts]   { cwd, readFile } — cwd is the repository root the command runs in
  * @returns {{ decision: string, rule: string, layer: string, reason: string } | null}
  */
 export function evaluateExecPolicy(policy, command, opts = {}) {
   if (!policy || typeof command !== 'string' || !command) return null;
-  const ctx = buildContext(command, opts);
+  const ctx = buildContext(command, opts, policy.hostMounts ?? null);
   let best = null;
   for (const layer of policy.layers) {
     for (const rule of layer.rules) {
       if (!ruleMatches(rule, ctx)) continue;
-      const hit = { decision: rule.decision, rule: rule.id, layer: layer.name, reason: rule.reason };
+      // A `writes_outside` rule reports WHY: the specific path classification the context found (a
+      // read-only mount, the checkout's .git, a host-backed mount), falling back to the rule's own
+      // reason for the plain strict case (a VM-local write, which no single path names).
+      const reason = rule.writes === 'strict' ? ctx.strictWriteReason ?? rule.reason
+        : rule.writes === 'outside' ? ctx.writeReason ?? rule.reason
+        : rule.reason;
+      const hit = { decision: rule.decision, rule: rule.id, layer: layer.name, reason };
       if (!best || RANK[hit.decision] > RANK[best.decision]) best = hit;
       break; // first matching rule in this layer wins
     }
@@ -260,7 +332,7 @@ function ruleMatches(rule, ctx) {
         if (!ctx.tokens.some((t) => p.res.some((re) => re.test(t)) && !p.keepOut.some((re) => re.test(t)))) return false;
         break;
       case 'writes_outside':
-        if (!ctx.writesOutside) return false;
+        if (p.strict ? !ctx.writesOutsideAny : !ctx.writesOutside) return false;
         break;
     }
   }
@@ -318,7 +390,8 @@ function words(text) {
     .replace(/\$\{HOME\}/g, '$HOME') // before the split: the braces would break the word apart
     .split(/[\s;|&<>()"'`\[\]{}]+/)
     .map((w) => w.replace(/^[@:=+]+/, '').replace(/[,;:]+$/, ''))
-    .filter((w) => w.length > 1);
+    // One-char words are noise (`echo x`), except the filesystem root, which a `rm -rf /` writes.
+    .filter((w) => w.length > 1 || w === '/');
 }
 
 /** A segment's words past its env assignments and a leading sudo/env/command/exec. */
@@ -396,24 +469,79 @@ function writeTargets(segment) {
   return targets;
 }
 
-/** True when a segment writes an absolute path outside cwd (the repo root), /tmp and /dev aside. */
-function writesOutsideRepo(segment, cwd) {
+/** True when `target` sits at, under, or above one of `mounts` (guest targets). Comparisons are on
+ * segment boundaries, so `/root/.claudefoo` is not under a mounted `/root/.claude`. The ancestor
+ * case is deliberate: `rm -rf /root` and `rm -rf /` ask while a path below them is mounted. */
+function onMount(target, mounts) {
+  const parts = normalize(target).split('/').filter(Boolean);
+  return mounts.some((mount) => {
+    const mountParts = normalize(mount).split('/').filter(Boolean);
+    const shared = Math.min(parts.length, mountParts.length);
+    return parts.slice(0, shared).join('/') === mountParts.slice(0, shared).join('/');
+  });
+}
+
+/** True when `target` is exactly `path` or sits under it (`path` + `/`), separator-safe. */
+function underPath(target, path) {
+  return target === path || target.startsWith(`${path}/`);
+}
+
+/** True when `target` (absolute, normalized) lands in the checkout's own `.git`. */
+function inGitDir(target, cwd) {
+  return underPath(target, `${cwd}/.git`);
+}
+
+/**
+ * What one normalized absolute write target is, or null when it is none of the policy's business: a
+ * normal repository write, or a kernel sink (`/tmp`, `/dev/null`). A write into the checkout's
+ * `.git`, or onto a read-only host path, is the host's whichever way `hostMounts` reads. With
+ * `hostMounts` known, a path on a writable mount is `host` and anything else outside the repo is
+ * `vmlocal` (the microVM's discarded root filesystem); with no mount list (an older mothership, or
+ * a runner outside a VM) every path outside the repo reads as `host`, the conservative pre-#877
+ * answer. `cwd` is the normalized repository root.
+ */
+function classifyTarget(target, cwd, hostMounts) {
+  if (inGitDir(target, cwd)) return { kind: 'git', reason: GIT_REASON };
+  if (underPath(target, cwd)) return null; // a normal repo write
+  if (NEVER_OUTSIDE.some((re) => re.test(target))) return null;
+  if (hostMounts && onMount(target, hostMounts)) return { kind: 'host', reason: HOST_REASON };
+  const root = READ_ONLY_ROOTS.find((mount) => onMount(target, [mount]));
+  if (root) return { kind: 'readonly', reason: `the command writes to a read-only mount (${root})` };
+  const file = READ_ONLY_FILES.find((path) => underPath(target, path));
+  if (file) return { kind: 'readonly', reason: `the command writes to a read-only mount (${file})` };
+  return hostMounts ? { kind: 'vmlocal' } : { kind: 'host', reason: HOST_REASON };
+}
+
+/**
+ * The most severe classification among a segment's write targets, or null. Absolute targets are
+ * normalized first, so `/w/sub/../.git/x` reads as the git path it is and `/w/../etc/passwd` as the
+ * outside path it is. Relative targets are resolved against the checkout and flagged only when they
+ * land in its `.git` (`echo x > .git/HEAD` asks); any other relative target stays inside, as before,
+ * so a `../x` write does not start asking.
+ */
+function classifyWrite(segment, cwd, hostMounts) {
+  const root = posix.normalize(cwd);
+  let best = null;
   for (const raw of writeTargets(segment)) {
     const target = expandTilde(raw);
-    if (!target.startsWith('/')) continue; // relative: inside the worktree
-    if (NEVER_OUTSIDE.some((re) => re.test(target))) continue;
-    if (target === cwd || target.startsWith(`${cwd}/`)) continue;
-    return true;
+    const hit = target.startsWith('/')
+      ? classifyTarget(posix.normalize(target), root, hostMounts)
+      : inGitDir(posix.join(root, target), root) ? { kind: 'git', reason: GIT_REASON } : null;
+    if (hit && (!best || WRITE_SEVERITY[hit.kind] > WRITE_SEVERITY[best.kind])) best = hit;
   }
-  return false;
+  return best;
 }
 
 /**
  * Everything the predicates see, derived from the command alone: its segments, the tokens the
  * `touches` globs match against (the command's words and every script's words), the scripts it
- * runs (resolved against the repo root, contents capped), and whether anything is written outside.
+ * runs (resolved against the repo root, contents capped), and what it writes outside the checkout.
+ * `writesOutside` is the default predicate: a git, read-only or host-backed write (with no
+ * `hostMounts`, any path outside the repo). `writesOutsideAny` is the strict predicate (#750): any
+ * of those plus a write into the microVM's own root filesystem. Each carries the reason for the
+ * write it matched; a VM-local write has no reason of its own, so a strict rule names it.
  */
-function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}) {
+function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile } = {}, hostMounts = null) {
   const segments = splitCommands(command);
   const scripts = [];
   const seen = new Set();
@@ -430,11 +558,20 @@ function buildContext(command, { cwd = process.cwd(), readFile = readScriptFile 
   for (const word of [...segments.flatMap((s) => words(s)), ...scripts.flatMap((s) => words(s.text))]) {
     tokens.add(expandTilde(word));
   }
+  const writes = segments.map((segment) => classifyWrite(segment, cwd, hostMounts)).filter(Boolean);
+  const pick = (kinds) => writes
+    .filter((w) => kinds.includes(w.kind))
+    .reduce((best, w) => (!best || WRITE_SEVERITY[w.kind] > WRITE_SEVERITY[best.kind] ? w : best), null);
+  const outside = pick(['git', 'readonly', 'host']);
+  const strict = pick(['git', 'readonly', 'host', 'vmlocal']);
   return {
     command,
     segments,
     tokens: [...tokens],
     scripts,
-    writesOutside: segments.some((segment) => writesOutsideRepo(segment, cwd)),
+    writesOutside: outside !== null,
+    writesOutsideAny: strict !== null,
+    writeReason: outside?.reason ?? null,
+    strictWriteReason: strict?.reason ?? null,
   };
 }

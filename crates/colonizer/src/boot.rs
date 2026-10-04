@@ -133,6 +133,9 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             }
             s.status = SessionStatus::Failed;
             s.error = Some(truncate(&message, 2000));
+            // A refusal by policy is permanent: retrying would be refused the same way (issue #881).
+            s.failure_class = Some(crate::retry::FailureClass::Permanent);
+            s.retry_at = None;
             attention = s.clear_attention();
             true
         })
@@ -192,22 +195,85 @@ pub(crate) async fn boot(app: Shared, id: String, resume: bool, grant: Option<cr
             app.note_cleared_attention(&id, attention).await;
             return;
         }
-        let mut attention = None;
+        // Classified (issue #881): a transient failure with retries left is retried, anything else
+        // fails the colony. The answer is not needed here either way.
+        fail_or_retry_boot(&app, &id, &message).await;
+    } else {
+        // A boot that lands ends the failing streak (issue #881), so the next failure starts fresh.
         app.update_session(&id, |s| {
-            s.status = SessionStatus::Failed;
-            s.error = Some(truncate(&message, 2000));
-            // A warm-up this failed boot was still carrying dies with it; a held answer stays for
-            // a manual resume to deliver.
-            s.prewarm = None;
-            attention = s.clear_attention();
+            s.retry_at = None;
+            s.failure_class = None;
+            s.boot_retries = 0;
         })
         .await;
-        app.note_cleared_attention(&id, attention).await;
-        // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
-        if let Some(s) = app.session(&id).await {
-            crate::claims::spawn_release_if_needed(app.clone(), &s);
-        }
     }
+}
+
+/// Handles a boot that failed with `message` (issue #881): a transient failure with retries left
+/// goes back to `Queued` and answers `true`; every other case fails the colony, classed, and
+/// answers `false` (only then freeing the issue for a retry).
+async fn fail_or_retry_boot(app: &Shared, id: &str, message: &str) -> bool {
+    let class = crate::retry::classify(message);
+    if class == crate::retry::FailureClass::TransientInfra && schedule_boot_retry(app, id, message).await {
+        return true;
+    }
+    let mut attention = None;
+    app.update_session(id, |s| {
+        s.status = SessionStatus::Failed;
+        s.error = Some(truncate(message, 2000));
+        // The class of the failure that ended the retries, and no retry left pending.
+        s.failure_class = Some(class);
+        s.retry_at = None;
+        // A warm-up this failed boot was still carrying dies with it; a held answer stays for a
+        // manual resume to deliver.
+        s.prewarm = None;
+        attention = s.clear_attention();
+    })
+    .await;
+    app.note_cleared_attention(id, attention).await;
+    // A colony that never got going frees the issue for a retry, on GitHub as well as locally.
+    if let Some(s) = app.session(id).await {
+        crate::claims::spawn_release_if_needed(app.clone(), &s);
+    }
+    false
+}
+
+/// Puts a colony whose boot failed transiently back in the queue for another attempt (issue #881):
+/// `Queued` with `retry_at` at now plus the next backoff and the attempt counted. Answers `false`
+/// once the budget is spent, so the caller fails the colony for real.
+async fn schedule_boot_retry(app: &Shared, id: &str, message: &str) -> bool {
+    let message = message.to_string();
+    let Some((attempt, delay)) = app
+        .update_session(id, |s| {
+            if s.status != SessionStatus::Starting {
+                return None;
+            }
+            let delay = crate::retry::retry_delay(s.boot_retries)?;
+            let attempt = s.boot_retries + 1;
+            s.status = SessionStatus::Queued;
+            s.error = Some(truncate(&message, 2000));
+            s.failure_class = Some(crate::retry::FailureClass::TransientInfra);
+            s.retry_at = Some(Utc::now() + delay);
+            s.boot_retries = attempt;
+            s.updated_at = Utc::now();
+            Some((attempt, delay))
+        })
+        .await
+        .and_then(|(_, scheduled)| scheduled)
+    else {
+        return false;
+    };
+    app.session_log(
+        id,
+        "warn",
+        format!(
+            "boot attempt {attempt} failed (transient): {message} — retrying in {} min (retry {attempt} of {})",
+            delay.num_minutes(),
+            crate::retry::BOOT_RETRY_DELAYS.len()
+        ),
+    )
+    .await;
+    true
 }
 
 /// Whether a boot that failed after its colony left `Starting` must still reap the microVM: only
@@ -779,6 +845,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if resume && let Some(story) = resume_digest(&dir).await {
         prompt.push_str(&story);
     }
+    // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
+    // for yourself" or an answer that arrived while the colony was parked — rides the brief. Cleared
+    // once the runner is up, below; a warm resume hands it over on its own prompt instead.
+    if let Some(note) = s.resume_note.as_deref() {
+        prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
+    }
     write_private(&vm_dir.join("token"), random_token().as_bytes())?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
@@ -1178,6 +1250,11 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if findings_enabled(app, &modules) {
         runner_env.insert("COLONIZER_FINDINGS".into(), Value::String("true".into()));
     }
+    // A GitHub-needing loop's colony (issue #778): the read-only context is written into `vm_dir`
+    // (visible at /colonizer/github), and the guest is handed the host-proxied write tools.
+    if crate::loop_github::prepare(app, &s, &vm_dir, &log).await {
+        runner_env.insert("COLONIZER_GITHUB".into(), Value::String("true".into()));
+    }
     // A loop's colony gets loop_stop, and loop_next when the loop is self-paced (loops.rs).
     if let Some(self_paced) = crate::loops::colony_self_paced(app, s.origin.as_deref()).await {
         runner_env.insert("COLONIZER_LOOP".into(), Value::String("true".into()));
@@ -1200,6 +1277,17 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         );
         runner_env.insert("COLONIZER_RECALL_TOKEN".into(), Value::String(gateway_token.clone()));
     }
+    // Colony-to-colony coordination (issue #834): the /coordinate route and this colony's gateway
+    // token, set for every colony the gateway token exists for — it needs no deja index, unlike
+    // recall above.
+    runner_env.insert(
+        "COLONIZER_COORD_URL".into(),
+        Value::String(format!(
+            "http://host.microsandbox.internal:{}/coordinate",
+            app.cfg.gateway_bind.port()
+        )),
+    );
+    runner_env.insert("COLONIZER_COORD_TOKEN".into(), Value::String(gateway_token.clone()));
     // What the colony can and cannot run is part of the agent's brief (runner.mjs), so it names the
     // image this colony actually boots — the resolved stack's, not the configured one — or an agent
     // in a repository detected as Rust would brief itself for a Node machine.
@@ -1212,8 +1300,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // below). Without a session id — never reported, or the module stopped declaring resumability
     // since — the answer still rides the prompt, so it is delivered either way. A pre-warm boot
     // (issue #701) resumes too: no answer is riding it, but the transcript it continues is the one
-    // the question belongs to.
-    if (s.pending_answer.is_some() || s.prewarming())
+    // the question belongs to. A mid-task agent switch (issue #737) resumes as well: the transcript
+    // it wrote for the target module is the one this boot's runner must pick up.
+    if (s.pending_answer.is_some() || s.prewarming() || s.switch_note.is_some())
         && let Some(session_id) = &s.agent_session
     {
         runner_env.insert("COLONIZER_RESUME_SESSION".into(), Value::String(session_id.clone()));
@@ -1455,6 +1544,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // no turn, and the answer is delivered as a user message once it arrives.
     let initial_prompt = if s.prewarming() {
         String::new()
+    } else if let Some(note) = &s.switch_note {
+        // A mid-task agent switch (issue #737): the converted transcript carries the task brief, so
+        // the switch note alone is the first turn — it tells the new runner it is continuing another
+        // agent's session. It outranks a held answer, which cannot ride the same boot (the switch
+        // stops a waiting colony, clearing any held answer).
+        note.clone()
     } else {
         match (&s.pending_answer, &s.agent_session) {
             (Some(pa), Some(_)) => pa.prompt.clone(),
@@ -1687,6 +1782,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = crate::path_policy::opt_outs(&policy) {
         app.session_log(id, "warn", note).await;
     }
+    // The guest's exec policy (modules/agents/*/execpolicy.mjs, issue #877) reads this to tell a
+    // write into the microVM's discardable root filesystem from one into a host-backed path: only
+    // the writable mounts below survive the VM, so only they can still be the host's to protect.
+    // Written before the VM starts, like the path policy above (a failed write fails the launch; a
+    // missing list would leave the policy's conservative fallback — every absolute path asks).
+    std::fs::write(vm_dir.join(sandbox::HOST_MOUNTS_FILE), sandbox::host_mounts_text(&mounts))?;
     let spec = BootSpec {
         name: s.sandbox.clone(),
         image: setting_str(&sandbox_settings, &sandbox_schema, "image"),
@@ -1818,16 +1919,39 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     }
     // The runner is up, so a held answer is as delivered as it gets (issue #562): say so, once, and
     // only then take it off the record. A boot that failed above never reaches this, and the answer
-    // stays for the next resume; a stop cleared it under its own claim.
-    let delivered = app.update_session(id, |x| x.pending_answer.take().is_some()).await;
-    if let Some((s, true)) = delivered {
+    // stays for the next resume; a stop cleared it under its own claim. A resume note (issue #876)
+    // is spent the same way, for the same reason.
+    let delivered = app
+        .update_session(id, |x| {
+            let answer = x.pending_answer.take().is_some();
+            let note = x.resume_note.take().is_some();
+            (answer, note)
+        })
+        .await;
+    if let Some((s, (answered, noted))) = delivered {
+        if answered {
+            app.session_log(
+                id,
+                "info",
+                "held answer delivered: the agent resumes its session with it".into(),
+            )
+            .await;
+            crate::activity::record_restored(app, &s).await;
+        }
+        if noted {
+            app.session_log(id, "info", "resume note delivered to the agent".into()).await;
+        }
+    }
+    // A switch note is consumed the same way (issue #737): the runner is up, so its first turn
+    // carried the note and it must not repeat on a later boot. Taken only here, after the runner
+    // linked, so a failed boot above leaves it for the retry.
+    if let Some((_, true)) = app.update_session(id, |x| x.switch_note.take().is_some()).await {
         app.session_log(
             id,
             "info",
-            "held answer delivered: the agent resumes its session with it".into(),
+            "agent switch note delivered: the new agent is continuing the converted session".into(),
         )
         .await;
-        crate::activity::record_restored(app, &s).await;
     }
     Ok(())
 }
@@ -2023,6 +2147,104 @@ mod tests {
             .filter(|e| e["level"] == level)
             .filter_map(|e| e["message"].as_str().map(String::from))
             .collect()
+    }
+
+    /// Put a colony back where a fresh boot attempt starts it, without a claim or a slot.
+    async fn back_to_starting(app: &Shared, id: &str) {
+        app.update_session(id, |s| s.status = SessionStatus::Starting).await;
+    }
+
+    /// A transient microVM failure with retries left does not fail the colony (issue #881): it goes
+    /// back to `Queued` with a future `retry_at` and the attempt counted, and the colony log says so
+    /// — no `Failed` transition, so nothing notifies and no claim is released.
+    #[tokio::test]
+    async fn a_transient_boot_failure_goes_back_to_the_queue() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        assert!(fail_or_retry_boot(&app, "rt", "microVM boot failed: connection refused").await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Queued, "not failed: waiting to try again");
+        assert_eq!(s.boot_retries, 1);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::TransientInfra));
+        assert!(s.retry_at.is_some_and(|at| at > Utc::now()), "the retry is in the future");
+        let warned = said(&app, "rt", "warn").await;
+        assert!(
+            warned
+                .iter()
+                .any(|w| w.contains("retrying in 1 min") && w.contains("retry 1 of 3")),
+            "{warned:?}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The retry budget is three: each transient failure schedules the next, longer wait, and the
+    /// fourth has none left — the colony fails, still classed transient because that is what it was.
+    #[tokio::test]
+    async fn the_retry_budget_runs_out_and_transient_then_fails() {
+        let (app, root) = crate::sessions::tests::app_with_colony("rt", SessionStatus::Starting).await;
+        let msg = "microVM boot failed: connection refused";
+        for expected in [1u32, 2, 3] {
+            back_to_starting(&app, "rt").await;
+            assert!(
+                fail_or_retry_boot(&app, "rt", msg).await,
+                "retry {expected} is still within budget"
+            );
+            let s = app.session("rt").await.unwrap();
+            assert_eq!(s.boot_retries, expected);
+            assert_eq!(s.status, SessionStatus::Queued);
+        }
+        let waited: Vec<i64> = said(&app, "rt", "warn")
+            .await
+            .iter()
+            .filter_map(|w| w.split("retrying in ").nth(1))
+            .filter_map(|w| w.split(' ').next())
+            .filter_map(|m| m.parse().ok())
+            .collect();
+        assert_eq!(waited, vec![1, 5, 15], "the backoff grows 1, 5, 15 minutes");
+        // The fourth transient failure has no retry left: the colony is failed for real.
+        back_to_starting(&app, "rt").await;
+        assert!(!fail_or_retry_boot(&app, "rt", msg).await);
+        let s = app.session("rt").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(
+            s.failure_class,
+            Some(crate::retry::FailureClass::TransientInfra),
+            "a blip, not a verdict"
+        );
+        assert!(s.retry_at.is_none(), "no retry is pending");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A permanent failure — bad configuration, a missing credential, a policy refusal — fails the
+    /// colony at once, classed permanent, with no retry scheduled (issue #881).
+    #[tokio::test]
+    async fn a_permanent_boot_failure_fails_the_colony_at_once() {
+        for message in [
+            "invalid sandbox configuration: cpus must be >= 1",
+            "git asked for a GitHub credential and none was available",
+            "resume refused: not authorized (no grant)",
+        ] {
+            let (app, root) = crate::sessions::tests::app_with_colony("perm", SessionStatus::Starting).await;
+            assert!(!fail_or_retry_boot(&app, "perm", message).await, "{message:?}");
+            let s = app.session("perm").await.unwrap();
+            assert_eq!(s.status, SessionStatus::Failed, "{message:?}");
+            assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent), "{message:?}");
+            assert!(s.retry_at.is_none(), "{message:?} schedules no retry");
+            assert_eq!(s.boot_retries, 0, "{message:?} never counted a retry");
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    /// The whole `boot` path on a failure it cannot retry: a fresh boot of a colony with no agent
+    /// installed fails through `boot_inner` and is recorded permanent, never queued for a retry.
+    #[tokio::test]
+    async fn boot_of_a_colony_with_no_agent_module_fails_permanently() {
+        let (app, root) = crate::sessions::tests::app_with_colony("noagent", SessionStatus::Starting).await;
+        boot(app.clone(), "noagent".into(), false, None).await;
+        let s = app.session("noagent").await.unwrap();
+        assert_eq!(s.status, SessionStatus::Failed);
+        assert_eq!(s.failure_class, Some(crate::retry::FailureClass::Permanent));
+        assert!(s.retry_at.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn provider(id: &str, trusted: bool) -> providers::Provider {

@@ -8,6 +8,9 @@ use chrono::TimeZone;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 
+mod local;
+mod resolve;
+
 fn t0() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 9, 30, 9, 0, 0).unwrap()
 }
@@ -32,6 +35,11 @@ struct Fake {
     /// Every call, in order: `main`, `read s1`, `merge s1`, `update s1`, `rerun 77`, `dispatch fix` …
     log: RefCell<Vec<String>>,
     merged_at: RefCell<Vec<DateTime<Utc>>>,
+    /// Issue #969: the repository's local-check settings (off when unset) and the local runs' answers.
+    local: RefCell<Option<LocalChecks>>,
+    local_runs: RefCell<VecDeque<LocalRun>>,
+    /// Issue #968: what starting a resolve answers (resuming on `src/shared.rs` when unset).
+    resolves: RefCell<VecDeque<super::resolve::Started>>,
 }
 
 impl Fake {
@@ -52,7 +60,11 @@ impl Fake {
         self.log
             .borrow()
             .iter()
-            .filter(|l| !l.starts_with("main") && !l.starts_with("read") && !l.starts_with("guards") && !l.starts_with("branch"))
+            .filter(|l| {
+                !["main", "read", "guards", "branch", "config"]
+                    .iter()
+                    .any(|r| l.starts_with(r))
+            })
             .cloned()
             .collect()
     }
@@ -127,6 +139,38 @@ impl Ops for Fake {
         self.say(format!("dispatch {what}"));
         Ok("c0lony".to_string())
     }
+    async fn local_config(&self, _repo: &str, _base: &str, opted_in: bool) -> Result<LocalChecks, String> {
+        self.say(format!("config opted_in={opted_in}"));
+        Ok(self
+            .local
+            .borrow()
+            .clone()
+            .unwrap_or(LocalChecks::Off("local checks are off here".into())))
+    }
+    async fn local_run(&self, s: &Session, head: &str, _base: &str, commands: &[String]) -> LocalRun {
+        self.say(format!("local {} {head} [{}]", s.id, commands.join("; ")));
+        next(&mut self.local_runs.borrow_mut())
+    }
+    async fn post_status(&self, _repo: &str, sha: &str, state: &str, _description: &str) -> Result<(), String> {
+        self.say(format!("status {sha} {state}"));
+        Ok(())
+    }
+    async fn resolve(&self, s: &Session, base: &str) -> super::resolve::Started {
+        self.say(format!("resolve {} onto {base}", s.id));
+        let mut q = self.resolves.borrow_mut();
+        if q.is_empty() {
+            return super::resolve::Started::Resuming(vec!["src/shared.rs".into()]);
+        }
+        next(&mut q)
+    }
+    async fn reset_resolve(&self, s: &Session) -> Result<(), String> {
+        self.say(format!("reset {}", s.id));
+        Ok(())
+    }
+    async fn label_needs_human(&self, s: &Session) -> Result<(), String> {
+        self.say(format!("label {} needs-human", s.id));
+        Ok(())
+    }
 }
 
 fn session(id: &str, n: u64) -> Session {
@@ -169,6 +213,7 @@ fn reading(n: u64, mergeability: Mergeability, ci: CiState, behind: u64) -> Read
             base_is_default: true,
         },
         failing: Vec::new(),
+        unavailable: None,
     }
 }
 
@@ -385,6 +430,159 @@ async fn after_a_merge_the_next_one_is_updated_waited_for_and_merged_on_fresh_ci
     assert_eq!(item(&r, "s2").action, Action::Merged);
     let at = fake.merged_at.borrow();
     assert!(at[1] - at[0] >= ChronoDuration::seconds(120), "the cooldown held: {at:?}");
+}
+
+/// A session whose pull request touched `path`, so the merge train knows it overlaps another.
+fn touching(id: &str, n: u64, path: &str) -> Session {
+    let mut s = session(id, n);
+    s.changed_paths = vec![path.to_string()];
+    s
+}
+
+#[tokio::test]
+async fn a_merge_brings_the_candidates_that_share_its_files_onto_the_new_base_before_their_turn() {
+    // Three pull requests all touching one file: s1 merges, s2 and s3 are brought onto the new base
+    // at once; merging s2 moves the base again, so s3 is brought up to date a second time.
+    let fake = Fake::new()
+        // Green; the new tip's CI still running right after s1; then green for the rest.
+        .main(vec![
+            main_green(),
+            Ok(MainCi::Pending {
+                reason: "still running: ci".into(),
+            }),
+            main_green(),
+            main_green(),
+            main_green(),
+        ])
+        .pr("s1", vec![green(1)])
+        // Mergeable, then behind once s1 landed, then waiting on its fresh CI, then green.
+        .pr(
+            "s2",
+            vec![
+                green(2),
+                Ok(reading(2, Mergeability::Behind, CiState::Success, 1)),
+                Ok(reading(2, Mergeability::Clean, CiState::Pending, 0)),
+                Ok(reading(2, Mergeability::Clean, CiState::Success, 0)),
+            ],
+        )
+        // Behind once s1 landed; updated; waiting while s2 is dealt with; behind again once s2
+        // landed; updated once more; then green.
+        .pr(
+            "s3",
+            vec![
+                green(3),
+                Ok(reading(3, Mergeability::Behind, CiState::Success, 1)),
+                Ok(reading(3, Mergeability::Clean, CiState::Pending, 0)),
+                Ok(reading(3, Mergeability::Clean, CiState::Pending, 0)),
+                Ok(reading(3, Mergeability::Behind, CiState::Success, 1)),
+                Ok(reading(3, Mergeability::Clean, CiState::Success, 0)),
+            ],
+        );
+    let mut memory = BTreeMap::new();
+    let sessions = [
+        touching("s1", 1, "docs/protocol.md"),
+        touching("s2", 2, "docs/protocol.md"),
+        touching("s3", 3, "docs/protocol.md"),
+    ];
+    let r = run(&fake, &cfg(), &sessions, &mut memory, false).await;
+    assert_eq!(
+        fake.writes(),
+        vec![
+            "merge s1 Change 1 (#1)".to_string(),
+            "update s2".to_string(),
+            "update s3".to_string(),
+            "merge s2 Change 2 (#2)".to_string(),
+            "update s3".to_string(),
+            "merge s3 Change 3 (#3)".to_string(),
+        ]
+    );
+    for id in ["s1", "s2", "s3"] {
+        assert_eq!(item(&r, id).action, Action::Merged, "{id}: {:#?}", r.lines);
+    }
+    assert!(
+        !fake.writes().iter().any(|w| w.starts_with("rebase")),
+        "none of them ever read dirty: {:?}",
+        fake.writes()
+    );
+}
+
+#[tokio::test]
+async fn a_candidate_that_shares_no_files_waits_for_its_own_turn_to_be_updated() {
+    let fake = Fake::new()
+        .main(vec![
+            main_green(),
+            Ok(MainCi::Pending {
+                reason: "still running: ci".into(),
+            }),
+            main_green(),
+            main_green(),
+        ])
+        .pr("s1", vec![green(1)])
+        .pr(
+            "s2",
+            vec![
+                green(2),
+                Ok(reading(2, Mergeability::Behind, CiState::Success, 1)),
+                Ok(reading(2, Mergeability::Clean, CiState::Success, 0)),
+            ],
+        );
+    let mut memory = BTreeMap::new();
+    let sessions = [touching("s1", 1, "docs/a.md"), touching("s2", 2, "docs/b.md")];
+    let r = run(&fake, &cfg(), &sessions, &mut memory, false).await;
+    assert_eq!(
+        fake.writes(),
+        vec![
+            "merge s1 Change 1 (#1)".to_string(),
+            "update s2".to_string(),
+            "merge s2 Change 2 (#2)".to_string(),
+        ]
+    );
+    // The update came from the head of the queue, after main was read again — not fanned out by
+    // the merge, which nothing shares a file with.
+    let log = fake.log.borrow();
+    let at = log.iter().position(|l| l == "merge s1 Change 1 (#1)").unwrap();
+    assert_eq!(log[at + 1], "main", "{log:?}");
+    assert_eq!(item(&r, "s2").action, Action::Merged);
+}
+
+#[tokio::test]
+async fn a_candidate_that_shares_files_and_conflicts_after_the_merge_is_rebased() {
+    let fake = Fake::new().main(vec![main_green()]).pr("s1", vec![green(1)]).pr(
+        "s2",
+        vec![green(2), Ok(reading(2, Mergeability::Conflicted, CiState::Success, 1))],
+    );
+    let mut memory = BTreeMap::new();
+    let sessions = [touching("s1", 1, "docs/protocol.md"), touching("s2", 2, "docs/protocol.md")];
+    let r = run(&fake, &cfg(), &sessions, &mut memory, false).await;
+    assert_eq!(
+        fake.writes(),
+        vec!["merge s1 Change 1 (#1)".to_string(), "rebase s2".to_string()]
+    );
+    assert_eq!(item(&r, "s2").action, Action::Rebased);
+}
+
+#[tokio::test]
+async fn a_merge_that_reaches_the_cap_does_not_bring_the_rest_onto_the_new_base() {
+    // One more merge was allowed than this run may take: after s1 the cap is spent, so s2 is left
+    // for the next run rather than updated — which would only wait out CI it can no longer use.
+    let mut settings = cfg();
+    settings.max_merges = 1;
+    let fake = Fake::new().main(vec![main_green()]).pr("s1", vec![green(1)]).pr(
+        "s2",
+        vec![green(2), Ok(reading(2, Mergeability::Behind, CiState::Success, 1))],
+    );
+    let mut memory = BTreeMap::new();
+    let sessions = [touching("s1", 1, "docs/a.md"), touching("s2", 2, "docs/a.md")];
+    let r = run(&fake, &settings, &sessions, &mut memory, false).await;
+    assert_eq!(
+        fake.writes(),
+        vec!["merge s1 Change 1 (#1)".to_string()],
+        "{:?}",
+        fake.writes()
+    );
+    let i = item(&r, "s2");
+    assert_eq!(i.action, Action::Waiting);
+    assert!(i.reason.contains("merge cap (1)"), "{}", i.reason);
 }
 
 #[tokio::test]

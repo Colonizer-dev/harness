@@ -67,7 +67,7 @@ colonizer open     # reprints the link
 colonizer --help   # the rest
 ```
 
-To build from source (Node.js 20.19+ or 22.12+, and Rust 1.88+):
+To build from source (Node.js 20.19+ or 22.12+, and Rust 1.98+):
 
 ```sh
 git clone https://github.com/Colonizer-dev/harness && cd harness

@@ -430,6 +430,13 @@ export interface HarnessStatus {
   quota?: StatusQuota | null;
   /** "Provider out of quota" cards (issue #767), the same list GET /api/attention serves; older builds omit it. */
   quota_cards?: QuotaCard[];
+  /**
+   * A drain is holding the queue while an update or a restart waits for the colonies still booting
+   * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.
+   * The cockpit banners it. Optional so a mothership from before the drain sends nothing (reads as
+   * not draining).
+   */
+  draining?: boolean;
   /** Queue-wide stall readout (issue #230); null when nothing is stalled, omitted by older builds. */
   stall?: StallInfo | null;
   /** The shared anti-spam ledger's tallies (issue #311): what notify and the autonomous judge delivered, held for the digest, or dropped, by class, with the limits in force. Counts by class only — no colony ids. Older mothership builds omit it. */
@@ -972,6 +979,25 @@ export interface ModuleInfo {
   schema: SettingsSchema | null;
 }
 
+/** Why the autonomy judge's last call failed (issue #875), as the mothership classified it. */
+export type JudgeFailureKind = "provider_error" | "rate_limited" | "timeout" | "unreachable" | "refused";
+
+/**
+ * GET /api/autonomy/status (issue #875): the autonomy judge's recent health, for the Settings
+ * status line and the header's warning chip. `last_success` and `last_error` are null until the
+ * judge has answered or failed once; `consecutive_failures` counts the run of failures since the
+ * last success, and `alerted` says whether the mothership has already told the operator about them.
+ */
+export interface AutonomyStatus {
+  enabled: boolean;
+  model: string | null;
+  fallback_models: string[];
+  last_success: { at: string; model: string } | null;
+  last_error: { at: string; model: string; kind: JudgeFailureKind; status: number | null; message: string } | null;
+  consecutive_failures: number;
+  alerted: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Model providers (§6.3)
 // ---------------------------------------------------------------------------
@@ -1193,7 +1219,7 @@ export interface UpdateStatus {
   /// Whether this install can update itself, and why not if it cannot.
   can_apply: { ok: boolean; reason: string | null };
   apply: {
-    phase: "idle" | "installing" | "restarting" | "failed";
+    phase: "idle" | "draining" | "installing" | "restarting" | "failed";
     version: string | null;
     started_at: string | null;
     error: string | null;
@@ -1959,6 +1985,10 @@ export interface Loop {
   /** What a run starts: a colony from `prompt` (the default), the repository's architecture map, or —
    * for the one built-in loop, id `disk-cleanup` — the mothership's own disk cleanup. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778): before it launches, the mothership checks it can reach
+   * `repo`, and the colony gets the read-only `/colonizer/github` context and the host-proxied
+   * `colonizer_github` tools. Colony loops only. */
+  needs_github?: boolean;
   /** Map loops only: repositories still queued this cycle; `owner/*` is re-listed every run. */
   pending?: string[];
   /** The built-in disk-cleanup loop only: its settings, run history and attention item. */
@@ -2147,6 +2177,8 @@ export interface NewLoop {
   /** Colony loops (the default) or map loops; a map loop's `repo` may be `owner/*`. `disk_cleanup`
    * only on the built-in loop's own PUT. */
   kind?: LoopKind;
+  /** The loop's work is GitHub's (issue #778); see `Loop.needs_github`. Colony loops only. */
+  needs_github?: boolean;
   tz_offset_minutes?: number;
   model?: string | null;
   subagent_model?: string | null;
@@ -2683,6 +2715,9 @@ export interface PendingPhone {
 export interface Phones {
   devices: PairedPhone[];
   pending: PendingPhone[];
+  /** The same ranked origins an invite answers with (bare origins, no code, no credential), so a
+   * bookmark can name the network address without minting an invite. Older motherships omit it. */
+  origins?: PhoneOrigin[];
 }
 
 // ---------------------------------------------------------------------------
@@ -3143,9 +3178,14 @@ export interface MergeLoopSettings {
   min_call_gap_ms: number;
   /** Colony ids held out of the loop. */
   held: string[];
+  /** Issue #969: `owner` or `owner/repo` entries whose checks run locally when GitHub CI cannot run. */
+  local_checks: string[];
+  /** Issue #968: resolve a conflicted pull request by merging the base in and resuming its colony. */
+  resolve_conflicts: boolean;
+  resolve_attempts: number;
 }
 
-export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "waiting" | "skipped";
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "resolving" | "waiting" | "skipped";
 
 export interface MergeLoopItem {
   session: string;

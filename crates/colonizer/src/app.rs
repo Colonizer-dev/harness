@@ -137,6 +137,9 @@ pub struct App {
     pub claude_bins: Mutex<HashMap<bool, PathBuf>>,
     /// The optional deja transcript indexer (deja.rs): per-org locks and the not-installed warning.
     pub deja: crate::deja::Deja,
+    /// The draining flag that holds the queue back while an update or a restart runs (drain.rs,
+    /// issue #880), plus when it was set.
+    pub drain: crate::drain::Drain,
     /// The execution seam (execution.rs): boots, removes and lists the microVMs colonies run on.
     /// Local microsandbox today; a remote outpost is a second backend behind the same trait.
     pub execution: Arc<dyn crate::execution::ExecutionBackend>,
@@ -163,6 +166,11 @@ pub struct App {
     pub http_cache: crate::cache_store::DiskCache,
     /// Avatars fetched by `/api/img` (`<data_dir>/cache/img`).
     pub img_cache: crate::cache_store::DiskCache,
+    /// The autonomy judge's health (issue #875, autonomy.rs): the last success, the last failure
+    /// with its classified reason, and how many primary-model failures have gone unanswered in a
+    /// row. In memory only — a restart re-learns it — and read by `GET /api/autonomy/status` and by
+    /// notify's one judge-degraded announcement.
+    pub judge_health: Mutex<crate::autonomy::Health>,
     /// The shared anti-spam ledger (`<data_dir>/ledger.json`): notify and the autonomy judge count
     /// every outbound proactive action against it, so the operator's attention is one bounded rate.
     pub ledger: crate::ledger::LedgerStore,
@@ -267,6 +275,7 @@ impl App {
             claude_account: Mutex::new(None),
             claude_bins: Mutex::new(HashMap::new()),
             deja: crate::deja::Deja::default(),
+            drain: crate::drain::Drain::default(),
             execution: Arc::new(crate::execution::LocalBackend::new(cfg.msb.clone())),
             fleet_cache: crate::fleet::FleetCache::new(),
             fleet_members: crate::fleet_members::FleetStore::load(&cfg.config_dir),
@@ -277,6 +286,7 @@ impl App {
             host_cache: Mutex::new(None),
             http_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/http"), crate::cache_store::HTTP_MAX_BYTES),
             img_cache: crate::cache_store::DiskCache::new(cfg.data_dir.join("cache/img"), crate::cache_store::IMG_MAX_BYTES),
+            judge_health: Mutex::new(crate::autonomy::Health::default()),
             ledger: crate::ledger::LedgerStore::load(&cfg.data_dir),
             login: Default::default(),
             disk_cleanup: Default::default(),

@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { HOST_MOUNTS_FILE, evaluateExecPolicy, loadExecPolicy } from '../execpolicy.mjs';
 import { clampOptions, commandText, confine, contentText, defaultCacheDir, resolveGemini, riskForKind, splitCommand, toolOutput } from '../runner.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -132,15 +133,15 @@ test('the pure helpers: command split, risk, content text, option clamp, command
   assert.equal(confine(root, '/etc/hostname'), null, 'an absolute path outside escapes');
   // An outside target that exists on every OS (macOS has no /etc/hostname): a dangling link would
   // resolve through its parent instead, which is a different case.
-  const outside = join(mkdtempSync(join(tmpdir(), 'acp-outside-')), 'target.txt');
+  const outside = join(realpathSync(mkdtempSync(join(tmpdir(), 'acp-outside-'))), 'target.txt');
   writeFileSync(outside, 'x');
   symlinkSync(outside, join(root, 'escape'));
   assert.equal(confine(root, 'escape'), null, 'a symlink out of the tree escapes');
 });
 
 test('confine refuses a dangling symlink out of the tree, which a write would follow out of it', () => {
-  const root = mkdtempSync(join(tmpdir(), 'acp-dangle-'));
-  const outside = mkdtempSync(join(tmpdir(), 'acp-outside-'));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'acp-dangle-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'acp-outside-')));
   const target = join(outside, 'outside.txt');
   symlinkSync(target, join(root, 'link'));
   symlinkSync(join(outside, 'deeper', 'x.txt'), join(root, 'link-deep'));
@@ -233,6 +234,24 @@ test('acp/execpolicy.mjs is byte-identical to the claude-code original it is cop
     copy.equals(original),
     'modules/agents/acp/execpolicy.mjs has drifted from modules/agents/claude-code/execpolicy.mjs; the exec policy is one file in two places — change both together',
   );
+});
+
+test('the vm-writes vectors hold against the ACP copy of the exec policy (#877)', () => {
+  // The claude-code test drives the same fixture against its copy; both must agree, since the
+  // file is one in two places.
+  const fixture = JSON.parse(readFileSync(join(moduleDir, '..', 'claude-code', 'test', 'fixtures', 'execpolicy-vm-writes.json'), 'utf8'));
+  const mountsText = `${fixture.hostMounts.join('\n')}\n`;
+  const policy = loadExecPolicy({}, {
+    cwd: fixture.cwd,
+    readFile: (path) => (path === HOST_MOUNTS_FILE ? mountsText : null),
+  });
+  assert.deepEqual(policy.hostMounts, [...fixture.hostMounts], 'the mount list is parsed off the file');
+  for (const { command, decision, rule, reason } of fixture.cases) {
+    const hit = evaluateExecPolicy(policy, command, { cwd: fixture.cwd });
+    assert.equal(hit?.decision ?? null, decision, command);
+    if (rule) assert.equal(hit.rule, rule, command);
+    if (reason) assert.ok(hit.reason.includes(reason), `${command}: ${hit.reason}`);
+  }
 });
 
 test('acp/pathpolicy.mjs is byte-identical to the claude-code original it is copied from', () => {

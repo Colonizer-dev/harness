@@ -1,6 +1,6 @@
 // The fleet colony list (issue #689): the FleetPanel's host stack lists machines; this lists what
 // runs on them, directly under it on the Overview. Rows are the pure `FleetColony`s from
-// fleetColonies.ts (this host's sessions, plus the members' pushed history); this file is only the
+// fleetColoniesModel.ts (this host's sessions, plus the members' pushed history); this file is only the
 // fetch and the markup. A member pushes only finished colonies, so every imported row is done.
 import { useEffect, useMemo, useState, type ReactElement } from "react";
 
@@ -11,7 +11,7 @@ import type { FleetHost, Session } from "../types";
 import {
   filterColonies, fromImported, fromSession, hostOptions, mergeFleetColonies, totalsBy,
   type FleetColony, type FleetTotal, type WaitingOn,
-} from "./fleetColonies";
+} from "./fleetColoniesModel";
 
 /** Imported history to read: 5 pages of 100, newest first (older rows live in Settings → Fleet history). */
 const PAGE_LIMIT = 100;

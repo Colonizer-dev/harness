@@ -34,7 +34,7 @@ use axum::{
 };
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_value};
 use std::{
     collections::VecDeque,
     net::{IpAddr, SocketAddr, UdpSocket},
@@ -443,9 +443,39 @@ fn not_a_phone(phone: Option<&Extension<PhoneDevice>>) -> Result<(), crate::AppE
 // ---------------------------------------------------------------------------
 
 /// `GET /api/phone`: the paired phones and the pairings waiting for a confirm code — labels and
-/// times only, never a code, a secret or a hash.
+/// times only, never a code, a secret or a hash — plus where a phone could reach this mothership.
+/// The origins are the same ranked, non-secret list the invite route answers (relay → tailnet →
+/// lan), so the cockpit can show a bookmarkable address without minting a single-use invite.
 async fn list(State(app): State<Shared>) -> Json<Value> {
-    Json(app.phones.view())
+    Json(view_with_origins(app.phones.view(), detect_origins(&app).await))
+}
+
+/// The list view with the ranked origins folded in. Only bare origins go in — no code, no secret.
+fn view_with_origins(view: Value, origins: Vec<Origin>) -> Value {
+    let mut view = view;
+    if let Value::Object(fields) = &mut view {
+        fields.insert("origins".to_string(), to_value(origins).unwrap_or(Value::Null));
+    }
+    view
+}
+
+/// The origins a phone could open this mothership on, ranked best first. Detection is a route
+/// lookup per candidate (a UDP `connect` sends nothing), off the async threads all the same.
+async fn detect_origins(app: &Shared) -> Vec<Origin> {
+    let (tailnet, lan) = tokio::task::spawn_blocking(|| {
+        let tailnet = detect_tailnet();
+        (tailnet, detect_lan(tailnet))
+    })
+    .await
+    .unwrap_or_default();
+    let relay = app.remote.link().await;
+    origins(
+        relay.as_ref().map(|(host, up)| (host.as_str(), *up)),
+        tailnet,
+        lan,
+        &app.cfg.bind,
+        &app.cfg.allowed_hosts,
+    )
 }
 
 /// `POST /api/phone/invites`: mint an invite and answer the origins a phone could open it on.
@@ -458,22 +488,7 @@ async fn invite(State(app): State<Shared>, phone: Option<Extension<PhoneDevice>>
             "too many open invites; use one or wait a few minutes for them to expire",
         ));
     };
-    // Detection is a route lookup per candidate (a UDP `connect` sends nothing), off the async
-    // threads all the same.
-    let (tailnet, lan) = tokio::task::spawn_blocking(|| {
-        let tailnet = detect_tailnet();
-        (tailnet, detect_lan(tailnet))
-    })
-    .await
-    .unwrap_or_default();
-    let relay = app.remote.link().await;
-    let origins = origins(
-        relay.as_ref().map(|(host, up)| (host.as_str(), *up)),
-        tailnet,
-        lan,
-        &app.cfg.bind,
-        &app.cfg.allowed_hosts,
-    );
+    let origins = detect_origins(&app).await;
     Ok(Json(json!({
         "code": code,
         "expires_at": rfc3339(now + TTL_SECS),
@@ -971,6 +986,36 @@ mod tests {
         );
         assert!(reloaded.authenticate(&second).is_some());
         assert_eq!(reloaded.view()["devices"].as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_list_view_carries_the_ranked_origins_and_no_secret() {
+        let root = crate::tests::temp_root();
+        let store = PhoneStore::load(&root);
+        store.add("iPhone").unwrap();
+        let list_origins = origins(
+            Some(("abc123.my.colonizer.dev", true)),
+            Some(ip("100.72.1.4")),
+            None,
+            "0.0.0.0:7878",
+            &["100.72.1.4".to_string()],
+        );
+        let view = view_with_origins(store.view(), list_origins);
+        let kinds: Vec<_> = view["origins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["relay", "tailnet"], "the same ranking the invite route answers");
+        assert_eq!(view["origins"][1]["url"], "http://100.72.1.4:7878");
+        assert_eq!(view["devices"][0]["label"], "iPhone", "the devices are still there");
+        assert!(view["devices"][0].get("token_hash").is_none());
+        // Bare origins only: no invite code, no credential rides along with the list.
+        let text = view.to_string();
+        assert!(!text.contains("\"code\""), "no invite code in the list");
+        assert!(!text.contains("cph_"), "no credential in the list");
         let _ = std::fs::remove_dir_all(root);
     }
 

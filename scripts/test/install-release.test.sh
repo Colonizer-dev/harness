@@ -4,36 +4,45 @@
 # and the next install must recover from whatever the interrupted one left behind.
 #
 # Runs offline. A fake release has no modules/agents/*/fetch-at-install markers and its node.lock
-# points at a fake runtime tarball over file://, so the installer downloads nothing but local files,
-# and guest_claude only runs on a Mac.
-#
-# Needs Linux x86_64 with /dev/kvm readable and writable, because that is the installer's own platform
-# gate and this test drives the real script. It skips with a message anywhere else.
+# points at a fake runtime tarball over file://, so the installer downloads nothing but local files.
+# A macOS fake release also carries a fake guest Claude Code build, so guest_claude runs against that
+# too; the macOS signing cases below shim `uname` so the installer takes its Darwin path on Linux.
 set -eu
 
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 installer=$repo/scripts/install-release.sh
 
-if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
-  echo "skip: the installer only runs on Linux x86_64 with /dev/kvm, and this test drives the real installer"
+# Needs Linux x86_64 (sha256sum, /proc, and the installer's own platform gate). The Linux-install
+# cases also need /dev/kvm readable and writable, because that is the installer's own platform gate;
+# the macOS signing cases shim `uname` so the installer takes its Darwin path, which needs no kvm, so
+# they still run on a host without it.
+if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
+  echo "skip: this test drives the installer on Linux x86_64 (sha256sum, /proc)"
   exit 0
 fi
+have_kvm=0
+if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then have_kvm=1; fi
 
 # Everything lives under one scratch directory: the fake releases, the fake HOME, the PATH shims and
 # the installer's own temp dirs. TMPDIR is exported so a killed install leaks here, not into /tmp.
 scratch=$(mktemp -d)
 mkdir -p "$scratch/tmp"
 export TMPDIR="$scratch/tmp"
-trap 'rm -rf "$scratch"' EXIT
+# A background process started from a slot stands in for a running mothership or a colony's msb; it
+# has to be killed before the scratch dir it runs from is removed.
+bg_pids=
+trap 'stop_bg; rm -rf "$scratch"' EXIT
 
 # The default install path under the fake HOME is what we want to exercise, so an inherited
-# COLONIZER_APP must not move it.
-unset COLONIZER_APP
+# COLONIZER_APP must not move it, nor an inherited signing identity drive the macOS cases.
+unset COLONIZER_APP COLONIZER_CODESIGN_IDENTITY
 
 home=$scratch/home
 app=$home/.local/share/colonizer/app
 versions=$scratch/versions
 shims=$scratch/shims
+darwin_shims=$scratch/darwin-shims
+codesign_log=$scratch/codesign.log
 counter=$scratch/shim-count
 log=$scratch/install.log
 
@@ -60,7 +69,9 @@ bad() {
 # real ones, and the fake app is a script that says which version it is. Since the guest_node step,
 # every release also carries a node.lock pinning the colony Node.js runtime, and the installer
 # refuses an archive without one — so the fake carries a lock pointing at a fake runtime tarball
-# over file://, keeping the test offline.
+# over file://, keeping the test offline. A darwin-arm64 release carries, in addition, the guest
+# Claude Code build and the arm64 Node runtime the installer fetches on that platform (guest_claude,
+# guest_node), both faked over file:// the same way.
 make_fake_node() { # dir
   dir=$1
   mkdir -p "$dir/node-payload/node-fake/bin"
@@ -69,18 +80,26 @@ make_fake_node() { # dir
   tar -C "$dir/node-payload" -cJf "$dir/node.tar.xz" node-fake
   node_sha=$(sha256sum "$dir/node.tar.xz" | cut -d' ' -f1)
   node_url="file://$dir/node.tar.xz"
+  printf '#!/bin/sh\necho claude-guest-fake\n' > "$dir/claude-guest-fake"
+  claude_sha=$(sha256sum "$dir/claude-guest-fake" | cut -d' ' -f1)
+  claude_url="file://$dir/claude-guest-fake"
 }
 
-fake_release() { # version dir
+fake_release() { # version dir [platform]
   version=$1
   dir=$2
+  platform=${3:-linux-x86_64}
   mkdir -p "$dir/colonizer/bin"
   printf '#!/bin/sh\necho colonizer %s\n' "$version" > "$dir/colonizer/bin/colonizer"
   chmod 755 "$dir/colonizer/bin/colonizer"
   printf '%s\n' "$version" > "$dir/colonizer/VERSION"
   printf 'node 99 linux-x64 runtime %s %s\n' "$node_sha" "$node_url" > "$dir/colonizer/node.lock"
-  tar -C "$dir" -czf "$dir/colonizer-linux-x86_64.tar.gz" colonizer
-  (cd "$dir" && sha256sum colonizer-linux-x86_64.tar.gz > SHA256SUMS)
+  if [ "$platform" = darwin-arm64 ]; then
+    printf 'node 99 linux-arm64 runtime %s %s\n' "$node_sha" "$node_url" >> "$dir/colonizer/node.lock"
+    printf 'claude-code 99 linux-arm64 agent %s %s\n' "$claude_sha" "$claude_url" > "$dir/colonizer/claude-code.lock"
+  fi
+  tar -C "$dir" -czf "$dir/colonizer-$platform.tar.gz" colonizer
+  (cd "$dir" && sha256sum "colonizer-$platform.tar.gz" > SHA256SUMS)
 }
 
 install_from_release() { # release-url
@@ -105,6 +124,41 @@ refuse_install() { # release-url label
   fi
   grep -q "checksum mismatch" "$log" ||
     bad "$2: expected the installer to report a checksum mismatch; its log says: $(cat "$log")"
+}
+
+# The macOS signing cases shadow uname so the installer takes its Darwin path on this Linux host
+# (Darwin -s, arm64 -m; anything else delegates to the real uname), and codesign so no signature is
+# made: the shim appends its arguments to a log, and exits 1 when CODESIGN_FAIL is set. PATH carries
+# these two shims only, so the real mv/ln/tar/curl run.
+make_darwin_shims() {
+  rm -rf "$darwin_shims"
+  mkdir -p "$darwin_shims"
+  real_uname=$(command -v uname)
+  cat > "$darwin_shims/uname" <<EOF
+#!/bin/sh
+case "\$1" in
+  -s) echo Darwin ;;
+  -m) echo arm64 ;;
+  *) exec "$real_uname" "\$@" ;;
+esac
+EOF
+  cat > "$darwin_shims/codesign" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CODESIGN_LOG"
+if [ -n "${CODESIGN_FAIL:-}" ]; then exit 1; fi
+exit 0
+EOF
+  chmod 755 "$darwin_shims/uname" "$darwin_shims/codesign"
+}
+
+# A darwin-shimmed install. $2 is the identity in the environment (empty means none); $codesign_fail,
+# set by the caller, makes the codesign shim fail. The log starts empty each run, so a grep sees only
+# this run's calls.
+install_darwin() { # release-url identity
+  : > "$codesign_log"
+  HOME="$home" COLONIZER_RELEASE_URL="file://$1" \
+    COLONIZER_CODESIGN_IDENTITY="${2:-}" CODESIGN_LOG="$codesign_log" CODESIGN_FAIL="${codesign_fail:-}" \
+    PATH="$darwin_shims:$PATH" sh "$installer" > "$log" 2>&1
 }
 
 # An install run with mv and ln shadowed by shims that share one counter file: every call is counted,
@@ -188,9 +242,126 @@ fresh_home() {
   mkdir -p "$home"
 }
 
+# The same helper the installer uses, lifted out of it verbatim, so the test starts a process the
+# installer will see as running out of a slot. Each helper is one contiguous `name() {` ... `}` block,
+# so awk can lift it out; the count keeps a refactor that breaks that shape from silently testing
+# nothing.
+slot_func=$(awk '/^slot_pids\(\) \{/,/^\}/' "$installer")
+[ "$(printf '%s\n' "$slot_func" | grep -c '() {')" = 1 ] ||
+  { echo "FAIL: expected the slot_pids helper in $installer, got: $(printf '%s\n' "$slot_func" | grep '() {' || true)"; exit 1; }
+eval "$slot_func"
+
+src_sleep=$(command -v sleep || true)
+[ -n "$src_sleep" ] && [ -x "$src_sleep" ] || src_sleep=/bin/sleep
+
+start_in_slot() { # slot
+  mkdir -p "$1/vendor/microsandbox/bin"
+  cp "$src_sleep" "$1/vendor/microsandbox/bin/msb"
+  "$1/vendor/microsandbox/bin/msb" 600 &
+  bg_pids="$bg_pids $!"
+  i=0
+  while [ -z "$(slot_pids "$1")" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$(slot_pids "$1")" ] || bad "could not start a process from $1"
+}
+
+# The same process, but started through a symlink outside the slot — exactly how the mothership runs
+# (`~/.local/bin/colonizer`, or `$dir/app/bin/colonizer` after an update restarts itself). `ps` shows
+# the symlink, not the slot, so only the real-executable check (`/proc/<pid>/exe` on Linux, `lsof` on
+# macOS) finds it; finding it is what makes the installer refuse the slot.
+start_in_slot_via_symlink() { # slot
+  mkdir -p "$scratch/bin" "$1/vendor/microsandbox/bin"
+  cp "$src_sleep" "$1/vendor/microsandbox/bin/msb"
+  ln -sf "$1/vendor/microsandbox/bin/msb" "$scratch/bin/colonizer"
+  "$scratch/bin/colonizer" 600 &
+  bg_pids="$bg_pids $!"
+  i=0
+  while [ -z "$(slot_pids "$1")" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -n "$(slot_pids "$1")" ] || bad "could not start a process from $1 through a symlink"
+}
+
+# Kills and reaps what start_in_slot left running, so a later case does not see the previous case's
+# slot as still in use.
+stop_bg() {
+  for p in $bg_pids; do kill "$p" 2>/dev/null || true; done
+  for p in $bg_pids; do wait "$p" 2>/dev/null || true; done
+  bg_pids=
+}
+
 make_fake_node "$versions"
 fake_release 1 "$versions/v1"
 fake_release 2 "$versions/v2"
+fake_release 1 "$versions/v1-darwin" darwin-arm64
+fake_release 2 "$versions/v2-darwin" darwin-arm64
+
+# 0. The macOS signing cases. uname is shimmed to Darwin, so the installer takes its macOS path and
+#    re-signs the new host binary with the identity it knows, before switching slots. They need no
+#    /dev/kvm — only the Linux cases below do — so they run even on a host where those are skipped.
+note "== macOS: the new binary is re-signed before the switch"
+make_darwin_shims
+
+expect_signed() { # label identity
+  grep -q -- "--force --sign $2 --identifier dev.colonizer.mothership" "$codesign_log" ||
+    bad "$1: expected codesign to be called with --sign $2 --identifier dev.colonizer.mothership; the log says: $(cat "$codesign_log" 2>&1)"
+}
+
+# The identity in the environment signs the new slot's binary, the switch happens, and the identity is
+# recorded beside the app for later cockpit-started updates, which carry no environment of their own.
+fresh_home
+codesign_fail=
+install_darwin "$versions/v1-darwin" "my-darwin-id" || bad "macOS fresh install: the installer exited non-zero"
+expect_signed "macOS fresh install" "my-darwin-id"
+grep -q "app-a/bin/colonizer" "$codesign_log" ||
+  bad "macOS fresh install: expected the new slot's binary signed, the log says: $(cat "$codesign_log")"
+expect_colonizer "macOS fresh install" "colonizer 1"
+[ "$(readlink "$app")" = "app-a" ] ||
+  bad "macOS fresh install: expected the app symlink at app-a, got $(readlink "$app" 2>&1)"
+[ "$(cat "$home/.local/share/colonizer/codesign-identity" 2>/dev/null)" = "my-darwin-id" ] ||
+  bad "macOS fresh install: expected the identity recorded in codesign-identity"
+note "ok: an environment identity signed the new slot and was recorded"
+
+# No identity in the environment, but one recorded beside the app: the install re-signs with it, and
+# leaves the recorded file as it is (it did not come from the environment this time).
+fresh_home
+mkdir -p "$home/.local/share/colonizer"
+printf 'recorded-darwin-id\n' > "$home/.local/share/colonizer/codesign-identity"
+install_darwin "$versions/v2-darwin" || bad "macOS recorded-identity install: the installer exited non-zero"
+expect_signed "macOS recorded-identity install" "recorded-darwin-id"
+expect_colonizer "macOS recorded-identity install" "colonizer 2"
+[ "$(cat "$home/.local/share/colonizer/codesign-identity")" = "recorded-darwin-id" ] ||
+  bad "macOS recorded-identity install: expected the recorded file left untouched"
+note "ok: a recorded identity re-signed the new slot with no environment variable"
+
+# codesign fails: the installer exits non-zero, the app symlink still points at the previous slot, the
+# new slot is removed, and the previous version still runs.
+fresh_home
+codesign_fail=
+install_darwin "$versions/v1-darwin" "keep-me-id" || bad "macOS v1 install before a failing re-sign: the installer exited non-zero"
+expect_colonizer "macOS before a failing re-sign" "colonizer 1"
+codesign_fail=1
+rc=0
+install_darwin "$versions/v2-darwin" "keep-me-id" || rc=$?
+[ "$rc" -ne 0 ] || bad "macOS failing re-sign: expected the installer to exit non-zero"
+[ "$(readlink "$app" 2>&1)" = "app-a" ] ||
+  bad "macOS failing re-sign: expected the app symlink still at app-a, got $(readlink "$app" 2>&1)"
+[ ! -d "$home/.local/share/colonizer/app-b" ] ||
+  bad "macOS failing re-sign: expected the new slot app-b removed"
+expect_colonizer "macOS failing re-sign" "colonizer 1"
+grep -q "codesign failed" "$log" ||
+  bad "macOS failing re-sign: expected the installer to say codesign failed; it said: $(cat "$log")"
+note "ok: a failed re-sign left the previous version installed and running"
+codesign_fail=
+note "macOS signing checks passed"
+
+if [ "$have_kvm" != 1 ]; then
+  echo "skip: the Linux-install cases below need /dev/kvm readable and writable; the macOS cases above ran"
+  exit 0
+fi
 
 # 1. A fresh install: the app is a symlink, colonizer runs through it, nothing is left over.
 note "== fresh install of v1"
@@ -309,11 +480,49 @@ expect_no_leftovers "restore with app.old behind a dangling app symlink"
 expect_one_slot "restore with app.old behind a dangling app symlink"
 note "ok: app.old behind a dangling app symlink was put back, and the install finished over it"
 
-# 6. A download that does not match the checksums travels with the release must install nothing. It
+# 6. A running process in the slot an install would replace: the installer refuses, naming the slot
+#    and pid(s), and leaves the slot's binary alone — the boot that failed when a restart ran an
+#    installer over the slot its msb was still running from. The process is started through a symlink
+#    outside the slot, the way the mothership itself runs, so this only passes with the
+#    real-executable check and not the command line.
+note "== install refused when the target slot is in use"
+fresh_home
+must_install "$versions/v1" "clean v1 before the in-use target test"
+start_in_slot_via_symlink "$home/.local/share/colonizer/app-b"
+rc=0
+install_from_release "$versions/v2" || rc=$?
+[ "$rc" -ne 0 ] || bad "in-use target slot: expected the installer to refuse app-b in use"
+grep -q "in use by pid(s)" "$log" ||
+  bad "in-use target slot: expected the refusal to name the slot and pid(s); it said: $(cat "$log")"
+[ -f "$home/.local/share/colonizer/app-b/vendor/microsandbox/bin/msb" ] ||
+  bad "in-use target slot: expected the in-use slot's binary to be left untouched"
+expect_colonizer "in-use target slot" "colonizer 1"
+note "ok: an install whose target slot is in use was refused and left it untouched"
+stop_bg
+
+# 7. A running process in the slot an install would remove: the slot is kept, not deleted, and a note
+#    says so. The mothership's own sweep removes it later. Started from the slot directly, so the
+#    command-line match sees it — the other half of the check, next to the symlinked case above.
+note "== install keeps a previous slot still in use"
+fresh_home
+must_install "$versions/v1" "clean v1 before the in-use previous test"
+start_in_slot "$home/.local/share/colonizer/app-a"
+must_install "$versions/v2" "install over an in-use previous slot"
+expect_colonizer "keep in-use previous slot" "colonizer 2"
+grep -q "keeping the previous version at" "$log" ||
+  bad "keep in-use previous slot: expected a note that app-a is kept; it said: $(cat "$log")"
+[ -d "$home/.local/share/colonizer/app-a" ] ||
+  bad "keep in-use previous slot: expected the in-use app-a to be kept"
+expect_symlink_app "keep in-use previous slot"
+expect_no_leftovers "keep in-use previous slot"
+note "ok: an install kept the previous slot a process was still running from"
+
+# 8. A download that does not match the checksums travels with the release must install nothing. It
 #    is the release's own SHA256SUMS that turns a corrupted or swapped download into a refusal rather
 #    than a bad install, so the refusal is tested where nothing is installed yet, and over a working
 #    install that must be left exactly as it was.
 note "== a tarball that does not match SHA256SUMS installs nothing"
+stop_bg
 
 corrupt_release 1 "$versions/corrupt-fresh"
 fresh_home

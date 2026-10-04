@@ -244,6 +244,7 @@ export function bodyOf(l: Loop, change: Partial<NewLoop> = {}): NewLoop {
     prompt: l.prompt,
     cadence: l.cadence,
     kind: l.kind ?? "colony",
+    needs_github: l.needs_github ?? false,
     tz_offset_minutes: l.tz_offset_minutes,
     model: l.model,
     subagent_model: l.subagent_model,
@@ -293,6 +294,9 @@ export function LoopDialog({
   // The built-in disk cleanup never opens this form (it has its own dialog).
   const [kind, setKind] = useState<"colony" | "map">(loop?.kind === "map" ? "map" : "colony");
   const [allRepos, setAllRepos] = useState(loop?.kind === "map" && loop.repo.endsWith("/*"));
+  // Whether the loop's work is GitHub's (issue #778): the run then waits for the repository to be
+  // reachable and gets the read-only context and the host-proxied write tools. Colony loops only.
+  const [needsGithub, setNeedsGithub] = useState(loop?.needs_github ?? false);
   const [choice, setChoice] = useState<LoopChoice>(loop ? toLocalChoice(loop.cadence) : { every: "daily", time: "09:00" });
   const [model, setModel] = useState(loop?.model ?? "");
   const [subagentModel, setSubagentModel] = useState(loop?.subagent_model ?? "");
@@ -322,6 +326,7 @@ export function LoopDialog({
         prompt: kind === "map" ? "" : prompt,
         cadence,
         kind,
+        needs_github: kind === "colony" && needsGithub,
         tz_offset_minutes: -new Date().getTimezoneOffset(),
         model: model || null,
         subagent_model: subagentModel || null,
@@ -368,6 +373,8 @@ export function LoopDialog({
                   setPrompt(t.prompt);
                   setName(t.label);
                   setChoice(t.choice);
+                  setKind("colony");
+                  setNeedsGithub(t.needsGithub);
                 }}
                 className="cursor-pointer rounded-full border border-border bg-transparent px-2.5 py-1 text-[12px] text-muted hover:border-border-strong hover:text-text"
               >
@@ -392,6 +399,8 @@ export function LoopDialog({
                 onClick={() => {
                   setKind(k);
                   if (k === "colony" && !repo.includes("/")) setRepo(firstInOrg(repo));
+                  // A map refresh reads the repository, not GitHub; the need is colony-only.
+                  if (k === "map") setNeedsGithub(false);
                 }}
                 className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-[12.5px]", kind === k ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
               >
@@ -560,6 +569,11 @@ export function LoopDialog({
           <span className="flex items-center gap-2">
             <Switch checked={autopilot} onChange={setAutopilot} label="Autopilot" /> Autopilot: open the pull request without asking
           </span>
+          {kind === "colony" && (
+            <span className="flex items-center gap-2" title="The run waits until the mothership can reach the repository, then reads /colonizer/github and labels or comments through the host">
+              <Switch checked={needsGithub} onChange={setNeedsGithub} label="Needs GitHub" /> Needs GitHub: read issues, CI and merged PRs, and label or comment on issues
+            </span>
+          )}
           <label className="flex items-center gap-2">
             stop after
             <input type="number" min={1} value={maxRuns} onChange={(e) => setMaxRuns(e.target.value)} placeholder="∞" className={cx(field, "w-20")} />

@@ -193,6 +193,11 @@ pub struct Park {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
     pub vm_kept: bool,
+    /// The risk class of the question the colony was parked on, when it was waiting on one
+    /// (issue #876): a hold park records it so the backoff decision can tell a question the judge
+    /// may answer from one it never may. `None` for a park with no open question, or a quota park.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_risk: Option<crate::protocol::QuestionRisk>,
 }
 
 /// A user answer that arrived while the colony was suspended and is still undelivered.
@@ -469,6 +474,11 @@ pub struct Session {
     /// was kept. `None` for a colony that has never been parked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked: Option<Park>,
+    /// How many times the hold timeout has auto-resumed this colony (issue #876): the index into
+    /// the backoff schedule. On the session, not the park record, because a resume clears `parked`
+    /// and a colony that parks again must not start the schedule over.
+    #[serde(default)]
+    pub hold_resumes: u32,
     /// The agent runner's own session id, as last reported by the `agent_session` event: what a
     /// resumed boot continues. `None` until the first report, and permanently unknown to agents
     /// whose module declares no `session_resume`.
@@ -479,6 +489,19 @@ pub struct Session {
     /// mothership restart, so an answer is never lost (issue #562).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_answer: Option<PendingAnswer>,
+    /// The note the next boot hands a colony whose agent module was switched mid-task (issue #737):
+    /// the switch sets it with the new `agent` and `agent_session`, the boot that follows treats it
+    /// as a resume trigger and uses it as the turn prompt, and it is cleared once the runner is up —
+    /// the same delivery as `pending_answer`, and for the same reason: it survives a failed boot and
+    /// a mothership restart, so a switch whose boot has not run is never lost. `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch_note: Option<String>,
+    /// A one-shot note the next resume hands the agent (issue #876): the hold-timeout backoff writes
+    /// what to do about the timed-out question here, and an answer given while parked writes the
+    /// answer itself. Delivered on a cold resume (the brief) and a warm one (the prompt), then
+    /// cleared — like `pending_answer` but with no suspension behind it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_note: Option<String>,
     /// The colony's pre-warm request (issue #701), set when someone opens a suspended colony's
     /// question and the queue has not started (or has already given up on) the warm-up boot.
     /// `None` unless a request is live.
@@ -528,6 +551,19 @@ pub struct Session {
     /// same retry budget instead of starting a new one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub boot_attempt_started_at: Option<u64>,
+    /// How the last boot failure was classed (issue #881): `transient_infra` for a blip the colony
+    /// retries on [`Session::boot_retries`] and [`Session::retry_at`], `permanent` for a verdict a
+    /// retry cannot fix. Cleared when a boot finally lands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<crate::retry::FailureClass>,
+    /// How many transient boot failures this colony has retried (issue #881). When it reaches the
+    /// retry budget the next failure is permanent. Kept as a record after a successful boot.
+    #[serde(default)]
+    pub boot_retries: u32,
+    /// When a transient boot failure may be tried again (issue #881): the queue holds the colony
+    /// `Queued` until this passes. `None` when no retry is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -602,8 +638,11 @@ impl Default for Session {
             attention: None,
             suspended: None,
             parked: None,
+            hold_resumes: 0,
             agent_session: None,
             pending_answer: None,
+            switch_note: None,
+            resume_note: None,
             prewarm: None,
             supply_chain: None,
             superseded: None,
@@ -615,6 +654,9 @@ impl Default for Session {
             boot_image: None,
             app_slot: None,
             boot_attempt_started_at: None,
+            failure_class: None,
+            boot_retries: 0,
+            retry_at: None,
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             updated_at: DateTime::<Utc>::UNIX_EPOCH,
         }
@@ -751,6 +793,7 @@ mod tests {
             reason: "hold_timeout".into(),
             resets_at: None,
             vm_kept: true,
+            question_risk: Some(crate::protocol::QuestionRisk::WorkspaceWrite),
         });
         let again: Session = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
         assert_eq!(again.parked, s.parked);
@@ -818,6 +861,7 @@ mod tests {
             reason: "provider_quota_exhausted".into(),
             resets_at: Some("2026-09-28T07:00:00Z".into()),
             vm_kept: false,
+            question_risk: None,
         });
         full.last_activity_at = Some(Utc::now());
         full.boot_timing = Some(json!({"total_ms": 5}));

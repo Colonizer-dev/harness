@@ -1,7 +1,10 @@
 /api/activity                                        GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     GET    unauth=401    token=owner            activity=-
+/api/admin/drain                                     POST   unauth=401    token=owner            activity=-
 /api/archive                                         GET    unauth=401    token=owner            activity=-
 /api/archive/retention                               POST   unauth=401    token=owner            activity=-
 /api/attention                                       GET    unauth=401    token=owner            activity=-
+/api/autonomy/status                                 GET    unauth=401    token=read             activity=-
 /api/burn-down                                       GET    unauth=401    token=owner            activity=-
 /api/burn-down/stop                                  POST   unauth=401    token=owner            activity=burn_down.stop
 /api/chat                                            GET    unauth=401    token=owner            activity=-
@@ -212,6 +215,7 @@
 /api/sessions/{id}/retain                            POST   unauth=401    token=owner            activity=colony.retain
 /api/sessions/{id}/seen                              POST   unauth=401    token=session>=read    activity=-
 /api/sessions/{id}/stop                              POST   unauth=401    token=session>=operate activity=colony.stop
+/api/sessions/{id}/switch-agent                      POST   unauth=401    token=session>=operate activity=colony.switch_agent
 /api/sessions/{id}/terminal                          GET    unauth=401    token=owner            activity=-
 /api/sessions/{id}/transcript                        GET    unauth=401    token=session>=read    activity=-
 /api/settings/claude-token                           DELETE unauth=401    token=owner            activity=settings.remove
