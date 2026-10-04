@@ -3178,9 +3178,14 @@ export interface MergeLoopSettings {
   min_call_gap_ms: number;
   /** Colony ids held out of the loop. */
   held: string[];
+  /** Issue #969: `owner` or `owner/repo` entries whose checks run locally when GitHub CI cannot run. */
+  local_checks: string[];
+  /** Issue #968: resolve a conflicted pull request by merging the base in and resuming its colony. */
+  resolve_conflicts: boolean;
+  resolve_attempts: number;
 }
 
-export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "waiting" | "skipped";
+export type MergeLoopAction = "merged" | "updated" | "rebased" | "red" | "rerun" | "needs_redo" | "redo_dispatched" | "resolving" | "waiting" | "skipped";
 
 export interface MergeLoopItem {
   session: string;
