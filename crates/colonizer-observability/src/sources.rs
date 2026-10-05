@@ -80,8 +80,8 @@ pub(crate) fn colony_of(relative: &str) -> Option<&str> {
 
 /// Every file to tail under `data_dir` for these colonies, with these settings. A stream that is
 /// off is not listed, so it is never read (P1). Metrics read the gateway and spend ledgers on
-/// cursors of their own, and traces (#846) read each colony's events and the activity ledger (for
-/// the outcomes that close a colony's root span) on theirs.
+/// cursors of their own, and traces (#846, #847) read each colony's events and gateway ledgers and
+/// the activity ledger (for the outcomes that close a colony's root span) on theirs.
 pub fn discover(data_dir: &Path, settings: &Settings, colonies: &[String]) -> Vec<SourceFile> {
     let mut out = Vec::new();
     let mut add = |source: Source, signal: Signal, colony: Option<&str>, relative: String, rolled: Option<String>| {
@@ -119,7 +119,7 @@ pub fn discover(data_dir: &Path, settings: &Settings, colonies: &[String]) -> Ve
             if source == Source::Gateway && settings.stream_metrics {
                 add(source, Signal::Metrics, Some(colony), relative.clone(), None);
             }
-            if source == Source::Events && settings.stream_traces {
+            if matches!(source, Source::Events | Source::Gateway) && settings.stream_traces {
                 add(source, Signal::Traces, Some(colony), relative, None);
             }
         }
@@ -161,6 +161,7 @@ mod tests {
         assert!(rel.contains(&("sessions/abc123/gateway.jsonl", Signal::Metrics)));
         assert!(rel.contains(&("spend.jsonl", Signal::Metrics)));
         assert!(rel.contains(&("sessions/abc123/events.jsonl", Signal::Traces)));
+        assert!(rel.contains(&("sessions/abc123/gateway.jsonl", Signal::Traces)));
         assert!(rel.contains(&("activity.jsonl", Signal::Traces)));
         assert_eq!(
             all.iter().filter(|s| s.relative == "sessions/abc123/harness.jsonl").count(),
@@ -242,6 +243,7 @@ mod tests {
             vec![
                 ("activity.jsonl".to_string(), Signal::Traces),
                 ("sessions/abc123/events.jsonl".to_string(), Signal::Traces),
+                ("sessions/abc123/gateway.jsonl".to_string(), Signal::Traces),
             ]
         );
         let _ = std::fs::remove_dir_all(&root);

@@ -181,6 +181,7 @@ impl Policy {
     /// or path, since `hashed` does not reach it. The name is still redacted and capped.
     pub fn span(&self, kind: SpanKind, subject: &str) -> SpanBuilder<'_> {
         let mut fields = Fields::new(self, allowlist::for_span(kind), true);
+        fields.cap = fields.cap.min(SPAN_ATTRIBUTE_BYTES);
         let subject = match (kind, self.config.repo_names) {
             (SpanKind::InvokeAgent, RepoNames::Hashed) => self.hash(subject).unwrap_or_default(),
             _ => subject.to_string(),
@@ -190,7 +191,8 @@ impl Policy {
         } else {
             format!("{} {subject}", kind.as_str())
         };
-        let name = fields.text(&name, None, self.config.max_attribute_bytes);
+        let cap = fields.cap;
+        let name = fields.text(&name, None, cap);
         SpanBuilder {
             fields,
             span: Span {
@@ -267,11 +269,18 @@ fn redact_under(key: &str, value: String) -> String {
     }
 }
 
+/// The longest attribute value a span carries, whatever `max_attribute_bytes` says: Tempo's
+/// distributor truncates span attributes at 2 KiB, so a span's are cut here first, with the marker.
+pub const SPAN_ATTRIBUTE_BYTES: usize = 2048;
+
 /// The attributes of one record under construction, and whether anything in it was cut.
 struct Fields<'p> {
     policy: &'p Policy,
     tables: [&'static [Rule]; 2],
     span: bool,
+    /// The attribute cap: `max_attribute_bytes`, and at most [`SPAN_ATTRIBUTE_BYTES`] on a span
+    /// ([`Policy::span`] lowers it).
+    cap: usize,
     attributes: Vec<KeyValue>,
     truncated: bool,
 }
@@ -282,6 +291,7 @@ impl<'p> Fields<'p> {
             policy,
             tables,
             span,
+            cap: policy.config.max_attribute_bytes,
             attributes: Vec::new(),
             truncated: false,
         }
@@ -323,7 +333,7 @@ impl<'p> Fields<'p> {
                 }
             }
             _ => match value {
-                AttrValue::Str(s) => AttrValue::Str(self.text(&s, Some(key), policy.config.max_attribute_bytes)),
+                AttrValue::Str(s) => AttrValue::Str(self.text(&s, Some(key), self.cap)),
                 other => other,
             },
         };
@@ -520,7 +530,8 @@ impl SpanBuilder<'_> {
     /// A span event: a name from a fixed set (`colonizer.suspended`) at a time, with no attributes.
     /// Like a span's name it is structure, so it is still redacted and capped.
     pub fn event(mut self, name: &str, unix_nanos: u64) -> Self {
-        let name = self.fields.text(name, None, self.fields.policy.config.max_attribute_bytes);
+        let cap = self.fields.cap;
+        let name = self.fields.text(name, None, cap);
         self.span.events.push(span::Event {
             time_unix_nano: unix_nanos,
             name,

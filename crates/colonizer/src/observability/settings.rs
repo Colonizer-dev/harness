@@ -68,7 +68,7 @@ fn shared_properties() -> Map<String, Value> {
     );
     m.insert(
         "max_trace_bytes".into(),
-        json!({"type": "integer", "title": "Max trace size (bytes)", "minimum": 1024, "default": 4194304}),
+        json!({"type": "integer", "title": "Max trace size (bytes)", "description": "One colony trace's budget, kept under Tempo's 5 MB per trace. Past 90% of it, tool, subagent, question, gateway and host-step spans are counted on their turn and the root instead of sent; turns and the root always are.", "minimum": 1024, "default": 4194304}),
     );
     m.insert(
         "repo_names".into(),

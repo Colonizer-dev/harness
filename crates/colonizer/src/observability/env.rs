@@ -195,6 +195,7 @@ pub fn resolve(module: Option<&ModuleChoice>, env: &dyn Fn(&str) -> Option<Strin
         ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
         ("max_content_bytes", json!(cfg.max_content_bytes)),
         ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),
+        ("max_trace_bytes", json!(cfg.max_trace_bytes)),
         ("repo_names", json!(cfg.repo_names)),
         ("max_backlog_days", json!(cfg.max_backlog_days)),
         ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
@@ -343,6 +344,7 @@ mod tests {
             None,
         ));
         assert_eq!(e.settings["trace_sample_ratio"], json!(0.25));
+        assert_eq!(e.settings["max_trace_bytes"], json!(4_194_304));
         assert_eq!(e.str("traces_endpoint"), "https://traces.example.com/v1/traces");
         assert_eq!(e.provenance["traces_endpoint"], "env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
 

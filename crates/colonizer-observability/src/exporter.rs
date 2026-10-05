@@ -418,6 +418,7 @@ impl Exporter {
             host_id: &self.contract.host_id,
             colonies: &self.contract.policy,
             sample_ratio: self.contract.settings.trace_sample_ratio,
+            max_trace_bytes: self.contract.settings.max_trace_bytes,
         };
         let mut traces = self.traces.clone();
         let mut items = Vec::new();
@@ -430,7 +431,14 @@ impl Exporter {
         for record in gaps.iter().chain(&tailed.records) {
             match record.signal {
                 Signal::Metrics => aggregates.fold(record.source, &record.line),
-                Signal::Traces => builder.feed(&mut traces, record.source, record.colony.as_deref(), &record.line, &mut items),
+                Signal::Traces => builder.feed(
+                    &mut traces,
+                    record.source,
+                    record.colony.as_deref(),
+                    &record.line,
+                    &record.digest,
+                    &mut items,
+                ),
                 Signal::Logs => {
                     if let Some(item) = mapper.log(record.source, record.colony.as_deref(), &record.line, &record.digest) {
                         items.push(item);

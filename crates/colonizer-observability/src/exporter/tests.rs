@@ -833,15 +833,32 @@ async fn a_long_colony_crossing_export_ticks_sends_each_span_once_and_the_root_l
         colonies: &colonies,
         policy: policy_for(&contract::load(&path).unwrap()),
         ratio: 1.0,
+        max_trace_bytes: crate::traces::DEFAULT_MAX_TRACE_BYTES,
     };
     let builder = run.builder();
     let mut state = crate::traces::Traces::default();
     let mut once = Vec::new();
     for line in &events {
-        builder.feed(&mut state, crate::policy::Source::Events, Some("c0ffee12"), line, &mut once);
+        let digest = crate::traces::tests::digest(line);
+        builder.feed(
+            &mut state,
+            crate::policy::Source::Events,
+            Some("c0ffee12"),
+            line,
+            &digest,
+            &mut once,
+        );
     }
     let merged_line = crate::traces::tests::outcome("c0ffee12", "merged", "2026-09-24T10:01:00Z");
-    builder.feed(&mut state, crate::policy::Source::Activity, None, &merged_line, &mut once);
+    let digest = crate::traces::tests::digest(&merged_line);
+    builder.feed(
+        &mut state,
+        crate::policy::Source::Activity,
+        None,
+        &merged_line,
+        &digest,
+        &mut once,
+    );
     builder.settle(&mut state, &|_| true, &[], now_nanos(), &mut once);
     assert_eq!(all, crate::traces::tests::spans(&once));
     assert_eq!(y.status.signals["traces"].state, "ok");

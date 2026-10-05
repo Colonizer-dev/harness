@@ -14,10 +14,13 @@ attribute, whatever the content switches say ([export policy](export-policy.md))
 invoke_agent acme/widgets                 the colony (root)
 ├── turn 1                                one turn: a message to its turn_end
 │   ├── execute_tool Bash                 one tool call: tool_call to tool_result
-│   └── execute_tool Task                 a Task (or Agent) call …
-│       └── subagent Explore              … and the subagent it started
-│           └── execute_tool Read         the subagent's own tool calls
-└── turn 2
+│   ├── execute_tool Task                 a Task (or Agent) call …
+│   │   └── subagent Explore              … and the subagent it started
+│   │       └── execute_tool Read         the subagent's own tool calls
+│   └── question                          a question, to its answer
+├── turn 2
+├── chat qwen/qwen3-coder                 one routed model call through the gateway
+└── host_step verification                one host-chain verdict
 ```
 
 | Span | Starts | Ends | Attributes |
@@ -26,6 +29,15 @@ invoke_agent acme/widgets                 the colony (root)
 | `turn <n>` | the message that starts it (or its first event) | its `turn_end` | `colonizer.origin` (`user`, `watchdog`, `autonomy`, …), `gen_ai.response.model`, and this turn's own tokens and `colonizer.cost_usd` (the change since the previous turn, not the running total); `error.type` = `turn_error` when the turn failed |
 | `execute_tool <tool>` | the `tool_call` | its `tool_result` | `gen_ai.operation.name` = `execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.id`, `colonizer.tool.output_bytes` (a size, never the output), `colonizer.denial.class` (`egress`, `read_only`, …) when the sandbox refused it; `error.type` = `tool_error` when it failed |
 | `subagent <type>` | its Task call | the Task's result, or its `subagent_end` when it ran in the background | `gen_ai.operation.name` = `invoke_agent`, `gen_ai.agent.id` (the Task call's id), `gen_ai.agent.name` (the subagent type); `error.type` = `subagent_failed` |
+| `question` | the `question` | its `question_answered` | `colonizer.question.risk`, `colonizer.question.kind` (`exec_policy` for an exec-policy ask), `colonizer.question.blocking`, `colonizer.question.options` (a count), `colonizer.answered_by` (`user` or `autonomy`, the judge); `colonizer.unanswered` when the root closes it. Never the question or the answer. |
+| `chat <model>` (client) | the gateway accepted the request | its last byte (`ts` + `duration_ms`) | `gen_ai.operation.name` = `chat`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model` (the model sent upstream), `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `colonizer.gateway.status`, `colonizer.gateway.wire`, `colonizer.gateway.queue_ms`, `colonizer.fallback`; `error.type` = the failure code (`upstream_error`, `queue_full`, …). One span per attempt, so a retry is a second span. |
+| `host_step <step>` | the host's line (a verification: its run's start) | the same instant (a verification: its verdict) | `colonizer.step`, and per step: `verification` `colonizer.verdict`, `colonizer.verify.exit_code`, `colonizer.verify.commits`, `colonizer.verify.files_changed` (a count); `screening` its mode, outcome and finding count; `validated` `colonizer.finding.severity`; `review` `colonizer.review.verdict`; `fix_colony` `colonizer.fix.colony`; `watchdog_turn_end` `colonizer.watchdog.after_secs`; `boundary` its kind and control; `path_policy` the access, policy and tool, never the path; `jev_ladder` applied, tokens before and after, trigger, and the kept and dropped counts |
+
+Questions, gateway requests and host steps sit where they belong: a question under the turn (or
+subagent) that asked it, open across turns until it is answered; a gateway request and a host step
+under the root, since the gateway is tailed apart from the events and the host chain runs between
+turns. A question's span is keyed by its `question_id`, a gateway request's by its line's digest,
+and a host step's by its line's `seq`.
 
 The root's status is `OK` for `merged`, `closed` and `no_changes`, `ERROR` for `failed`, and unset
 for `idle` and `deleted`. Streaming text deltas, thinking, logs and status changes make no span. A
@@ -67,11 +79,29 @@ per colony are held open; past that the oldest closes with `colonizer.evicted = 
 The open spans, turn counters and running totals are kept in `<data>/observability/state.json`,
 written in the same atomic write as the read offsets and only after the backend acknowledged the
 spans, so a restart resumes mid-turn with the same ids, and a crash before that write replays the
-same spans. A refused credential (401, 403) holds the spans like any other record.
+same spans. A refused credential (401, 403) holds the spans like any other record. The budget's byte
+count is committed the same way, so a replay leaves out the same spans.
 
 The `colonizer.agent_event` log records of the same lines are still sent while **Colony activity**
 is on: they are the per-event view (with the record id a backend can deduplicate on), the trace is
 the per-colony one, and either can be switched off alone.
+
+## Long colonies and Tempo limits
+
+A colony that runs for days can make more spans than a tracing backend keeps for one trace: Tempo
+refuses whatever arrives past `max_bytes_per_trace` (5 MB by default), and the root arrives last.
+**Max trace size** (`max_trace_bytes`, 4 MiB by default) keeps every trace under it. The exporter
+counts the encoded bytes of every span it sends per colony (in `state.json`, with the offsets).
+Past 90 % of the budget, tool calls, subagents, questions, gateway requests and host steps are
+counted instead of sent: on their turn as `colonizer.spans_suppressed.<kind>`, and on the root as
+the same counts, `colonizer.trace.dropped_spans` and `colonizer.trace_budget_exhausted = true`.
+The last 10 % is kept for the turns and the root, which are always sent. A span's attribute values
+are cut at 2 KiB (Tempo's distributor limit) with the `…(N more bytes)` marker and
+`colonizer.truncated`, whatever **Max attribute size** says for log records.
+
+To keep more of a long colony, raise Tempo's `max_bytes_per_trace` (in its `overrides`) and
+`max_trace_bytes` together, the second below the first. Raising only `max_trace_bytes` makes Tempo
+refuse the end of the trace, the root included; raising only Tempo's limit changes nothing here.
 
 ## Sampling
 

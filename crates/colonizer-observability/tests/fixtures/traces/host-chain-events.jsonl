@@ -1,0 +1,15 @@
+{"type":"user_message","id":"initial","text":"Fix the flaky test","origin":"user","seq":1,"ts":"2026-09-24T11:00:00.000Z"}
+{"type":"tool_call","message_id":"m1","tool_call_id":"toolu_edit","name":"Edit","input":{"file_path":"src/lib.rs"},"origin":"agent","seq":2,"ts":"2026-09-24T11:00:01.000Z"}
+{"type":"path_policy","access":"write","policy":"protected","path":".github/workflows/ci.yml","tool":"Edit","origin":"agent","seq":3,"ts":"2026-09-24T11:00:02.000Z"}
+{"type":"boundary","kind":"path_policy_denied","control":"path_policy","detail":"write to .github/workflows/ci.yml refused","at":"2026-09-24T11:00:03Z","origin":"system","seq":4,"ts":"2026-09-24T11:00:03.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_edit","output":"","is_error":true,"origin":"agent","seq":5,"ts":"2026-09-24T11:00:04.000Z"}
+{"type":"jev_ladder","applied":true,"pre_tokens":180000,"post_tokens":90000,"trigger":"auto","decisions":[{"tool_call_id":"t1","tool":"Read","action":"keep","keep_call":0.9,"keep_result":0.8},{"tool_call_id":"t2","tool":"Grep","action":"drop_result","keep_call":0.6,"keep_result":0.1},{"tool_call_id":"t3","tool":"Bash","action":"drop_call","keep_call":0.1,"keep_result":0.0}],"origin":"agent","seq":6,"ts":"2026-09-24T11:00:05.000Z"}
+{"type":"turn_end","is_error":false,"result":"Fixed","cost_usd":0.2,"duration_ms":7000,"model_usage":{"claude-opus-5":{"input_tokens":500,"output_tokens":90,"cache_read_tokens":0,"cache_write_tokens":0}},"origin":"agent","seq":7,"ts":"2026-09-24T11:00:06.000Z"}
+{"type":"watchdog_turn_end","after_secs":95,"origin":"system","seq":8,"ts":"2026-09-24T11:00:07.000Z"}
+{"type":"verification","verdict":"contradicted","by_declaration":false,"summary":"cargo test failed: tests::flaky","contradictions":["tests::flaky still fails"],"advisories":[],"inconclusive":[],"command":"cargo test --workspace","command_source":"detected","exit_code":101,"tests_ms":5100,"commits":2,"files_changed":["src/lib.rs","tests/flaky.rs"],"snapshot":null,"ms":6000,"origin":"system","seq":9,"ts":"2026-09-24T11:00:08.000Z"}
+{"type":"screening","mode":"warn","outcome":"warned","findings":[{"class":"bidi_control","severity":"high","location":"src/lib.rs:3"}],"origin":"system","seq":10,"ts":"2026-09-24T11:00:09.000Z"}
+{"type":"validated","title":"The flaky test hides a race","severity":"high","origin":"system","seq":11,"ts":"2026-09-24T11:00:10.000Z"}
+{"type":"rejected","title":"Unrelated lint","reason":"Outside the issue","origin":"system","seq":12,"ts":"2026-09-24T11:00:11.000Z"}
+{"type":"fix_colony","title":"The flaky test hides a race","session":"f1x0c0de","issue":"https://github.com/acme/widgets/issues/9","origin":"system","seq":13,"ts":"2026-09-24T11:00:12.000Z"}
+{"type":"review","title":"The flaky test hides a race","session":"r3v1e3ed","verdict":"pass","pr":"https://github.com/acme/widgets/pull/10","origin":"system","seq":14,"ts":"2026-09-24T11:00:13.000Z"}
+{"type":"merged","title":"The flaky test hides a race","session":"f1x0c0de","pr":"https://github.com/acme/widgets/pull/10","origin":"system","seq":15,"ts":"2026-09-24T11:00:14.000Z"}

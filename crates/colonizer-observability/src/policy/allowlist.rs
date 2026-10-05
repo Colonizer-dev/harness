@@ -212,6 +212,8 @@ const SPAN_COMMON: &[Rule] = &[
     // span evicted past the open-span cap.
     s("colonizer.unmatched"),
     s("colonizer.evicted"),
+    // What the trace budget left out under a turn or the root, by span kind (#847).
+    s("colonizer.spans_suppressed.*"),
 ];
 
 const EVENTS: &[Rule] = &[
@@ -371,6 +373,7 @@ const INVOKE_AGENT: &[Rule] = &[
     d("colonizer.pr.url"),
     s("colonizer.outcome"),
     s("colonizer.trace.dropped_spans"),
+    s("colonizer.trace_budget_exhausted"),
 ];
 const TURN: &[Rule] = &[s("cost_usd"), s("is_error")];
 /// The description is content, and content is never a span attribute (P5): always dropped here.
@@ -383,14 +386,58 @@ const EXECUTE_TOOL: &[Rule] = &[
     s("colonizer.tool.output_bytes"),
 ];
 const CHAT: &[Rule] = &[
+    s("colonizer.gateway.wire"),
+    s("colonizer.gateway.status"),
+    s("colonizer.gateway.queue_ms"),
+    s("colonizer.fallback"),
     s("input_tokens"),
     s("output_tokens"),
     s("status"),
     s("failure"),
     s("fallback"),
 ];
-const QUESTION: &[Rule] = &[s("risk"), s("kind"), s("blocking")];
-const HOST_STEP: &[Rule] = &[s("kind"), s("actor")];
+/// A question's class and shape, and who answered it; never its text or the answer (P5).
+const QUESTION: &[Rule] = &[
+    s("risk"),
+    s("kind"),
+    s("blocking"),
+    s("colonizer.question.risk"),
+    s("colonizer.question.kind"),
+    s("colonizer.question.blocking"),
+    s("colonizer.question.options"),
+    s("colonizer.answered_by"),
+    s("colonizer.unanswered"),
+];
+/// A host-chain step's verdict and counts; never a path, a command, a title or a reason.
+const HOST_STEP: &[Rule] = &[
+    s("kind"),
+    s("actor"),
+    s("colonizer.step"),
+    s("colonizer.verdict"),
+    s("colonizer.verify.by_declaration"),
+    s("colonizer.verify.exit_code"),
+    s("colonizer.verify.commits"),
+    s("colonizer.verify.files_changed"),
+    s("colonizer.screening.mode"),
+    s("colonizer.screening.outcome"),
+    s("colonizer.screening.findings"),
+    s("colonizer.finding.severity"),
+    s("colonizer.review.verdict"),
+    s("colonizer.fix.colony"),
+    s("colonizer.watchdog.after_secs"),
+    s("colonizer.boundary.kind"),
+    s("colonizer.boundary.control"),
+    s("colonizer.path_policy.access"),
+    s("colonizer.path_policy.policy"),
+    s("colonizer.path_policy.tool"),
+    s("colonizer.jev.applied"),
+    s("colonizer.jev.pre_tokens"),
+    s("colonizer.jev.post_tokens"),
+    s("colonizer.jev.trigger"),
+    s("colonizer.jev.kept"),
+    s("colonizer.jev.dropped_results"),
+    s("colonizer.jev.dropped_calls"),
+];
 
 /// The tables a source's log records and metric points are checked against.
 pub(crate) fn for_source(source: Source) -> [&'static [Rule]; 2] {

@@ -27,6 +27,98 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244004000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "3fbaf9c2a17386f0",
+              "spanId": "9fc82f549360c0a2",
+              "startTimeUnixNano": "1790244002000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.kind",
+                  "value": {
+                    "stringValue": "exec_policy"
+                  }
+                },
+                {
+                  "key": "colonizer.question.blocking",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "autonomy"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244008000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "3fbaf9c2a17386f0",
+              "spanId": "5b0ad4c03498c5c5",
+              "startTimeUnixNano": "1790244007000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"

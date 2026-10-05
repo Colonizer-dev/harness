@@ -184,7 +184,9 @@ committed with the read offsets that produced them.
 
 One trace per colony while **Traces** is on: the root `invoke_agent <repo>` span from launch to
 outcome, a `turn <n>` span per turn, an `execute_tool <tool>` span per tool call, and a
-`subagent <type>` span under the Task call that started it. Ids are derived from the install's
+`subagent <type>` span under the Task call that started it, a `question` span from a question
+to its answer, a `chat <model>` span per gateway request and a `host_step <step>` span per
+host-chain verdict. **Max trace size** keeps each trace under Tempo's limit. Ids are derived from the install's
 host id, the colony id and the turn number or tool call id, so a replay sends the same spans. A
 span goes out when it ends; the root goes out once, at the colony's outcome. Structure only, never
 content. [Traces](observability/traces.md) has the span names, attributes, ids and sampling.
