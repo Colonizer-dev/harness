@@ -23,6 +23,8 @@ export type AttentionReason =
   | "autopilot_held"
   | "provider_quota_exhausted"
   | "hold_timeout"
+  /** Parked because the repo's daily PR cap was reached (issue #910); the worktree is kept and the colony resumes at the next UTC day. */
+  | "repo_pr_rate_limit"
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
   | "control_defeat"
