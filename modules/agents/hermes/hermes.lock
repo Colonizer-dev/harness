@@ -1,0 +1,26 @@
+# hermes-agent pinned by its source commit, plus the uv build that installs it
+# and a Python for images without a usable one.
+# Same six columns as vendor/vendor.lock: name, version, platform, kind, sha256, url.
+#
+# Hermes publishes no release binaries, and PyPI stops at 0.19.0, so the runner builds it at
+# colony boot (stage.mjs) instead of extracting a binary. It downloads each row and checks the
+# sha256 before using it. Then it creates a venv and installs hermes-requirements.lock with
+# `uv pip install --require-hashes --only-binary :all:` (every dependency pinned by hash, wheels
+# only), then the source tree itself with --no-deps --no-build-isolation, using the hash-pinned
+# setuptools and wheel from that lock.
+#
+# Kinds:
+#   source        the GitHub tarball of the tag's exact commit (the url names the commit; it must
+#                 match requires.pins.hermes.source_rev in module.json)
+#   requirements  the sha256 of hermes-requirements.lock next to this file, so the two cannot drift
+#   tool          uv, per architecture, from its GitHub release
+#   python        a python-build-standalone CPython, per architecture, used only when the image has
+#                 no python3.11-3.13 on PATH
+#
+# Regenerate everything with `node scripts/pin-hermes.mjs <tag>`.
+hermes-agent  0.21.5            any          source        babbdb9706ad1c96708d75914afb45d809cd4b73dec1ceae233a6814f5ed97e3  https://codeload.github.com/NousResearch/hermes-agent/tar.gz/f97608f178d1ffeca59860195ab7da295f7c8e5f
+hermes-agent  0.21.5            any          requirements  03eb494521886d46edd285c3d1924bc72dd17c6f89f6d48af8780098ee7692f7  hermes-requirements.lock
+uv            0.12.23           linux-x64    tool          9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6  https://github.com/astral-sh/uv/releases/download/0.12.23/uv-x86_64-unknown-linux-gnu.tar.gz
+uv            0.12.23           linux-arm64  tool          6524bd338177ed50d035d39354e12545e993bbeba2ecbddf0480c5b3a81d313f  https://github.com/astral-sh/uv/releases/download/0.12.23/uv-aarch64-unknown-linux-gnu.tar.gz
+python        3.13.16+20261003  linux-x64    python        4595c5589fff7bf0cb158d9a88a797e0d791fa33830770fcb7bf3f4b104feeae  https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+python        3.13.16+20261003  linux-arm64  python        6e9641400f8debd9b7924b27b5ff0662c372852382e291a76c450c7b67414cf6  https://github.com/astral-sh/python-build-standalone/releases/download/20261003/cpython-3.13.16%2B20261003-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz

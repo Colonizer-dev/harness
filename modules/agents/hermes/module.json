@@ -2,7 +2,7 @@
   "kind": "agent",
   "id": "hermes",
   "name": "Hermes",
-  "description": "Nous Research's Hermes Agent CLI, driven headlessly (hermes chat -q --format stream-json). One model; questions reach the cockpit through the colonizer ask_user MCP tool.",
+  "description": "Nous Research's Hermes Agent CLI, driven headlessly (hermes chat -q --format stream-json). One model; questions reach the cockpit through the colonizer ask_user MCP tool. The runner builds the pinned hermes-agent source into a venv on first boot (every download and dependency hash-checked), so nothing needs to be staged into the colony image.",
   "protocol": "colonizer-runner/1",
   "entry": [
     "node",
@@ -12,14 +12,31 @@
     "binaries": [
       "hermes"
     ],
-    "image": "glibc + node >= 20 + Python 3.11 with hermes-agent v2026.9.24: git clone --depth 1 --branch v2026.9.24 https://github.com/NousResearch/hermes-agent into a Python 3.11 venv and pip install -e \".[mcp]\" (a plain pip install from git refuses by design; the mcp extra is what makes Hermes load MCP servers), leaving the `hermes` binary on PATH"
+    "fetched_by_runner": [
+      "hermes"
+    ],
+    "image": "glibc + node >= 20; the runner builds the pinned hermes-agent (source commit, uv and every Python dependency hash-pinned in hermes.lock and hermes-requirements.lock) on first boot, on the image's python3.11-3.13 or, without one, a pinned CPython it downloads",
+    "pins": {
+      "hermes": {
+        "version": "0.21.5",
+        "tag": "v2026.9.24",
+        "source_rev": "f97608f178d1ffeca59860195ab7da295f7c8e5f"
+      }
+    }
   },
   "secrets": [],
   "egress": {
     "api": [],
     "auth": [],
     "telemetry": [],
-    "extra": []
+    "extra": [
+      "github.com",
+      "codeload.github.com",
+      "objects.githubusercontent.com",
+      "release-assets.githubusercontent.com",
+      "pypi.org",
+      "files.pythonhosted.org"
+    ]
   },
   "settings": {
     "type": "object",

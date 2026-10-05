@@ -10,9 +10,9 @@
 
 pub use crate::events::resolve_origin;
 pub use crate::fleet_export::{BUNDLE_FORMAT, BUNDLE_VERSION};
-pub use crate::modules::{DeclaredSecret, Requires, discover_agents, parse_requires, read_agent};
+pub use crate::modules::{DeclaredSecret, Requires, check_requires, discover_agents, parse_requires, read_agent};
 pub use crate::plugins::validate;
-pub use crate::presets::{detect, find};
+pub use crate::presets::{detect, find, pinned_image};
 pub use crate::protocol::Origin;
 pub use crate::util::short_id;
 

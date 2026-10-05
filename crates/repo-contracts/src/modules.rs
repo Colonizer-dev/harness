@@ -1,6 +1,8 @@
 //! The shipped agent manifests against discovery, presets and the docs (moved from `modules.rs`).
 
-use colonizer_harness::contract::{DeclaredSecret, Requires, discover_agents, parse_requires, read_agent, short_id};
+use colonizer_harness::contract::{
+    DeclaredSecret, Requires, check_requires, discover_agents, parse_requires, pinned_image, read_agent, short_id,
+};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -174,6 +176,21 @@ fn the_requires_section_parses_binaries_pins_and_the_runner_fetched_marker() {
     const PI: &str = include_str!("../../../modules/agents/pi/module.json");
     let pi: Value = serde_json::from_str(PI).unwrap();
     assert_eq!(parse_requires(&pi).unwrap(), Requires::default());
+}
+
+/// Issue #602: the Hermes runner builds its pinned hermes-agent on first boot (stage.mjs), so the
+/// harness must launch a Hermes colony on every stock preset instead of refusing it for want of a
+/// `hermes` binary in the image.
+#[test]
+fn the_hermes_module_launches_on_every_stock_preset() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../modules/agents/hermes/module.json");
+    let hermes = read_agent(&path).unwrap();
+    assert_eq!(hermes.requires.binaries, ["hermes"]);
+    assert_eq!(hermes.requires.fetched_by_runner, ["hermes"]);
+    for preset in ["node", "python", "rust", "go"] {
+        let image = pinned_image(preset).unwrap();
+        assert_eq!(check_requires(&hermes, &image, &[]), Ok(()), "{preset}: {image}");
+    }
 }
 
 /// The boot reads `relaunch_subagents` with `unwrap_or(true)`, and boot.rs's own test reads a schema
