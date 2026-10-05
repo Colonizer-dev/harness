@@ -21,7 +21,9 @@ answers `{"install_id": "...", "host": "<install_id>.my.colonizer.dev"}`. The re
 install to that host, so the mothership's tunnel URL is `wss://<relay>/tunnel/<install_id>` and
 the Host every tunnelled request carries is `<install_id>.…`. The relay base is
 `COLONIZER_REMOTE_URL` (default `wss://my.colonizer.dev`); the registration URL is the same host
-over `https://` (`http://` for a `ws://` base) plus `/api/installs`.
+over `https://` (`http://` for a `ws://` base) plus `/api/installs`. A `ws://` base is accepted only
+when its host is loopback (`localhost`, `127.0.0.0/8`, `[::1]`): enabling against any other
+plaintext relay is refused before anything is sent, and the supervisor will not dial one.
 
 ## `GET /api/remote`
 
@@ -50,8 +52,13 @@ answers the current view and records nothing.
 
 A fresh key, registered at once and persisted in place of the old identity; if the switch was on
 the tunnel redials immediately under it. The way to retire a key that leaked. It answers the new
-view. Before the old key is replaced, the old install's owner is unbound at the relay (a signed
-`DELETE`, best effort), so the new link starts unowned and the old one has no owner left.
+view. Before the old key is replaced, the old install is retired at the relay: a signed
+`DELETE /api/installs/<old id>` deletes it with its owner and pending pairings and closes its tunnel
+(`4404`), so a leaked copy of the old key reaches nothing afterwards. If the relay cannot be told
+(unreachable, or it refuses the old key's signature), the answer is **502** and nothing changes: the
+old link and key stay, and the install registered a moment earlier is withdrawn again, best effort.
+Only an old key that can no longer be read is replaced regardless, since nothing can sign for it.
+A relay older than the retire endpoint gets the old owner unbound instead (`DELETE …/owner`).
 
 The three switches record `remote.enable`, `remote.disable` and `remote.reset` in the activity
 log (§6.9), with actor `you`, but only when the state actually changes.
@@ -108,7 +115,10 @@ After the hello, frames go both ways:
   larger than 10 MiB is refused with **413**, and one that never ends within a minute per frame
   is answered **408** — a stream is never left hanging without a status.
 - `{"t": "res", "id", "status", "headers"}` answers a request (hop-by-hop headers stripped, the
-  same list both sides), followed by the answer's body frames, the last with `end: true`.
+  same list both sides), followed by the answer's body frames, the last with `end: true`. Every
+  `set-cookie` in it carries `Secure` (added when the handler left it off), since the browser
+  only ever reaches the tunnel over `https://<host>`; the relay then drops any `Domain` attribute,
+  so the cookie stays on that one host.
 - `{"t": "ws_open", "id", "path", "headers"}` opens a tunnelled WebSocket: the mothership dials
   its own router over an in-memory connection, so the upgrade is a real one. `ws_msg`
   `{"t": "ws_msg", "id", "data", "binary"}` carries text as-is and binary as base64; `ws_close`
@@ -126,6 +136,16 @@ clean end `1000`. A tunnelled `req` with a bad method, bad base64 or a bad path 
 **400**, and an answer whose next body frame does not come within 300 s ends its stream. Answers
 are queued to the relay behind a bounded buffer, so a relay that stops
 reading slows a streaming answer instead of growing it without limit.
+
+What comes in from the relay is bounded too (review finding R5). The tunnel socket takes no
+message or frame over **1 MiB** (tungstenite's default is 64 MiB); a relay that sends one ends the
+tunnel, which redials. A body frame whose `chunk` is longer than base64 of 48 KiB is refused
+**413** before it is decoded. Request body frames wait in a 16-frame queue per stream, the reader
+pausing for room rather than dropping one, and once a stream has its body (or, for `GET` and
+`HEAD`, at once) further body frames for it are dropped, never queued. Frames for a tunnelled
+websocket wait in a 64-frame queue; a socket whose cockpit handler falls that far behind is closed
+`ws_close` `1008`, and its stream ends within 5 s even when the handler never answers the close.
+The relay, for its part, closes a passthrough `1009` when the browser sends a message over 128 KiB.
 
 If the relay goes away, the mothership redials after 1 s, doubling to at most 60 s, with a little
 jitter so a relay blip does not align every install's retries. The backoff resets to 1 s only

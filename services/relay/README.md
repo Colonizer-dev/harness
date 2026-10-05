@@ -80,9 +80,12 @@ Confirming is local-only at the mothership — never through the tunnel.
   owner already bound → 409.
 - `POST /api/installs/<id>/pairing/reject` `{"code": …}` → `200 {"github_login"}` — deletes just that
   pairing, so the sign-in behind it never becomes the owner. Malformed → 400; unknown/expired → 404.
-- `DELETE /api/installs/<id>/owner` → `204` — the "reset link": unbinds the owner and clears pending
-  pairings. Existing sessions die on their next request, because each one re-checks the cookie against
-  the current owner.
+- `DELETE /api/installs/<id>/owner` → `204` — unbinds the owner and clears pending pairings. Existing
+  sessions die on their next request, because each one re-checks the cookie against the current owner.
+- `DELETE /api/installs/<id>` → `204` — the "reset link" (review finding R2): deletes the install, its
+  owner and its pending pairings in one batch, then tells the install's DO, which closes a live tunnel
+  with `4404`. From then on the install is unknown: its key signs nothing (404), a dial is 404, and its
+  subdomain shows the unknown-install page to every session.
 
 ## Owner sign-in (`<install>.my.colonizer.dev`)
 
@@ -105,6 +108,11 @@ Confirming is local-only at the mothership — never through the tunnel.
 
 Both cookies are `__Host-` prefixed: `Secure; HttpOnly; SameSite=Lax; Path=/`, no `Domain`, sealed with
 HMAC-SHA256 under the `SESSION_SECRET` secret and verified in constant time.
+
+Cookies the cockpit sets come back host-only (review finding R4): the DO drops every `Domain` attribute
+from a forwarded `set-cookie`, so one install can never set a cookie on `my.colonizer.dev` or a sibling
+install, and drops outright any cookie named like one of the two above (`hostOnlyCookie`,
+`src/protocol.js`).
 
 ## Deploy (done by a human, out of scope for the PR)
 

@@ -14,6 +14,11 @@ export const CHUNK_RAW = 36864;
 /** Inbound chunks must decode to at most this many bytes. */
 export const CHUNK_DECODED_MAX = 49152;
 
+/** The largest browser websocket message forwarded to the mothership, in bytes. A bigger one closes that
+ * passthrough 1009 instead (review finding R5): the mothership caps every tunnel message at 1 MiB, and
+ * 128 KiB stays under it even as base64 or fully JSON-escaped text. */
+export const WS_MSG_MAX = 128 * 1024;
+
 /** Seconds between tunnel pings. */
 export const PING_MS = 20000;
 
@@ -88,6 +93,37 @@ export function stripHopByHop(headers, { ws = false } = {}) {
       const drop = named.trim().toLowerCase();
       for (let at = out.length - 1; at >= 0; at--) if (out[at][0] === drop) out.splice(at, 1);
     }
+  }
+  return out;
+}
+
+// The relay's own cookies (auth.js). A cockpit answer must never set one of these: the browser would take
+// it as the relay's session or sign-in state on that host.
+const RELAY_COOKIES = new Set(['__host-colonizer_session', '__host-colonizer_oauth']);
+
+/** A cockpit set-cookie made host-only (review finding R4): every Domain attribute is dropped, so a
+ * cookie set through one install's host can never land on my.colonizer.dev or a sibling install. Answers
+ * null for a cookie named like one of the relay's own, which is dropped altogether. */
+export function hostOnlyCookie(value) {
+  const [pair, ...attributes] = String(value).split(';');
+  const eq = pair.indexOf('=');
+  const name = (eq === -1 ? pair : pair.slice(0, eq)).trim().toLowerCase();
+  if (RELAY_COOKIES.has(name)) return null;
+  const kept = attributes.filter((attribute) => attribute.split('=')[0].trim().toLowerCase() !== 'domain');
+  return [pair, ...kept].join(';');
+}
+
+/** The headers of a mothership `res`, ready for the browser: hop-by-hop stripped (stripHopByHop), and
+ * every set-cookie made host-only (hostOnlyCookie). */
+export function responseHeaders(headers) {
+  const out = [];
+  for (const [name, value] of stripHopByHop(headers)) {
+    if (name !== 'set-cookie') {
+      out.push([name, value]);
+      continue;
+    }
+    const cookie = hostOnlyCookie(value);
+    if (cookie !== null) out.push([name, cookie]);
   }
   return out;
 }
