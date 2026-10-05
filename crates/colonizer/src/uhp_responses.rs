@@ -121,7 +121,7 @@ fn was_interrupted(id: &ResponseId) -> bool {
 /// Records that the colony's current turn was interrupted from the cockpit's socket, so its UHP
 /// response ends `cancelled` like one cancelled over `/uhp`.
 pub(crate) async fn note_interrupt(app: &App, session: &str) {
-    let epoch = crate::lifecycle::run_epoch_for_dir(&app.session_dir(session));
+    let epoch = crate::lifecycle::run_epoch(app.store(), session).await;
     let shape = Shape::of(&read_epoch(app, session, epoch, epoch).await);
     mark_interrupted(&ResponseId {
         session: session.to_string(),
@@ -631,13 +631,12 @@ impl Projection {
 /// the archive `events-<epoch>.jsonl` for an earlier one. A line that does not decode is skipped,
 /// as the socket's replay skips it.
 async fn read_epoch(app: &App, session: &str, epoch: u64, current: u64) -> Vec<(u64, Value)> {
-    let dir = app.session_dir(session);
-    let path = if epoch == current {
-        dir.join("events.jsonl")
+    let name = if epoch == current {
+        "events.jsonl".to_string()
     } else {
-        dir.join(format!("events-{epoch}.jsonl"))
+        format!("events-{epoch}.jsonl")
     };
-    let Ok(bytes) = tokio::fs::read(&path).await else {
+    let Ok(Some(bytes)) = app.store().read_file(session, &name).await else {
         return Vec::new();
     };
     bytes
@@ -703,7 +702,7 @@ async fn resolve_with(app: &App, raw: &str, scoped: Option<&ScopedToken>, starte
     if scoped.is_some_and(|token| !token.covers(&session.org, &session.repo)) {
         return None;
     }
-    let current = crate::lifecycle::run_epoch_for_dir(&app.session_dir(&id.session));
+    let current = crate::lifecycle::run_epoch(app.store(), &id.session).await;
     if id.epoch > current {
         return None;
     }
@@ -1104,7 +1103,7 @@ async fn continue_colony(
             let resumed = crate::lifecycle::resume(State(app.clone()), Path(session.id.clone()), via.map(axum::Extension)).await;
             match resumed {
                 Ok(_) => {
-                    let epoch = crate::lifecycle::run_epoch_for_dir(&app.session_dir(&session.id));
+                    let epoch = crate::lifecycle::run_epoch(app.store(), &session.id).await;
                     Ok(ResponseId {
                         session: session.id.clone(),
                         epoch,

@@ -91,8 +91,6 @@ pub struct Runtime {
     /// warned once: a colony circling against the policy must not grow the set without bound. In
     /// memory like `path_policy_warned` — a restart reporting an attempt again is a minor repeat.
     pub(crate) path_policy_seen: Mutex<HashSet<String>>,
-    pub(crate) events_path: PathBuf,
-    pub(crate) logs_path: PathBuf,
     pub activity: Mutex<Activity>,
     /// A read failure from `load`, already worded to name the file and the consequence that
     /// restarts, carried until the first caller that has an `App` to report it with. Leaving it
@@ -100,13 +98,31 @@ pub struct Runtime {
     pub(crate) load_error: Mutex<Option<String>>,
 }
 
-/// Reads a JSONL file as raw bytes, leaving UTF-8 decoding to the caller's per-line pass. A file
-/// that is not there is not a failure — a colony that has never emitted an event has no
-/// `events.jsonl` — but anything else is handed back for the caller to report.
-fn read_jsonl(path: &std::path::Path) -> (Vec<u8>, Option<std::io::Error>) {
-    match std::fs::read(path) {
-        Ok(bytes) => (bytes, None),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+/// A colony's saved logs as the session store handed them back: the raw bytes of `events.jsonl`
+/// and `harness.jsonl` (UTF-8 decoding is left to the per-line pass), and whether a rotated
+/// `events-N.jsonl` exists. A file that is not there is not a failure — a colony that has never
+/// emitted an event has no `events.jsonl` — but any other read error is kept for the report.
+pub(crate) struct SavedLogs {
+    pub(crate) events: std::io::Result<Option<Vec<u8>>>,
+    pub(crate) logs: std::io::Result<Option<Vec<u8>>>,
+    pub(crate) archived: bool,
+}
+
+impl SavedLogs {
+    /// Reads one colony's logs through the session store.
+    pub(crate) async fn read(store: &dyn crate::store::SessionStore, id: &str) -> Self {
+        Self {
+            events: store.read_file(id, "events.jsonl").await,
+            logs: store.read_file(id, "harness.jsonl").await,
+            archived: !crate::store::event_archives(store, id).await.unwrap_or_default().is_empty(),
+        }
+    }
+}
+
+/// Splits one read into its bytes and its error, an absent file being empty and no error.
+fn bytes_or_error(read: std::io::Result<Option<Vec<u8>>>) -> (Vec<u8>, Option<std::io::Error>) {
+    match read {
+        Ok(bytes) => (bytes.unwrap_or_default(), None),
         Err(e) => (Vec::new(), Some(e)),
     }
 }
@@ -122,10 +138,34 @@ impl Runtime {
         self.open_question.lock().await.clone()
     }
 
+    /// A runtime for a colony whose session directory is `dir`, read straight off the disk: the
+    /// unit tests' shortcut to [`Runtime::from_saved`], which the mothership feeds from the store.
+    #[cfg(test)]
     pub(crate) fn load(dir: &std::path::Path) -> Self {
-        let events_path = dir.join("events.jsonl");
-        let logs_path = dir.join("harness.jsonl");
-        let (events_bytes, events_err) = read_jsonl(&events_path);
+        let read = |name: &str| match std::fs::read(dir.join(name)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        };
+        let archived = std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_prefix("events-")?.strip_suffix(".jsonl")?.parse::<u64>().ok())
+                .is_some()
+        });
+        let saved = SavedLogs {
+            events: read("events.jsonl"),
+            logs: read("harness.jsonl"),
+            archived,
+        };
+        Self::from_saved(saved, &dir.join("out"))
+    }
+
+    /// A colony's runtime, rebuilt from its saved logs: the reconnect cursors, the open question,
+    /// the colony-log ring and the PR description's mark (read from `out_dir`, the microVM's output
+    /// directory in the session's local working copy).
+    pub(crate) fn from_saved(saved: SavedLogs, out_dir: &std::path::Path) -> Self {
+        let (events_bytes, events_err) = bytes_or_error(saved.events);
         // Decoded one line at a time, as agentd reads its own store (colonizer-agentd/src/store.rs): a
         // final line torn inside a multi-byte character then costs that line and not the whole file. A
         // whole-file failure here would silently reset the reconnect cursor, and the colony would replay
@@ -187,7 +227,7 @@ impl Runtime {
                 _ => {}
             }
         }
-        let (logs_bytes, logs_err) = read_jsonl(&logs_path);
+        let (logs_bytes, logs_err) = bytes_or_error(saved.logs);
         // The take counts parsed entries, not raw split segments: `append_line` ends every entry
         // with a newline, so a well-formed file always yields one empty trailing segment, and
         // taking segments first would keep one entry too few.
@@ -205,15 +245,13 @@ impl Runtime {
         let mut read_errors = Vec::new();
         if let Some(e) = events_err {
             read_errors.push(format!(
-                "could not read the saved events ({}: {e}); \
-                 the reconnect cursor restarts, so events already on disk may be recorded a second time",
-                events_path.display()
+                "could not read the saved events (events.jsonl: {e}); \
+                 the reconnect cursor restarts, so events already on disk may be recorded a second time"
             ));
         }
         if let Some(e) = logs_err {
             read_errors.push(format!(
-                "could not read the saved colony log ({}: {e}); the log history starts over",
-                logs_path.display()
+                "could not read the saved colony log (harness.jsonl: {e}); the log history starts over"
             ));
         }
         // A colony coming back from parked (or stopped) has just had its event log rotated aside, so
@@ -222,7 +260,7 @@ impl Runtime {
         // fresh colony's first `pr.md` write does — so the mark starts empty and the first turn_end
         // publishes. A restart of an ongoing run (events already on disk) is not a resume and keeps
         // the ordinary compare against the mark on disk.
-        let resumed = events_bytes.is_empty() && crate::lifecycle::run_epoch_for_dir(dir) > 1;
+        let resumed = events_bytes.is_empty() && saved.archived;
         let (commands, commands_rx) = mpsc::unbounded_channel();
         Self {
             events: broadcast::channel(1024).0,
@@ -240,11 +278,7 @@ impl Runtime {
             judged_questions: Mutex::new(HashSet::new()),
             jev_ladder: Mutex::new(crate::jev_ladder::Watch::default()),
             brief_pick: Mutex::new(crate::brief_pick::Watch::default()),
-            pr_mark: Mutex::new(if resumed {
-                None
-            } else {
-                github::pr_description_mark(&dir.join("out"))
-            }),
+            pr_mark: Mutex::new(if resumed { None } else { github::pr_description_mark(out_dir) }),
             interrupted: std::sync::atomic::AtomicBool::new(false),
             final_text_at: Mutex::new(None),
             open_tool_calls: Mutex::new(HashSet::new()),
@@ -259,8 +293,6 @@ impl Runtime {
             verify_lock: Mutex::new(()),
             path_policy_warned: Mutex::new(HashSet::new()),
             path_policy_seen: Mutex::new(HashSet::new()),
-            events_path,
-            logs_path,
             activity: Mutex::new({
                 let now = Utc::now();
                 let mut activity = Activity::new(now);

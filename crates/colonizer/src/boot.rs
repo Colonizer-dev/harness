@@ -2,6 +2,7 @@
 //! the base and issue, prepare the worktree, assemble prompt, mounts and secrets, size and start
 //! the sandbox, wait for the agent daemon — and the failure path that reaps an orphaned microVM.
 
+use crate::store::SessionStore;
 use crate::{
     App, CLAUDE_API_HOST, Shared,
     config::{ModulesConfig, setting, setting_str, setting_u64},
@@ -18,7 +19,7 @@ use crate::{
         agent_env, agent_needs_node, agentd_http, apply_exec_policy, colony_image, findings_enabled,
     },
     stack,
-    util::{append_line, random_token, truncate, write_private},
+    util::{append_line, random_token, truncate},
 };
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
@@ -75,22 +76,11 @@ async fn resolve_stack(
     stack
 }
 
-/// The highest-numbered `events-N.jsonl` in a session directory — the run a resume just rotated
-/// aside, since the highest slot names it — or `None` when there is no archive.
-fn latest_archive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut highest: Option<u64> = None;
-    for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let name = entry.file_name();
-        if let Some(n) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("events-"))
-            .and_then(|n| n.strip_suffix(".jsonl"))
-            .and_then(|n| n.parse::<u64>().ok())
-        {
-            highest = Some(highest.map_or(n, |m: u64| m.max(n)));
-        }
-    }
-    Some(dir.join(format!("events-{}.jsonl", highest?)))
+/// The highest-numbered `events-N.jsonl` of a session — the run a resume just rotated aside, since
+/// the highest slot names it — or `None` when there is no archive. Listed through the store.
+async fn latest_archive(store: &dyn SessionStore, id: &str) -> Option<String> {
+    let highest = crate::store::event_archives(store, id).await.ok()?.pop()?;
+    Some(format!("events-{highest}.jsonl"))
 }
 
 /// What a resumed colony is told about its previous run (issue #213): a short digest of the last
@@ -98,9 +88,9 @@ fn latest_archive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
 /// diagnosis reads, capped at twenty lines and 64 KiB of source, so it rides in the prompt without
 /// weighing it down. `None` when there is nothing to tell (no archived log, or one that digests to
 /// nothing but deltas), which is the fresh-boot shape and asks for no block at all.
-async fn resume_digest(dir: &std::path::Path) -> Option<String> {
-    let archive = latest_archive(dir)?;
-    let recent = diagnosis::recent_events(&diagnosis::tail_events_within(&archive, 64 * 1024).await)?;
+async fn resume_digest(store: &dyn SessionStore, id: &str) -> Option<String> {
+    let archive = latest_archive(store, id).await?;
+    let recent = diagnosis::recent_events(&diagnosis::tail_events_within(store, id, &archive, 64 * 1024).await)?;
     let mut block = String::from(
         "\n## Where your previous run left off\n\n\
          This colony was resumed after being parked or stopped. The last events of that run, \
@@ -204,18 +194,18 @@ fn interrupted_from_events(events: &[Value]) -> Vec<InterruptedSubagent> {
 /// [`interrupted_from_events`] over the run `dir`'s highest archive holds, read whole and line by
 /// line: a Task call sits at the start of a run, out of reach of the digest's 64 KiB tail. Every
 /// line is redacted on the way in (issue #761) — the report this feeds rides the prompt.
-async fn interrupted_subagents(dir: &std::path::Path) -> Vec<InterruptedSubagent> {
-    use tokio::io::AsyncBufReadExt as _;
-    let Some(archive) = latest_archive(dir) else {
+async fn interrupted_subagents(store: &dyn SessionStore, id: &str) -> Vec<InterruptedSubagent> {
+    let Some(archive) = latest_archive(store, id).await else {
         return Vec::new();
     };
-    let Ok(file) = tokio::fs::File::open(&archive).await else {
+    let Ok(Some(bytes)) = store.read_file(id, &archive).await else {
         return Vec::new();
     };
     let mut events = Vec::new();
-    let mut lines = tokio::io::BufReader::new(file).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        if let Ok(mut event) = serde_json::from_str::<Value>(&line) {
+    // Line by line as the old buffered reader went, stopping at the first line that is not UTF-8.
+    for line in bytes.split(|b| *b == b'\n') {
+        let Ok(line) = std::str::from_utf8(line) else { break };
+        if let Ok(mut event) = serde_json::from_str::<Value>(line) {
             crate::redact::redact_value(&mut event);
             events.push(event);
         }
@@ -491,7 +481,7 @@ const BRIEF_SEARCH_LINES: usize = 200;
 /// the event logs), and only a colony with neither asks `fetch` once — whose failure is a warning,
 /// not a failed resume, since the worktree and branch are what the colony's work lives in.
 async fn resolve_issue<F, Fut>(
-    dir: &std::path::Path,
+    store: &dyn SessionStore,
     s: &Session,
     resume: bool,
     log: &SessionLogger,
@@ -504,25 +494,25 @@ where
     let Some(number) = s.issue else { return Ok(None) };
     if !resume {
         let issue = fetch().await?;
-        store_issue(dir, &issue, log).await;
+        store_issue(store, &s.id, &issue, log).await;
         return Ok(Some(issue));
     }
-    if let Some(issue) = stored_issue(dir) {
+    if let Some(issue) = stored_issue(store, &s.id).await {
         log.info(format!(
             "resuming on the stored copy of issue #{number}; GitHub is not asked again"
         ))
         .await;
         return Ok(Some(issue));
     }
-    if let Some(issue) = issue_from_brief(dir) {
+    if let Some(issue) = issue_from_brief(store, &s.id).await {
         log.info(format!("resuming on issue #{number} as this colony's first brief carried it"))
             .await;
-        store_issue(dir, &issue, log).await;
+        store_issue(store, &s.id, &issue, log).await;
         return Ok(Some(issue));
     }
     match fetch().await {
         Ok(issue) => {
-            store_issue(dir, &issue, log).await;
+            store_issue(store, &s.id, &issue, log).await;
             Ok(Some(issue))
         }
         Err(e) => {
@@ -540,20 +530,20 @@ where
 }
 
 /// The stored issue, when there is a readable one.
-fn stored_issue(dir: &std::path::Path) -> Option<Value> {
-    let bytes = std::fs::read(dir.join(ISSUE_FILE)).ok()?;
+async fn stored_issue(store: &dyn SessionStore, id: &str) -> Option<Value> {
+    let bytes = store.read_file(id, ISSUE_FILE).await.ok()??;
     let issue: Value = serde_json::from_slice(&bytes).ok()?;
     issue.get("title")?.as_str()?;
     Some(issue)
 }
 
-/// Stores the issue a boot works on. Best effort: a colony that cannot write it still boots, and
-/// its resume recovers the issue from its brief instead.
-async fn store_issue(dir: &std::path::Path, issue: &Value, log: &SessionLogger) {
-    let written = std::fs::create_dir_all(dir)
-        .map_err(anyhow::Error::from)
-        .and_then(|()| Ok(serde_json::to_vec_pretty(issue)?))
-        .and_then(|bytes| write_private(&dir.join(ISSUE_FILE), &bytes));
+/// Stores the issue a boot works on, owner-only. Best effort: a colony that cannot write it still
+/// boots, and its resume recovers the issue from its brief instead.
+async fn store_issue(store: &dyn SessionStore, id: &str, issue: &Value, log: &SessionLogger) {
+    let written = match serde_json::to_vec_pretty(issue) {
+        Ok(bytes) => store.write_private(id, ISSUE_FILE, &bytes).await.map_err(anyhow::Error::from),
+        Err(e) => Err(e.into()),
+    };
     if let Err(e) = written {
         log.warn(format!("could not store the issue for a later resume: {e:#}")).await;
     }
@@ -562,42 +552,37 @@ async fn store_issue(dir: &std::path::Path, issue: &Value, log: &SessionLogger) 
 /// The issue as this colony's first brief carried it, for a colony started before issues were
 /// stored: the `<issue>` block of the last `vm/session.json`, else of the first message in the
 /// event logs, oldest run first.
-fn issue_from_brief(dir: &std::path::Path) -> Option<Value> {
-    let from_session = std::fs::read(dir.join("vm").join("session.json"))
+async fn issue_from_brief(store: &dyn SessionStore, id: &str) -> Option<Value> {
+    let from_session = store
+        .read_file(id, "vm/session.json")
+        .await
         .ok()
+        .flatten()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|v| v["initial_prompt"].as_str().and_then(parse_issue_block));
     if from_session.is_some() {
         return from_session;
     }
-    let mut archives: Vec<u64> = std::fs::read_dir(dir)
-        .ok()?
-        .flatten()
-        .filter_map(|e| {
-            e.file_name()
-                .to_str()?
-                .strip_prefix("events-")?
-                .strip_suffix(".jsonl")?
-                .parse()
-                .ok()
-        })
-        .collect();
-    archives.sort_unstable();
-    let mut logs: Vec<PathBuf> = archives.into_iter().map(|n| dir.join(format!("events-{n}.jsonl"))).collect();
-    logs.push(dir.join("events.jsonl"));
-    logs.iter()
-        .find_map(|path| first_brief(path).as_deref().and_then(parse_issue_block))
+    let archives = crate::store::event_archives(store, id).await.ok()?;
+    let mut logs: Vec<String> = archives.into_iter().map(|n| format!("events-{n}.jsonl")).collect();
+    logs.push("events.jsonl".into());
+    for name in logs {
+        let Ok(Some(bytes)) = store.read_file(id, &name).await else {
+            continue;
+        };
+        if let Some(issue) = first_brief(&bytes).as_deref().and_then(parse_issue_block) {
+            return Some(issue);
+        }
+    }
+    None
 }
 
 /// The runner's echo of its first message (`user_message` with id `initial`) in one event log.
-fn first_brief(path: &std::path::Path) -> Option<String> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(path).ok()?;
-    std::io::BufReader::new(file)
-        .lines()
+fn first_brief(log: &[u8]) -> Option<String> {
+    log.split(|b| *b == b'\n')
         .take(BRIEF_SEARCH_LINES)
-        .map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
+        .map_while(|line| std::str::from_utf8(line).ok())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .find(|e| e["type"] == "user_message" && e["id"] == "initial")
         .and_then(|e| e["text"].as_str().map(String::from))
 }
@@ -829,7 +814,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
     // resumed one already has it — stored at its first boot, or recovered from its first brief —
     // and does not ask GitHub again, so a GitHub that refuses or is unreachable cannot fail it.
-    let issue = resolve_issue(&dir, &s, resume, &log, || async {
+    let issue = resolve_issue(app.store(), &s, resume, &log, || async {
         let number = s.issue.unwrap_or_default();
         if resume {
             // One bounded attempt, only for a colony that has nothing stored at all.
@@ -1021,7 +1006,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     // The previous run's story (issue #213): a resumed colony's own brief carries a digest of the
     // event log the resume just rotated aside, so the agent knows what it was doing when the park
     // or stop interrupted it instead of reading its work cold.
-    if resume && let Some(story) = resume_digest(&dir).await {
+    if resume && let Some(story) = resume_digest(app.store(), id).await {
         prompt.push_str(&story);
     }
     // A one-shot note an automatic resume carries (issue #876) — the hold-timeout backoff's "choose
@@ -1030,7 +1015,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(note) = s.resume_note.as_deref() {
         prompt.push_str(&format!("\n## What to do now\n\n{note}\n"));
     }
-    write_private(&vm_dir.join("token"), random_token().as_bytes())?;
+    app.store().write_private(id, "vm/token", random_token().as_bytes()).await?;
     // The colony's own agent module's settings (issue #201): an org may run its colonies on a
     // module other than the install's, whose settings are not this module's to read.
     let mut agent_choice = orgs::effective_agent_for(&modules, &org_settings, &agent.id);
@@ -1120,7 +1105,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let subagent_section = if resume {
         match resume_cause {
             // Only paid for when a resume can actually say something about the previous run.
-            Some(cause) => subagent_resume_section(cause, &interrupted_subagents(&dir).await, relaunch_subagents),
+            Some(cause) => subagent_resume_section(cause, &interrupted_subagents(app.store(), id).await, relaunch_subagents),
             None => None,
         }
     } else {
@@ -1394,7 +1379,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         x.model_substitutions = substitutions.clone();
     })
     .await;
-    write_private(&app.gateway_token_file(id), gateway_token.as_bytes())?;
+    app.store()
+        .write_private(id, crate::gateway::GATEWAY_TOKEN_FILE, gateway_token.as_bytes())
+        .await?;
     // The tool policy the colony is being launched under, recorded for the colony report (#295): the
     // connection level per used provider, then the harness level the agent module configured.
     for line in providers::connection_disabled_tool_lines(&used) {
@@ -1840,8 +1827,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if let Some(restore) = restore {
         session_json["restore"] = restore;
     }
-    std::fs::write(vm_dir.join("session.json"), serde_json::to_vec_pretty(&session_json)?)?;
-    std::fs::write(vm_dir.join("boot.sh"), BOOT_SCRIPT)?;
+    app.store()
+        .write_file(id, "vm/session.json", &serde_json::to_vec_pretty(&session_json)?)
+        .await?;
+    app.store().write_file(id, "vm/boot.sh", BOOT_SCRIPT.as_bytes()).await?;
 
     if memory_on && memory::uses_mem0(app).await {
         // mem0's notes are written into the session directory, which is already the colony's
@@ -1947,7 +1936,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         log.info("starting the private mesh").await;
         mesh.ensure_started().await?;
         mesh.delete_nodes_named(&s.sandbox).await?;
-        write_private(&vm_dir.join("mesh-authkey"), mesh.mint_vm_key().await?.as_bytes())?;
+        app.store()
+            .write_private(id, "vm/mesh-authkey", mesh.mint_vm_key().await?.as_bytes())
+            .await?;
         mounts.push(Mount {
             // The guest's own build when the host's is not a Linux one (a Mac builds Mach-O for the
             // mesh it runs itself); otherwise the single vendored copy serves both sides.
@@ -1993,7 +1984,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         colony_network(mesh_net, &routing, app.cfg.gateway_bind, &resolved_egress, &tls_hosts);
     // The record is the fleet-view query surface (`GET /api/sessions/{id}/egress`): what the
     // colony could reach, and under whose word, for as long as the session dir survives.
-    std::fs::write(dir.join("egress.json"), serde_json::to_vec_pretty(&egress_record)?)?;
+    app.store()
+        .write_file(id, "egress.json", &serde_json::to_vec_pretty(&egress_record)?)
+        .await?;
 
     // The chosen stack fills in image and machine size — detected from the
     // repository when the configured preset was `auto`, otherwise the one the
@@ -2104,7 +2097,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     if mesh_on {
         log.info("waiting for the microVM to join the private mesh").await;
         let node = app.mesh().await?.wait_online(&s.sandbox, Duration::from_secs(120)).await?;
-        let _ = std::fs::remove_file(vm_dir.join("mesh-authkey"));
+        let _ = app.store().remove_file(id, "vm/mesh-authkey").await;
         log.info(format!("{} joined the mesh at {}", s.sandbox, node.ip)).await;
         app.update_session(id, |x| {
             x.mesh = Some(MeshInfo {
@@ -2325,15 +2318,29 @@ exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --toke
 mod tests {
     use super::*;
 
+    /// A store over a session directory planted at `<root>/sessions/s1`, as the tests below lay one
+    /// out, and that session's id.
+    fn local(dir: &std::path::Path) -> (crate::store::LocalDirStore, &'static str) {
+        let root = dir.parent().and_then(|p| p.parent()).expect("<root>/sessions/s1");
+        (crate::store::LocalDirStore::new(root), "s1")
+    }
+
     /// The digest a cold resume rides in the prompt comes from the run the resume just rotated
     /// aside — the highest-numbered archive, not the first — and is absent for a colony with no
     /// previous run to tell about.
     #[tokio::test]
     async fn the_resume_digest_tells_the_latest_archived_run_and_skips_a_fresh_colony() {
-        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}", crate::util::short_id()));
+        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}/sessions/s1", crate::util::short_id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(resume_digest(&dir).await.is_none(), "no archive, no story");
+        assert!(
+            {
+                let (store, id) = local(&dir);
+                resume_digest(&store, id).await
+            }
+            .is_none(),
+            "no archive, no story"
+        );
         let line = |seq: u64, text: &str| {
             json!({"seq": seq, "ts": "2026-01-01T00:00:00Z", "type": "user_message", "text": text}).to_string()
         };
@@ -2350,7 +2357,11 @@ mod tests {
         );
         std::fs::write(dir.join("events-2.jsonl"), newer).unwrap();
         std::fs::write(dir.join("events.jsonl"), line(1, "the new run, not the old one")).unwrap();
-        let story = resume_digest(&dir).await.expect("an archived run has a story");
+        let story = {
+            let (store, id) = local(&dir);
+            resume_digest(&store, id).await
+        }
+        .expect("an archived run has a story");
         assert!(story.contains("#2 user_message: ran the tests") && story.contains("#3 user_message: found the failure"));
         assert!(!story.contains("first run"), "the older archive is not the story");
         assert!(!story.contains("the new run"), "the live log is not the story");
@@ -2530,17 +2541,27 @@ mod tests {
     /// out of the digest's 64 KiB tail, so a small tail budget would miss it.
     #[tokio::test]
     async fn interrupted_subagents_reads_the_whole_archived_run() {
-        let dir = std::env::temp_dir().join(format!("colonizer-subagents-{}", crate::util::short_id()));
+        let dir = std::env::temp_dir().join(format!("colonizer-subagents-{}/sessions/s1", crate::util::short_id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(interrupted_subagents(&dir).await.is_empty(), "no archive, no report");
+        assert!(
+            {
+                let (store, id) = local(&dir);
+                interrupted_subagents(&store, id).await
+            }
+            .is_empty(),
+            "no archive, no report"
+        );
         let task = json!({"seq": 1, "type": "tool_call", "tool_call_id": "t1", "name": "Task",
             "input": {"subagent_type": "general-purpose", "prompt": "do the thing"}});
         let noise: Vec<String> = (2..500)
             .map(|i| json!({"seq": i, "type": "status", "state": "working"}).to_string())
             .collect();
         std::fs::write(dir.join("events-1.jsonl"), format!("{task}\n{}\n", noise.join("\n"))).unwrap();
-        let subs = interrupted_subagents(&dir).await;
+        let subs = {
+            let (store, id) = local(&dir);
+            interrupted_subagents(&store, id).await
+        };
         assert_eq!(subs.len(), 1);
         assert_eq!(subs[0].prompt.as_deref(), Some("do the thing"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2858,7 +2879,7 @@ mod tests {
             std::fs::write(dir.join(ISSUE_FILE), github_issue().to_string()).unwrap();
             let asked = std::cell::Cell::new(0);
             let log = app.logger(&s.id);
-            let issue = resolve_issue(&dir, &s, true, &log, || async {
+            let issue = resolve_issue(app.store(), &s, true, &log, || async {
                 asked.set(asked.get() + 1);
                 Err(anyhow::anyhow!(refusal))
             })
@@ -2888,7 +2909,7 @@ mod tests {
             json!({"session_id": s.id, "initial_prompt": prompt}).to_string(),
         )
         .unwrap();
-        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        let issue = resolve_issue(app.store(), &s, true, &log, failing).await.unwrap().unwrap();
         assert_eq!(issue["title"], "Fix the flaky login");
         assert_eq!(issue["body"], "The login test fails one run in ten.");
         assert_eq!(issue["labels"], json!([{"name": "bug"}, {"name": "ready"}]));
@@ -2908,7 +2929,7 @@ mod tests {
             format!("{}\n{echo}\n", json!({"seq": 0, "type": "status", "state": "running"})),
         )
         .unwrap();
-        let issue = resolve_issue(&dir, &s, true, &log, failing).await.unwrap().unwrap();
+        let issue = resolve_issue(app.store(), &s, true, &log, failing).await.unwrap().unwrap();
         assert_eq!(issue["body"], "The login test fails one run in ten.");
         // And it resumes with the same brief as before: the prompt rebuilt from the recovered
         // issue carries the same issue block.
@@ -2921,9 +2942,9 @@ mod tests {
     /// and the kept worktree, with a warning rather than a failure.
     #[tokio::test]
     async fn a_resume_with_nothing_stored_and_github_down_warns_and_carries_on() {
-        let (root, app, s, dir) = resumable("bare");
+        let (root, app, s, _dir) = resumable("bare");
         let log = app.logger(&s.id);
-        let issue = resolve_issue(&dir, &s, true, &log, || async {
+        let issue = resolve_issue(app.store(), &s, true, &log, || async {
             Err(anyhow::anyhow!("error connecting to api.github.com"))
         })
         .await
@@ -2939,20 +2960,25 @@ mod tests {
     /// boots on exactly what was fetched.
     #[tokio::test]
     async fn a_fresh_boot_stores_the_issue_its_resume_reads_back() {
-        let (root, app, s, dir) = resumable("fresh");
+        let (root, app, s, _dir) = resumable("fresh");
         let log = app.logger(&s.id);
-        let fresh = resolve_issue(&dir, &s, false, &log, || async { Ok(github_issue()) })
+        let fresh = resolve_issue(app.store(), &s, false, &log, || async { Ok(github_issue()) })
             .await
             .unwrap();
         assert_eq!(fresh, Some(github_issue()));
-        let resumed = resolve_issue(&dir, &s, true, &log, || async { Ok(json!({"title": "changed since"})) })
-            .await
-            .unwrap();
+        let resumed = resolve_issue(app.store(), &s, true, &log, || async {
+            Ok(json!({"title": "changed since"}))
+        })
+        .await
+        .unwrap();
         assert_eq!(resumed, fresh, "the resume boots on the stored issue");
         // A colony with no issue asks nobody either way.
         let mut chat = s.clone();
         chat.issue = None;
-        let none = resolve_issue(&dir, &chat, false, &log, || async { Err(anyhow::anyhow!("never asked")) }).await;
+        let none = resolve_issue(app.store(), &chat, false, &log, || async {
+            Err(anyhow::anyhow!("never asked"))
+        })
+        .await;
         assert!(none.unwrap().is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2964,7 +2990,7 @@ mod tests {
         let (root, app, s, dir) = resumable("susp");
         let log = app.logger(&s.id);
         let raw = "`gh issue view 7 -R acme/repo` failed (exit status: 1): gh: Sorry. Your account was suspended. (HTTP 403)";
-        let err = resolve_issue(&dir, &s, false, &log, || async {
+        let err = resolve_issue(app.store(), &s, false, &log, || async {
             Err(github::access_error(&app, "acme/repo", anyhow::anyhow!(raw)).await)
         })
         .await
@@ -3022,7 +3048,7 @@ mod tests {
     /// colony's prompt; ordinary text in it is told as it was.
     #[tokio::test]
     async fn the_resume_digest_redacts_a_secret_in_an_old_archived_log() {
-        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}", crate::util::short_id()));
+        let dir = std::env::temp_dir().join(format!("colonizer-digest-{}/sessions/s1", crate::util::short_id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let secret = concat!("gh", "p_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5");
@@ -3032,7 +3058,11 @@ mod tests {
             json!({"seq": 2, "type": "user_message", "text": "ran the tests"}),
         );
         std::fs::write(dir.join("events-1.jsonl"), old).unwrap();
-        let story = resume_digest(&dir).await.expect("an archived run has a story");
+        let story = {
+            let (store, id) = local(&dir);
+            resume_digest(&store, id).await
+        }
+        .expect("an archived run has a story");
         assert!(!story.contains(secret), "the secret stays out of the prompt: {story}");
         assert!(story.contains("[REDACTED:"), "{story}");
         assert!(

@@ -13,10 +13,7 @@ use crate::{
 use anyhow::{Result, bail};
 use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use serde_json::{Value, json};
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 /// The read-only directory a GitHub-needing loop's context lands in, as the guest sees it (`vm_dir`
 /// is mounted at `/colonizer`, so nothing nested has to be mounted).
@@ -389,31 +386,46 @@ pub fn describe_action(action: &Action, repo: &str) -> String {
     }
 }
 
-/// How many writes a colony has already made, from its ledger on disk.
+/// How many writes a colony has already made, from its ledger's text.
+pub fn count_in(ledger: &str) -> usize {
+    ledger.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// [`count_in`] over a ledger file on disk, for the unit tests that plant one by hand.
+#[cfg(test)]
 pub fn count(record: &Path) -> usize {
-    std::fs::read_to_string(record)
-        .map(|content| content.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0)
+    count_in(&std::fs::read_to_string(record).unwrap_or_default())
 }
 
 /// Whether the colony has already made the most writes one colony may make.
+#[cfg(test)]
 pub fn spent_cap(record: &Path) -> bool {
     count(record) >= MAX_ACTIONS
+}
+
+/// A colony's GitHub ledger, read through the session store; absent or unreadable reads as empty.
+async fn ledger(app: &App, id: &str) -> String {
+    match app.store().read_file(id, LEDGER).await {
+        Ok(Some(bytes)) => String::from_utf8(bytes).unwrap_or_default(),
+        _ => String::new(),
+    }
 }
 
 /// How many merges a colony has already made, from its ledger: the `pr_merge` lines whose outcome is
 /// `ok`. Refused and failed attempts count against [`MAX_ACTIONS`] already; this cap bounds only what
 /// actually merged.
+fn merges_made_in(ledger: &str) -> usize {
+    ledger
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v["tool"] == "pr_merge" && v["outcome"] == "ok"))
+        .count()
+}
+
+/// [`merges_made_in`] over a ledger file on disk, for the unit tests.
+#[cfg(test)]
 fn merges_made(record: &Path) -> usize {
-    std::fs::read_to_string(record)
-        .map(|content| {
-            content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter(|l| serde_json::from_str::<Value>(l).is_ok_and(|v| v["tool"] == "pr_merge" && v["outcome"] == "ok"))
-                .count()
-        })
-        .unwrap_or(0)
+    merges_made_in(&std::fs::read_to_string(record).unwrap_or_default())
 }
 
 fn ledger_line(action: &Action, repo: &str, outcome: &str, reason: Option<&str>) -> Value {
@@ -450,12 +462,9 @@ fn ledger_line(action: &Action, repo: &str, outcome: &str, reason: Option<&str>)
     line
 }
 
-fn append(record: &Path, line: &Value) {
-    use std::io::Write as _;
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(record)
-        && let Err(e) = writeln!(file, "{line}")
-    {
-        eprintln!("github: could not append to {}: {e}", record.display());
+async fn append(app: &App, id: &str, line: &Value) {
+    if let Err(e) = app.store().append(id, LEDGER, line.to_string().as_bytes()).await {
+        eprintln!("github: could not append to colony {id}'s {LEDGER}: {e}");
     }
 }
 
@@ -489,8 +498,8 @@ pub async fn perform(app: Shared, id: String, rt: std::sync::Arc<Runtime>, event
         }
     };
     let _serial = rt.github_lock.lock().await;
-    let record: PathBuf = app.session_dir(&id).join(LEDGER);
-    if spent_cap(&record) {
+    let record = ledger(&app, &id).await;
+    if count_in(&record) >= MAX_ACTIONS {
         app.session_log(
             &id,
             "warn",
@@ -504,17 +513,17 @@ pub async fn perform(app: Shared, id: String, rt: std::sync::Arc<Runtime>, event
     if let Action::PrMerge { pr, head_sha, .. } = &action {
         match attempt_merge(&app, &s, &record, *pr, head_sha).await {
             Ok(()) => {
-                append(&record, &ledger_line(&action, &s.repo, "ok", None));
+                append(&app, &id, &ledger_line(&action, &s.repo, "ok", None)).await;
                 app.session_log(&id, "info", format!("github: {}", describe_action(&action, &s.repo)))
                     .await;
             }
             Err(MergeOutcome::Refused(reason)) => {
-                append(&record, &ledger_line(&action, &s.repo, "refused", Some(&reason)));
+                append(&app, &id, &ledger_line(&action, &s.repo, "refused", Some(&reason))).await;
                 app.session_log(&id, "warn", format!("refused to merge {}#{pr}: {reason}", s.repo))
                     .await;
             }
             Err(MergeOutcome::Failed(e)) => {
-                append(&record, &ledger_line(&action, &s.repo, "failed", None));
+                append(&app, &id, &ledger_line(&action, &s.repo, "failed", None)).await;
                 app.session_log(&id, "warn", format!("could not {}: {e:#}", describe_action(&action, &s.repo)))
                     .await;
             }
@@ -525,13 +534,13 @@ pub async fn perform(app: Shared, id: String, rt: std::sync::Arc<Runtime>, event
     // close-duplicate (comment written, close failed) must still count against the cap.
     match run_action(&app, &s.repo, &action).await {
         Ok(()) => {
-            append(&record, &ledger_line(&action, &s.repo, "ok", None));
+            append(&app, &id, &ledger_line(&action, &s.repo, "ok", None)).await;
             app.session_log(&id, "info", format!("github: {}", describe_action(&action, &s.repo)))
                 .await;
         }
         Err(e) => {
             let what = describe_action(&action, &s.repo);
-            append(&record, &ledger_line(&action, &s.repo, "failed", None));
+            append(&app, &id, &ledger_line(&action, &s.repo, "failed", None)).await;
             app.session_log(&id, "warn", format!("could not {what}: {e:#}")).await;
         }
     }
@@ -617,7 +626,7 @@ enum MergeOutcome {
 /// gate reads holds. The merge is squash and pinned to the head the colony named
 /// (`--match-head-commit`), so a push landing between the gather and the merge cannot ride through,
 /// and `--delete-branch` is left off: the branch may have a stacked child.
-async fn attempt_merge(app: &App, s: &Session, record: &Path, pr: u64, head_sha: &str) -> std::result::Result<(), MergeOutcome> {
+async fn attempt_merge(app: &App, s: &Session, record: &str, pr: u64, head_sha: &str) -> std::result::Result<(), MergeOutcome> {
     let repo = s.repo.as_str();
     // The operator's switch is checked before any `gh` read: a repository that is not enabled never
     // touches GitHub, and a missing or unreadable setting reads as off.
@@ -649,7 +658,7 @@ async fn attempt_merge(app: &App, s: &Session, record: &Path, pr: u64, head_sha:
         base_ref_name: info.base_ref_name,
         default_branch,
         changed_paths,
-        merges_made: merges_made(record),
+        merges_made: merges_made_in(record),
     };
     if let Some(reason) = merge_refusal(&facts) {
         return Err(MergeOutcome::Refused(reason));

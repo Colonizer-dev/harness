@@ -1167,7 +1167,7 @@ mod tests {
         check_all(&app).await;
 
         assert!(rt.final_text_at.lock().await.is_none(), "the claim is spent");
-        let events = std::fs::read_to_string(&rt.events_path).unwrap();
+        let events = std::fs::read_to_string(app.session_dir("w1").join("events.jsonl")).unwrap();
         assert!(
             events.contains(r#""type":"watchdog_turn_end""#),
             "the end is on the record: {events}"
@@ -1201,7 +1201,7 @@ mod tests {
             "not finished while a call is in flight"
         );
         assert!(
-            !std::fs::read_to_string(&rt.events_path)
+            !std::fs::read_to_string(app.session_dir("w1").join("events.jsonl"))
                 .unwrap_or_default()
                 .contains("watchdog_turn_end")
         );
@@ -1272,7 +1272,7 @@ mod tests {
             "the claim is kept: the runner started working during the probe"
         );
         assert!(
-            !std::fs::read_to_string(&rt.events_path)
+            !std::fs::read_to_string(app.session_dir("w1").join("events.jsonl"))
                 .unwrap_or_default()
                 .contains("watchdog_turn_end"),
             "no end is synthesised for a busy runner"

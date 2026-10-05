@@ -1039,8 +1039,7 @@ pub async fn file(
         let app = app.clone();
         let path = path.clone();
         async move {
-            let events =
-                crate::diagnosis::tail_events_within(&app.session_dir(&s.id).join("events.jsonl"), READ_TAIL_BYTES).await;
+            let events = crate::diagnosis::tail_events_within(app.store(), &s.id, "events.jsonl", READ_TAIL_BYTES).await;
             let activity = file_activity(&events, &path);
             let diff = file_diff(&app, s, &path).await;
             (s, activity, diff)
@@ -1131,12 +1130,10 @@ pub async fn touched(State(app): State<Shared>) -> Json<Value> {
     }
     // What each live colony has been looking at lately, so a colony that is still exploring (or
     // blocked) walks the chambers it reads instead of waiting at the surface.
-    let reads = live.iter().map(|s| {
-        let path = app.session_dir(&s.id).join("events.jsonl");
-        async move {
-            let events = crate::diagnosis::tail_events_within(&path, READ_TAIL_BYTES).await;
-            (s.id.clone(), recent_reads(&events))
-        }
+    let store = app.store();
+    let reads = live.iter().map(|s| async move {
+        let events = crate::diagnosis::tail_events_within(store, &s.id, "events.jsonl", READ_TAIL_BYTES).await;
+        (s.id.clone(), recent_reads(&events))
     });
     let mut reading = BTreeMap::new();
     for (id, paths) in futures_util::future::join_all(reads).await {

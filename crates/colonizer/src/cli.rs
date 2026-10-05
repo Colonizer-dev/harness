@@ -88,7 +88,7 @@ Exit codes:
 
 Settings come from the environment, not flags: COLONIZER_BIND, COLONIZER_DATA_DIR,
 COLONIZER_HOME and the rest are in docs/install.md. The mothership and the local commands
-(`open`, `login-item`, `telemetry`, `migrate-store`) read them. The client commands take --host and --token-file,
+(`open`, `login-item`, `telemetry`, `sessions migrate`) read them. The client commands take --host and --token-file,
 and so does `update` — a thin client of a running mothership; the other local commands refuse
 them (and --json), which only the client commands use.";
 
@@ -137,7 +137,15 @@ enum Command {
         #[arg(long, value_name = "N", default_value_t = crate::hotspots::DEFAULT_TOP)]
         top: usize,
     },
-    /// Copy this machine's colonies into another local session store (docs/session-store.md)
+    /// Manage this machine's session store: where colonies' records and logs live
+    /// (docs/session-store.md)
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+    /// Copy this machine's colonies into another local directory (the older form of
+    /// `sessions migrate`; it never changes the setting)
+    #[command(hide = true)]
     MigrateStore {
         /// The store to copy from (default: this install's data dir, `COLONIZER_DATA_DIR`)
         #[arg(long, value_name = "DIR")]
@@ -299,6 +307,27 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+}
+
+/// The `sessions` subcommands. They run locally off the settings — no mothership, no token.
+#[derive(Subcommand, Debug)]
+enum SessionsCommand {
+    /// Copy every colony into another session store, verify the copy (counts and SHA-256 of every
+    /// file), then switch this install to it. Idempotent and resumable: run it again after an
+    /// interruption and it copies only what is missing
+    Migrate {
+        /// The store to copy into: local, local:<dir>, a directory path, or
+        /// s3://<bucket>[/<prefix>]?endpoint=<url>[&region=<region>]
+        #[arg(long, value_name = "BACKEND")]
+        to: String,
+        /// The store to copy from (default: the configured one). The setting is switched only when
+        /// this is the configured store
+        #[arg(long, value_name = "BACKEND")]
+        from: Option<String>,
+        /// Count what would move and write nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1309,6 +1338,7 @@ const LOCAL_COMMANDS: &[(&str, &[&str])] = &[
     ("telemetry", &["host", "token_file", "json"]),
     ("hotspots", &["host", "token_file"]),
     ("migrate-store", &["host", "token_file", "json"]),
+    ("sessions", &["host", "token_file"]),
     ("version", &["host", "token_file", "json"]),
     ("completions", &["host", "token_file", "json"]),
     ("man", &["host", "token_file", "json"]),
@@ -1471,6 +1501,16 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
         } => {
             let json = cli.json;
             await_local(crate::hotspots::command(repo.as_deref(), git_dir.as_deref(), days, top, json))
+        }
+        Command::Sessions {
+            command: SessionsCommand::Migrate { to, from, dry_run },
+        } => {
+            let cfg = match Settings::from_env() {
+                Ok(cfg) => cfg,
+                Err(e) => return await_local(Err(e)),
+            };
+            let migrated = crate::store_config::migrate_command(&cfg, from.as_deref(), &to, dry_run, cli.json).await;
+            await_local(migrated)
         }
         Command::MigrateStore { from, to, dry_run } => {
             let cfg = match Settings::from_env() {
@@ -3207,6 +3247,9 @@ mod tests {
             &["hotspots", "--days", "7", "--top", "5"][..],
             &["hotspots", "--repo", "acme/app"][..],
             &["hotspots", "--git-dir", "/tmp/mirror.git"][..],
+            &["sessions", "migrate", "--to", "local:/srv/copy"][..],
+            &["sessions", "migrate", "--to", "/srv/copy", "--from", "local", "--dry-run"][..],
+            &["sessions", "migrate", "--to", "/srv/copy", "--json"][..],
             &["completions", "bash"][..],
             &["man"][..],
             &["launch", "acme/app"][..],
@@ -3346,6 +3389,7 @@ mod tests {
             &["login-item", "enable", "--host", "h:1"][..],
             &["hotspots", "--host", "h:1"][..],
             &["hotspots", "--token-file", "/tmp/token"][..],
+            &["--host", "h:1", "sessions", "migrate", "--to", "/srv/copy"][..],
             &["completions", "bash", "--token-file", "/tmp/token"][..],
             &["man", "--host", "h:1"][..],
             &["update", "--json"][..],

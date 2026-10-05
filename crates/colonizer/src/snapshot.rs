@@ -285,9 +285,11 @@ fn read_key(app: &crate::App, session: &str) -> Result<SnapshotKey> {
 
 /// Mints a fresh gateway token over the colony's, revoking the old one: the gateway validates by
 /// reading this file per request (`gateway::colony_for_token`), so the old one stops matching.
-pub(crate) fn rotate_gateway_token(app: &crate::App, session: &str) -> Result<String> {
+pub(crate) async fn rotate_gateway_token(app: &crate::App, session: &str) -> Result<String> {
     let token = crate::util::random_token();
-    write_private(&app.gateway_token_file(session), token.as_bytes())?;
+    app.store()
+        .write_private(session, crate::gateway::GATEWAY_TOKEN_FILE, token.as_bytes())
+        .await?;
     Ok(token)
 }
 
@@ -296,7 +298,7 @@ pub(crate) fn rotate_gateway_token(app: &crate::App, session: &str) -> Result<St
 /// the sandbox name. If the mesh step fails the gateway token is already rotated; that is acceptable,
 /// since the caller falls back and the fresh boot re-mints both.
 pub(crate) async fn rotate_credentials(app: &crate::App, session: &str, sandbox: &str) -> Result<(String, String)> {
-    let gateway_token = rotate_gateway_token(app, session)?;
+    let gateway_token = rotate_gateway_token(app, session).await?;
     let mesh = app.mesh().await?;
     mesh.delete_nodes_named(sandbox).await?;
     let vm_key = mesh.mint_vm_key().await?;
@@ -668,14 +670,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rotating_the_gateway_token_revokes_the_old_one() {
+    #[tokio::test]
+    async fn rotating_the_gateway_token_revokes_the_old_one() {
         let root = scratch("rotate");
         let app = crate::tests::test_app(&root);
         std::fs::create_dir_all(app.session_dir(SESSION)).unwrap();
         let old = crate::util::random_token();
         write_private(&app.gateway_token_file(SESSION), old.as_bytes()).unwrap();
-        let new = rotate_gateway_token(&app, SESSION).unwrap();
+        let new = rotate_gateway_token(&app, SESSION).await.unwrap();
         assert_ne!(new, old);
         // The gateway reads this file per request (gateway::colony_for_token), so the file holding
         // only the new token is what revokes the old.

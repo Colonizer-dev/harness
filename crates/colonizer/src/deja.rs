@@ -173,7 +173,7 @@ async fn index_colony(app: &Shared, s: &crate::sessions::Session) -> Result<()> 
 /// required `<project-slug>/<file>.jsonl` layout, with the colony id prefixed so one project
 /// directory holds every session of its repository.
 fn copy_transcripts(data_dir: &Path, session: &str, org: &str, repo: &str, secrets: &[String]) -> Result<usize> {
-    let source = data_dir.join("sessions").join(session).join("transcripts");
+    let source = crate::store::local_session_dir(data_dir, session).join("transcripts");
     if !source.is_dir() {
         return Ok(0);
     }

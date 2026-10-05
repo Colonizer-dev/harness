@@ -8,7 +8,7 @@ code carries the same statements next to the operations they constrain.
 
 ## The interface
 
-Nine operations, each with its consistency promise written into the trait. Every operation is
+Nine core operations, each with its consistency promise written into the trait. Every operation is
 async and the trait is object-safe — each method returns a boxed `Send` future, so a caller can
 drive any backend, written or not yet written, as `&dyn SessionStore` (which is how `migrate`
 works):
@@ -24,6 +24,17 @@ works):
 | `list_files` | A session's files, relative and `/`-separated (`vm/token`), sorted, recursive. |
 | `remove_session` | Removes a session and everything in it; idempotent. |
 | `quarantine_index` | Moves an unusable index aside to `sessions.json.corrupt-<unix-ts>` and returns the name; `None` when there is no index. The stamp has one-second resolution, so an aside from an earlier second is never overwritten. |
+
+Five more operations are derived from those nine: each has a default built from them, so a backend
+is correct by implementing the nine alone, and overrides one only to do it cheaper.
+
+| Operation | Promise | Local store |
+| --- | --- | --- |
+| `read_tail` | The last bytes of a file within a budget, cut forward to a line start, so only whole lines come back; `None` if absent. | Seeks; never reads the whole log. |
+| `stat` | A file's length and, where the backend keeps one, its modified time; `None` if absent. | `metadata`. |
+| `write_private` | `write_file` for a credential (`vm/token`, `vm/mesh-authkey`, `gateway-token`, `issue.json`). | Owner-only (0600), through `util::write_private`. |
+| `remove_file` | Removes one file; idempotent. | `remove_file`. |
+| `rename_file` | Renames a file within a session; the default copies then removes, so a crash leaves both, never neither. | `rename`, with the same fault seam the event-log rotation always had. |
 
 Every id and file name is validated before a backend sees it: an id is one plain component, a file
 name is relative with only normal components (`vm/token` is fine, `../x`, `/abs`, `C:/x` and
@@ -74,7 +85,7 @@ interface or a documented local-only behavior:
 | `O_APPEND` (`append_line`) | Guarantee: appends visible after return; remotely read-modify-write under the single-writer rule + conditional put. |
 | Directories under `sessions/<id>/` | Guarantee, reshaped: backends list by key prefix; the on-disk shape stays for the local store. |
 | Path shapes (`vm/token`, ids as components) | Guarantee: validated in the interface; worktree paths and traversal are refused. |
-| File modes: `write_private`'s 0600 on `vm/token`, `vm/mesh-authkey` | Local-only, and outside the store API: `write_file` carries no mode and goes by the umask, so those two secrets stay written by `write_private` (as they are today); moving them onto the store first needs a private-write operation. A remote backend protects such bytes by access control, not mode bits. |
+| File modes: `write_private`'s 0600 on `vm/token`, `vm/mesh-authkey` | Guarantee, through its own operation: `write_private` writes a credential owner-only on the local store, and a migration copies credentials with it. A remote backend protects such bytes by access control, not mode bits. |
 | Symlinks | Local-only, never followed when listing; nothing in the contract may require one. |
 | No fsync of the parent directory after rename | Local-only (unchanged): a power loss can revert a rename; the next save rewrites the file. |
 
@@ -89,48 +100,169 @@ and the answer and HTTP caches (`cache/`); the top-level journals (`spend.jsonl`
 storage. Settings (`orgs.json`, `providers.json`, `modules.json`, `claude-accounts.json`) live in
 the config dir. MicroVM disks belong to microsandbox and were never in the data dir.
 
+## Configuration
+
+The store an install runs on is named in `<config dir>/session-store.json` (`COLONIZER_CONFIG_DIR`,
+`~/.config/colonizer` by default):
+
+```json
+{ "backend": "local" }
+```
+
+or a bucket on any S3-compatible service (Cloudflare R2, MinIO, AWS S3):
+
+```json
+{ "backend": "s3", "endpoint": "https://<account>.r2.cloudflarestorage.com", "bucket": "colonies", "prefix": "home", "region": "auto" }
+```
+
+`endpoint` is the service's base URL (requests are path-style, `<endpoint>/<bucket>/<key>`, which
+all three serve); `prefix` is optional and puts the store under `<prefix>/`; `region` is the signing
+region (`auto` for R2, `us-east-1` for MinIO's default, the bucket's own on AWS). On the command line
+the same bucket is `s3://colonies/home?endpoint=https://<account>.r2.cloudflarestorage.com`.
+The key pair never goes in the file: it comes from `COLONIZER_SESSION_STORE_ACCESS_KEY_ID` and
+`COLONIZER_SESSION_STORE_SECRET_ACCESS_KEY`, or else from the saved secrets
+`session-store-access-key-id` and `session-store-secret-access-key` in the config dir, read through
+the same mechanism as every provider key (the keychain, or a 0600 file encrypted under
+`COLONIZER_MASTER_KEY` when that is set). Give the key read, write, list and delete on the prefix
+and nothing else: a bucket protects the colony tokens it holds by access control, not mode bits.
+
+No file means `local`: `sessions.json` and `sessions/<id>/` under the data dir, the layout every
+release has written, so an existing install reads unchanged. A file the build cannot read stops the
+mothership at startup with the file's path in the error, rather than starting it on an empty colony
+list while the colonies sit somewhere else. The file has one writer, `colonizer sessions migrate`,
+and it writes it only after a copy that verified itself.
+
+Whatever the backend, the data dir keeps a working copy of every session: a microVM mounts its
+session's `vm/` and `out/` from a host path, so the backend decides where the records are kept, not
+where a colony runs.
+
+## The bucket backend
+
+`crates/colonizer/src/store_s3.rs` has two layers.
+
+- **`S3Store`** speaks to the bucket directly, signing every request with AWS Signature Version 4.
+  A replace is one whole-object put. An append is a read-modify-write under a conditional put
+  (`If-Match` on the ETag it read, `If-None-Match: *` for a new object), retried when another writer
+  won, so the single-writer rule is enforced rather than assumed. Throttling (429), server errors
+  (5xx) and dropped connections are retried five times with exponential backoff and jitter; an
+  access error is not retried. A quarantine is copy-then-delete. `colonizer sessions migrate` copies
+  into and out of this layer.
+- **`MirroredStore`** is what a mothership runs on: a write-ahead local cache with upload. Every
+  write lands in the working copy first, byte for byte as the local store writes it, and the object
+  is owed to the bucket; the upload state (`session-store-sync.json`, beside the index) is saved
+  before the write returns, so a crash between the write and its upload is caught up on the next
+  start. An uploader sends what is owed about a second after the last write (a burst of appends to
+  one log uploads once, as the whole file), backs off while the bucket refuses, and every 30 seconds
+  sweeps the working copy for files that changed without going through the store: what the microVM
+  wrote into `out/` or `transcripts/`, the gateway's audit log. Reads are served from the working
+  copy. When the working copy has no index and the bucket has one, startup hydrates it from the
+  bucket, credentials owner-only and the index last, which is how a fresh host takes over another
+  host's colonies.
+
+**The read-lag bound.** A write through the store reaches the bucket within the upload delay (one
+second) while the bucket answers, and a file written into the working copy directly within the
+sweep interval (30 seconds); a bucket that refuses delays both by its backoff, and the owed objects
+wait in the upload state until it answers. Another host reading the bucket can be that far behind
+this one.
+
 ## Migration and rollback
 
-Moving a colony between stores is copy-then-switch, and the copy only ever reads its source —
+Moving colonies between stores is copy-then-switch, and the copy only ever reads its source, so
 rollback is pointing the mothership back at the old store, which never changed:
 
-1. Stop the mothership, so the single-writer rule holds while copying.
-2. Dry run: `colonizer migrate-store --to <new store> --dry-run` counts what would move — colonies,
-   files, bytes — and writes nothing.
-3. Migrate: `colonizer migrate-store --to <new store>` copies each session's files and the index
-   last, so every failure before the index lands leaves the destination index-less — visibly
-   unfinished, not half-written. The destination must be empty; a store that already holds an index
-   or sessions is refused (`AlreadyExists`) before anything is written.
-4. Verification is part of the call: the session listing, every per-session file listing, and every
-   file's bytes are read back out of the destination and compared *before* the index is written;
-   the index's own bytes are compared after it lands. A migration that cannot prove itself returns
-   an error — the one exception being that final index check, where the destination is left
-   holding a written index that says so in the error.
-5. Spot-check the destination (open a colony in the UI, resume one), then point the mothership at
-   the new store — set `COLONIZER_DATA_DIR` to it (the switch the command prints) and start it.
+1. Stop the mothership, so the single-writer rule holds while copying. When the source is the
+   configured store, the command refuses to run while something is listening on `COLONIZER_BIND`.
+2. Dry run: `colonizer sessions migrate --to <store> --dry-run` counts what would move (colonies,
+   files, bytes, and how many are already there) and writes nothing.
+3. Migrate: `colonizer sessions migrate --to <store>` copies each session's files, then the index
+   last, so every failure before the index lands leaves the destination index-less: visibly
+   unfinished, not half-written.
+4. Verification is part of the call. The session listing, every per-session file listing, and every
+   file's SHA-256 are read back out of the destination and compared *before* the index is written;
+   the index's own bytes are compared after it lands. The report ends with a checksum: the SHA-256
+   of the source's manifest (every file's path and SHA-256, then the index's), the figure two runs
+   over the same source agree on.
+5. The switch. When the source was the configured store, the copy verified and `--to` is a backend,
+   the command records `--to` in `session-store.json`, and the next mothership start runs on it.
+   A directory target (`local:<dir>`, or a bare path) is a copy, not a switch: to run on it, point
+   the mothership at it with `COLONIZER_DATA_DIR`, as the command says.
 
-`colonizer migrate-store` runs locally off the settings, with no mothership and no token; `--from`
-defaults to the configured data dir, and when the source is that data dir it refuses to run while
-something is listening on `COLONIZER_BIND` — most likely a running mothership — because an in-flight
-colony would be lost from the copy. A failed migration leaves the source untouched and, short of that final index check, the
-destination without an index; just point back, or fix the destination and run the command again —
-it is a copy, not a move.
+`--from` names a source other than the configured store; the setting is then left alone. A store is
+named as `local` (this install's local store), `local:<dir>`, a bare directory path, or a bucket,
+`s3://<bucket>[/<prefix>]?endpoint=<url>[&region=<region>]`.
 
-Where each operation goes today. Startup reads the index through the store: `load_sessions`
-(`app.rs`) calls `read_index`, and an index a store cannot read or parse is quarantined through
-`quarantine_index` — the same move-aside to `sessions.json.corrupt-<unix-ts>`, with the same fault
-seam, as before. The salvage *copy* stays a local file op (`copy_corrupt_aside`): the store has no
-copy, and moving the original would destroy what the copy is meant to keep. Saves write the index
-through it, and the per-session appends go through `append`: the agent event log and the host
-chain's events (`events.rs`, `validation.rs`), the findings ledger (`validation.rs`) and the
-harness log (`sessions/persist.rs`), all landing at the same `sessions/<id>/<name>` paths the file
-helpers wrote. The log archive (`archive.rs`) reads a finished colony's files through `list_files`
-and `read_file`. What still stays local, deliberately: the `vm/` files, whose `write_private` 0600
-secrets the store API cannot carry (the mode is in the table above); `Runtime::load`'s initial
-reads of a colony's event and harness logs at startup; event rotation; and the archive's own copy.
-Tests cover the endpoint here
-(`store::tests::a_migration_round_trips_local_to_memory_and_back_byte_for_byte`,
-`a_dry_run_migration_counts_without_writing`, `a_migration_refuses_a_destination_that_already_holds_colonies`,
+**Idempotent and resumable.** The destination may be empty, hold part of this source's copy (an
+interrupted run), or hold all of it (a finished run). A file the destination already holds byte for
+byte is skipped, a changed one is copied over, and a destination file the source's colony no longer
+has is removed, so running the command again after an interruption copies only what is left, and
+running it after a finished migration copies nothing and re-verifies. Anything else is someone
+else's store: a destination whose index differs from the source's, or that holds a colony the source
+does not, is refused (`AlreadyExists`) before anything is written.
+
+**Rollback.** The source is never written. Restore the previous `session-store.json` (or remove the
+file, for the local store) and start the mothership.
+
+`colonizer migrate-store --to <dir> [--from <dir>] [--dry-run]` is the older, directory-to-directory
+form of the same copy, kept for scripts written against it. It never changes the setting.
+
+## Limits
+
+- **One writer per session.** A store holds no lock of its own; the mothership that owns a colony
+  is the only process that writes it, and a migration needs the mothership stopped. The bucket
+  enforces it for appends with conditional puts; the mirror's whole-object uploads assume it, so two
+  motherships must never run on one prefix.
+- **Upload on the next start.** The mirror has no shutdown flush: what was owed when the mothership
+  stopped is uploaded when it next starts (the upload state survives). Until then the bucket lags.
+- **What still uses a local path.** Some reads and writes cannot go through the store API, because
+  something other than the mothership's own code consumes a path: the microVM mounts `vm/`, `out/`,
+  `transcripts/` and the services directory; `gh --body-file` reads `finding-body.md`, `review.md`
+  and `pr-body.md`; txcript reads and writes the agent's native transcripts as a directory; msb
+  writes memory snapshots; the gateway's request audit (`gateway.jsonl`) is appended from a
+  synchronous `Drop` on the request path; `colonizer fleet export` and the fleet drain run with no
+  mothership; and the disk measurements walk the working copy. Each is listed, with its count and
+  reason, in `LAYOUT_ALLOWLIST` (`crates/colonizer/src/store.rs`), and
+  `store::tests::the_session_layout_is_touched_only_through_the_store` fails on any new path into the
+  session layout that is neither routed through the store nor listed there.
+- **Salvage stays local.** A damaged index's salvage *copy* (`copy_corrupt_aside`) and the
+  pre-update backup of `sessions.json` are copies of the local file; the store has no copy
+  operation, and moving the original would destroy what the copy is meant to keep.
+
+## Where each operation goes
+
+Every read and write of a session's records goes through the `SessionStore` the mothership opened at
+startup (`App::store`):
+
+| What | Through |
+| --- | --- |
+| The index at startup, and every save | `read_index`, `quarantine_index`, `write_index` (`app.rs`, `sessions/persist.rs`) |
+| A colony's runtime at first use: its event and harness logs, and whether it was resumed | `read_file`, `list_files` (`SavedLogs::read`, `sessions/runtime.rs`) |
+| The event log: appends, the cockpit's replay, the diagnosis and map tails, history search, the judge's context | `append`, `read_file`, `read_tail`, `stat` |
+| Event-log rotation on resume, and the run epoch | `list_files`, `rename_file` (`rotate_events`, `run_epoch`, `lifecycle.rs`) |
+| The harness log, findings, GitHub and message ledgers (`harness.jsonl`, `findings.jsonl`, `github.jsonl`, `inbox.jsonl`, `sent.jsonl`) | `append`, `read_file` |
+| Commit links, claims, the egress record (`commits.json`, `claims.json`, `egress.json`) | `write_file`, `read_file`, `stat` |
+| The stored issue, `vm/session.json`, `vm/boot.sh`, and the archived runs a resume reads | `write_private`, `write_file`, `read_file` (`boot.rs`) |
+| The colony's credentials (`vm/token`, `vm/mesh-authkey`, `gateway-token`) | `write_private`, `read_file`, `remove_file` |
+| The log archive of a finished colony | `list_files`, `read_file`, `stat` (`archive.rs`) |
+| Deleting a colony | `remove_session` |
+
+Tests cover the endpoint here: the conformance suite every backend runs
+(`store::tests::the_contract_holds_for_both_reference_backends`, derived operations included), the
+migration (`a_migration_round_trips_local_to_memory_and_back_byte_for_byte`,
+`a_dry_run_migration_counts_without_writing`,
+`an_interrupted_migration_resumes_and_a_finished_one_reruns_idempotently`,
+`a_resumed_migration_replaces_changed_files_and_drops_stale_ones`,
+`a_migration_refuses_a_destination_that_already_holds_other_colonies`,
 `a_failed_migration_leaves_the_source_whole_and_the_destination_without_an_index`,
-`the_migrate_store_command_dry_runs_then_copies`), the startup read through the store
-(`app::tests::startup_loads_the_index_through_the_store`) and the per-session appends.
+`a_migration_keeps_credentials_owner_only`), the command
+(`store_config::tests::sessions_migrate_dry_runs_copies_reruns_and_leaves_the_setting_for_a_directory`,
+`the_migrate_store_command_dry_runs_then_copies`), the checked-in v0.1.9 data dir
+(`the_v0_1_9_fixture_reads_and_writes_byte_for_byte`), the startup read
+(`app::tests::startup_loads_the_index_through_the_store`), and the static check above. The bucket
+backend runs the same conformance suite against an in-process S3-compatible server that checks
+every request's signature (`store_s3::tests::the_contract_holds_for_the_s3_store`,
+`the_contract_holds_for_the_mirror_and_a_flush_makes_the_bucket_match`), with the signer checked
+against AWS's published SigV4 examples, retries, racing appends, hydration, the sweep, and the
+whole move into a bucket and back (`sessions_migrate_moves_to_a_bucket_switches_and_moves_back`).
+Set `COLONIZER_TEST_S3` to an `s3://` URL, with the two key variables, and
+`the_contract_holds_against_a_real_bucket_when_one_is_named` runs the suite against a real bucket
+(MinIO or R2) under a fresh prefix.

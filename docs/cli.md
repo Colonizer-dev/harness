@@ -3,7 +3,7 @@
 One binary, two jobs. With no subcommand, `colonizer` starts the mothership, exactly as it always
 has: it serves the cockpit and the API on `COLONIZER_BIND` (default `127.0.0.1:7878`) and runs the
 colonies. The subcommands are everything else: a few run against this machine (`version`,
-`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `migrate-store`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
+`update`, `setup`, `open`, `login-item`, `telemetry`, `hotspots`, `sessions migrate`, `fleet export`, `fleet import`, `completions`, `man`), and the rest are clients of a mothership already running somewhere —
 here or across a tailnet (`launch`, `list`, `status`, `logs`, `diff`, `ask`, `answer`, `stop`,
 `resume`, `pr`, `map`, `loop`, `redteam`, `token`, `fleet sync`, `mcp`). Settings still come from the environment, never flags — every
 `COLONIZER_*` variable is in [install.md](install.md).
@@ -26,8 +26,9 @@ Every client command takes the same two global flags, before or after the subcom
 The local commands run against this machine and take none of the client flags. `update` is the
 exception: it is a thin client of a running mothership, so it follows `--host` and `--token-file`
 like any client command — but it has no `--json`. The rest (`setup`, `open`, `login-item`, `telemetry`,
-`migrate-store`, `version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
-(exit 2), and their `--help` does not list them.
+`version`, `completions`, `man`) refuse `--host`, `--token-file` and `--json` with a usage error
+(exit 2), and their `--help` does not list them; `hotspots` and `sessions migrate` refuse the two host
+flags and keep `--json`.
 
 `colonizer open` is local on purpose: it reprints the sign-in link and opens a browser on this
 machine, always with the local token and `COLONIZER_BIND`. The mothership on another machine cannot
@@ -67,9 +68,10 @@ colonizer telemetry show      # anonymous usage reporting (on, off; no network, 
 colonizer hotspots            # the files merged pull requests touched most, over the last 30 days
 colonizer hotspots --days 7 --top 5      # a shorter window, fewer files
 colonizer hotspots --repo acme/app       # a repository's mirror instead of the current directory
-colonizer migrate-store --to /new/data               # copy this install's colonies into another local store
-colonizer migrate-store --to /new/data --dry-run     # count what would move, write nothing
-colonizer migrate-store --from /old/data --to /new/data   # copy from a store other than this install's data dir
+colonizer sessions migrate --to local:/new/data --dry-run   # count what would move, write nothing
+colonizer sessions migrate --to local:/new/data             # copy this install's colonies, verified
+colonizer sessions migrate --from /old/data --to /new/data  # copy from a store other than the configured one
+colonizer sessions migrate --to 's3://colonies/home?endpoint=https://acct.r2.cloudflarestorage.com'  # move to a bucket, and switch
 ```
 
 `hotspots` reads a git repository on this machine — no mothership — and ranks the files its
@@ -82,6 +84,15 @@ current directory unless `--repo owner/repo` names a mirror in this machine's da
 `--git-dir PATH` names a git directory (a mirror, or a worktree's `.git`); the two refuse to
 combine. The report is where parallel colonies collide and what to split; `--json` prints
 `{days, pull_requests, files}`.
+
+`sessions migrate` copies every colony from the configured session store (or `--from`) into
+`--to`, verifies the copy by listing and by every file's SHA-256, and prints what it copied, what
+was already there and the source's checksum. Stop the mothership first; the command refuses to copy
+a store something is serving. Run it again after an interruption and it copies only what is left.
+When the source is the configured store and `--to` is a backend, it switches this install to it
+(`<config dir>/session-store.json`); a directory target is a copy, run on with `COLONIZER_DATA_DIR`.
+`--json` prints the report. The store, the switch and rollback are in
+[session-store.md](session-store.md#migration-and-rollback).
 
 Colonies — the ids are what `list` and the cockpit show:
 

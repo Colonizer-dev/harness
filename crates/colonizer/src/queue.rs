@@ -1168,7 +1168,7 @@ async fn retire_and_rotate(app: &Shared, id: &str, revert: impl FnOnce(&mut Sess
             Some(rt) => Some(rt.file_lock.lock().await),
             None => None,
         };
-        rotate_events(&app.session_dir(id))
+        rotate_events(app.store(), id).await
     };
     if let Err(e) = rotated {
         let e = anyhow::Error::from(e);
@@ -3219,12 +3219,12 @@ mod tests {
             );
         }
         drop(sessions);
-        let log = std::fs::read_to_string(&app.runtime("subagent-past-cap").await.logs_path).unwrap();
+        let log = std::fs::read_to_string(app.session_dir("subagent-past-cap").join("harness.jsonl")).unwrap();
         assert!(
             log.contains("suspending anyway") && log.contains("the agent that asked is lost"),
             "the capped suspension says what it costs: {log}"
         );
-        let log = std::fs::read_to_string(&app.runtime("lead").await.logs_path).unwrap();
+        let log = std::fs::read_to_string(app.session_dir("lead").join("harness.jsonl")).unwrap();
         assert!(
             !log.contains("suspending anyway"),
             "the ordinary suspension keeps its own line: {log}"

@@ -31,7 +31,6 @@ use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value, json};
 use std::{
-    path::Path,
     sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
@@ -477,33 +476,12 @@ fn context_lines(tail: &str, keep: usize) -> Vec<String> {
 /// The colony's last few events as context lines. Reads the tail of the event log only — the file
 /// grows for as long as the colony lives — and reads nothing at all rather than failing loudly: this
 /// is context, and a judge without it is still a judge.
-pub(crate) async fn event_context(events_path: &Path) -> Vec<String> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let Ok(mut file) = tokio::fs::File::open(events_path).await else {
+pub(crate) async fn event_context(store: &dyn crate::store::SessionStore, id: &str) -> Vec<String> {
+    // The store's tail is whole lines only, so a line the byte budget cut in half is never parsed.
+    let Ok(Some(bytes)) = store.read_tail(id, "events.jsonl", EVENT_TAIL_BYTES).await else {
         return Vec::new();
     };
-    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let seeked = len > EVENT_TAIL_BYTES;
-    if file
-        .seek(std::io::SeekFrom::Start(len.saturating_sub(EVENT_TAIL_BYTES)))
-        .await
-        .is_err()
-    {
-        return Vec::new();
-    }
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).await.is_err() {
-        return Vec::new();
-    }
-    let tail = String::from_utf8_lossy(&bytes);
-    // The seek landed wherever the arithmetic put it, almost never on a line boundary, so the first
-    // line can be half an event. Dropping it also drops any character the seek cut in half.
-    let tail = if seeked {
-        tail.split_once('\n').map(|(_, rest)| rest).unwrap_or_default()
-    } else {
-        &tail
-    };
-    context_lines(tail, CONTEXT_LINES)
+    context_lines(&String::from_utf8_lossy(&bytes), CONTEXT_LINES)
 }
 
 /// Reads the judge's reply and checks it against what was actually offered.
@@ -838,7 +816,7 @@ async fn judge_one(
             message: "the colony is gone".into(),
         }));
     };
-    let context = event_context(&rt.events_path).await;
+    let context = event_context(app.store(), id).await;
     let prompt_text = prompt(task, questions, &context);
     let mut last: Option<ModelError> = None;
     for (index, model) in std::iter::once(&judge.model).chain(judge.fallback_models.iter()).enumerate() {

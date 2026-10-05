@@ -132,12 +132,17 @@ pub(crate) async fn dial_agentd(app: &App, s: &Session) -> Result<Box<dyn Io>> {
     bail!("the microVM's address is not known yet")
 }
 
-pub(crate) fn agentd_token(app: &App, id: &str) -> Result<String> {
-    read_trimmed(&app.session_dir(id).join("vm/token")).context("session token is missing")
+pub(crate) async fn agentd_token(app: &App, id: &str) -> Result<String> {
+    let bytes = app.store().read_file(id, "vm/token").await?.unwrap_or_default();
+    let token = String::from_utf8_lossy(&bytes).trim().to_string();
+    if token.is_empty() {
+        bail!("session token is missing");
+    }
+    Ok(token)
 }
 
 pub(crate) async fn agentd_http(app: &App, s: &Session, method: &str, path: &str) -> Result<(u16, String)> {
-    let token = agentd_token(app, &s.id)?;
+    let token = agentd_token(app, &s.id).await?;
     let request = async {
         let mut stream = dial_agentd(app, s).await?;
         let head = format!(
@@ -205,7 +210,7 @@ fn content_length(head: &str) -> Option<usize> {
 }
 
 pub(crate) async fn agentd_ws(app: &App, s: &Session, path: &str) -> Result<WebSocketStream<Box<dyn Io>>> {
-    let token = agentd_token(app, &s.id)?;
+    let token = agentd_token(app, &s.id).await?;
     let stream = dial_agentd(app, s).await?;
     let mut request = format!("ws://agentd{path}").into_client_request()?;
     request

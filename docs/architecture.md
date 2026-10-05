@@ -490,9 +490,11 @@ and that stub is the one piece left for the gate.
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` and the
 per-session files and logs under `data/sessions/<id>/` are read and written through the `SessionStore` in
 `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)) — startup loads the index through it, the
-saves write it back, and the event, harness and findings appends go through it — and its contract, atomic replaces,
-at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets another backend serve the
-same colonies (`colonizer migrate-store` copies one store into another). That is
+saves write it back, and every record and ledger (the event and harness logs, findings, commit links, claims, messages,
+the stored issue, the colony's tokens) is read and written through it, the paths a microVM mounts aside — and its
+contract, atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets
+another backend serve the same colonies (`colonizer sessions migrate` copies one store into another, verifies it, and
+switches to it). That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
 

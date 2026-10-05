@@ -127,17 +127,31 @@ pub fn issue_body(finding: &Finding, s: &Session, co_author: Option<&CoAuthor>) 
 /// colony (which carries the `issue` again), review, merge, or an error along the way — are the same
 /// finding, so they do not count a second time. A legacy line with no `state` counts when it carries
 /// `issue` or `duplicate_of`, which is how filing was recorded before states existed.
-pub fn count(record: &Path) -> usize {
-    std::fs::read_to_string(record)
-        .map(|content| {
-            content
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .filter(|line| serde_json::from_str::<Value>(line).ok().is_some_and(|v| used_the_cap(&v)))
-                .count()
-        })
-        .unwrap_or(0)
+pub fn count_in(ledger: &str) -> usize {
+    ledger
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter(|line| serde_json::from_str::<Value>(line).ok().is_some_and(|v| used_the_cap(&v)))
+        .count()
 }
+
+/// [`count_in`] over a ledger file on disk, for the unit tests that plant one by hand.
+#[cfg(test)]
+pub fn count(record: &Path) -> usize {
+    count_in(&std::fs::read_to_string(record).unwrap_or_default())
+}
+
+/// A colony's findings ledger (`findings.jsonl`), read through the session store; an absent or
+/// unreadable ledger reads as empty, as the direct file read did.
+pub(crate) async fn ledger(app: &App, id: &str) -> String {
+    match app.store().read_file(id, LEDGER_FILE).await {
+        Ok(Some(bytes)) => String::from_utf8(bytes).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// The findings ledger's name in a session.
+pub(crate) const LEDGER_FILE: &str = "findings.jsonl";
 
 /// Whether one ledger line is the one that filed or matched its finding.
 fn used_the_cap(line: &Value) -> bool {
@@ -186,10 +200,13 @@ pub struct FindingRecord {
 /// Reads a session's findings ledger, in the order it was written, tolerating whatever a crash or
 /// an older version left behind: a torn or corrupt line costs itself, and a legacy line without
 /// `state` is read by its `issue` or `duplicate_of` field.
+#[cfg(test)]
 pub fn records(path: &Path) -> Vec<FindingRecord> {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+    records_in(&std::fs::read_to_string(path).unwrap_or_default())
+}
+
+/// [`records`] over the ledger's text.
+pub fn records_in(content: &str) -> Vec<FindingRecord> {
     content
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -217,8 +234,7 @@ pub async fn list(State(app): State<Shared>, AxumPath(id): AxumPath<String>) -> 
     app.session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    let record = app.session_dir(&id).join("findings.jsonl");
-    let mut out = records(&record);
+    let mut out = records_in(&ledger(&app, &id).await);
     for line in &mut out {
         line.session = id.clone();
     }
@@ -230,8 +246,7 @@ pub async fn list_all(State(app): State<Shared>) -> Json<Vec<FindingRecord>> {
     let sessions = app.sessions.read().await.clone();
     let mut out = Vec::new();
     for s in sessions.into_iter().rev() {
-        let record = app.session_dir(&s.id).join("findings.jsonl");
-        let mut lines = records(&record);
+        let mut lines = records_in(&ledger(&app, &s.id).await);
         for line in &mut lines {
             line.session = s.id.clone();
             line.repo = Some(s.repo.clone());

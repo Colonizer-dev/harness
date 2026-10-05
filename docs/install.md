@@ -175,7 +175,7 @@ this machine and read the same environment the mothership does:
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
 | `colonizer hotspots [--days N] [--top N]` | Ranks the files merged pull requests touched most, from a git repository on this machine ([docs/cli.md](cli.md)) |
-| `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
+| `colonizer sessions migrate --to STORE [--from STORE] [--dry-run]` | Copies every colony into another session store, verifies it (counts and every file's SHA-256), and switches this install to it when `--to` is a backend; resumable ([docs/session-store.md](session-store.md#migration-and-rollback)). `--from` defaults to the configured store, named in `<config dir>/session-store.json` ([Configuration](session-store.md#configuration)) |
 | `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
@@ -338,7 +338,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`, `migrate-store`, `fleet export`, `fleet import`) read the same variables.
+`telemetry`, `sessions migrate`, `fleet export`, `fleet import`) read the same variables.
 
 ### The mothership
 
@@ -357,6 +357,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_FLEET_SYNC` | on | Set to `off` (or `0`, `false`, `no`) to stop a fleet member's background history push ([fleet.md](fleet.md#history-push)); `colonizer fleet sync` still drains on demand. Has no effect on a machine that has not joined a fleet |
 | `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
+| `COLONIZER_SESSION_STORE_ACCESS_KEY_ID`, `COLONIZER_SESSION_STORE_SECRET_ACCESS_KEY` | – (the saved secrets `session-store-access-key-id`, `session-store-secret-access-key`) | The key pair for a session store in an S3-compatible bucket ([docs/session-store.md](session-store.md#configuration)) |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
 | `COLONIZER_NO_EXTERNAL_EFFECTS`, `COLONIZER_NO_WRITE` | – | A kill switch: set either to anything but `0`, `false`, `off` or `no`, and every write that leaves the harness (commits, pushes, pull requests, merges, comments, filed issues) refuses to run |
 | `COLONIZER_SUMMARIES` | on | `0`, `false` or `off` turns colony summaries off whatever the agent module's `summaries` setting says |

@@ -507,13 +507,20 @@ pub(crate) async fn serve() -> Result<()> {
         }
         Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
     };
-    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
+    for dir in ["repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    // The one store this run reads and writes through (docs/session-store.md): built once here and
-    // threaded into startup and the `App`, so every later save and append answers by the same name.
-    let store: Arc<dyn crate::store::SessionStore> = Arc::new(crate::store::LocalDirStore::new(cfg.data_dir.clone()));
-    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &cfg.data_dir.join("sessions.json")).await?;
+    // The one store this run reads and writes through (docs/session-store.md): the backend
+    // `session-store.json` names (the local disk under the data dir when there is none), opened once
+    // here and threaded into startup and the `App`, so every later save and append answers by the
+    // same name. Its local root holds the session directories a microVM mounts.
+    std::fs::create_dir_all(crate::store::local_sessions_root(&cfg.data_dir))?;
+    let backend = crate::store_config::load(&cfg.config_dir)?;
+    let store = backend.open(&cfg).await?;
+    if backend != crate::store_config::Backend::default() {
+        println!("sessions: using {}", backend.describe(&cfg.data_dir));
+    }
+    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &crate::store::local_index(&cfg.data_dir)).await?;
     for s in &mut sessions {
         if s.org.is_empty() {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
