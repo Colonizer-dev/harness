@@ -351,8 +351,8 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | Scope | What it may call |
 | :--- | :--- |
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops` and `/api/loops/{id}/runs`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
-| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm` |
-| `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm`, and the UHP cancels `POST /uhp/v1/sessions/{id}/cancel` and `/uhp/v1/responses/{id}/cancel` |
+| `launch` | Start colonies: `POST /api/sessions` and `POST /uhp/v1/responses`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,

@@ -18,10 +18,17 @@ with version negotiation on every served `/uhp` route (any `UHP-Version` other
 than `2026-09-12` is **400** `unsupported_protocol_version`) and the envelope on
 every `/uhp` refusal, the credential ones included (**401**
 `authentication_error`, **403** `permission_error`). Scoped API tokens are held
-to the same scope and org/repo limits there as on `/api`. The rest is still
-proposed — creating and continuing responses (§7.3), SSE streaming (§7.4), input
-files (§7.5) and cancellation (§7.6): until a table lands, nothing on the wire
-changes for it. The *Colonizer today* column is what works; how the served
+to the same scope and org/repo limits there as on `/api`. #650 then served the
+task-bearing core (`crates/colonizer/src/uhp_responses.rs`): `POST
+/uhp/v1/responses` (create and continue, §7.3), SSE streaming (§7.4),
+`GET /uhp/v1/responses/{id}`, and cancellation of a response or a session
+(§7.6); discovery reports `streaming` and `cancellation` true. Creating a
+response needs a `launch` token; cancelling one, or a session, needs `operate`;
+a `read` token gets **403** `permission_error`. Still proposed: input files
+(§7.5), and the `/api/sessions` aliases these tables name (`previous_response_id`
+and `metadata.harness_id` on `POST /api/sessions`, `Session.last_response_id`,
+SSE on `GET /api/sessions/{id}/events`): the `/uhp` routes carry those today.
+Until a table lands, nothing on the wire changes for it. The *Colonizer today* column is what works; how the served
 surface measures against the UHP conformance suite is in
 [docs/conformance.md](../conformance.md). The runner
 contract (§2), the event definitions in `docs/agent-events.schema.json`, the
@@ -96,6 +103,26 @@ one, so the id keeps working across restarts.
 | `instructions` in the create body: the task text | `input` | `POST /api/sessions` | Not an in-place alias: UHP's `instructions` means system-level instructions. `input` becomes the task text; `instructions` keeps today's meaning through the deprecation release, and reusing the name is a later decision. |
 | duplicate-issue check, `allow_duplicate` | `Idempotency-Key` header | `POST /api/sessions` | A repeat with the same key within 24 hours returns the first colony and starts nothing, even while that one is still booting. The duplicate check stays. |
 
+How `POST /uhp/v1/responses` reads a request (#650):
+
+| Field | Meaning |
+| --- | --- |
+| `input` | The task text: a string, or `message` items and `input_text` parts, joined. Required, at most 100,000 characters. An `input_file` or `input_image` part is **400** `invalid_input` while discovery reports `files_input` false. |
+| `metadata.repo` | `owner/name`: the repository a new colony works on. Required to create, unread on a continuation. |
+| `metadata.issue`, `metadata.title` | The issue number (string) and title of a new colony, as on `POST /api/sessions`. |
+| `metadata.harness_id` | `chrn_<module>` or the module id. Unknown or switched off: **404** `harness_not_found`; installed but not the module the repository's colonies launch on, or not the colony's on a continuation: **409** `harness_mismatch`. |
+| `stream` | `true` answers with the response's SSE stream (§7.4) instead of the object. |
+| `previous_response_id` | Continue that colony, as below. |
+| `Idempotency-Key` header | Per caller (owner or token), 24 hours, in memory: a repeat answers the first response and starts nothing; a mothership restart forgets the keys. |
+
+Every other field, `model` and `instructions` included, is ignored and listed in
+`metadata.ignored_fields` (§7.1). Validation refusals are **400** `invalid_input`
+with `param` naming the field. A create runs `POST /api/sessions` underneath, so
+its refusals keep their status in the envelope (a duplicate-issue **409** reads
+`colonizer_conflict`, a scoped token's cap **429** `rate_limited`). An idle
+colony's continuation is delivered as a follow-up message; a stopped or failed
+one is resumed with `input` as the resume brief's note.
+
 `previous_response_id` resolves by the colony's state:
 
 | Colony | Result |
@@ -133,6 +160,16 @@ stream, so the §2 events keep their names inside the microVM and on the WS.
 | `status` | nothing, except `exited` with no `turn_end`, which ends the response by how the colony stopped (§7.7): `response.failed` with `response.status: "cancelled"` after Stop, `response.incomplete` after a budget stop, otherwise an `error` event (`harness_error`) and then `response.failed` |
 | `turn_end` | `is_error: false`: `response.completed`. `is_error: true`: `response.failed` with `error.code` from §7.7. After an interrupt: `response.failed` with `response.status: "cancelled"`, which UHP makes authoritative. |
 
+Served (#650) as `POST /uhp/v1/responses` with `stream: true` and as
+`GET /uhp/v1/responses/{id}?stream=true`, which resumes after `Last-Event-ID`.
+A text block opens its `message` item with `response.output_item.added` and
+`response.content_part.added` before its first delta, and closes it with
+`response.content_part.done`, as Responses SDKs expect; a `thinking` block is a
+`reasoning` item. A stream whose colony stops without `exited` ends from the
+colony's record within a few seconds. An interrupt is remembered in memory, so
+after a mothership restart an interrupted turn that already finished reads
+`failed` rather than `cancelled`.
+
 A subagent event keeps its `agent` ref as an extra field on its item or event.
 The projection gets its own schema when it is built;
 `docs/agent-events.schema.json` describes §2 and does not change.
@@ -150,6 +187,14 @@ The projection gets its own schema when it is built;
 | --- | --- | --- | --- |
 | `POST /api/sessions/{id}/stop` → `{"result": "stopped"}` or `"already_stopped"`, plus the session | `POST /v1/sessions/{session_id}/cancel` → `{id, status}` | `POST /uhp/v1/sessions/{id}/cancel`, on the stop handler | `POST /api/sessions/{id}/stop` keeps its name and reply. The UHP reply takes its `status` from §7.7. |
 | WS `{"type": "interrupt"}`: ends the current turn, no reply frame | `POST /v1/responses/{response_id}/cancel` → the response | `POST /uhp/v1/responses/{response_id}/cancel` | Interrupts that turn if it is still running. The colony and the output so far are kept, as UHP requires. |
+
+Served (#650). `POST /uhp/v1/sessions/{id}/cancel` answers
+`{"id", "object": "session", "status", "metadata": {"colonizer_result"}}`, with
+`status` `cancelled` for a colony this stop ended or one stopped by hand,
+`completed`, `failed` or `incomplete` for one that ended otherwise, and
+`colonizer_result` the stop's `stopped` or `already_stopped`.
+`POST /uhp/v1/responses/{id}/cancel` answers the response, `status: "cancelled"`
+for a turn it ended.
 
 Every cancel is safe to retry: a repeat changes nothing and is not an error
 (Stop answers `already_stopped`, a response cancel returns the finished

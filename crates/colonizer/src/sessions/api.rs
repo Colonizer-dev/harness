@@ -373,7 +373,7 @@ const SEEN_CLIENTS_MAX: usize = 512;
 /// Why a user message was not delivered. The socket path drops each of these silently, as it
 /// always has; the HTTP twin answers each with its own status.
 #[derive(Debug)]
-enum MessageError {
+pub(crate) enum MessageError {
     NoSession,
     NotAccepting(SessionStatus),
     /// Empty or oversized text — the socket drops it, HTTP answers 400.
@@ -385,16 +385,16 @@ enum MessageError {
 }
 
 /// What one user message turned into, for the HTTP twin's reply.
-struct Sent {
-    id: String,
-    delivered: bool,
+pub(crate) struct Sent {
+    pub(crate) id: String,
+    pub(crate) delivered: bool,
 }
 
 /// The one user-message path (issue #746): the events socket's `user_message` command and
 /// `POST /api/sessions/{id}/messages` both forward through here, so both check the colony, trim
 /// and size-check the text, and mark a scoped token's message the same way. `client_id` is the
 /// HTTP twin's dedupe key; the socket passes `None` and mints its own `u-<short_id>`.
-async fn submit_message(
+pub(crate) async fn submit_message(
     app: &Shared,
     id: &str,
     rt: &Arc<Runtime>,
@@ -1104,6 +1104,8 @@ async fn client_command(
         }
         Some("interrupt") => {
             rt.interrupted.store(true, Ordering::SeqCst);
+            // The UHP response this interrupt ends reads `cancelled`, not failed (§7.4).
+            crate::uhp_responses::note_interrupt(app, id).await;
             json!({"type": "interrupt"})
         }
         Some("set_model") => {
