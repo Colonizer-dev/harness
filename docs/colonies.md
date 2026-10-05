@@ -410,15 +410,27 @@ Some failures have no work behind them: a provider that blipped, a status that f
 parent that paused, a sign-in that expired. The mothership handles these itself rather than
 handing each one to you as a colony that needs you.
 
-- **A transient provider error is retried, not held** (issue #980). When an autopilot colony's turn
-  ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529, an
-  "unreachable" or overloaded provider, a timeout, a dropped or refused connection — the colony is
-  parked with reason `provider_retry` (worktree kept, parallel slot released) and continued
-  automatically after 2, 5, 10, then 20 minutes. Each attempt is a `provider_retry` line in the
-  colony log. Only when the attempts run out is the colony held as `autopilot_held`, and the message
-  then names the provider's own error. A turn that ends cleanly resets the count. The Watchdog
-  setting `provider_retry_max_attempts` (default 4, at most 4, `0` turns the retry off) sets the
-  budget. An error that is not transient still holds at once, as before.
+- **A transient provider error is retried, not held** (issues #980, #1093). When an autopilot
+  colony's turn ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529,
+  an "unreachable" or overloaded provider, a timeout, a dropped, reset or refused connection
+  (`UND_ERR_SOCKET`, `ECONNRESET`, the router's "the connection to Anthropic failed"), a gateway
+  restarting — the colony is parked with reason `provider_retry` (worktree kept, parallel slot
+  released) and continued automatically after 1, 5, then 15 minutes. Each attempt is a line in the
+  colony log. While a retry is pending the colony is not "waiting on you": its card reads "Stopped on
+  a model gateway error (502, connection to Anthropic): retrying in 4 min", with **Retry now**. Only
+  when the attempts run out is the colony held as `autopilot_held`, and the card then reads "Stopped
+  on repeated gateway errors", with **Retry** (which sends the agent on again) and **Open colony**. A
+  turn that ends cleanly resets the count. Two Watchdog settings shape it:
+  `provider_retry_max_attempts` (default 3, at most 10, `0` turns the retry off) and
+  `provider_retry_schedule_minutes` (default `1, 5, 15`; retries past the end of the list wait its
+  last entry). An error a retry cannot fix — a refused sign-in, permission or policy — still holds
+  at once, and the card names that error instead of saying the watchdog flagged the colony.
+- **A turn the mothership's own restart cut off is continued once** (issue #1093). A colony that
+  keeps running through a mothership restart loses its gateway socket, so its turn can end on a
+  gateway error while the mothership is down. When the restarted mothership reconnects, the first
+  turn end within 15 minutes that is such an error is continued once, straight away, without
+  parking the colony or spending a retry; the colony log says so. A later failure takes the
+  ordinary retry path.
 - **A stale "waiting for an answer" is reconciled** (issue #981). On every watchdog tick, a colony
   whose status is `waiting_for_answer` but which has no question actually pending is set back to
   `idle`, and the colony log says why. This runs even with the Watchdog module off. An answer to one

@@ -272,12 +272,13 @@ when approved, or `reviewed: false` when stored with review off.
 | `POST /api/vault/proposals/{id}/reject` | Drops the proposal; the vault is not touched |
 
 **Watchdog.** New module kind `watchdog` (provider `default`, on by default; settings
-`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 4) and kind `memory` (provider `files`,
+`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 3,
+`provider_retry_schedule_minutes` = `"1, 5, 15"`) and kind `memory` (provider `files`,
 on by default; setting `require_review` = true; off lets only `repo` notes skip review). `Session`
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2, "detail": "…"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -290,12 +291,20 @@ colony blocked on an exhausted provider is flagged `provider_quota_exhausted` in
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
 `autopilot_held`. An error the retry classifier calls transient (a gateway 5xx, 429 or 529, an
-unreachable or overloaded provider, a timeout, a dropped or refused connection) is retried first
-(issue #980): the colony parks with `parked.reason` and `attention.reason` `provider_retry`, and the
-queue tick continues it after 2, 5, 10 and 20 minutes, re-checking under the lifecycle lock that it
-is still parked for that reason. After `provider_retry_max_attempts` (0–4; 0 turns the retry off)
-it is held as `autopilot_held`, with a message naming the provider's error; a clean turn end resets
-the count (`Session.provider_retries`). A colony whose Claude account answered 401 or 403 parks
+unreachable or overloaded provider, a timeout, a dropped, reset or refused connection, a gateway
+restart) is retried first (issues #980, #1093): the colony parks with `parked.reason` and
+`attention.reason` `provider_retry`, and the queue tick continues it after each wait in
+`provider_retry_schedule_minutes` (default 1, 5, 15; the last entry repeats), re-checking under the
+lifecycle lock that it is still parked for that reason. The retry's attention also carries
+`cause: "gateway_error"`, `summary` ("Stopped on a model gateway error (502, connection to
+Anthropic)"), `detail`, `retry_at`, `attempt` and `max_attempts`; nobody has to act on it. After
+`provider_retry_max_attempts` (0–10, default 3; 0 turns the retry off) it is held as
+`autopilot_held` with `cause: "gateway_error"` and a `detail` naming the error ("Stopped on repeated
+gateway errors (502, connection to Anthropic); 3 automatic retries did not get through"); a clean
+turn end resets the count (`Session.provider_retries`). An error that is not transient holds at
+once with `cause: "turn_error"` and the error's first line as `detail`. A colony the mothership
+reconnected to after its own restart whose first turn end within 15 minutes is a transient gateway
+error is sent one `user_message` to continue instead, with no park and no retry spent. A colony whose Claude account answered 401 or 403 parks
 with reason `waiting_for_account` ahead of all of this (Claude account health, in
 [harness-api.md](harness-api.md#get-apistatus)). On every tick, whether or not the watchdog is
 enabled, a colony that is `waiting_for_answer` with no question actually pending is set back to

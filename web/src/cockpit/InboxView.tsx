@@ -13,7 +13,7 @@ import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
 import type { ActivityEntry, DecisionAnswerRequest, DecisionsView, PrAction, PrCard, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
 import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
-import { useOpenQuestions, watchdogFlagged } from "./questions";
+import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
 import { inboxEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
 import { LoopBadge } from "./LoopsView";
@@ -169,11 +169,11 @@ export function InboxView({
                     onClick={() => onOpenColony(session.id)}
                     className="ml-auto cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 font-sans text-[13px] font-medium text-bg hover:opacity-85 max-sm:min-h-11 max-sm:px-4"
                   >
-                    Answer
+                    {questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}
                   </button>
                 </div>
                 <div className="mt-2 text-[15px] font-semibold [text-wrap:pretty]">
-                  {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
+                  {questions[session.id] ?? needsYouLine(session)}
                 </div>
                 <div className="mt-1 text-[13px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}<LoopBadge session={session} /></div>
               </div>

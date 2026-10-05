@@ -147,6 +147,7 @@ export function ordinal(n: number): string {
 const PARK_REASONS: Record<string, string> = {
   provider_quota_exhausted: "provider quota exhausted",
   hold_timeout: "hold timed out",
+  provider_retry: "gateway error, retrying automatically",
 };
 
 /** The short local date/time a parked colony can resume at, e.g. "27 Sep, 14:05"; "" for a timestamp that will not parse. */
@@ -408,6 +409,8 @@ export function attentionText(attention: Attention): string {
       return "Held too long — parked, resume to continue";
     case "control_defeat":
       return "A control may have been bypassed";
+    case "provider_retry":
+      return attention.summary?.trim() || attention.detail?.trim() || "Retrying a provider error automatically";
     default:
       return "Needs attention";
   }
@@ -415,7 +418,8 @@ export function attentionText(attention: Attention): string {
 
 /** The amber marker for colonies the watchdog flagged. */
 export function AttentionBadge({ attention, className }: { attention: Attention | null | undefined; className?: string }) {
-  if (!attention) return null;
+  // An automatic retry backing off (issue #1093) needs nobody, so it is no amber "Needs attention".
+  if (!attention || attention.reason === "provider_retry") return null;
   return (
     <span
       title={attentionText(attention)}

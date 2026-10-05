@@ -72,6 +72,9 @@ export function needsYou(session: Session): boolean {
   // request may succeed (the gateway then lifts the flag). It needs you once the turn has stopped.
   const reason = (session.attention as { reason?: string }).reason;
   if (reason === "model_error" && (session.status === "running" || session.status === "starting")) return false;
+  // An automatic retry of a provider error is still pending (issue #1093): the mothership continues
+  // the colony itself, so nothing waits on a person until the retries run out and it is held.
+  if (reason === "provider_retry") return false;
   return true;
 }
 

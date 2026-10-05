@@ -83,6 +83,14 @@ describe("needsYou", () => {
     expect(needsYou(session({ status: "running", attention: flag }))).toBe(false);
     expect(needsYou(session({ status: "idle", attention: flag }))).toBe(true);
   });
+
+  it("never needs you while an automatic retry of a gateway error is pending (issue #1093)", () => {
+    const retrying = { reason: "provider_retry" as const, since: "2026-10-06T08:00:00Z", nudges: 0, cause: "gateway_error" as const };
+    expect(needsYou(session({ status: "parked", attention: retrying }))).toBe(false);
+    // Once the retries run out it is held, and then it does.
+    const held = { reason: "autopilot_held" as const, since: "2026-10-06T08:20:00Z", nudges: 0, cause: "gateway_error" as const };
+    expect(needsYou(session({ status: "idle", attention: held }))).toBe(true);
+  });
   it("is true when a question waits on a person", () => {
     expect(needsYou(session({ status: "waiting_for_answer" }))).toBe(true);
   });

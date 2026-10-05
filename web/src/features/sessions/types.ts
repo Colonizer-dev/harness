@@ -25,7 +25,9 @@ export type AttentionReason =
   | "hold_timeout"
   | "model_error"
   /** The watchdog's control-defeat signature fired (issue #609); `signature`, `detail` and `evidence` say why. */
-  | "control_defeat";
+  | "control_defeat"
+  /** Parked while an automatic retry of a transient provider error backs off (issues #980, #1093): nobody has to act. */
+  | "provider_retry";
 
 /** Set by the watchdog or autopilot (§6.3); cleared by the next agent event. */
 export interface Attention {
@@ -44,6 +46,19 @@ export interface Attention {
   signature?: string;
   /** `control_defeat`: the boundary events that are its evidence. */
   evidence?: BoundaryRecord[];
+  /**
+   * What stopped the colony (issue #1093): `gateway_error` for a transient model gateway error —
+   * retried automatically under `provider_retry`, held as `autopilot_held` once the retries run out —
+   * and `turn_error` for an error a retry cannot fix. Absent on older motherships and other reasons.
+   */
+  cause?: "gateway_error" | "turn_error";
+  /** `provider_retry`: what stopped it, e.g. "Stopped on a model gateway error (502, connection to Anthropic)". */
+  summary?: string;
+  /** `provider_retry`: when the next automatic attempt runs. */
+  retry_at?: string;
+  /** `provider_retry`: the attempt being waited out, and how many there are. */
+  attempt?: number;
+  max_attempts?: number;
 }
 
 /** A model the "Provider out of quota" card offers to switch to, with its provider's health (issue #767). */

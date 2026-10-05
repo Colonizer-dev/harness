@@ -50,6 +50,7 @@ import { AccountBanner } from "./AccountBanner";
 import { GitHubBanner } from "./GitHubBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
+import { GATEWAY_RETRY_MESSAGE } from "./questions";
 
 // The Chat view (and its highlighter, which it loads later still) stays out of the main bundle.
 const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
@@ -81,7 +82,7 @@ function storedTheme(): "light" | "dark" | null {
 }
 
 /** The toast for a failed inspector action: what failed, on which colony, and why. */
-export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
+export function actionError(action: "stop" | "resume" | "retry", colony: string, error: unknown): string {
   return `Couldn't ${action} ${colony}: ${errorMessage(error)}`;
 }
 
@@ -509,6 +510,22 @@ export function Cockpit({
     [onSessionChanged, sessions, toast],
   );
 
+  // Retry on a colony stopped on a model gateway error (issue #1093): one backing off an automatic
+  // retry is parked, so Retry now resumes it; one held after the retries ran out is still live, so
+  // Retry sends its agent on again.
+  const retry = useCallback(
+    async (id: string) => {
+      const target = sessions.find((s) => s.id === id);
+      if (target?.status === "parked") return act(id, "resume", (x) => api.resumeSession(x));
+      try {
+        await api.messageSession(id, GATEWAY_RETRY_MESSAGE);
+      } catch (error) {
+        toast(actionError("retry", target ? `${target.repo}#${target.issue}` : id, error), "error");
+      }
+    },
+    [act, api, sessions, toast],
+  );
+
   // The global quota banner's keyed dismissal: dismissing hides this pause, and a new reset (or a
   // new pause scope) re-shows it — the same pattern as the storage alert App owns.
   const [dismissedQuota, setDismissedQuota] = useState<ReadonlySet<string>>(() => new Set());
@@ -859,6 +876,7 @@ export function Cockpit({
             onOpenColony={openColonyById}
             onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
             onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
+            onRetry={(id) => void retry(id)}
             onLaunch={() => setView("launch")}
             onOpenSettings={(section) => onOpenSettings(section)}
           />
