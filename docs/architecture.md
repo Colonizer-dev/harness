@@ -449,7 +449,7 @@ back to suspended and its VM is torn down; a mothership restart mid-warm-up or a
 suspended too, never to failed.
 
 This is transcript resume, not a VM snapshot, and that is a measured fact about the pinned sandbox, not a choice.
-microsandbox 0.7.3 (the pin since issue #639) can capture a running VM — `msb snapshot create --full`
+microsandbox 0.7.3 (measured on the pin of issue #639; the pin is 0.7.6 since issue #1096, whose release notes name no restore change) can capture a running VM — `msb snapshot create --full`
 checkpointed an idle 512 MiB sandbox in about half a second, guest writes flushed first under
 `--guest-flush required` — but its restore cannot bring a colony back, measured on the pinned binaries. A
 sandbox that has ever carried a `--secret` fails its restore outright (`restore virtio device virtio_fs1 …
@@ -833,12 +833,12 @@ is root in the guest, and root can still reach kernel interfaces, another proces
 human's terminal. Hardening narrows what root can do; it does not replace the VM wall (issue #301).
 
 Guest kernel baseline, measured 2026-09-25 on the stack as pinned then (microsandbox 0.6.18 per
-`vendor/vendor.lock`; the pin is 0.7.3 since issue #639, same libkrunfw 5.6.x): Linux 6.12.99, x86_64, seccomp fully available
+`vendor/vendor.lock`; the pin is 0.7.6 since issue #1096, still libkrunfw 5.6.1): Linux 6.12.99, x86_64, seccomp fully available
 (`user_notif` and `log` included). Landlock is not: the version would do (≥ 6.2 for V3), but
 libkrunfw is built without it — `landlock_create_ruleset` returns `ENOSYS`, active LSMs
 `capability,selinux`. That is upstream, not pending work here: through 5.6.2 and on main, the
 kernel configs at `libkrun/libkrunfw` leave `CONFIG_SECURITY_LANDLOCK` unset (x86_64's
-`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.3
+`CONFIG_LSM` omits `landlock`; aarch64 sets no `CONFIG_SECURITY` at all), and microsandbox 0.7.6
 still bundles the same 5.6.1 build. Pinning stays blocked upstream (issue #638) until a libkrunfw
 ships `CONFIG_SECURITY_LANDLOCK=y` with `landlock` in its LSM list — `CONFIG_SECURITY=y` on
 aarch64 — inside a microsandbox release we pin, since an msb bump is one-way (`MSB_HOME` is

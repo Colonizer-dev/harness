@@ -392,6 +392,11 @@ to a 0.6-era release, downgrade the home first, with the 0.7 binary: `msb self d
 (`db/msb.db.bak-…`), purges the image cache (re-downloaded on the next boot) and installs the
 0.6.18 binaries, after which the old `msb` works again.
 
+Within 0.7 the home needs no migration: 0.7.3 to 0.7.6 (the pin since
+[#1096](https://github.com/Colonizer-dev/harness/issues/1096)) add no database migration, so the
+same home serves both, and going back to an earlier 0.7 release needs no downgrade. A running
+colony keeps the `msb` it was started with until it is stopped and resumed.
+
 ### Credentials read from the environment
 
 Each of these is used only when nothing is saved for it in Settings. A saved value wins.
