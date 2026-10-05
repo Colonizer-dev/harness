@@ -122,9 +122,10 @@ export const MEMORY_EXTENSION = fileURLToPath(new URL('./memory-extension.mjs', 
 /** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note
  * and, when the harness switched tools off, an --exclude-tools denylist on top of Pi's default
  * read, bash, edit, write set. With shared memory mounted (`memory`), the memory extension is
- * loaded and the prompt gains one fixed line naming its tools — never any note text. */
-export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false }) {
-  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory ? ['--extension', MEMORY_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
+ * loaded and the prompt gains one fixed line naming its tools — never any note text. With the operator
+ * vault staged (`vault`, issue #777) the same extension is loaded for its vault_search tool. */
+export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false, vault = false }) {
+  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory || vault ? ['--extension', MEMORY_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
 }
 
 /**
@@ -224,7 +225,7 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
   const modelUsage = new Map(); // "provider/model" -> cumulative tokens
   const pendingResponses = new Map(); // request id → response handler
 
-  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR) }), env, cwd });
+  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR), vault: Boolean(env.COLONIZER_VAULT_DIR) }), env, cwd });
   child.stdin.on('error', () => {}); // Pi gone: the exit path reports it, not a broken pipe
 
   /**

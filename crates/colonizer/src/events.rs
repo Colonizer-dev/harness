@@ -586,6 +586,20 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             };
             memory_proposal_full(app, id, origin.as_deref(), proposal).await;
         }
+        AgentEvent::VaultProposal {
+            path,
+            title,
+            body,
+            reason,
+        } => {
+            let proposal = crate::vault::Draft {
+                path: &path,
+                title: &title,
+                body: &body,
+                reason: &reason,
+            };
+            crate::vault::propose(app, id, origin, proposal).await;
+        }
         // Spawned: filing talks to GitHub, and the colony's event stream should not wait on it.
         AgentEvent::Finding { .. } => {
             tokio::spawn(file_finding(app.clone(), id.to_string(), rt.clone(), event.clone()));

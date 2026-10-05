@@ -365,6 +365,32 @@ test('without a memory mount no MCP server is registered and no prompt names mem
   assert.deepEqual((await import('../runner.mjs')).mcpServers({}), []);
 });
 
+test('acp/vault.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'vault.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'vault.mjs'));
+  assert.ok(copy.equals(original), 'modules/agents/acp/vault.mjs has drifted from modules/agents/claude-code/vault.mjs; the operator vault logic is one file in four places — change them together');
+});
+
+test('operator vault (issue #777): a staged vault alone registers the server, which answers vault_search from the snapshot only', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'acp-vault-'));
+  const dir = join(root, 'vault');
+  mkdirSync(join(dir, 'Notes'), { recursive: true });
+  writeFileSync(join(dir, 'Notes', 'deploy.md'), '# Deploy\n\nRun MARKER-VAULT migrations first.\n');
+  writeFileSync(join(root, 'outside.md'), '# Outside MARKER-VAULT\n');
+  const [server, ...rest] = (await import('../runner.mjs')).mcpServers({ COLONIZER_VAULT_DIR: dir });
+  assert.deepEqual(rest, []);
+  assert.deepEqual(server.env, [{ name: 'COLONIZER_VAULT_DIR', value: dir }]);
+  const mcp = startMcp(server);
+  t.after(() => mcp.stop());
+  await mcp.call('initialize', {});
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['vault_search']);
+  const answer = await mcp.tool('vault_search', { query: 'marker-vault' });
+  assert.match(answer, /^<operator-vault>\n/);
+  assert.match(answer, /- \/colonizer\/vault\/Notes\/deploy\.md:3 \(under "Deploy"\) — Deploy/);
+  assert.doesNotMatch(answer, /Outside/);
+  assert.equal((await mcp.call('tools/call', { name: 'memory_briefing', arguments: {} })).error.code, -32602, 'no memory tools without a memory mount');
+});
+
 test('handshake and prompt turns: initialize, session/new in the workspace, mapped events, queued messages', async (t) => {
   const runner = startRunner({
     script: { turns: { '*': { updates: [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } }] } } },

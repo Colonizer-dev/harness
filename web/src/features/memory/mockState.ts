@@ -1,6 +1,6 @@
 // The mock's per-call state slice for the memory feature (issue #827). The one shared state object
 // (MockState in src/mockState.ts) carries these fields so a reassignment is seen by every feature.
-import type { Mem0Status, MemoryNote, MemoryProposal, VoiceStatus } from "../../types";
+import type { Mem0Status, MemoryNote, MemoryProposal, VaultProposal, VoiceStatus } from "../../types";
 import { ago } from "../../mockShared";
 import type { MockState } from "../../mockState";
 
@@ -8,6 +8,7 @@ export type MemoryMockState = {
     mem0: Mem0Status;
     voiceKeys: Set<string>;
     proposals: MemoryProposal[];
+    vaultProposals: VaultProposal[];
     notes: MemoryNote[];
     voiceStatus: () => VoiceStatus;
 };
@@ -15,6 +16,19 @@ export type MemoryMockState = {
 export function installMemoryMockState(ms: MockState): void {
   ms.mem0 = { has_key: false, source: null, active: false };
   ms.voiceKeys = new Set<string>();
+
+  // The operator vault (issue #777): one note a colony proposed for the vault's inbox.
+  ms.vaultProposals = [
+    {
+      id: "vprop-release",
+      path: "acme/release-order.md",
+      title: "Fold the changelog before tagging",
+      body: "Run `node scripts/changelog.mjs fold` before `git tag`, or the release notes miss the fragments.",
+      reason: "The last two releases shipped without their notes.",
+      created_at: ago(8),
+      source: { session_id: "stall5678", repo: "acme/webshop", commit: "4f2c9e1a7b3d", origin: "orchestrator" },
+    },
+  ];
 
   // Shared memory: three proposals waiting for review, two of them from one colony, and a few notes per scope.
   ms.proposals = [

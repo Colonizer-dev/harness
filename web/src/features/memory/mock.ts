@@ -125,6 +125,21 @@ export function memoryMock(ms: MockState): MemoryApi {
       ms.notes.splice(index, 1);
       return { ok: true };
     },
+    vaultProposals: () => ms.later(() => ({ configured: true, inbox: "Inbox/colonizer", proposals: clone(ms.vaultProposals) })),
+    acceptVaultProposal: async (id) => {
+      await sleep(200);
+      const index = ms.vaultProposals.findIndex((p) => p.id === id);
+      if (index < 0) throw new ApiError("no such vault proposal", 404);
+      const [proposal] = ms.vaultProposals.splice(index, 1);
+      return { ok: true as const, path: `Inbox/colonizer/${proposal.path}` };
+    },
+    rejectVaultProposal: async (id) => {
+      await sleep(200);
+      const index = ms.vaultProposals.findIndex((p) => p.id === id);
+      if (index < 0) throw new ApiError("no such vault proposal", 404);
+      ms.vaultProposals.splice(index, 1);
+      return { ok: true };
+    },
     mem0Status: () => ms.later(() => ({ ...ms.mem0 })),
     saveMem0Key: async (apiKey) => {
       await sleep(250);
