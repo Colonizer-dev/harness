@@ -1830,7 +1830,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     app.store()
         .write_file(id, "vm/session.json", &serde_json::to_vec_pretty(&session_json)?)
         .await?;
-    app.store().write_file(id, "vm/boot.sh", BOOT_SCRIPT.as_bytes()).await?;
+    app.store().write_file(id, "vm/boot.sh", boot_script().as_bytes()).await?;
 
     if memory_on && memory::uses_mem0(app).await {
         // mem0's notes are written into the session directory, which is already the colony's
@@ -2236,6 +2236,9 @@ mkdir -p /var/lib/colonizer
 # Git metadata is mounted read-only; give git a private, writable index.
 if [ -f "${GIT_DIR:-}/index" ]; then cp "$GIT_DIR/index" "$GIT_INDEX_FILE"; fi
 export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH"
+# The guest's IPv4 preference (issue #946), from crate::ipv6::SCRIPT — the VM has no IPv6 egress
+# and dual-stack names must not resolve to it.
+@@COLONIZER_IPV6@@
 if [ -f /colonizer/mesh-authkey ]; then
   mkdir -p /var/lib/tailscale
   /opt/colonizer/tailscale/tailscaled --statedir=/var/lib/tailscale --socket=/run/tailscaled.sock \
@@ -2313,6 +2316,14 @@ ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc \
   || echo "colonizer: could not link colonizer-svc; the agent must run \`colonizer-agentd svc\` instead" >&2
 exec /opt/colonizer/bin/colonizer-agentd --config /colonizer/session.json --token-file /colonizer/token --seal-token --state-dir /var/lib/colonizer
 "#;
+
+/// The script the guest actually runs, with [`crate::ipv6::MARKER`] replaced by that module's shell
+/// block. The constant keeps the network preference out of this file — it is logic with its own
+/// tests — while the marker holds its place in the ordering the assertions below pin (this block
+/// touches `/proc` and `/etc`, so it runs early, before the mesh, the path policy and agentd).
+fn boot_script() -> String {
+    BOOT_SCRIPT.replace(crate::ipv6::MARKER, crate::ipv6::SCRIPT)
+}
 
 #[cfg(test)]
 mod tests {
@@ -3299,8 +3310,11 @@ mod tests {
     /// The boot script puts the node bin dir first and keeps the claude entry as-is.
     #[test]
     fn boot_script_puts_node_first() {
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
         assert!(
-            BOOT_SCRIPT.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
+            script.contains(r#"export PATH="/opt/node/bin:/opt/claude/bin:/opt/colonizer/bin:$PATH""#),
             "node first, claude entry unchanged"
         );
     }
@@ -3309,11 +3323,14 @@ mod tests {
     /// the exported PATH before the agent runs, so the runner's first shell already has it.
     #[test]
     fn boot_script_puts_the_service_cli_on_the_path() {
-        let link = BOOT_SCRIPT
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
+        let link = script
             .find("ln -sf /opt/colonizer/bin/colonizer-agentd /opt/colonizer/bin/colonizer-svc")
             .expect("the colonizer-svc symlink");
-        let path = BOOT_SCRIPT.find(r#"export PATH="#).expect("the PATH export");
-        let exec = BOOT_SCRIPT
+        let path = script.find(r#"export PATH="#).expect("the PATH export");
+        let exec = script
             .find("exec /opt/colonizer/bin/colonizer-agentd")
             .expect("the exec of agentd");
         assert!(
@@ -3321,7 +3338,7 @@ mod tests {
             "the link sits between the PATH export ({path}) and the exec ({exec})"
         );
         // `set -u` is not `set -e`: a failed link must say so, not vanish.
-        let fallback = BOOT_SCRIPT[link..exec].find("|| echo \"colonizer: could not link colonizer-svc");
+        let fallback = script[link..exec].find("|| echo \"colonizer: could not link colonizer-svc");
         assert!(fallback.is_some(), "a failed colonizer-svc link is loud");
     }
 
@@ -3331,9 +3348,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn boot_script_links_colonizer_svc_and_says_so_when_it_cannot() {
-        let start = BOOT_SCRIPT.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
-        let end = BOOT_SCRIPT.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
-        let lines = &BOOT_SCRIPT[start..end];
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
+        let start = script.find("ln -sf /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let end = script.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let lines = &script[start..end];
         let root = std::env::temp_dir().join(format!("colonizer-svc-link-{}", crate::util::short_id()));
         let run = |bin: &std::path::Path| {
             let script = format!(
@@ -3367,27 +3387,30 @@ mod tests {
     /// writes has a branch — a policy line the guest did not act on would be silent non-enforcement.
     #[test]
     fn boot_script_enforces_the_path_policy_before_the_agent_starts() {
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
         for kind in ["mask-file", "mask-dir", "protect"] {
-            assert!(BOOT_SCRIPT.contains(kind), "the guest handles {kind}");
+            assert!(script.contains(kind), "the guest handles {kind}");
         }
-        let policy = BOOT_SCRIPT.find("/colonizer/path-policy").expect("the policy file is read");
-        let exec = BOOT_SCRIPT.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
+        let policy = script.find("/colonizer/path-policy").expect("the policy file is read");
+        let exec = script.find("exec /opt/colonizer/bin/colonizer-agentd").unwrap();
         assert!(policy < exec, "the binds happen before the agent can run a command");
         // Fail closed: an unenforceable bind stops the boot rather than starting without it — a
         // missing target, a symlink the mount would follow, a kind the host does not write, and a
         // lost policy file are all loud stops, not silent starts.
-        assert!(BOOT_SCRIPT.contains("cannot mask"), "mask failures are loud");
-        assert!(BOOT_SCRIPT.contains("cannot protect"), "protect failures are loud");
-        assert!(BOOT_SCRIPT.contains("unknown kind"), "an unknown kind is loud");
-        assert!(BOOT_SCRIPT.contains("is missing"), "a missing target is loud");
-        assert!(BOOT_SCRIPT.contains("is a symlink"), "a symlink target is loud");
+        assert!(script.contains("cannot mask"), "mask failures are loud");
+        assert!(script.contains("cannot protect"), "protect failures are loud");
+        assert!(script.contains("unknown kind"), "an unknown kind is loud");
+        assert!(script.contains("is missing"), "a missing target is loud");
+        assert!(script.contains("is a symlink"), "a symlink target is loud");
         // And the whole list, not just its lines: a lost path-policy file stops the boot before
         // the loop would silently enforce nothing.
-        let guard = BOOT_SCRIPT
+        let guard = script
             .find("is missing\" >&2; exit 1; }")
             .expect("a lost policy file is loud");
         assert!(
-            guard < BOOT_SCRIPT.find("while read").unwrap(),
+            guard < script.find("while read -r kind rel").unwrap(),
             "the missing-list check precedes the loop"
         );
     }
@@ -3396,11 +3419,14 @@ mod tests {
     /// agentd is exec'd — the agent's seccomp filter denies unshare, so masks set here stick.
     #[test]
     fn boot_script_hardens_kernel_interfaces_before_the_agent_runs() {
-        let mesh = BOOT_SCRIPT
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
+        let mesh = script
             .find(r#"|| echo "colonizer: joining the mesh failed" >&2"#)
             .expect("the script joins the mesh");
-        let hardening = BOOT_SCRIPT.find("dmesg_restrict").expect("the hardening step is present");
-        let exec = BOOT_SCRIPT
+        let hardening = script.find("dmesg_restrict").expect("the hardening step is present");
+        let exec = script
             .find("exec /opt/colonizer/bin/colonizer-agentd")
             .expect("the script execs agentd");
         assert!(
@@ -3416,7 +3442,7 @@ mod tests {
             "remount,bind,ro /proc/sys",                        // sysctls read-only, after the writes
             "remount,ro /sys",
         ] {
-            assert!(BOOT_SCRIPT.contains(marker), "hardening must contain {marker:?}");
+            assert!(script.contains(marker), "hardening must contain {marker:?}");
         }
     }
 
@@ -3425,15 +3451,39 @@ mod tests {
     /// bearer token and reach the unfiltered /v1/pty shell with it.
     #[test]
     fn boot_script_passes_seal_token_to_agentd() {
-        let exec = BOOT_SCRIPT
+        // The script the guest runs, not the constant with its marker still in it.
+        let script = boot_script();
+
+        let exec = script
             .find("exec /opt/colonizer/bin/colonizer-agentd")
             .expect("the script execs agentd");
-        let line = BOOT_SCRIPT[exec..].lines().next().expect("the exec line");
+        let line = script[exec..].lines().next().expect("the exec line");
         assert!(line.contains("--seal-token"), "the exec must pass --seal-token: {line}");
         assert!(
             line.contains("--token-file /colonizer/token"),
             "the sealed path is still the token the daemon reads: {line}"
         );
+    }
+
+    /// `boot_script` is a `replace`, and a `replace` on a needle that is not there is a no-op, not
+    /// an error. If the marker and the line in `BOOT_SCRIPT` ever drift apart, the guest runs
+    /// `@@COLONIZER_IPV6@@` as a command: `sh` prints `not found`, carries on, and the IPv4
+    /// preference is silently never applied — while every other assertion on this script still
+    /// passes, because each of them only looks for text the two variants share.
+    #[test]
+    fn the_ipv6_block_is_spliced_in_and_not_left_as_a_marker() {
+        let script = boot_script();
+
+        assert!(
+            !script.contains(crate::ipv6::MARKER),
+            "the IPv4 preference block is spliced in, not left as a marker for the guest's shell to run: {}",
+            crate::ipv6::MARKER
+        );
+        // And that it is the block, not an empty splice: both halves of the table are in the script
+        // the guest runs.
+        for line in crate::ipv6::PREFERENCE_LINES {
+            assert!(script.contains(&format!("'{line}'")), "the spliced block writes {line:?}");
+        }
     }
 
     /// The Jev compaction switch mounts the payload only with the staged files and a key to go with them.

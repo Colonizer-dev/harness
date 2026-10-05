@@ -240,6 +240,57 @@ Composable profiles arrived in v0.6.7 ([`2026-07-24.mdx:9-18`][changelog]). The 
 has no entry for any 0.7.x release; its latest lists v0.6.18
 ([`2026-09-11.mdx:9`][changelog-last]).
 
+## IPv4 preference in the guest (#946)
+
+- **The gap.** A colony's microVM gets an IPv4 gateway, and an IPv6 one only where the host has a
+  route for the family ([`network.rs:206-229`][families]); this guest has neither a global IPv6
+  address nor a `::/0` route, so every IPv6 destination it is given is unroutable **(inferred)**.
+  The names a colony fetches from are dual-stack — the crates.io CDN, PyPI, npm's registry — and
+  glibc's default RFC 6724 table ranks the native IPv6 destination `::/0` above the IPv4-mapped
+  `::ffff:0:0/96`, so the AAAA record a resolver relays wins on paper and fails on the wire. A
+  colony met this as 403s from the crates.io CDN while its cargo, curl, node and python all dialled
+  an address with no route.
+- **No host-side seam.** Nothing above fixes it: `msb` takes `--net`, `--net-rule` and
+  `--net-default-egress` (see [How the harness passes network
+  flags](#how-the-harness-passes-network-flags)) and offers no resolver, route or netfilter knob
+  beyond them. The boot script is the one place the harness runs as the guest's root before the
+  agent does, and is already where the path policy and the kernel masks are applied.
+- **The fix.** `boot.rs:2241` splices `crates/colonizer/src/ipv6.rs:53` into `BOOT_SCRIPT` (expanded
+  by `boot_script`, `crates/colonizer/src/boot.rs:2324`, at the write,
+  `crates/colonizer/src/boot.rs:1833`), and the block appends two lines to the guest's
+  `/etc/gai.conf`:
+  ```
+  precedence ::ffff:0:0/96  100
+  precedence ::/0           10
+  ```
+  Both are needed. Ranking only the IPv4-mapped range at 100 leaves a **native** AAAA under `::/0` at
+  glibc's default rank, still ahead of the mapped range, and still preferred; demoting `::/0` is
+  the half that does the work, and the mapped line keeps an IPv4-mapped answer from being demoted
+  with it.
+- **An operator's table wins.** A `/etc/gai.conf` that already carries an active `precedence` line
+  is left byte for byte alone, because the harness cannot know why they ranked families. A stock
+  Debian image's own table ships commented out (`#precedence ::ffff:0:0/96  10`), which is not a
+  preference, so the real lines go in beneath it **(inferred)**.
+- **The event.** When the guest has no global IPv6 address or no default route — read from
+  `/proc/net/if_inet6` and `/proc/net/ipv6_route`, with no network tool and no timeout — the block
+  appends one `log` event to the guest's `/var/lib/colonizer/events.jsonl`, at level `info` when the
+  preference was written or was already there and `warn` when it could not be (which also says so
+  on stderr). With working IPv6 there is nothing to report and nothing is written. agentd reads that
+  log from the start, so the line is counted, replayed to the host verbatim, and numbering
+  continues at 2 **(inferred)** — no colony has booted with this block yet.
+- **Every boot (inferred).** The guest rootfs is discardable, so the preference is reapplied at
+  each boot rather than persisted; the block is idempotent, and a `/etc` it cannot write costs the
+  preference, never the boot. Untested on a running colony.
+
+### Not a package mirror
+
+An agent that meets these 403s can reach for a third-party cargo, npm or pip mirror to get past
+them. That is a supply-chain hazard: the colony's dependencies would come from whoever answers, not
+from the registries the fence and the allow-list already cover ([Egress
+policy](#egress-policy-303)). Agents must not switch a colony to a mirror to work around a network
+failure, and the harness fixes this one properly instead — in the guest's resolver policy, where
+no colony's configuration is involved.
+
 ## Colony secrets and the fence
 
 A colony secret (`POST /api/secrets/colony`, see `protocol.md`) names the hosts its value is for,
