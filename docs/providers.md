@@ -86,6 +86,20 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
 - an unknown tool in the harness `disabled_tools` setting — the message names the agent module and
   the tools it knows: `agent module '<id>' setting 'disabled_tools': unknown tool '<name>' (known: …)`.
 
+## Base URLs
+
+The gateway joins the request's own path (`/v1/messages`, `/v1/chat/completions`, `/v1/responses`,
+and `/v1/models` for the health probe) to `base_url`, ignoring any trailing `/`. Enter the base the
+provider documents as its API root:
+
+- **A base whose path ends in a version segment** — `/v1`, `/v3`, `/api/v3`, `/api/coding/v3`, any
+  `/v<digits>` — is taken as that root, and the request path's leading `/v1` is dropped, so
+  `https://ark.ap-southeast.bytepluses.com/api/coding/v3` posts to `…/api/coding/v3/chat/completions`
+  and `https://api.x.ai/v1` to `…/v1/chat/completions`. This holds for every route, on either wire.
+- **Any other base** gets the full path appended: `https://api.deepseek.com/anthropic` posts to
+  `…/anthropic/v1/messages`, and `http://host:8000` to `http://host:8000/v1/chat/completions`.
+- An `anthropic`-wire base that ends in `/v1` is refused on save; enter it without the `/v1`.
+
 ## Plans, quotas and trust
 
 A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers,

@@ -341,9 +341,11 @@ pub(super) fn usage_recorder(app: &Shared, colony: &str, provider: &Provider, re
 
 /// `{base_url}{rest}?{query}`, where `rest` is the request path after `/providers/{id}`. The path
 /// is held to plain URL characters with no `.`/`..` segment, and the query to the same kind of set
-/// plus `=&` — `None` for anything else, before the request is built. An openai-wire base_url
-/// legitimately ends in `/v1` (the xai-grok catalog ships `https://api.x.ai/v1`), so a request path
-/// that starts with `/v1/` does not repeat the base's own.
+/// plus `=&` — `None` for anything else, before the request is built. A base_url whose path already
+/// ends in a version segment is the API root as its provider documents it — `https://api.x.ai/v1`,
+/// BytePlus's `…/api/coding/v3`, Volcengine's `…/api/v3` — so a request path that starts with `/v1/`
+/// drops that `/v1` instead of doubling the version (issue #1018). Every route joins here: the
+/// anthropic wire, the openai passthrough, the translated chat completion and the `/v1/models` probe.
 pub(super) fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> Option<String> {
     let clean = rest.starts_with('/')
         && rest.chars().all(|c| c.is_ascii_alphanumeric() || "/_-.".contains(c))
@@ -353,12 +355,24 @@ pub(super) fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> O
         return None;
     }
     let base = base_url.trim_end_matches('/');
-    let rest = match base.ends_with("/v1") && rest.starts_with("/v1/") {
+    let rest = match ends_in_version_segment(base) && rest.starts_with("/v1/") {
         true => &rest["/v1".len()..],
         false => rest,
     };
     let query = query.map(|q| format!("?{q}")).unwrap_or_default();
     Some(format!("{base}{rest}{query}"))
+}
+
+/// Whether the last path segment of `base` (no trailing `/`) is `v<digits>`: `/v1`, `/v3`,
+/// `/api/coding/v3`. Only the path counts, so a host that happens to be named `v1` does not.
+fn ends_in_version_segment(base: &str) -> bool {
+    let authority_and_path = base.split_once("://").map_or(base, |(_, rest)| rest);
+    let Some((_, path)) = authority_and_path.split_once('/') else {
+        return false;
+    };
+    let last = path.rsplit('/').next().unwrap_or_default();
+    last.strip_prefix('v')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The OpenAI-wire routes the gateway forwards untranslated to an `openai`-wire provider (issue
