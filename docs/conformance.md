@@ -12,19 +12,19 @@ the suite, `uhp-conformance` `2026.9.12.post2`, is not on PyPI and is installed 
 ## The claim
 
 > Colonizer is **not conformant** (no class) at spec 2026-09-12, measured 2026-09-29 with suite
-> 2026.9.12.post2. Every hermetic core check passes except D-05 — by choice: streaming and
-> cancellation are the follow-up, and the discovery document reports them false rather than
-> claiming them. The core's other skips are the task-bearing checks, which need a harness to run
-> against and stay the manual gate; a class claim needs those too.
+> 2026.9.12.post2. Every hermetic core check passes: since #650 serves responses, streaming and
+> cancellation, discovery reports them true and D-05 passes. The core's skips are the task-bearing
+> checks, which need a harness to run against and stay the manual gate; a class claim needs those
+> too.
 
 The target claim is the **core** class, then **extended**; **full is not targeted**. Classes are
 cumulative — core 40 checks, extended 49, full 75 — and a skip is never a pass.
 
 | Class | Checks | Pass | Fail | Skip | Error |
 | :--- | ---: | ---: | ---: | ---: | ---: |
-| core | 40 | 15 | 1 | 24 | 0 |
-| extended (cumulative) | 49 | 18 | 1 | 30 | 0 |
-| full (cumulative) | 75 | 18 | 2 | 55 | 0 |
+| core | 40 | 16 | 0 | 24 | 0 |
+| extended (cumulative) | 49 | 19 | 0 | 30 | 0 |
+| full (cumulative) | 75 | 19 | 1 | 55 | 0 |
 
 Per-check outcomes are in [uhp-conformance.json](uhp-conformance.json) — machine-readable, written
 by the script below and compared check by check in CI. Measured 2026-09-29 on build commit
@@ -40,8 +40,12 @@ error envelope on every `/uhp` answer, harnesses, models and the single colony
 
 | Check | Spec chapter | What the suite saw |
 | :--- | :--- | :--- |
-| D-05 | lifecycle §2 | the discovery document claims class core but reports `streaming` and `cancellation` false — honest, and the follow-up flips it |
 | F-02 | harnesses §4.1 | `POST /v1/harnesses` is not served (405), so creating a harness with an unsupported base is not refused with 400/422 (full class, not targeted) |
+
+The #650 task-bearing change moves exactly one outcome, D-05 from fail to pass (the S, C and T
+checks still skip: the hermetic boot lists no harness to run a task on). That change was not
+re-measured locally; the expectation file carries the moved outcome and the CI `conformance` job
+checks it check by check, so the run on its pull request is the measurement.
 
 Everything else that failed is fixed: D-01–D-04, V-01–V-03 and A-02 pass since the discovery
 document, the `UHP-Version` negotiation and the 401 envelope exist (`crates/colonizer/src/uhp.rs`,
@@ -61,11 +65,10 @@ class.
 
 **Core** — discovery/lifecycle, versioning, auth/errors, harnesses and session listing are served
 under `/uhp/v1` since #650 (`crates/colonizer/src/uhp.rs`, `crates/colonizer/routes/`), under
-the same scoped-token limits as the `/api` routes. What keeps the core class is D-05, and what
-keeps D-05 is the missing half of the surface: creating and continuing responses
-(`POST /uhp/v1/responses`), SSE streaming (§7.4) and cancellation (§7.6) are still the follow-up,
-and the discovery document says so in its capabilities. Follow-up: *UHP core class: responses,
-streaming and cancellation on /uhp/v1 (docs/protocol.md §7.3, §7.4, §7.6)*.
+the same scoped-token limits as the `/api` routes. Since #650 the task-bearing half is served too
+(`crates/colonizer/src/uhp_responses.rs`): creating and continuing responses
+(`POST /uhp/v1/responses`), SSE streaming (§7.4) and cancellation (§7.6), and discovery reports
+`streaming` and `cancellation` true, so no hermetic core check fails.
 
 Unknown paths inside `/uhp` do not fall through to the SPA fallback — `api_not_found` in
 `crates/colonizer/src/server.rs` answers them as 404 envelopes (since #651), the way it has
@@ -110,8 +113,7 @@ fixture (`modules/agents/claude-code/test/fixtures/events.jsonl`) against
 [agent-events.schema.json](agent-events.schema.json) (draft 2020-12). That schema is the internal
 runner→agentd contract; UHP's bundled one describes the client-facing Responses-style stream,
 overlapping only semantically (text deltas, reasoning, tool calls). The UHP stream checks (S-*)
-still all skip — streaming is the part of the surface not served yet (see D-05 above), so there is
-nothing to cross-check yet.
+still all skip — they need a task to stream, which the hermetic boot cannot run.
 
 ## The manual gate
 
