@@ -299,7 +299,8 @@ or headless it does nothing, logging the reason once rather than a line a tick. 
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
+{"id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
+ "event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
  "pr_url": null,
@@ -312,7 +313,10 @@ The note carries no repository content — no issue title, no question text, no 
 `pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests, failure}`
 (`failure` is the code of its most recent failure, or `null`); on `provider_quota_exhausted`
 `provider` is `{id, name, reset_at, colonies}` (`colonies` is a count) — so
-a receiver reads one six-key shape either way.
+a receiver reads one seven-key shape either way.
+`id` is the event's stable id (issue #896): the same event always carries the same one, so a
+receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
+derived, and how to verify a request, is in [Webhooks](webhooks.md).
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
 `X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —

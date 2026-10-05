@@ -75,6 +75,15 @@ pub enum Event {
 }
 
 impl Event {
+    /// What tells two events of one colony apart in its [`event_id`]: the name, and for an
+    /// attention event the reason too — a stall and an out-of-nudges are two different events.
+    fn id_kind(self) -> String {
+        match self {
+            Event::Attention(reason) => format!("attention:{reason}"),
+            _ => self.name().to_string(),
+        }
+    }
+
     /// The event's name in the webhook payload.
     pub fn name(self) -> &'static str {
         match self {
@@ -342,10 +351,11 @@ pub fn quota_edges<'a>(
     (edges, next)
 }
 
-/// The webhook payload for an out-of-quota card: the six-key shape, `colony` and `pr_url` null, and
+/// The webhook payload for an out-of-quota card: the seven-key shape, `colony` and `pr_url` null, and
 /// `provider` the id, name, reset time and how many colonies wait — nothing of any repository.
 pub fn quota_payload(card: &QuotaCard, at: DateTime<Utc>) -> Value {
     json!({
+        "id": host_event_id(&format!("quota:{}", card.provider), crate::push_prefs::QUOTA, at),
         "event": crate::push_prefs::QUOTA,
         "at": at.to_rfc3339(),
         "text": quota_text(&card.name, card.reset_at.as_deref(), card.colonies.len()),
@@ -537,11 +547,42 @@ async fn notify_desktop(tool: Tool, text: &str) -> Option<String> {
 // The webhook channel
 // ---------------------------------------------------------------------------
 
+/// The header that carries a payload's `id`, so a receiver can dedupe before it parses the body.
+pub const EVENT_ID_HEADER: &str = "X-Colonizer-Event-Id";
+
+/// An event's stable id (issue #896): `evt_` and the first 32 hex digits of SHA-256 over what the
+/// event is about (`source`: a colony id, or a host-level topic such as `provider:zai`), what
+/// happened to it (`kind`), and where in that source's history it happened (`sequence`: the
+/// colony's `updated_at` when the edge was seen, or the moment a host-level edge was detected).
+/// Deterministic, so the same event always carries the same id — every delivery of it, and every
+/// payload built from the same edge — and receivers can dedupe on it. It names nothing: a hash, not
+/// the repository or the colony's words.
+pub fn event_id(source: &str, kind: &str, sequence: &str) -> String {
+    let mut input = String::with_capacity(source.len() + kind.len() + sequence.len() + 2);
+    for (i, part) in [source, kind, sequence].into_iter().enumerate() {
+        if i > 0 {
+            // A separator no id, name or timestamp contains, so ("a", "bc") and ("ab", "c") differ.
+            input.push('\u{1f}');
+        }
+        input.push_str(part);
+    }
+    let digest = ring::digest::digest(&ring::digest::SHA256, input.as_bytes());
+    format!("evt_{}", &hex(digest.as_ref())[..32])
+}
+
+/// The id of a host-level event — one with no colony behind it — detected at `at`.
+fn host_event_id(topic: &str, event: &str, at: DateTime<Utc>) -> String {
+    event_id(topic, event, &at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+}
+
 /// The whole of what a webhook receives. No issue title, no question text, no branch, no error, no
 /// diff: repository content can carry instructions, so nothing of it is sent to an address outside
 /// this machine.
 pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
+    // Keyed on the colony's own history, not on `at`: the same edge rebuilt later is the same id.
+    let sequence = session.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     json!({
+        "id": event_id(&session.id, &event.id_kind(), &sequence),
         "event": event.name(),
         "at": at.to_rfc3339(),
         "text": event.text(&session.repo, session.issue),
@@ -566,6 +607,7 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
 /// counters behind the announcement — still nothing of any repository.
 pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealth, at: DateTime<Utc>) -> Value {
     json!({
+        "id": host_event_id(&format!("provider:{id}"), Event::ProviderDegraded.name(), at),
         "event": Event::ProviderDegraded.name(),
         "at": at.to_rfc3339(),
         "text": Event::provider_text(name, health.failure_pct, health.last_failure.as_deref()),
@@ -587,6 +629,7 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
 /// is the provider's words or a transport reason — never repository content.
 pub fn judge_payload(provider: &str, kind: &str, status: Option<u16>, message: &str, at: DateTime<Utc>) -> Value {
     json!({
+        "id": host_event_id(&format!("judge:{provider}"), Event::JudgeDegraded.name(), at),
         "event": Event::JudgeDegraded.name(),
         "at": at.to_rfc3339(),
         "text": Event::judge_text(provider, message),
@@ -618,14 +661,16 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// POSTs one signed body. No retries: the next event tries again, and a webhook that answers 500 is
-/// the receiver's problem to describe, not ours to fix.
-async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, body: &str) -> Result<()> {
+/// POSTs one signed body, its event id in [`EVENT_ID_HEADER`] as well as in the body. No retries:
+/// the next event tries again, and a webhook that answers 500 is the receiver's problem to describe,
+/// not ours to fix.
+async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, event_id: &str, body: &str) -> Result<()> {
     let timestamp = Utc::now().timestamp().to_string();
     let mut request = client
         .post(url)
         .header("content-type", "application/json")
         .header("X-Colonizer-Timestamp", &timestamp)
+        .header(EVENT_ID_HEADER, event_id)
         .body(body.to_string());
     if let Some(secret) = secret {
         request = request.header(
@@ -795,10 +840,11 @@ pub async fn run(app: Shared) {
         if let Some((summary, held)) = app.ledger.digest_due(Utc::now()) {
             let at = Utc::now();
             let payload = json!({
+                "id": host_event_id("digest", "digest", at),
                 "event": "digest",
                 "at": at.to_rfc3339(),
                 "text": summary,
-                // The same six-key shape every webhook payload carries, with nothing to name here.
+                // The same seven-key shape every webhook payload carries, with nothing to name here.
                 "colony": None::<Value>,
                 "pr_url": None::<Value>,
                 "provider": None::<Value>,
@@ -1012,9 +1058,11 @@ async fn announce_account(
         colony: None,
         priority: false,
     };
+    let at = Utc::now();
     let payload = json!({
+        "id": host_event_id(&format!("account:{account}"), event, at),
         "event": event,
-        "at": Utc::now().to_rfc3339(),
+        "at": at.to_rfc3339(),
         "text": text,
         "colony": None::<Value>,
         "pr_url": None::<Value>,
@@ -1075,9 +1123,11 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         priority: false,
     };
     let text = truncate(line, MAX_TEXT);
+    let at = Utc::now();
     let payload = json!({
+        "id": host_event_id(&candidate.topic, event, at),
         "event": event,
-        "at": Utc::now().to_rfc3339(),
+        "at": at.to_rfc3339(),
         "text": text,
         "colony": None::<Value>,
         "pr_url": None::<Value>,
@@ -1206,6 +1256,7 @@ async fn post_webhook(
         client,
         &settings.webhook_url,
         signing.as_ref().map(|(value, _)| value.as_str()),
+        payload["id"].as_str().unwrap_or_default(),
         &body,
     )
     .await

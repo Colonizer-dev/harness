@@ -328,8 +328,8 @@ fn the_webhook_payload_carries_no_repository_content() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["at", "colony", "event", "pr_url", "provider", "text"],
-            "the payload is exactly six keys, one shape for receivers"
+            ["at", "colony", "event", "id", "pr_url", "provider", "text"],
+            "the payload is exactly seven keys, one shape for receivers"
         );
         let mut colony_keys: Vec<&str> = value["colony"].as_object().unwrap().keys().map(String::as_str).collect();
         colony_keys.sort_unstable();
@@ -564,7 +564,7 @@ fn the_provider_text_and_payload_carry_no_repository_content() {
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["at", "colony", "event", "pr_url", "provider", "text"],
+        ["at", "colony", "event", "id", "pr_url", "provider", "text"],
         "one shape with the session payload"
     );
     assert!(value["colony"].is_null(), "no colony behind a provider event: {body}");
@@ -878,5 +878,134 @@ async fn one_push_for_a_card_of_many_colonies_respecting_each_devices_prefs() {
     assert_eq!(payload["silent"], true);
     assert!(payload.get("colony").is_none());
     assert!(!String::from_utf8_lossy(&plaintext).contains("SENTINEL"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// ---------------------------------------------------------------------------
+// Stable event ids (issue #896)
+// ---------------------------------------------------------------------------
+
+/// What a fake webhook receiver records per POST: the headers and the body.
+pub(crate) type Received = std::sync::Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, String)>>>;
+
+/// A webhook receiver on 127.0.0.1 that records every POST and answers with the next status in
+/// `answers`, or 200 once they run out.
+pub(crate) async fn receiver(received: Received, answers: Vec<u16>) -> String {
+    let answers = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(answers)));
+    let router = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |headers: axum::http::HeaderMap, body: String| {
+            let received = received.clone();
+            let answers = answers.clone();
+            async move {
+                received.lock().unwrap().push((headers, body));
+                let status = answers.lock().unwrap().pop_front().unwrap_or(200);
+                StatusCode::from_u16(status).unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    format!("http://{addr}/hook")
+}
+
+fn is_event_id(id: &str) -> bool {
+    id.len() == 36 && id.starts_with("evt_") && id[4..].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+#[test]
+fn an_event_keeps_its_id_however_often_its_payload_is_built() {
+    let session = colony("c1", SessionStatus::Failed);
+    let first = payload(Event::Failed, Utc::now(), &session);
+    let later = payload(Event::Failed, Utc::now() + chrono::Duration::minutes(5), &session);
+    let id = first["id"].as_str().unwrap();
+    assert!(is_event_id(id), "{id}");
+    assert_eq!(first["id"], later["id"], "the same edge is the same id, whenever it is sent");
+
+    // Anything that makes it a different event makes it a different id.
+    let other_event = payload(Event::PullRequest, Utc::now(), &session);
+    let stalled = payload(Event::Attention("stalled"), Utc::now(), &session);
+    let out_of_nudges = payload(Event::Attention("nudges_exhausted"), Utc::now(), &session);
+    let other_colony = payload(Event::Failed, Utc::now(), &colony("c2", SessionStatus::Failed));
+    let mut again = session.clone();
+    again.updated_at += chrono::Duration::seconds(1);
+    let failed_again = payload(Event::Failed, Utc::now(), &again);
+    let ids: BTreeSet<String> = [&first, &other_event, &stalled, &out_of_nudges, &other_colony, &failed_again]
+        .iter()
+        .map(|p| p["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 6, "{ids:?}");
+    // The id is a hash: it names no colony content.
+    assert!(!first["id"].as_str().unwrap().contains("SENTINEL"));
+    assert_eq!(event_id("a", "bc", "d"), event_id("a", "bc", "d"));
+    assert_ne!(event_id("a", "bc", "d"), event_id("ab", "c", "d"));
+}
+
+#[test]
+fn every_host_level_payload_carries_an_id() {
+    let at = Utc::now();
+    let health = UsageHealth {
+        rated: true,
+        degraded: true,
+        failure_pct: 20.0,
+        avg_latency_ms: 10,
+        last_failure: None,
+    };
+    let bodies = [
+        provider_payload("zai", "Z.AI", 100, &health, at),
+        judge_payload("zai", "http", Some(500), "boom", at),
+        quota_payload(&quota_card(2), at),
+    ];
+    for body in &bodies {
+        assert!(is_event_id(body["id"].as_str().unwrap()), "{body}");
+    }
+    assert_eq!(
+        provider_payload("zai", "Z.AI", 100, &health, at)["id"],
+        bodies[0]["id"],
+        "the same detection is the same id"
+    );
+    assert_ne!(bodies[0]["id"], bodies[1]["id"]);
+}
+
+/// End to end: the webhook carries the event's id in `X-Colonizer-Event-Id` and in the body, the
+/// signature still covers the body, and the same event sent again keeps its id.
+#[tokio::test]
+async fn the_webhook_carries_the_event_id_in_a_header_and_the_body() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), Vec::new()).await;
+    let root = std::env::temp_dir().join(format!("colonizer-notify-id-{}", crate::util::short_id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let app = crate::tests::test_app(&root);
+    std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    let client = reqwest::Client::new();
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let session = colony("c1", SessionStatus::WaitingForAnswer);
+    for _ in 0..2 {
+        // Rebuilt each time, as a resend would be: a later `at`, the same id.
+        let body = payload(Event::Question, Utc::now(), &session);
+        assert!(post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await);
+    }
+    let got = received.lock().unwrap().clone();
+    assert_eq!(got.len(), 2);
+    let mut ids = BTreeSet::new();
+    for (headers, body) in &got {
+        let header = headers.get(EVENT_ID_HEADER).unwrap().to_str().unwrap();
+        let parsed: Value = serde_json::from_str(body).unwrap();
+        assert_eq!(parsed["id"], header, "the header and the body carry the same id");
+        let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
+        assert_eq!(
+            headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
+            format!("sha256={}", signature("whsec-test", timestamp, body)),
+            "the signature covers the body, id included"
+        );
+        assert!(!body.contains("whsec-test"), "the secret never travels in the payload");
+        ids.insert(header.to_string());
+    }
+    assert_eq!(ids.len(), 1, "a resent event keeps its id: {ids:?}");
     let _ = std::fs::remove_dir_all(root);
 }
