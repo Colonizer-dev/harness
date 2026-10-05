@@ -644,7 +644,7 @@ fn role_models(app: &Shared, modules: &crate::config::ModulesConfig, s: &Session
 /// One setting a switch changed, with what it held before: `scope` is `install` (target: the agent
 /// module), `org` (target: the org), `colony` (target: the colony id) or `provider` (the remembered
 /// fallback), so the cockpit can say "was X, now Y" for each.
-fn change(scope: &str, target: &str, key: &str, was: Option<&str>, now: &str) -> Value {
+pub(crate) fn change(scope: &str, target: &str, key: &str, was: Option<&str>, now: &str) -> Value {
     json!({"scope": scope, "target": target, "key": key, "was": was, "now": now})
 }
 
@@ -718,7 +718,7 @@ async fn apply_overrides(app: &Shared, provider: &str, model: &str, plan: &[Over
 }
 
 /// Restarts every colony on the new model scope ([`restart`]).
-async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
+pub(crate) async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
     let mut out = Vec::new();
     for s in targets {
         out.push(outcome(&s.id, restart(app, &s.id).await));
@@ -740,7 +740,7 @@ const INSTALL_ROLES: [&str; 6] = [
 /// whose provider maps its models must map this one (the boot would refuse the launch otherwise),
 /// and `summary_model` on a plain Claude model needs an Anthropic provider or API key — summaries
 /// never use the subscription login.
-fn role_error(app: &Shared, role: &str, model: &str) -> Option<String> {
+pub(crate) fn role_error(app: &Shared, role: &str, model: &str) -> Option<String> {
     if let Some((id, canonical)) = model.split_once('/')
         && let Some(p) = app.providers().into_iter().find(|p| p.id == id)
         && !p.model_map.is_empty()

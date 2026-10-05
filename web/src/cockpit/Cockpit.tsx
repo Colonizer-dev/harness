@@ -23,6 +23,7 @@ import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
+import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
@@ -742,6 +743,7 @@ export function Cockpit({
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
+        models={<ModelSwitcher selectedOrg={selectedOrg} />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,

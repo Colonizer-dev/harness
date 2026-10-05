@@ -66,6 +66,16 @@ describe("demo build", () => {
     expect(touched).toEqual([]);
   });
 
+  it("serves the header's model switcher and a switch without the network (issue #1051)", async () => {
+    const api = await demoLoadApi();
+    const assignments = await api.modelAssignments();
+    expect(assignments.install.roles.length).toBeGreaterThan(0);
+    expect(assignments.orgs.length).toBeGreaterThan(0);
+    const plan = await api.switchModels({ scope: "install", roles: { model: "sonnet" }, apply: "running", dry_run: true });
+    expect(plan.dry_run).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
   it("shows the \"Added to …\" notification from the mock orgs and answers it without the network", async () => {
     const api = await demoLoadApi();
     const { pendingOrgPrompts } = await import("./orgs");

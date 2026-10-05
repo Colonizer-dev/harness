@@ -1,0 +1,2 @@
+/api/models/assignments                              GET    unauth=401    token=owner            activity=-
+/api/models/switch                                   POST   unauth=401    token=owner            activity=settings.save

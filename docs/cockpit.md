@@ -85,9 +85,40 @@ The Inbox has no sidebar item. It is behind the bell in the top bar.
 ### Top bar
 
 The top bar shows the avatars of the workspaces that have colonies running now. Click one to filter
-to that workspace. At the far right is the notifications bell (see [Inbox](#inbox-and-the-bell)).
+to that workspace. Toward the right is the model chip (see [Switching models](#switching-models)),
+and at the far right the notifications bell (see [Inbox](#inbox-and-the-bell)).
 The bar also warns when the mothership stops answering or the live feed drops. While remote access
 is on, it shows a "Remote access on" badge that opens its settings.
+
+### Switching models
+
+The chip at the top right names the install's main model, for example **Opus 5.5**, with a dot for
+its provider's health: green when healthy, amber when its provider is failing requests, red while it
+is out of quota. Click it, or type `/model` in ⌘K, to open the switcher:
+
+- **Scope**: **All orgs (install default)** changes the install's agent settings, which every org
+  without an override of its own follows. Pick an org to change only that org. Each role says where
+  its value comes from: set install-wide, the module's default, an org override, or the install
+  default an org inherits. In an org, **Use install default** drops that org's override.
+- **Agent**: which agent module the scope runs (Claude Code, Codex, OpenCode, Pi, …). A module that
+  can't launch on this install is greyed out, with the same reason a launch would give. A new module
+  applies to new colonies only.
+- **One row per model role** the selected module declares in its `module.json`: orchestrator,
+  subagent, background, summary, small model, small-task and large-task models. Claude Code has all
+  six; Codex three; OpenCode two; Pi, Hermes, Grok Build and ACP one. An org can override the
+  orchestrator, subagent and background models; the others are install-wide only. Each picker lists
+  the models on offer grouped by provider, with the provider's failure rate, and a model whose
+  provider is out of quota is shown disabled with its reset time.
+- **Apply to**: **New colonies only** (the default) saves the settings, as Settings would. **Also
+  switch running colonies** first says how many running, parked or queued colonies in the scope
+  would restart, then, once you confirm, restarts them on the new models the way the [provider out of
+  quota card](#inbox-and-the-bell) does.
+- **Recent**: the main models you switched between, for switching back in one click. The list is kept
+  in this browser.
+
+Nothing is saved unless the whole switch is valid: a model out of quota, not on offer, or not usable
+for a role refuses the switch with the reason, and nothing changes. Scoped API tokens cannot switch
+models.
 
 ### Page width
 
@@ -821,6 +852,7 @@ On Linux and Windows, read Ctrl for ⌘.
 | Keys | Where | What it does |
 | --- | --- | --- |
 | ⌘K | Anywhere except the code editor and terminals | Open Colonize |
+| ⌘K, then `/model` ↵ | Anywhere ⌘K works | Switch model… (opens the model switcher) |
 | ⌘B | Anywhere except text fields | Collapse or expand the sidebar |
 | Escape | Colonize | Close, or step back from the confirm step |
 | ⌘\ | Chat | Show or hide the conversation list |
