@@ -68,17 +68,17 @@ export function Header(props: {
     props;
 
   return (
-    <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)]">
+    <header className="v3-glass sticky top-0 z-10 flex h-12 min-w-0 shrink-0 items-center gap-3 px-6 shadow-[inset_0_-1px_0_var(--border)] max-sm:gap-2 max-sm:px-4">
       {statusError && (
-        <span role="status" className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-err">
-          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-err" />
-          Mothership unreachable
+        <span role="status" className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-body-sm text-err">
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-err" />
+          <span className="truncate">Mothership unreachable</span>
         </span>
       )}
       {!statusError && connection !== undefined && connection !== "open" && (
-        <span role="status" title="the live feed dropped — polls cover until it reconnects" className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] text-faint">
-          <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-faint" />
-          reconnecting…
+        <span role="status" title="the live feed dropped — polls cover until it reconnects" className="inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap text-body-sm text-faint">
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-faint" />
+          <span className="truncate">reconnecting…</span>
         </span>
       )}
       {/* One compact badge for the tunnel being up, quieter than the fault spans beside it: a
@@ -89,7 +89,7 @@ export function Header(props: {
           onClick={onOpenRemote}
           aria-label="Remote access on"
           title="Remote access is on — open its settings"
-          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-ok-soft px-2 py-0.5 text-[12px] font-medium text-ok"
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-ok-soft px-2 py-0.5 text-small font-medium text-ok"
         >
           <span aria-hidden="true" className="size-1.5 rounded-full bg-ok" />
           <span className="max-sm:hidden">Remote access ON</span>
@@ -102,7 +102,7 @@ export function Header(props: {
         <span
           role="status"
           title={judgeAlertTitle(judge)}
-          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-warn-soft px-2 py-0.5 text-[12px] font-medium text-warn"
+          className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border-0 bg-warn-soft px-2 py-0.5 text-small font-medium text-warn"
         >
           <span aria-hidden="true" className="size-1.5 rounded-full bg-warn" />
           Judge failing
@@ -156,7 +156,7 @@ export function UserMenu({ login, name, avatarUrl, onOpenSettings, onOpenSecrets
     };
   }, [open]);
   const label = login ? `${name || login} (@${login})` : "GitHub not connected";
-  const item = "flex w-full cursor-pointer items-center gap-2 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-[13px] text-text hover:bg-panel-2";
+  const item = "flex w-full cursor-pointer items-center gap-2 rounded-md border-0 bg-transparent px-2.5 py-1.5 text-left text-body-sm text-text hover:bg-panel-2";
   return (
     <div ref={root} className="relative shrink-0">
       <button
@@ -173,8 +173,8 @@ export function UserMenu({ login, name, avatarUrl, onOpenSettings, onOpenSecrets
       {open && (
         <div role="menu" className="absolute right-0 top-10 z-50 w-56 rounded-xl border border-border-strong bg-panel p-1.5 shadow-[0_16px_48px_rgb(0_0_0/0.35)]">
           <div className="border-b border-border px-2.5 pb-2 pt-1">
-            <div className="truncate text-[13px] font-medium text-text">{name || login || "Not signed in"}</div>
-            {login && <div className="truncate text-[12px] text-faint">@{login} · GitHub</div>}
+            <div className="truncate text-body-sm font-medium text-text">{name || login || "Not signed in"}</div>
+            {login && <div className="truncate text-small text-faint">@{login} · GitHub</div>}
           </div>
           <div className="pt-1">
             <button type="button" role="menuitem" className={item} onClick={() => (setOpen(false), onOpenSettings())}>

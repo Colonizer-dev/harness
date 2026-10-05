@@ -50,7 +50,7 @@ export function GitHubBanner({
           <button
             type="button"
             onClick={onReconnect}
-            className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-[12.5px] font-semibold hover:underline"
+            className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-small-lg font-semibold hover:underline"
           >
             Reconnect GitHub
           </button>
@@ -60,7 +60,7 @@ export function GitHubBanner({
             href="https://support.github.com"
             target="_blank"
             rel="noreferrer"
-            className="rounded-md border border-warn px-2 py-0.5 text-[12.5px] font-semibold hover:underline"
+            className="rounded-md border border-warn px-2 py-0.5 text-small-lg font-semibold hover:underline"
           >
             GitHub support
           </a>

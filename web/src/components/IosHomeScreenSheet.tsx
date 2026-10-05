@@ -37,7 +37,7 @@ export function IosHomeScreenSheet({
 } = {}): ReactElement {
   if (!safari) return <InstallSteps platform="ios-other" address={address} />;
   return (
-    <div role="note" aria-label="Add Colonizer to your Home Screen for web push" className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+    <div role="note" aria-label="Add Colonizer to your Home Screen for web push" className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
       <p className="m-0 text-text">
         Web push on iPhone and iPad needs Colonizer on your Home Screen (iOS 16.4+):
       </p>

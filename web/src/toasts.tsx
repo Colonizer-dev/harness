@@ -123,8 +123,8 @@ export function ToastStack({ toasts, onDismiss }: { toasts: readonly ToastItem[]
               <KindIcon kind={t.kind} />
             </span>
             <div className="min-w-0 flex-1 pt-0.5">
-              <div className="text-[13.5px] font-semibold leading-snug text-text [overflow-wrap:anywhere]">{t.title}</div>
-              {t.body && <div className="mt-0.5 text-[12.5px] leading-snug text-muted [overflow-wrap:anywhere]">{t.body}</div>}
+              <div className="text-body font-semibold leading-snug text-text [overflow-wrap:anywhere]">{t.title}</div>
+              {t.body && <div className="mt-0.5 text-small-lg leading-snug text-muted [overflow-wrap:anywhere]">{t.body}</div>}
               {t.action && (
                 <button
                   type="button"
@@ -132,7 +132,7 @@ export function ToastStack({ toasts, onDismiss }: { toasts: readonly ToastItem[]
                     t.action?.onClick();
                     onDismiss(t.id);
                   }}
-                  className="mt-2 inline-flex h-7 cursor-pointer items-center rounded-md border border-border bg-panel-2 px-2.5 text-[12px] font-medium text-text hover:border-border-strong"
+                  className="mt-2 inline-flex h-7 cursor-pointer items-center rounded-md border border-border bg-panel-2 px-2.5 text-small font-medium text-text hover:border-border-strong"
                 >
                   {t.action.label}
                 </button>
@@ -160,13 +160,13 @@ export function ToastStack({ toasts, onDismiss }: { toasts: readonly ToastItem[]
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="pointer-events-auto self-end rounded-full border border-border-strong bg-panel px-3 py-1 text-[12px] font-medium text-muted shadow-[0_8px_24px_rgb(0_0_0/0.25)] hover:text-text"
+          className="pointer-events-auto self-end rounded-full border border-border-strong bg-panel px-3 py-1 text-small font-medium text-muted shadow-[0_8px_24px_rgb(0_0_0/0.25)] hover:text-text"
         >
           +{hidden} more
         </button>
       )}
       {expanded && toasts.length > MAX_VISIBLE && (
-        <button type="button" onClick={() => setExpanded(false)} className="pointer-events-auto self-end rounded-full border-0 bg-transparent px-2 py-0.5 text-[12px] text-muted hover:text-text">
+        <button type="button" onClick={() => setExpanded(false)} className="pointer-events-auto self-end rounded-full border-0 bg-transparent px-2 py-0.5 text-small text-muted hover:text-text">
           Show fewer
         </button>
       )}

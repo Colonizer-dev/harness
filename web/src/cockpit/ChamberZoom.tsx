@@ -177,26 +177,26 @@ export function ChamberZoom({
           type="button"
           onClick={onClose}
           aria-label="back to the nest"
-          className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-[13px] text-muted transition-colors hover:bg-panel-2 hover:text-text"
+          className="shrink-0 cursor-pointer rounded-md px-2 py-1 text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text"
         >
           ← nest
         </button>
-        <span className="shrink-0 font-mono text-[12px] text-text">
+        <span className="shrink-0 font-mono text-small text-text">
           {session.repo}{issue}
         </span>
-        <span className="shrink-0 font-mono text-[11px]" style={{ color: edge }}>
+        <span className="shrink-0 font-mono text-meta" style={{ color: edge }}>
           {status}
         </span>
-        <span className="min-w-0 flex-1 truncate text-[13px] text-muted">
+        <span className="min-w-0 flex-1 truncate text-body-sm text-muted">
           {taskLine(session, status)}
         </span>
-        <span className="shrink-0 font-mono text-[11px] text-faint tabular-nums">
+        <span className="shrink-0 font-mono text-meta text-faint tabular-nums">
           {steps} steps · {settlerCount}
         </span>
         <button
           type="button"
           onClick={() => onOpen(session.id)}
-          className="shrink-0 cursor-pointer rounded-md bg-text px-3 py-1 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+          className="shrink-0 cursor-pointer rounded-md bg-text px-3 py-1 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
         >
           open colony →
         </button>
@@ -258,7 +258,7 @@ export function ChamberZoom({
               <span className="block" style={{ animation: "ck-wander 11s ease-in-out 0s infinite" } as CSSProperties}>
                 <AntAvatar state={colonyAntState(session.status)} size={46} phase={0} ground={false} framed={false} />
               </span>
-              <span className="mt-0.5 font-mono text-[10px] text-muted">orchestrator</span>
+              <span className="mt-0.5 font-mono text-micro-lg text-muted">orchestrator</span>
             </span>
           </div>
           {settlers.map((settler, i) => {
@@ -289,7 +289,7 @@ export function ChamberZoom({
                       framed={false}
                     />
                   </span>
-                  <span className="mt-0.5 max-w-[90px] truncate font-mono text-[10px] text-muted">{settler.name}</span>
+                  <span className="mt-0.5 max-w-[90px] truncate font-mono text-micro-lg text-muted">{settler.name}</span>
                 </span>
               </div>
             );

@@ -84,8 +84,8 @@ export function HandoffIn({ onCreated }: { onCreated: (session: Session) => void
       >
         <IconPlus size={15} className="shrink-0" />
         <span className="min-w-0 flex-1">
-          <span className="block text-[13.5px] font-medium text-text">Continue in a colony</span>
-          <span className="block text-[12px]">Upload a txcript Simple JSON export from Claude Code, Codex or OpenCode</span>
+          <span className="block text-body font-medium text-text">Continue in a colony</span>
+          <span className="block text-small">Upload a txcript Simple JSON export from Claude Code, Codex or OpenCode</span>
         </span>
       </button>
     );
@@ -96,7 +96,7 @@ export function HandoffIn({ onCreated }: { onCreated: (session: Session) => void
   return (
     <div className="space-y-2.5 rounded-xl border border-border bg-panel p-3 shadow-[var(--shadow)]">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[13.5px] font-medium">Continue a local session in a colony</span>
+        <span className="text-body font-medium">Continue a local session in a colony</span>
         <Button
           size="sm"
           variant="ghost"
@@ -114,15 +114,15 @@ export function HandoffIn({ onCreated }: { onCreated: (session: Session) => void
         accept="application/json,.json"
         aria-label="Session export"
         onChange={(e) => void pick(e.target.files?.[0])}
-        className="block w-full cursor-pointer text-[12.5px] text-muted file:mr-2 file:cursor-pointer file:rounded-md file:border file:border-border file:bg-panel-2 file:px-2.5 file:py-1 file:text-[12.5px] file:text-text"
+        className="block w-full cursor-pointer text-small-lg text-muted file:mr-2 file:cursor-pointer file:rounded-md file:border file:border-border file:bg-panel-2 file:px-2.5 file:py-1 file:text-small-lg file:text-text"
       />
-      {fileName && <p className="m-0 truncate font-mono text-[11.5px] text-faint" title={fileName}>{fileName}</p>}
+      {fileName && <p className="m-0 truncate font-mono text-meta-lg text-faint" title={fileName}>{fileName}</p>}
       <input
         value={repo}
         onChange={(e) => setRepo(e.target.value)}
         placeholder="owner/repository"
         aria-label="Repository"
-        className={cx(inputClass, "font-mono text-[13px]")}
+        className={cx(inputClass, "font-mono text-body-sm")}
       />
       <div className="flex gap-2">
         <input
@@ -130,18 +130,18 @@ export function HandoffIn({ onCreated }: { onCreated: (session: Session) => void
           onChange={(e) => setBranch(e.target.value)}
           placeholder="Branch (optional)"
           aria-label="Branch"
-          className={cx(inputClass, "min-w-0 flex-1 font-mono text-[13px]")}
+          className={cx(inputClass, "min-w-0 flex-1 font-mono text-body-sm")}
         />
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="Title (optional)"
           aria-label="Title"
-          className={cx(inputClass, "min-w-0 flex-1 text-[13px]")}
+          className={cx(inputClass, "min-w-0 flex-1 text-body-sm")}
         />
       </div>
       {error && (
-        <p role="alert" className="m-0 text-[12.5px] text-err [overflow-wrap:anywhere]">
+        <p role="alert" className="m-0 text-small-lg text-err [overflow-wrap:anywhere]">
           {error}
         </p>
       )}

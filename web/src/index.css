@@ -1,5 +1,5 @@
 @import "tailwindcss";
-
+@import "./typeScale.css";
 /* Colonizer: deep-space neutrals with one beacon-orange accent. Light values first; dark overrides below. */
 :root {
   --bg: #f7f7f8;
@@ -160,7 +160,7 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: var(--text-body-lg);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
@@ -265,7 +265,7 @@ body {
 }
 .md pre {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--text-small-lg);
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1757,7 +1757,7 @@ body {
 /* The Code editor's blame gutter: author and date before each run of lines one commit touched. */
 .blame-label {
   color: var(--faint);
-  font-size: 11px;
+  font-size: var(--text-meta);
   font-family: var(--font-mono, ui-monospace, monospace);
   white-space: pre;
 }

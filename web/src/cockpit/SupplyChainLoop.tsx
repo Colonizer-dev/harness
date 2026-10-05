@@ -59,7 +59,7 @@ export function countsLine(counts: SupplyChainReport["counts"]): string {
 export function SupplyReport({ report, now = Date.now(), onOpenColony }: { report: SupplyChainReport; now?: number; onOpenColony?: (id: string) => void }): ReactElement {
   const findings = report.repos.flatMap((r) => r.findings.map((f) => ({ ...f, repo: r.repo })));
   return (
-    <div className="mt-3 space-y-3 text-[12.5px]">
+    <div className="mt-3 space-y-3 text-small-lg">
       <div className="flex flex-wrap items-center gap-2 text-muted">
         <span className="font-medium text-text">{report.dry_run ? "Dry run" : "Last run"}</span>
         <span>{relative(report.finished_at, now)}</span>
@@ -107,7 +107,7 @@ export function SupplyReport({ report, now = Date.now(), onOpenColony }: { repor
                 <td className="py-1 pr-2">
                   <span className="text-text">{f.package}</span>
                   {f.version ? <span className="text-faint"> {f.version}</span> : null}
-                  <div className="font-mono text-[11px] text-faint">
+                  <div className="font-mono text-meta text-faint">
                     {f.repo} · {f.lockfile || f.ecosystem}
                   </div>
                 </td>
@@ -245,11 +245,11 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <div className="min-w-0 flex-1 basis-64">
           <div className="flex items-center gap-2">
-            <span className="text-[14px] font-medium text-text">{view.name}</span>
+            <span className="text-body-lg font-medium text-text">{view.name}</span>
             <Badge>built-in</Badge>
             {view.running && <Spinner />}
           </div>
-          <div className="mt-0.5 text-[12.5px] text-muted">
+          <div className="mt-0.5 text-small-lg text-muted">
             {s.enabled && s.allow.length > 0
               ? `${describeLoopCadence(s.cadence)} · ${s.allow.join(", ")}${view.next_run_at ? ` · next ${relative(view.next_run_at)}` : ""}`
               : s.enabled
@@ -273,7 +273,7 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
       </div>
 
       {open && (
-        <div className="mt-3 grid gap-3 border-t border-border pt-3 text-[12.5px] sm:grid-cols-2">
+        <div className="mt-3 grid gap-3 border-t border-border pt-3 text-small-lg sm:grid-cols-2">
           <label className="sm:col-span-2">
             <span className="text-muted">Opted-in orgs and repositories (empty: nothing runs)</span>
             <input className={cx(inputClass, "mt-1")} value={allowText} placeholder="acme, globex/api" onChange={(e) => setAllowText(e.target.value)} aria-label="allowlist" />
@@ -331,13 +331,13 @@ export function SupplyChainLoopCard({ onOpenColony }: { onOpenColony: (id: strin
       )}
 
       {view.attention.length > 0 && !dry && (
-        <p className="mt-2 text-[12.5px] text-text">
+        <p className="mt-2 text-small-lg text-text">
           ⚠ {view.attention.length} critical or high finding{view.attention.length === 1 ? "" : "s"} with no fixed version need{view.attention.length === 1 ? "s" : ""} a person.
         </p>
       )}
       {shown && <SupplyReport report={shown} onOpenColony={onOpenColony} />}
       {view.history.length > 1 && (
-        <details className="mt-2 text-[12.5px] text-muted">
+        <details className="mt-2 text-small-lg text-muted">
           <summary className="cursor-pointer">History ({view.history.length} runs)</summary>
           <ul className="m-0 mt-1 list-none space-y-0.5 p-0">
             {view.history.map((h) => (

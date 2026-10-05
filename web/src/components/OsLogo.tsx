@@ -105,7 +105,7 @@ export function OsLogo({ os, size = 16, ...props }: OsLogoProps) {
   return (
     <span
       title={label}
-      className="inline-block max-w-[7ch] truncate text-[9px] font-semibold uppercase leading-none tracking-wide"
+      className="inline-block max-w-[7ch] truncate text-micro-sm font-semibold uppercase leading-none tracking-wide"
     >
       {os.vendor}
     </span>

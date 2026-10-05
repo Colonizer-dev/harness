@@ -50,8 +50,8 @@ export function PhoneWelcomeSheet({ onClose }: { onClose: () => void }): ReactEl
     >
       <div className="flex items-start gap-2">
         <div className="min-w-0 flex-1">
-          <h2 className="text-[14px] font-semibold">You're signed in</h2>
-          <p className="mt-0.5 text-[12.5px] text-muted">This phone now runs the same cockpit as your desk. Two things worth doing once:</p>
+          <h2 className="text-body-lg font-semibold">You're signed in</h2>
+          <p className="mt-0.5 text-small-lg text-muted">This phone now runs the same cockpit as your desk. Two things worth doing once:</p>
         </div>
         <button
           type="button"
@@ -68,12 +68,12 @@ export function PhoneWelcomeSheet({ onClose }: { onClose: () => void }): ReactEl
             <Button size="sm" variant="primary" onClick={() => void install()}>
               Install
             </Button>
-            <span className="min-w-0 flex-1 text-[12.5px] text-muted">Its own icon; same cockpit, same sign-in.</span>
+            <span className="min-w-0 flex-1 text-small-lg text-muted">Its own icon; same cockpit, same sign-in.</span>
           </div>
         ) : showIosInstallHint() ? (
           <InstallSteps platform={installPlatform(navigator.userAgent, false)} address={currentAddress()} />
         ) : (
-          <p className="text-[12.5px] text-muted">Install later from Settings → Desktop, or the browser's install icon.</p>
+          <p className="text-small-lg text-muted">Install later from Settings → Desktop, or the browser's install icon.</p>
         )}
         {permission !== "unsupported" && permission !== "granted" && (
           <div className="flex items-center gap-2">
@@ -81,7 +81,7 @@ export function PhoneWelcomeSheet({ onClose }: { onClose: () => void }): ReactEl
               {busy && <Spinner className="size-3" />}
               Turn on notifications
             </Button>
-            <span className="min-w-0 flex-1 text-[12.5px] text-muted">When a colony needs you, wherever the phone is.</span>
+            <span className="min-w-0 flex-1 text-small-lg text-muted">When a colony needs you, wherever the phone is.</span>
           </div>
         )}
       </div>

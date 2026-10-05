@@ -122,8 +122,8 @@ export function ChatComposer({
                 onMouseMove={() => setSlashIndex(i)}
                 className={cx("flex cursor-pointer items-baseline gap-3 rounded-lg px-2.5 py-1.5", i === slashIndex && "bg-panel-2")}
               >
-                <span className="font-mono text-[13px] text-accent">/{c.name}</span>
-                <span className="text-[12px] text-faint">{c.hint}</span>
+                <span className="font-mono text-body-sm text-accent">/{c.name}</span>
+                <span className="text-small text-faint">{c.hint}</span>
               </div>
             ))}
           </div>
@@ -182,7 +182,7 @@ export function ChatComposer({
           placeholder={blocked ? "Pick a model you can reach first…" : hero ? "Ask about your code, colonies or plans…  (/ for commands)" : "Reply…  (/ for commands)"}
           aria-label="message"
           className={cx(
-            "bare-field scroll-thin block w-full resize-none border-0 bg-transparent px-4 text-[15px] leading-relaxed text-text outline-none placeholder:text-faint",
+            "bare-field scroll-thin block w-full resize-none border-0 bg-transparent px-4 text-lead leading-relaxed text-text outline-none placeholder:text-faint",
             hero ? "min-h-[64px] pt-4" : "min-h-[48px] pt-3",
           )}
         />
@@ -192,7 +192,7 @@ export function ChatComposer({
           <ModelChip value={model} models={models} claudeIds={claudeIds} onChange={onModel} openRef={modelOpen} />
           {compareModel !== null ? (
             <span className="inline-flex items-center gap-1">
-              <span className="text-[11.5px] text-faint">vs</span>
+              <span className="text-meta-lg text-faint">vs</span>
               <ModelChip value={compareModel} models={models} claudeIds={claudeIds} onChange={onCompareModel} label="second model" exclude={model} compact />
               <button type="button" aria-label="stop comparing" title="Stop comparing" onClick={() => onCompareModel(null)} className="grid size-6 cursor-pointer place-items-center rounded-full border-0 bg-transparent text-faint hover:bg-panel-2 hover:text-text">
                 <IconX size={13} />
@@ -204,14 +204,14 @@ export function ChatComposer({
               onClick={() => onCompareModel("")}
               title="Compare two models side by side"
               aria-label="compare two models"
-              className="inline-flex cursor-pointer items-center gap-1 rounded-full border-0 bg-transparent px-2 py-1 text-[12px] text-faint hover:bg-panel-2 hover:text-text"
+              className="inline-flex cursor-pointer items-center gap-1 rounded-full border-0 bg-transparent px-2 py-1 text-small text-faint hover:bg-panel-2 hover:text-text"
             >
               <IconCompare size={14} /> Compare
             </button>
           )}
           <span className="flex-1" />
           {estimate && (
-            <span className="text-[11.5px] tabular-nums text-faint" title="Estimated input for this message's attached context and text (≈ 4 characters per token)">
+            <span className="text-meta-lg tabular-nums text-faint" title="Estimated input for this message's attached context and text (≈ 4 characters per token)">
               ≈ {formatTokens(estimate.tokens)}
               {estimate.unknown ? "+" : ""} tokens{estimate.cost != null ? ` · ${formatCost(estimate.cost)}` : ""}
             </span>
@@ -221,7 +221,7 @@ export function ChatComposer({
             onClick={() => onSendKey(sendKey === "enter" ? "mod-enter" : "enter")}
             title="Which key sends"
             aria-label={`send with ${sendKey === "enter" ? "Enter" : `${MOD}+Enter`}; switch`}
-            className="cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-0.5 font-mono text-[10.5px] text-faint hover:bg-panel-2 hover:text-text"
+            className="cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-0.5 font-mono text-meta-sm text-faint hover:bg-panel-2 hover:text-text"
           >
             {sendKey === "enter" ? "⏎ send" : `${MOD}⏎ send`}
           </button>
@@ -243,7 +243,7 @@ export function ChatComposer({
           )}
         </div>
       </div>
-      {blocked && <p className="m-0 mt-2 px-3 text-center text-[12px] text-warn">{blocked}</p>}
+      {blocked && <p className="m-0 mt-2 px-3 text-center text-small text-warn">{blocked}</p>}
     </div>
   );
 }

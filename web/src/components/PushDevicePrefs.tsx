@@ -66,7 +66,7 @@ function DeviceName({ row, onRenamed }: { row: PushSubscriptionSummary; onRename
           setDraft(row.label);
           setEditing(true);
         }}
-        className="cursor-pointer truncate text-left text-[13px] font-medium hover:text-accent"
+        className="cursor-pointer truncate text-left text-body-sm font-medium hover:text-accent"
       >
         {row.label}
       </button>
@@ -84,7 +84,7 @@ function DeviceName({ row, onRenamed }: { row: PushSubscriptionSummary; onRename
         if (e.key === "Enter") void rename();
         if (e.key === "Escape") setEditing(false);
       }}
-      className={cx(inputClass, "max-w-60 py-1 text-[13px]")}
+      className={cx(inputClass, "max-w-60 py-1 text-body-sm")}
     />
   );
 }
@@ -167,7 +167,7 @@ export function PushDeviceEditor({
       ))}
 
       <div className="space-y-1 py-2">
-        <label htmlFor={id("scope")} className="text-[13.5px] font-medium">
+        <label htmlFor={id("scope")} className="text-body font-medium">
           Repositories
         </label>
         <ChipsInput
@@ -176,9 +176,9 @@ export function PushDeviceEditor({
           onChange={(scope) => patch({ scope })}
           placeholder={prefs.scope.length ? "Add another" : "All repos — add an org or org/repo to narrow"}
         />
-        {invalid.length > 0 && <p className="text-[11.5px] text-err">Not an org or org/repo: {invalid.join(", ")}</p>}
+        {invalid.length > 0 && <p className="text-meta-lg text-err">Not an org or org/repo: {invalid.join(", ")}</p>}
         {suggestions.length > 0 && (
-          <p className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-faint">
+          <p className="flex flex-wrap items-center gap-1.5 text-meta-lg text-faint">
             Known orgs:
             {suggestions.map((org) => (
               <button
@@ -198,12 +198,12 @@ export function PushDeviceEditor({
         <Switch id={id("quiet")} labelledBy={`${id("quiet")}-label`} label="Quiet hours" checked={quietOn} onChange={setQuietOn} />
       </Row>
       {quietOn && (
-        <div className="flex flex-wrap items-center gap-2 py-1 text-[13.5px]">
+        <div className="flex flex-wrap items-center gap-2 py-1 text-body">
           <span className="font-medium">From</span>
           <input type="time" value={startText} aria-label="Quiet from" onChange={(e) => setStartText(e.target.value)} className={cx(inputClass, "w-28")} />
           <span className="font-medium">to</span>
           <input type="time" value={endText} aria-label="Quiet to" onChange={(e) => setEndText(e.target.value)} className={cx(inputClass, "w-28")} />
-          <span className="text-[12px] text-faint">in {prefs.tz ?? "the device's own timezone"}</span>
+          <span className="text-small text-faint">in {prefs.tz ?? "the device's own timezone"}</span>
         </div>
       )}
       <Row id={id("break")} label="Questions break through quiet hours" inline>
@@ -269,7 +269,7 @@ export function PushDeviceList({
           <div className="flex items-center gap-3 px-3.5 py-2.5">
             <div className="min-w-0 flex-1">
               <DeviceName row={row} onRenamed={onChanged} />
-              <div className="truncate font-mono text-[11px] text-faint">
+              <div className="truncate font-mono text-meta text-faint">
                 {row.endpoint_host} · enrolled {pushDate(row.created_at)} · last seen {lastSeenText(row.last_seen)}
               </div>
             </div>

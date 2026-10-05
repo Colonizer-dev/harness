@@ -204,7 +204,7 @@ export function QuotaBanner({
       >
         <span className="min-w-0 flex-1 basis-64">
           <strong className="font-semibold">{parts.title}</strong>
-          <span className="text-[12.5px]">
+          <span className="text-small-lg">
             {" · "}
             {parts.reset}
             {parts.usedBy ? ` ${parts.usedBy}` : ""} {parts.effect}
@@ -218,7 +218,7 @@ export function QuotaBanner({
               onClick={() => void resumeAll()}
               disabled={busy}
               title={`Resume ${parked.length === 1 ? "the parked colony" : `all ${parked.length} parked colonies`}`}
-              className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-[12.5px] font-semibold hover:underline disabled:cursor-default disabled:opacity-50 disabled:hover:no-underline"
+              className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-small-lg font-semibold hover:underline disabled:cursor-default disabled:opacity-50 disabled:hover:no-underline"
             >
               {busy ? "Resuming…" : `Resume all (${parked.length})`}
             </button>
@@ -226,7 +226,7 @@ export function QuotaBanner({
           <button
             type="button"
             onClick={onDismiss}
-            className="cursor-pointer text-[12.5px] font-semibold hover:underline"
+            className="cursor-pointer text-small-lg font-semibold hover:underline"
           >
             Dismiss
           </button>

@@ -54,7 +54,7 @@ export function MobileTabBar({
               setMoreOpen(false);
               onColonize();
             }}
-            className="ant-glyph-host col-span-3 flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border-0 bg-accent px-3 text-[13.5px] font-semibold text-on-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            className="ant-glyph-host col-span-3 flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border-0 bg-accent px-3 text-body font-semibold text-on-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             <AntGlyph size={24} />
             Colonize
@@ -67,7 +67,7 @@ export function MobileTabBar({
             role="menuitem"
             aria-current={view === item.view ? "page" : undefined}
             onClick={() => go(item.view)}
-            className={`flex min-h-16 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-0 bg-transparent px-1 text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+            className={`flex min-h-16 cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-0 bg-transparent px-1 text-small transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
               view === item.view ? "bg-panel-2 text-text" : "text-muted hover:bg-panel-2 hover:text-text"
             }`}
           >
@@ -98,12 +98,12 @@ export function MobileTabBar({
               <span className="relative grid place-items-center">
                 <Glyph name={tab.glyph} size={20} />
                 {count !== null && (
-                  <span aria-hidden="true" className="absolute -right-2 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-warn px-1 font-mono text-[9.5px] font-semibold text-bg">
+                  <span aria-hidden="true" className="absolute -right-2 -top-1 grid h-4 min-w-4 place-items-center rounded-full bg-warn px-1 font-mono text-micro font-semibold text-bg">
                     {count}
                   </span>
                 )}
               </span>
-              <span className="text-[10.5px] leading-none">{tab.label}</span>
+              <span className="text-meta-sm leading-none">{tab.label}</span>
             </button>
           );
         })}

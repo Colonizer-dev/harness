@@ -50,7 +50,7 @@ function Row({
             if (e.key === "Escape") setRenaming(null);
           }}
           aria-label="conversation title"
-          className="w-full rounded-lg border border-accent bg-panel px-2 py-1.5 text-[13px] text-text outline-none"
+          className="w-full rounded-lg border border-accent bg-panel px-2 py-1.5 text-body-sm text-text outline-none"
         />
       </div>
     );
@@ -70,11 +70,11 @@ function Row({
       >
         <ProviderMark preset={mark.preset} name={mark.name} size="button" />
         <span className="min-w-0 flex-1">
-          <span className={cx("flex items-center gap-1 truncate text-[13px]", active ? "text-text" : "text-muted group-hover/row:text-text")}>
+          <span className={cx("flex items-center gap-1 truncate text-body-sm", active ? "text-text" : "text-muted group-hover/row:text-text")}>
             {c.forked_from && <IconBranch size={11} className="shrink-0 text-faint" />}
             <span className="truncate">{title}</span>
           </span>
-          <span className="block truncate text-[11px] text-faint">
+          <span className="block truncate text-meta text-faint">
             {c.persona && c.persona !== "Plain" ? `${personaLabel(c.persona)} · ` : ""}
             {timeAgo(c.updated_at)}
           </span>
@@ -127,7 +127,7 @@ export function ChatSidebar({
   const groups = useMemo(() => groupChats(chats.filter((c) => chatMatches(c, query, workspace))), [chats, query, workspace]);
   const orgItems = useMemo<ListItem[]>(
     () => [
-      { id: "", label: "All workspaces", leading: <span className="grid size-[18px] place-items-center rounded-md bg-panel-2 text-[10px] text-faint">∗</span> },
+      { id: "", label: "All workspaces", leading: <span className="grid size-[18px] place-items-center rounded-md bg-panel-2 text-micro-lg text-faint">∗</span> },
       ...workspaces.map((w) => ({ id: w.org, label: w.org, leading: <Avatar name={w.org} src={w.avatar} size={18} rounded="md" /> })),
     ],
     [workspaces],
@@ -152,13 +152,13 @@ export function ChatSidebar({
         <button type="button" onClick={onToggle} aria-label="hide conversations (⌘\)" title="Hide conversations (⌘\)" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
           <IconSidebar size={16} />
         </button>
-        <h1 className="m-0 flex-1 text-[15px] font-semibold tracking-tight">Chats</h1>
+        <h1 className="m-0 flex-1 text-lead font-semibold tracking-tight">Chats</h1>
         <button
           type="button"
           onClick={onNew}
           aria-label="new conversation"
           title="New conversation (⌘⇧O)"
-          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-border bg-panel px-2 py-1 text-[12.5px] text-text hover:border-border-strong"
+          className="inline-flex cursor-pointer items-center gap-1 rounded-lg border border-border bg-panel px-2 py-1 text-small-lg text-text hover:border-border-strong"
         >
           <IconPlus size={14} /> New
         </button>
@@ -173,7 +173,7 @@ export function ChatSidebar({
             onKeyDown={(e) => e.key === "Escape" && setQuery("")}
             placeholder="Search conversations"
             aria-label="search conversations"
-            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
+            className="bare-field min-w-0 flex-1 border-0 bg-transparent text-body-sm text-text outline-none placeholder:text-faint"
           />
         </label>
         {workspaces.length > 1 && (
@@ -188,10 +188,10 @@ export function ChatSidebar({
         )}
       </div>
       <nav className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {groups.length === 0 && <p className="px-2 py-3 text-[12.5px] text-faint">{chats.length === 0 ? "No conversations yet. Ask something to start one." : "Nothing matches."}</p>}
+        {groups.length === 0 && <p className="px-2 py-3 text-small-lg text-faint">{chats.length === 0 ? "No conversations yet. Ask something to start one." : "Nothing matches."}</p>}
         {groups.map((g) => (
           <section key={g.label} aria-label={g.label} className="mb-2">
-            <h2 className="m-0 px-2 pb-1 pt-2 text-[10.5px] font-semibold uppercase tracking-wider text-faint">{g.label}</h2>
+            <h2 className="m-0 px-2 pb-1 pt-2 text-meta-sm font-semibold uppercase tracking-wider text-faint">{g.label}</h2>
             {g.chats.map((c) => (
               <Row
                 key={c.id}

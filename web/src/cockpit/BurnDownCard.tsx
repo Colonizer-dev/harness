@@ -81,7 +81,7 @@ export function BurnDownCard() {
   return (
     <section className="flex flex-col gap-1.5 rounded-2xl border border-border bg-panel px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-[10.5px] tracking-[0.12em] text-faint">BURN-DOWN</span>
+        <span className="font-mono text-meta-sm tracking-[0.12em] text-faint">BURN-DOWN</span>
         <Badge tone={stateTone(status.state)}>{stateLabel(status.state)}</Badge>
         {status.estimate && (
           <Badge tone="neutral" title="The allowance and remaining spend are measured-window estimates, never the plan's real numbers">
@@ -94,7 +94,7 @@ export function BurnDownCard() {
           </Button>
         )}
       </div>
-      <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] text-faint tabular-nums">
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-meta text-faint tabular-nums">
         {countdown && <span>{countdown}</span>}
         <span>{money}</span>
         <span>

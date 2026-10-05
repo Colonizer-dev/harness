@@ -24,7 +24,7 @@ function saveText(name: string, text: string): void {
 /** The instructions the download reveals: the file, the repository, and the two commands. */
 export function ContinueLocallyPanel({ lines, repo, file = HANDOFF_FILE }: { lines: string[]; repo: string; file?: string }) {
   return (
-    <div className="w-full rounded-xl border border-border bg-panel-2 px-3 py-2.5 text-[12.5px]">
+    <div className="w-full rounded-xl border border-border bg-panel-2 px-3 py-2.5 text-small-lg">
       <p className="m-0 text-muted">
         Downloaded <code className="font-mono text-text">{file}</code>. In a checkout of <span className="font-mono text-text">{repo}</span>, run:
       </p>
@@ -32,11 +32,11 @@ export function ContinueLocallyPanel({ lines, repo, file = HANDOFF_FILE }: { lin
         {lines.map((line, i) => (
           <li key={i} className="flex items-start gap-2">
             <span className="shrink-0 text-faint">{i + 1}.</span>
-            <code className="min-w-0 select-all font-mono text-[12px] text-text [overflow-wrap:anywhere]">{line}</code>
+            <code className="min-w-0 select-all font-mono text-small text-text [overflow-wrap:anywhere]">{line}</code>
           </li>
         ))}
       </ol>
-      <p className="m-0 mt-1.5 text-[11.5px] text-faint">The colony keeps its own copy; this is a snapshot to continue from.</p>
+      <p className="m-0 mt-1.5 text-meta-lg text-faint">The colony keeps its own copy; this is a snapshot to continue from.</p>
     </div>
   );
 }

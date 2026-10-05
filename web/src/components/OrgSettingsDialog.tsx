@@ -458,10 +458,10 @@ export function OrgSettingsForm({
       <div className="page-pad flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
         <Avatar name={org} src={info?.avatar_url} size={36} rounded="xl" />
         <div className="min-w-0 flex-1">
-          <h2 id="org-settings-title" className="text-[16px] font-semibold [overflow-wrap:anywhere]">
+          <h2 id="org-settings-title" className="text-title-sm font-semibold [overflow-wrap:anywhere]">
             {org} workspace
           </h2>
-          <p className="mt-0.5 text-[12.5px] text-muted">
+          <p className="mt-0.5 text-small-lg text-muted">
             Colonies on {org} repositories use these settings. Inherit follows Settings → Modules.
           </p>
         </div>
@@ -479,31 +479,31 @@ export function OrgSettingsForm({
 
       <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
         <section className="border-b border-border py-3">
-          <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Workspace</h3>
+          <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Workspace</h3>
           <div className="divide-y divide-border">
             <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
               <div className="min-w-0 flex-1 basis-44">
-                <div className="text-[13.5px] font-medium">Hide orgs with no colonies</div>
-                <div className="text-[12px] text-muted">
+                <div className="text-body font-medium">Hide orgs with no colonies</div>
+                <div className="text-small text-muted">
                   Orgs with nothing in the colony list stay out of the overview, the rail and the totals.
                 </div>
               </div>
               <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
                 <Switch checked={hideEmpty} onChange={setHideEmptyOrgs} label="Hide orgs with no colonies" />
-                <span className="text-[13px]">{hideEmpty ? "On" : "Off"}</span>
+                <span className="text-body-sm">{hideEmpty ? "On" : "Off"}</span>
               </div>
             </div>
             <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
               <div className="min-w-0 flex-1 basis-44">
-                <div className="text-[13.5px] font-medium">Include in the workspace list</div>
-                <div className="text-[12px] text-muted">
+                <div className="text-body font-medium">Include in the workspace list</div>
+                <div className="text-small text-muted">
                   Off hides {org} from the workspace list and stops new colonies starting there. Its existing colonies stay listed
                   and resumable, and you can switch it back on here at any time.
                 </div>
               </div>
               <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
                 <Switch checked={enabled} onChange={setEnabled} label={`Include ${org} as a workspace`} />
-                <span className="text-[13px]">{enabled ? "On" : "Off"}</span>
+                <span className="text-body-sm">{enabled ? "On" : "Off"}</span>
               </div>
             </div>
           </div>
@@ -511,7 +511,7 @@ export function OrgSettingsForm({
         {groups.map((group) => (
           <Fragment key={group}>
             <section className="border-b border-border py-3 last:border-b-0">
-              <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
+              <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">{group}</h3>
               <div className="divide-y divide-border">
                 {FIELDS.filter((f) => f.group === group).map((spec) => (
                   <OverrideRow
@@ -549,7 +549,7 @@ export function OrgSettingsForm({
                             parseNumber(spec, String(draft[spec.key].value)) === null && "border-err focus:border-err",
                           )}
                         />
-                        {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
+                        {spec.unit && <span className="text-body-sm text-muted">{spec.unit}</span>}
                       </div>
                     )}
                     {spec.kind === "size" && (
@@ -601,7 +601,7 @@ export function OrgSettingsForm({
                       </select>
                     )}
                     {spec.kind === "boolean" && (
-                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                      <label className="inline-flex h-9 items-center gap-2.5 text-body-sm">
                         <Switch
                           checked={Boolean(draft[spec.key].value)}
                           onChange={(value) => set(spec.key, { value })}
@@ -616,7 +616,7 @@ export function OrgSettingsForm({
             </section>
             {group === "Models" && skillsetRows.length > 0 && (
               <section className="border-b border-border py-3 last:border-b-0">
-                <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
+                <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
                 <div className="divide-y divide-border">
                   {skillsetRows.map(({ name, hint }) => (
                     <OverrideRow
@@ -627,7 +627,7 @@ export function OrgSettingsForm({
                       inherited={inheritedSkillsets ? (inheritedSkillsets.includes(name) ? "on" : "off") : "global default"}
                       onOverride={(override) => overrideSkillset(name, override)}
                     >
-                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                      <label className="inline-flex h-9 items-center gap-2.5 text-body-sm">
                         <Switch
                           checked={skillsets[name] ?? false}
                           onChange={(on) => setSkillsets((current) => sortedSkillsets({ ...current, [name]: on }))}
@@ -654,7 +654,7 @@ export function OrgSettingsForm({
       </div>
 
       <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
-        <span className={cx("mr-auto text-[12.5px]", error ? "text-err" : "text-muted")}>
+        <span className={cx("mr-auto text-small-lg", error ? "text-err" : "text-muted")}>
           {error ?? (overrides === 0 ? "Everything inherits the global settings" : `${overrides} override${overrides === 1 ? "" : "s"}`)}
         </span>
         {overrides > 0 && (
@@ -695,9 +695,9 @@ export function ExecPolicyEditor({
 }) {
   return (
     <section className="border-t border-border py-3">
-      <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Exec policy</h3>
+      <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Exec policy</h3>
       <div className="py-3">
-        <div className="text-[12px] text-muted">
+        <div className="text-small text-muted">
           Rules for the commands {org} colonies run, as JSON: {'{"rules": [{"id", "decision": "deny" | "ask" | "allow", "reason", "command" | "script" | "touches" | "writes_outside"}]}'}.
           Layered between the install's policy and a repository's own .colonizer/exec-policy.json; the strictest decision
           wins, so it can only narrow. Agent modules that cannot apply it refuse to launch while it is set. Empty adds nothing.
@@ -711,10 +711,10 @@ export function ExecPolicyEditor({
           aria-label={`Exec policy for ${org}`}
           aria-invalid={error !== null}
           aria-describedby={error ? "org-exec-policy-error" : undefined}
-          className={cx(inputClass, "mt-2 h-auto w-full py-2 font-mono text-[12.5px]", error !== null && "border-err focus:border-err")}
+          className={cx(inputClass, "mt-2 h-auto w-full py-2 font-mono text-small-lg", error !== null && "border-err focus:border-err")}
         />
         {error && (
-          <div id="org-exec-policy-error" role="alert" className="mt-1 text-[12px] text-err [overflow-wrap:anywhere]">
+          <div id="org-exec-policy-error" role="alert" className="mt-1 text-small text-err [overflow-wrap:anywhere]">
             {error}
           </div>
         )}
@@ -741,8 +741,8 @@ function OverrideRow({
   return (
     <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
       <div className="min-w-0 flex-1 basis-44">
-        <div className="text-[13.5px] font-medium [overflow-wrap:anywhere]">{label}</div>
-        <div className="text-[12px] text-muted">{hint}</div>
+        <div className="text-body font-medium [overflow-wrap:anywhere]">{label}</div>
+        <div className="text-small text-muted">{hint}</div>
       </div>
       <div className="flex w-full min-w-0 flex-col gap-2 sm:w-[270px]">
         <div role="radiogroup" aria-label={`${label}: inherit or override`} className="inline-flex self-start rounded-lg bg-panel-2 p-0.5">
@@ -754,7 +754,7 @@ function OverrideRow({
               aria-checked={override === value}
               onClick={() => onOverride(value)}
               className={cx(
-                "cursor-pointer rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+                "cursor-pointer rounded-md px-2.5 py-1 text-small-lg font-medium transition-colors",
                 override === value
                   ? value
                     ? "bg-panel text-accent shadow-sm"
@@ -769,7 +769,7 @@ function OverrideRow({
         {override ? (
           children
         ) : (
-          <div className="flex h-9 items-center text-[12.5px] text-faint">
+          <div className="flex h-9 items-center text-small-lg text-faint">
             Global setting: <span className="ml-1 font-medium text-muted [overflow-wrap:anywhere]">{inherited}</span>
           </div>
         )}

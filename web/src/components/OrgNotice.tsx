@@ -72,10 +72,10 @@ export function OrgNoticeRow({
     <div role="group" aria-labelledby={titleId} className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5">
       <OrgChip org={org} avatarUrl={avatarUrl} />
       <div className="min-w-0 flex-1">
-        <div id={titleId} className="truncate text-[13.5px] font-semibold leading-snug">
+        <div id={titleId} className="truncate text-body font-semibold leading-snug">
           Added to <span className="font-mono">{org}</span>
         </div>
-        <div className="mt-0.5 truncate text-[12.5px] leading-snug text-muted">Add it as a workspace so colonies can work on its repos.</div>
+        <div className="mt-0.5 truncate text-small-lg leading-snug text-muted">Add it as a workspace so colonies can work on its repos.</div>
       </div>
       <div className="ml-auto flex shrink-0 items-center gap-2">
         <Button size="sm" variant="primary" disabled={saving !== null} aria-label={`Add ${org} as a workspace`} onClick={() => void answer(true)}>
@@ -125,10 +125,10 @@ export function OrgNotices({
           <IconOrg size={16} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13.5px] font-semibold leading-snug">{title}</span>
-          <span className="mt-0.5 block truncate font-mono text-[11px] text-faint">{orgs.map((o) => o.org).join(" · ")}</span>
+          <span className="block truncate text-body font-semibold leading-snug">{title}</span>
+          <span className="mt-0.5 block truncate font-mono text-meta text-faint">{orgs.map((o) => o.org).join(" · ")}</span>
         </span>
-        <span className="shrink-0 text-[12.5px] text-muted">{open ? "Hide" : "Review"}</span>
+        <span className="shrink-0 text-small-lg text-muted">{open ? "Hide" : "Review"}</span>
         <IconChevronDown size={14} className={cx("shrink-0 text-muted transition-transform", open && "rotate-180")} />
       </button>
       {open && (

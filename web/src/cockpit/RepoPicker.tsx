@@ -157,7 +157,7 @@ function AvatarStack({ people, max = 4, size = 18 }: { people: RepoMeta["contrib
           <Avatar name={p.login} src={p.avatar_url || undefined} size={size} rounded="full" />
         </span>
       ))}
-      {more > 0 && <span className="ml-1 text-[10.5px] tabular-nums text-faint">+{more}</span>}
+      {more > 0 && <span className="ml-1 text-meta-sm tabular-nums text-faint">+{more}</span>}
     </span>
   );
 }
@@ -165,7 +165,7 @@ function AvatarStack({ people, max = 4, size = 18 }: { people: RepoMeta["contrib
 function LanguageChip({ name }: { name: string | null | undefined }) {
   if (!name) return null;
   return (
-    <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-muted">
+    <span className="inline-flex shrink-0 items-center gap-1 text-meta text-muted">
       <span aria-hidden="true" className="size-2 rounded-full" style={{ background: languageColor(name) }} />
       {name}
     </span>
@@ -255,7 +255,7 @@ export function RepoPicker({ repos, value, onChange }: { repos: string[]; value:
         aria-expanded={open}
         aria-label="repository"
         onClick={() => (open ? close() : setOpen(true))}
-        className="inline-flex max-w-[380px] cursor-pointer items-center gap-2 rounded-full border border-border bg-transparent py-1 pl-1.5 pr-3 text-[12.5px] text-text hover:border-border-strong"
+        className="inline-flex max-w-[380px] cursor-pointer items-center gap-2 rounded-full border border-border bg-transparent py-1 pl-1.5 pr-3 text-small-lg text-text hover:border-border-strong"
       >
         {value && <Avatar name={value.split("/")[0]} src={groups.find((g) => g.repos.includes(value))?.info?.avatar_url} size={18} rounded="full" />}
         <span className="min-w-0 truncate font-mono">
@@ -292,20 +292,20 @@ export function RepoPicker({ repos, value, onChange }: { repos: string[]; value:
                 placeholder="Find an organization or repository…"
                 aria-label="find a repository"
                 aria-controls="repo-picker-list"
-                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none placeholder:text-faint focus:border-border-strong"
+                className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none placeholder:text-faint focus:border-border-strong"
               />
             </div>
             <div ref={list} id="repo-picker-list" role="listbox" aria-label="repositories" className="scroll-thin min-h-0 flex-1 overflow-y-auto py-1">
-              {shown.length === 0 && <p className="px-3 py-3 text-[12.5px] text-faint">Nothing matches “{query.trim()}”.</p>}
+              {shown.length === 0 && <p className="px-3 py-3 text-small-lg text-faint">Nothing matches “{query.trim()}”.</p>}
               {shown.map((g) => (
                 <div key={g.org} role="group" aria-label={g.org}>
                   <div className="flex items-center gap-2.5 px-3 pb-1 pt-2.5">
                     <Avatar name={g.org} src={g.info?.avatar_url} size={22} rounded="md" />
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[12.5px] font-semibold text-text">{g.org}</div>
-                      {g.info?.description && <div className="truncate text-[11.5px] text-faint">{g.info.description}</div>}
+                      <div className="truncate text-small-lg font-semibold text-text">{g.org}</div>
+                      {g.info?.description && <div className="truncate text-meta-lg text-faint">{g.info.description}</div>}
                     </div>
-                    <span className="shrink-0 text-[11px] tabular-nums text-faint">{g.repos.length}</span>
+                    <span className="shrink-0 text-meta tabular-nums text-faint">{g.repos.length}</span>
                   </div>
                   {g.repos.map((repo) => {
                     index += 1;
@@ -327,10 +327,10 @@ export function RepoPicker({ repos, value, onChange }: { repos: string[]; value:
                       >
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <span className={cx("truncate font-mono text-[12.5px]", selected ? "text-accent" : "text-text")}>{repo.split("/")[1]}</span>
+                            <span className={cx("truncate font-mono text-small-lg", selected ? "text-accent" : "text-text")}>{repo.split("/")[1]}</span>
                             <LanguageChip name={meta?.primary_language} />
                           </div>
-                          <div className="truncate text-[11.5px] text-faint">{meta ? (meta.description ?? "No description") : metaCache.get(repo) === "error" ? "Could not read from GitHub" : "…"}</div>
+                          <div className="truncate text-meta-lg text-faint">{meta ? (meta.description ?? "No description") : metaCache.get(repo) === "error" ? "Could not read from GitHub" : "…"}</div>
                         </div>
                         {meta && <Sparkline values={meta.commits_weekly} />}
                         {meta && <AvatarStack people={meta.contributors} />}
@@ -365,15 +365,15 @@ export function RepoCard({ repo }: { repo: string }): ReactElement | null {
     <section aria-label={`${repo} on GitHub`} className="flex flex-wrap items-start gap-x-6 gap-y-3 rounded-xl border border-border bg-panel-2 px-4 py-3">
       <div className="min-w-0 flex-1 basis-64">
         <div className="flex items-center gap-2">
-          <span className="truncate font-mono text-[13px] font-semibold text-text">{meta.full_name}</span>
+          <span className="truncate font-mono text-body-sm font-semibold text-text">{meta.full_name}</span>
           {meta.html_url && (
-            <a href={meta.html_url} target="_blank" rel="noreferrer" className="shrink-0 text-[11.5px] text-muted underline decoration-dotted underline-offset-2 hover:text-text">
+            <a href={meta.html_url} target="_blank" rel="noreferrer" className="shrink-0 text-meta-lg text-muted underline decoration-dotted underline-offset-2 hover:text-text">
               GitHub ↗
             </a>
           )}
         </div>
-        <p className="mt-0.5 line-clamp-2 text-[12.5px] text-muted">{meta.description ?? "No description on GitHub."}</p>
-        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11.5px] text-faint">
+        <p className="mt-0.5 line-clamp-2 text-small-lg text-muted">{meta.description ?? "No description on GitHub."}</p>
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-meta-lg text-faint">
           <span>★ {meta.stars}</span>
           {meta.pushed_at && <span>pushed {timeAgo(meta.pushed_at)}</span>}
           {meta.homepage && (
@@ -393,7 +393,7 @@ export function RepoCard({ repo }: { repo: string }): ReactElement | null {
           </div>
           <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
             {top.map((l) => (
-              <span key={l.name} className="inline-flex items-center gap-1 text-[11px] text-muted">
+              <span key={l.name} className="inline-flex items-center gap-1 text-meta text-muted">
                 <span aria-hidden="true" className="size-2 rounded-full" style={{ background: languageColor(l.name) }} />
                 <span className="text-text">{l.name}</span> {l.percent}%
               </span>
@@ -410,17 +410,17 @@ export function RepoCard({ repo }: { repo: string }): ReactElement | null {
                 <span key={i} title={`${v} commits`} className="w-[3px] rounded-sm bg-accent" style={{ height: `${Math.max(v > 0 ? 8 : 3, (v / peak) * 100)}%`, opacity: v > 0 ? 0.9 : 0.25 }} />
               ))}
             </div>
-            <div className="mt-1 text-[11px] text-faint">{total} commits · 52 weeks</div>
+            <div className="mt-1 text-meta text-faint">{total} commits · 52 weeks</div>
           </div>
         ) : (
-          <div className="text-[11px] text-faint">{meta.stats_pending ? "GitHub is counting commits…" : "No commit history"}</div>
+          <div className="text-meta text-faint">{meta.stats_pending ? "GitHub is counting commits…" : "No commit history"}</div>
         )}
       </div>
 
       {meta.contributors.length > 0 && (
         <div className="shrink-0">
           <AvatarStack people={meta.contributors} max={8} size={22} />
-          <div className="mt-1 text-[11px] text-faint">{meta.contributors.length} top contributors</div>
+          <div className="mt-1 text-meta text-faint">{meta.contributors.length} top contributors</div>
         </div>
       )}
     </section>
