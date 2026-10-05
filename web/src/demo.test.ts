@@ -66,6 +66,35 @@ describe("demo build", () => {
     expect(touched).toEqual([]);
   });
 
+  it("shows the \"Added to …\" notification from the mock orgs and answers it without the network", async () => {
+    const api = await demoLoadApi();
+    const { pendingOrgPrompts } = await import("./orgs");
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { ApiContext } = await import("./context");
+    const { OrgNotices } = await import("./components/OrgNotice");
+    const render = (orgs: Parameters<typeof OrgNotices>[0]["orgs"]) =>
+      renderToStaticMarkup(createElement(ApiContext.Provider, { value: api }, createElement(OrgNotices, { orgs, onAnswered: () => {} })));
+
+    const pending = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(pending.map((o) => o.org)).toEqual(["hooli", "initech"]);
+    expect(render(pending)).toContain("Added to 2 organisations");
+
+    // Not now on hooli, as its button does: the mock remembers it and the row is gone.
+    const { answerNewOrg } = await import("./components/OrgNotice");
+    await answerNewOrg(api, "hooli", false);
+    const left = pendingOrgPrompts(await api.orgs(), new Set());
+    expect(left.map((o) => o.org)).toEqual(["initech"]);
+    expect(render(left)).toContain(">initech</span>");
+    expect(render(left)).toContain(">Add workspace</button>");
+
+    await answerNewOrg(api, "initech", true);
+    const orgs = await api.orgs();
+    expect(pendingOrgPrompts(orgs, new Set())).toEqual([]);
+    expect(orgs.find((o) => o.org === "initech")?.settings.enabled).toBe(true);
+    expect(touched).toEqual([]);
+  });
+
   it("answers the demo colony's question once its intro gets to it", async () => {
     vi.useFakeTimers();
     const api = await demoLoadApi();
