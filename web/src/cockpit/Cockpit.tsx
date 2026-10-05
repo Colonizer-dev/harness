@@ -31,6 +31,7 @@ import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { focusTurn } from "./turnFocus";
+import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
@@ -103,6 +104,7 @@ export function Cockpit({
   liveConnection,
   liveStorage = null,
   update,
+  onUpdateChanged,
   autopilotDefault,
   launchRequests,
   settingsRequests,
@@ -147,6 +149,8 @@ export function Cockpit({
   /** A storage frame the stream pushed; the overview's storage panel shows it (issue #446). */
   liveStorage?: StorageSummary | null;
   update: UpdateStatus | null;
+  /** Takes a fresh update status after the banner restarted colonies on the new version (issue #1097). */
+  onUpdateChanged?: (update: UpdateStatus) => void;
   autopilotDefault: boolean;
   /** Bumped by Setup's launch row, which lives in the settings body App owns. */
   launchRequests: number;
@@ -802,6 +806,16 @@ export function Cockpit({
           {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
               secondary limits), one banner above every view names the cause and the next step. */}
           <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
+          {/* Issue #1097: a release whose notes flag a critical or fixes-running fix is a banner
+              above every view, with how many colonies its probe found affected here; after the
+              update, the affected colonies still on the previous version are offered a restart. */}
+          <UpdateBanner
+            update={update}
+            onOpenUpdates={() => onOpenSettings("updates")}
+            onRestart={(ids) =>
+              void restartOnNewVersion(api, { ids }, (message, tone) => toast(message, tone ?? "info"), onUpdateChanged)
+            }
+          />
           {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
               so above every view, like the quota banner. It clears itself when the drain finishes,
               so there is nothing to dismiss. Absent on a mothership from before the drain. */}

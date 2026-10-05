@@ -166,6 +166,10 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
+    // A tunnelled request whose link or phone credential did not authenticate (revoked, rotated by a
+    // reset, or never real) is answered as before, but marked, so the relay counts it toward its
+    // throttle and sends that browser to its pair page (#1086). The open doors below still serve it.
+    let stale_credential = tunnelled && remote::presents_credential(req.headers());
     // The UHP surface answers its own refusals as envelopes, not pages (issue #650). Discovery is
     // how a client finds out this is a UHP server at all, so it is served before any credential
     // check; every other `/uhp` path gets the envelope's authentication error.
@@ -214,7 +218,8 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         {
             return crate::client_error(StatusCode::FORBIDDEN, "removed from the fleet").into_response();
         }
-        return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+        let res = (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+        return if stale_credential { remote::mark_rejected(res) } else { res };
     }
     // The installable-app files carry no secrets, and browsers fetch the manifest without the
     // cookie: they load before sign-in, so the locked page still installs and shows its icon.
@@ -241,7 +246,9 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     // presentation, which binds the pairing to this browser and shows the code to confirm in the
     // local cockpit; no credential is handed over yet. A wrong, spent or expired invite falls
     // through to the locked page, saying nothing about why, and counts against the rate limit.
-    // Already-authenticated requests never reach this, so they never spend an invite.
+    // Already-authenticated requests never reach this, so they never spend an invite. Through the
+    // tunnel, an invite that opens nothing is marked like a rejected credential (#1086).
+    let mut rejected = stale_credential;
     if req.method() == Method::GET
         && let Some(code) = auth::query_param(req.uri().query(), "pair")
     {
@@ -252,7 +259,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             .unwrap_or_default();
         match app.phones.open(&code, user_agent, tunnelled) {
             Ok(Some(opened)) => return crate::phone::pairing_response(&opened),
-            Ok(None) => {}
+            Ok(None) => rejected |= tunnelled,
             Err(crate::phone::Limited) => {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -265,7 +272,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     let mut res = (StatusCode::UNAUTHORIZED, Html(auth::locked_page())).into_response();
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    res
+    if rejected { remote::mark_rejected(res) } else { res }
 }
 
 /// Runs a request a revocable credential authenticated — a paired phone or a scoped API token —

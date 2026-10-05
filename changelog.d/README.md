@@ -28,6 +28,30 @@ fails one that edits `CHANGELOG.md` outside a release, unless the pull request c
 `changelog-edit` label (for a deliberate correction to an entry already released). A code change
 with no fragment only gets a warning.
 
+### A fix the operator should hear about before updating
+
+A fragment can open with a notice: `critical: <one line>` for a fix to something that loses work or
+blocks colonies, or `fixes-running: <one line>` for a bug that running colonies may be hitting right
+now. Write the line for the person deciding whether to update, not for a reviewer. It can be
+followed by `probe: <id>`, a read-only check the mothership runs on its own disk to count the
+colonies the fix is for; the ids are `PROBES` in
+[`crates/colonizer/src/update_notices.rs`](../crates/colonizer/src/update_notices.rs), and a new
+one is added there in the same pull request (`check` refuses an id that is not there). The entry follows as usual:
+
+```md
+critical: Fixes colonies failing with UND_ERR_SOCKET (sandbox credential scanner)
+probe: msb-body-secret-violation
+
+**Anthropic turns no longer fail with UND_ERR_SOCKET.** … ([#1096])
+```
+
+`assemble` keeps the notice on the entry in `CHANGELOG.md` as a `<!-- colonizer-notice … -->`
+comment. The release workflow then runs `node scripts/changelog.mjs notices --release <tag>`, which
+puts the release's notices at the top of its body as a "Before you update" list, plus a block that
+`GET /api/update` reads, carrying the notices of the nine releases before it as well. The cockpit
+shows a pending notice as a banner with the number of colonies its probe matched
+([docs/updates.md](../docs/updates.md#notices-and-affected-colonies)).
+
 ## If your branch edited CHANGELOG.md
 
 A branch started before this convention, or one written from habit, may have edited

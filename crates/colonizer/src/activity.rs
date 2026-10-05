@@ -111,6 +111,7 @@ pub(crate) const KINDS: &[&str] = &[
     "remote.unpair",
     "remote.device_approve",
     "remote.device_revoke",
+    "remote.require_github",
     "workspace.enable",
     "workspace.disable",
     "workspace.settings",
@@ -601,6 +602,12 @@ const RULES: &[Rule] = &[
         "/api/update/apply",
         "app.update",
         Target::Named("Colonizer", "updates"),
+    ),
+    rule(
+        "POST",
+        "/api/update/restart",
+        "app.update",
+        Target::Fixed("restarted colonies on the new version", "updates"),
     ),
     rule(
         "PUT",

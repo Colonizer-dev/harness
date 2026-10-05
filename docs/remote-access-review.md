@@ -85,6 +85,57 @@ serves the pairing routes, and confirming a code is refused through the tunnel
 [remote-tunnel.md](remote-tunnel.md#where-the-code-differs-today) lists every place the two halves
 depart from the pinned tunnel contract.
 
+## Pairing with the pair code alone (#1086, 2026-10-06)
+
+[#1086](https://github.com/Colonizer-dev/harness/issues/1086) drops the relay's GitHub sign-in as a
+precondition. A new install's link now forwards a browser without any relay session when the
+request carries one of three things, and only these:
+
+- a pairing invite, `GET /?pair=<invite>` (64 hex characters, at the root only);
+- that invite page's claim poll, `POST /api/phone/claim` with its `colonizer_pair` cookie;
+- a link credential (`clk_…`) or a paired phone's (`cph_…`), as the `colonizer_token` cookie or a
+  bearer.
+
+The relay recognises the shapes (`services/relay/src/passthrough.js`) but trusts none of them; the
+mothership's `host_guard` and `phone.rs` decide every one. Everything else gets the relay's own
+"Pair this device" page and never reaches the tunnel. The GitHub gate stays available as the
+`require_github` setting (local-only `PUT /api/remote/require-github`, relayed as a signed
+`PUT /api/installs/<id>/settings`): off for new installs, kept on for installs registered before
+the setting, and the owner binding and recovery work as before while it is on. A bound owner's
+GitHub session is forwarded in either mode.
+
+**R6, accepted by design: on the default setting, the mothership's own auth is the only gate on
+the invite and credential paths.** Before #1086 the relay's owner check was a second layer in front
+of them (see [The two boundary checks](#the-two-boundary-checks-536-asks-for): "a second gate, not
+a substitute"). What carries those paths now:
+
+| Protection | Where |
+| :--- | :--- |
+| The invite is 256 random bits, stored only as a SHA-256 hash, single-use (spent on its first presentation, even a wrong one), valid five minutes, at most four open at once, and a link invite opens nothing off the tunnel. | `phone.rs` `Book::mint_kind`, `open_from` |
+| Opening an invite hands over nothing: it binds a pairing to that one browser and shows six digits, which only the **local** cockpit can confirm (`403` through the link). | `server.rs` `host_guard`; `remote.rs` `confirm_device`, `local_only` |
+| Every failed pairing step (a dead invite, a claim that finds nothing, a wrong code) counts against the mothership's own limit, ten a minute across all callers. | `phone.rs` `Book::limited` |
+| Link and phone credentials are 256-bit, stored hashed, compared in constant time, revocable one by one (in-flight requests and sockets end at once), and all rotated by Reset link. | `remote.rs` `authenticate_link`, `revoke_link`, `rotate_links`; `phone.rs` |
+| The relay throttles the pass-through per install and per client in D1: every invite open counts (10 per client, 30 per install, per 10 min), and so does every forwarded credential the mothership rejected (20 per client, 200 per install, per 10 min). Past a limit it answers `429` and forwards nothing. The mothership reports a rejection with `x-colonizer-credential: rejected` (or a websocket `4401`), which the relay strips. | `services/relay/src/throttle.js`, `worker.js` `installHost`, `tunnel.js` `#countRejected` |
+
+Threat-model changes against the verdicts below:
+
+| Threat | Verdict with the pair code alone | Why |
+| :--- | :--- | :--- |
+| Guessing an invite or a credential over the internet | Holds | 256-bit secrets, and the relay's throttle makes even a spread-out guesser stop after a few hundred tries per 10 minutes per install. |
+| A leaked invite (a QR code photographed, a link pasted in the wrong chat) | Narrow, accepted | Whoever opens it first, within five minutes, gets the six digits. They still reach nothing unless the operator types *their* digits into the local cockpit, and the operator types the digits their own device shows; an operator who did not just open the link has no digits to type. With the GitHub gate on, they would also have needed the owner's GitHub account. Installs that want that second factor keep `require_github` on. |
+| A stolen link credential cookie | Holds, as before | `HttpOnly; Secure; SameSite=Strict`, host-only on the link's origin; revoking the device or Reset link ends it at once. Before #1086 a thief also needed the owner's relay session; now the credential alone works through the link until revoked. |
+| WebSocket hijack | Holds | A cross-site handshake carries no `SameSite=Strict` `colonizer_token`, and the cockpit still requires `Origin` to equal `https://<tunnel host>` for a cookie-authenticated upgrade. |
+| Install-id enumeration | Holds | Unknown installs answer `404`, known ones the pair page's `401`: an oracle, but useless against 100-bit ids. |
+| DoS of one install's pass-through | New, accepted (L6) | Anyone who knows the host can fill its per-install throttle (30 invite opens, or 200 rejected credentials, per 10 minutes) and pause pairing and the pass-through for everyone on that install until the window ends. The limits are generous, a bound owner's GitHub session is not throttled, and Reset link moves the install to a new host. |
+| Logging and storage leaks | Holds | The throttle stores a key per install and per client, where the client is an HMAC of the IP under `SESSION_SECRET`, truncated — never the address — and a row lives only until its window ends. The worker still logs nothing; the DO logs only the templated line. |
+| A relay compromise | Unchanged | The relay already saw link credentials in cleartext (R3's accepted residue); the GitHub layer never stood between a compromised relay and the cockpit. |
+
+The relay e2e (`the_whole_link_round_trips_through_the_real_relay`) now pairs a fresh browser
+through `?pair=` and the six digits with no GitHub session, loads the cockpit and its websocket on
+the link credential alone, sends a forged and a revoked credential to the pair page, then switches
+the GitHub gate on and runs the owner flow behind it. The relay's own negative tests are in
+`services/relay/test/pairing.test.mjs`.
+
 ## Threat-model verdicts
 
 | Threat | Verdict | Where it is held, or the finding |

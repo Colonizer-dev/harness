@@ -163,6 +163,7 @@ export type ActivityKind =
   | "remote.unpair"
   | "remote.device_approve"
   | "remote.device_revoke"
+  | "remote.require_github"
   | "workspace.enable"
   | "workspace.disable"
   | "workspace.settings"
