@@ -515,7 +515,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "colonizer-agentd"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "chrono",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-harness"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -567,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-observability"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "colonizer-redact"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde_json",
 ]
