@@ -315,14 +315,13 @@ impl Mapper<'_> {
                         log = log.attr("detail", detail, Tier::Content);
                     }
                 }
-                log
-                    .severity(if kind == "outcome.failed" {
-                        SeverityNumber::Warn
-                    } else {
-                        SeverityNumber::Info
-                    })
-                    .event_name("colonizer.activity")
-                    .body(kind, Tier::Structure)
+                log.severity(if kind == "outcome.failed" {
+                    SeverityNumber::Warn
+                } else {
+                    SeverityNumber::Info
+                })
+                .event_name("colonizer.activity")
+                .body(kind, Tier::Structure)
             }
             Source::Spend => copy(log, &SPEND_KEYS)
                 .severity(SeverityNumber::Info)

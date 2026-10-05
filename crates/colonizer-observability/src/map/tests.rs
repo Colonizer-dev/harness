@@ -312,13 +312,17 @@ fn more_lines() -> Vec<(&'static str, Source, Option<&'static str>, Vec<Value>)>
             "logs-jev-focus",
             Source::JevFocus,
             None,
-            vec![json!({"kind": "focus", "ts": "2026-10-04T10:05:00Z", "session": "c0ffee12", "mode": "shadow", "candidates": [{"label": "cargo test -p web", "files": 4}, {"label": "npm test", "files": 1}], "chosen": "cargo test -p web", "would_catch": true, "verdict": "confirmed", "actual_first_failure_ms": 81000, "focused_first_failure_ms": 12000, "total_ms": 95000, "checks_run": 2})],
+            vec![
+                json!({"kind": "focus", "ts": "2026-10-04T10:05:00Z", "session": "c0ffee12", "mode": "shadow", "candidates": [{"label": "cargo test -p web", "files": 4}, {"label": "npm test", "files": 1}], "chosen": "cargo test -p web", "would_catch": true, "verdict": "confirmed", "actual_first_failure_ms": 81000, "focused_first_failure_ms": 12000, "total_ms": 95000, "checks_run": 2}),
+            ],
         ),
         (
             "logs-mothership",
             Source::Mothership,
             None,
-            vec![json!({"ts": "2026-10-04T10:06:00Z", "level": "warn", "target": "colonizer::queue", "message": "slot freed after 3 retries", "fields": {"colony": "c0ffee12"}})],
+            vec![
+                json!({"ts": "2026-10-04T10:06:00Z", "level": "warn", "target": "colonizer::queue", "message": "slot freed after 3 retries", "fields": {"colony": "c0ffee12"}}),
+            ],
         ),
         (
             "logs-export-gap",
@@ -353,7 +357,13 @@ fn every_remaining_source_maps_to_its_golden() {
     for golden in ["logs-findings", "logs-routing", "logs-activity-summary"] {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/otlp/{golden}.json"));
         let text = std::fs::read_to_string(path).unwrap();
-        for content in ["token leaks", "bearer is printed", "src/auth.rs", "staging database", "session writes bypass"] {
+        for content in [
+            "token leaks",
+            "bearer is printed",
+            "src/auth.rs",
+            "staging database",
+            "session writes bypass",
+        ] {
             assert!(!text.contains(content), "{golden} carries content: {content}");
         }
     }
@@ -372,8 +382,14 @@ fn the_decision_and_jev_ledgers_key_their_records_on_the_row_session() {
         .find(|a| a["key"] == "colonizer.record.id")
         .unwrap()["value"]["stringValue"]
         .clone();
-    assert_eq!(id, json!(record_id(HOST, Source::JevLadder, "c0ffee12", &hex(&digest(&line)))));
-    assert!(attrs.to_string().contains("acme/widgets"), "the colony's repo joins in: {attrs}");
+    assert_eq!(
+        id,
+        json!(record_id(HOST, Source::JevLadder, "c0ffee12", &hex(&digest(&line))))
+    );
+    assert!(
+        attrs.to_string().contains("acme/widgets"),
+        "the colony's repo joins in: {attrs}"
+    );
 }
 
 /// Every attribute key of a golden's log records, with the source it came from.
