@@ -128,8 +128,8 @@ content switches say.
 
 ### Logs
 
-Each record has `colonizer.record.id`, `colonizer.source`, `colonizer.stream` (`operational` or
-`activity`), and, when it belongs to one, `colonizer.colony.id`, `colonizer.org` and `colonizer.repo`.
+Each record has `colonizer.record.id`, `colonizer.source`, `colonizer.stream` (`operational`,
+`activity` or `meta`), and, when it belongs to one, `colonizer.colony.id`, `colonizer.org` and `colonizer.repo`.
 The **Operational logs** and **Colony activity** switches gate their streams; a stream that is off is
 never read.
 
@@ -138,23 +138,26 @@ never read.
 | `sessions/<id>/harness.jsonl` | operational | `colonizer.harness_log` | the log line (redacted) | `origin`, `level`; severity from `level` |
 | `sessions/<id>/gateway.jsonl` | operational | `colonizer.gateway_request` | `gateway_request` | `provider`, `wire`, `model`, `wire_model`, `status`, `failure`, `fallback`, `queue_ms`, `duration_ms`, `request_bytes`, `response_bytes`, `input_tokens`, `output_tokens` |
 | `sessions/<id>/events.jsonl` | activity | `colonizer.agent_event` | the event type | `type`, `state`, `tool_call_id`, `name` (tool), `is_error`, `denial.class`, `question_id`, `risk`, `kind`, `blocking`, `model`, `cost_usd`, `duration_ms`, `access`, `policy`, `agent_ref.id`, `agent_ref.name`, `model_usage.<model>.<input/output/cache_read/cache_write>_tokens` |
-| `activity.jsonl` | activity | `colonizer.activity` | the kind | `kind`, `actor`, `colony`, `repo`, `target` |
+| `activity.jsonl` | activity | `colonizer.activity` | the kind | `kind`, `actor`, `via`, `colony`, `repo`, `target`, `summary` (reviewed kinds only, below) |
 | `spend.jsonl` | activity | `colonizer.spend` | `spend` | `kind`, `org`, `session`, `agent`, `model`, token counts, `cost_usd`, `scoring_ms` |
+| `sessions/<id>/findings.jsonl` | activity | `colonizer.finding` | the finding's `state` | `state`, `issue`, `duplicate_of`, `severity`, `verdict`, `fix_session`, `review_session`, `pr` (the title and reason are content) |
+| `decisions.jsonl` | activity | `colonizer.decision` | the point | `kind`, `point`, `mode`, `options` (a count), `pick`, `confidence`, `latency_ms`, `miss`, `did`, `outcome.progressed`, `outcome.window_min` |
+| `routing.jsonl` | activity | `colonizer.routing` | `decision` or `actual` | `kind`, `actual_cost_usd`, `decision.point`, `decision.jev_mode`, `decision.jev_agrees`, `decision.floor`, `decision.tier`, `decision.rule`, `decision.source`, `decision.score`, `decision.model`, `decision.agent`, `decision.misroute`, `decision.sensitivity` |
+| `jev_ladder.jsonl` | activity | `colonizer.jev_ladder` | `decision` or `reread` | `kind`, `tool`, `tool_call_id`, `action`, `keep_call`, `keep_result`, `matched_tool_call_id` |
+| `jev_focus.jsonl` | activity | `colonizer.jev_focus` | `focus` | `kind`, `session`, `mode`, `candidates` (a count), `chosen`, `would_catch`, `verdict`, `actual_first_failure_ms`, `focused_first_failure_ms`, `total_ms`, `checks_run` |
+| `logs/mothership.jsonl` (+ `.1`) | operational | `colonizer.mothership_log` | the log line (redacted) | `level`, `target`; severity from `level` |
+| `export_gap` (the exporter's own) | meta | `colonizer.export_gap` | the reason | `reason`, `file`, `bytes`, `lines`, `archived`; severity `WARN` |
 
-Streaming text deltas are skipped. These sources are read too, but not mapped to records yet
-([#845](https://github.com/Colonizer-dev/harness/issues/845)):
-
-| Source | Stream | Rotates |
-| :--- | :--- | :--- |
-| `sessions/<id>/findings.jsonl` | activity | no |
-| `decisions.jsonl`, `routing.jsonl` | activity | no |
-| `jev_ladder.jsonl`, `jev_focus.jsonl` | activity | no |
-| `logs/mothership.jsonl` | operational | to `logs/mothership.jsonl.1` |
-| `export_gap` (the exporter's own) | meta (on when either log stream is) | — |
+Streaming text deltas are skipped. The decision and Jev ledgers name their colony in the row's
+`session`, which becomes `colonizer.colony.id` (with its org and repo). An activity line's `detail`
+is content for every kind but four whose text the harness writes itself: `decision.shadow`,
+`decision.act` and `decision.fallback` (the point and its pick) and `outcome.suspended`, which send
+it as `summary`. The `meta` stream is on whenever either log stream is.
 
 An `export_gap` record marks a hole in what the exporter could read: `reason` (`backlog`,
-`rotated_past`, `truncated`, `deleted`, `oversized_line`), `file`, `colony`, and, where known,
-`bytes` and `lines` skipped, and for a deleted colony whether `archived` holds a bundle of it.
+`rotated_past`, `truncated`, `deleted`, `oversized_line`), `file`, `colonizer.colony.id`, and, where
+known, `bytes` and `lines` skipped, and for a deleted colony whether `archived` holds a bundle of
+it.
 
 ### Metrics
 

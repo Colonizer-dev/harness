@@ -258,8 +258,18 @@ const FINDINGS: &[Rule] = &[
 ];
 
 // `target` names the org for every `workspace.*` entry (crates/colonizer/src/activity.rs), so it is
-// hashed like one.
-const ACTIVITY: &[Rule] = &[s("kind"), s("actor"), s("colony"), h("repo"), h("target"), c("detail")];
+// hashed like one. `detail` is content, whatever the caller says; the kinds whose detail was
+// reviewed as harness-authored structure (`map::STRUCTURE_DETAIL_KINDS`) send it as `summary`.
+const ACTIVITY: &[Rule] = &[
+    s("kind"),
+    s("actor"),
+    s("via"),
+    s("colony"),
+    h("repo"),
+    h("target"),
+    c("detail"),
+    s("summary"),
+];
 
 const SPEND: &[Rule] = &[
     s("kind"),
@@ -275,8 +285,10 @@ const SPEND: &[Rule] = &[
     s("scoring_ms"),
 ];
 
-/// `decisions` and `routing` share a row shape. `options` is a count, never the options.
+/// `decisions.jsonl` (`decide::Row`). `options` is a count, never the options; `outcome.*` is a
+/// grade's scalars (`progressed`, `window_min`).
 const DECISIONS: &[Rule] = &[
+    s("kind"),
     s("point"),
     s("mode"),
     s("options"),
@@ -285,7 +297,27 @@ const DECISIONS: &[Rule] = &[
     s("latency_ms"),
     s("miss"),
     s("did"),
-    s("outcome"),
+    s("outcome.*"),
+];
+
+/// `routing.jsonl`: a `decision` row's routing record (boot.rs) as `decision.<key>`, and an
+/// `actual` row's cost. The rule's `reason` is free text, so content.
+const ROUTING: &[Rule] = &[
+    s("kind"),
+    s("actual_cost_usd"),
+    s("decision.point"),
+    s("decision.jev_mode"),
+    s("decision.jev_agrees"),
+    s("decision.floor"),
+    s("decision.tier"),
+    s("decision.rule"),
+    s("decision.source"),
+    s("decision.score"),
+    s("decision.model"),
+    s("decision.agent"),
+    s("decision.misroute"),
+    s("decision.sensitivity"),
+    c("decision.reason"),
 ];
 
 const JEV_LADDER: &[Rule] = &[
@@ -354,7 +386,8 @@ pub(crate) fn for_source(source: Source) -> [&'static [Rule]; 2] {
         Source::Findings => FINDINGS,
         Source::Activity => ACTIVITY,
         Source::Spend => SPEND,
-        Source::Decisions | Source::Routing => DECISIONS,
+        Source::Decisions => DECISIONS,
+        Source::Routing => ROUTING,
         Source::JevLadder => JEV_LADDER,
         Source::JevFocus => JEV_FOCUS,
         Source::Mothership => MOTHERSHIP,

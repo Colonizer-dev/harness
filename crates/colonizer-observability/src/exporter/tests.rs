@@ -310,7 +310,8 @@ async fn old_lines_past_the_backlog_limit_are_dropped_and_counted() {
     let path = contract(&root, &collector.url, |_| {});
     let mut x = Exporter::new(&path, Vec::new()).unwrap();
     x.tick().await;
-    assert_eq!(collector.bodies(), vec!["fresh".to_string()]);
+    // The skipped run goes out as one `export_gap` record, whose body is its reason.
+    assert_eq!(collector.bodies(), ["backlog", "fresh"]);
     assert_eq!(x.aggregates.dropped.get("backlog"), Some(&1));
 }
 

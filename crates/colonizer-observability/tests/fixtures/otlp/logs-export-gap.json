@@ -1,0 +1,178 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "1cee45f9f7784fe291e183155649cc1f"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "export_gap"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "meta"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "reason",
+                  "value": {
+                    "stringValue": "backlog"
+                  }
+                },
+                {
+                  "key": "file",
+                  "value": {
+                    "stringValue": "sessions/c0ffee12/harness.jsonl"
+                  }
+                },
+                {
+                  "key": "bytes",
+                  "value": {
+                    "intValue": "52000"
+                  }
+                },
+                {
+                  "key": "lines",
+                  "value": {
+                    "intValue": "48"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "backlog"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.export_gap",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108420000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108420000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "55e3502c34ec561b0c04cc440448dc67"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "export_gap"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "meta"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "reason",
+                  "value": {
+                    "stringValue": "deleted"
+                  }
+                },
+                {
+                  "key": "file",
+                  "value": {
+                    "stringValue": "sessions/c0ffee12"
+                  }
+                },
+                {
+                  "key": "archived",
+                  "value": {
+                    "boolValue": true
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "deleted"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.export_gap",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108480000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108480000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

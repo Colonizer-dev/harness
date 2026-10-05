@@ -1,0 +1,78 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "c334dca8eb51097ee740591aa48348a9"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "mothership"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "operational"
+                  }
+                },
+                {
+                  "key": "level",
+                  "value": {
+                    "stringValue": "warn"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "colonizer::queue"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "slot freed after 3 retries"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.mothership_log",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108360000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108360000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

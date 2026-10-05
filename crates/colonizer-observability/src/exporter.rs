@@ -383,7 +383,13 @@ impl Exporter {
             now_unix_nanos: now,
         };
         let mut items = Vec::new();
-        for record in tailed.gaps.iter().chain(&tailed.records) {
+        // Gap records are their own `meta` stream: sent only while a log stream is on.
+        let gaps = if sources::logs_enabled(&self.contract.settings, crate::policy::Source::ExportGap) {
+            &tailed.gaps[..]
+        } else {
+            &[]
+        };
+        for record in gaps.iter().chain(&tailed.records) {
             match record.signal {
                 Signal::Metrics => aggregates.fold(record.source, &record.line),
                 _ => {
