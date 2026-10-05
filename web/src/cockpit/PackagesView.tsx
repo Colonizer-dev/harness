@@ -10,6 +10,8 @@ import { FilterSelect, Pagination, SearchBox, optionsBy } from "./ListControls";
 import { matchesQuery, usePagedFilter } from "./paging";
 import { errorMessage, useApi, useToast } from "../context";
 import { cx, timeAgo } from "../components/ui";
+import { describeHolder } from "../components/DuplicateNotice";
+import { duplicateHolder } from "../api";
 import type {
   CacheInfo,
   Dependency,
@@ -554,14 +556,21 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
   const list = usePagedFilter(data.risks, { filters: RISKS_ALL, match: riskMatches });
   const { severity, fixable, kind } = list.filters;
 
-  const handOff = async (r: SupplyRisk, key: string) => {
+  const handOff = async (r: SupplyRisk, key: string, allowDuplicate = false) => {
     const repo = r.users[0]?.repo;
     if (!repo) return;
     setSending(key);
     try {
       // The target rides on the launch (issue #673): a second live colony for it is refused, and a
       // same-repository merge over this one marks it superseded.
-      const s = await api.createSession({ repo, title: `Supply chain: ${r.name}`, instructions: fixInstructions(r), autopilot: true, supply_chain: { package: r.name, advisory: advisoryId(r) } });
+      const s = await api.createSession({
+        repo,
+        title: `Supply chain: ${r.name}`,
+        instructions: fixInstructions(r),
+        autopilot: true,
+        supply_chain: { package: r.name, advisory: advisoryId(r) },
+        allow_duplicate: allowDuplicate || undefined,
+      });
       toast({
         title: `A colony is fixing ${r.name}`,
         body: `${repo} · ${KIND_LABEL[r.kind] ?? r.kind}`,
@@ -569,7 +578,19 @@ function SupplyList({ data, onOpenColony }: { data: SupplyChain; onOpenColony?: 
         action: onOpenColony ? { label: "Watch it work", onClick: () => onOpenColony(s.id) } : undefined,
       });
     } catch (e) {
-      toast(errorMessage(e), "error");
+      // Refused as a duplicate (issue #832): say who holds the fix — the loop's colony, or an
+      // earlier hand-off — and offer to start another anyway.
+      const holder = duplicateHolder(e);
+      if (holder) {
+        toast({
+          title: `${r.name} is already being fixed`,
+          body: describeHolder(holder),
+          kind: "warn",
+          action: { label: "Allow duplicate", onClick: () => void handOff(r, key, true) },
+        });
+      } else {
+        toast(errorMessage(e), "error");
+      }
     } finally {
       setSending(null);
     }

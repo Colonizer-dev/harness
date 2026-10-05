@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ApiError, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
+import { ApiError, duplicateHolder, epicMarker, heldByFor, heldInBatch, isEpic } from "../api";
 import { errorMessage, useApi, useToast } from "../context";
 import { colonyLabel, needsYou, needsYouLabel } from "../notifications";
 import { orgEntries } from "../orgs";
 import { sortSessions } from "../sessionOrder";
 import { formatCost, sessionCost } from "../spend";
-import type { HarnessStatus, Issue, OrgInfo, Repo, Session, StorageHealth } from "../types";
+import type { DuplicateHolder, HarnessStatus, Issue, OrgInfo, Repo, Session, StorageHealth } from "../types";
 import { type ImagePull } from "../useImagePull";
 import { Avatar } from "./Avatar";
+import { DuplicateNotice } from "./DuplicateNotice";
 import { diskSize } from "./SessionView";
 import {
   IconCheck,
@@ -692,7 +693,14 @@ export function NewSession({
   const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [queueBehind, setQueueBehind] = useState(false);
   const [blockedByDuplicate, setBlockedByDuplicate] = useState(false);
+  // The first holder a batch launch was refused for (issue #832), named under the batch bar.
+  const [batchRefusal, setBatchRefusal] = useState<DuplicateHolder | null>(null);
   const [launching, setLaunching] = useState(false);
+  // Opens the colony a refusal names, when it is one this mothership lists.
+  const openColonyById = (id: string): (() => void) | undefined => {
+    const found = sessions.find((s) => s.id === id);
+    return found && onOpenColony ? () => onOpenColony(found) : undefined;
+  };
 
   // The two ways past a held issue are alternatives — a duplicate, or a place in line — so picking
   // one drops the other.
@@ -820,6 +828,7 @@ export function NewSession({
     const batch = matchingIssues.filter((i) => selected.has(i.number) && !held.has(i.number) && !isEpic(i));
     setLaunching(true);
     setBlockedByDuplicate(false);
+    setBatchRefusal(null);
     let started = 0;
     let queued = 0;
     const failures: string[] = [];
@@ -843,6 +852,8 @@ export function NewSession({
       } catch (error) {
         // A 409 names the colony already holding the issue; the fix is the override below, not a retry.
         if (error instanceof ApiError && error.status === 409) setBlockedByDuplicate(true);
+        const holder = duplicateHolder(error);
+        if (holder) setBatchRefusal((first) => first ?? holder);
         failures.push(`#${issue.number}: ${errorMessage(error)}`);
       }
     }
@@ -975,6 +986,9 @@ export function NewSession({
                   A colony already holds one of these issues — check Allow duplicate to launch anyway.
                 </p>
               )}
+              {batchRefusal && !allowDuplicate && (
+                <DuplicateNotice holder={batchRefusal} onOpen={batchRefusal.colony ? openColonyById(batchRefusal.colony) : undefined} />
+              )}
             </div>
           )}
           {issues && issues.length > 6 && (
@@ -1010,6 +1024,7 @@ export function NewSession({
                 queueBehind={queueBehind}
                 onQueueBehind={(on) => pickOverride("queue", on)}
                 onOpenColony={onOpenColony}
+                openColonyById={openColonyById}
                 onCreated={onCreated}
               />
             ))}
@@ -1118,6 +1133,7 @@ function IssueRow({
   queueBehind,
   onQueueBehind,
   onOpenColony,
+  openColonyById,
   onCreated,
 }: {
   repo: string;
@@ -1134,11 +1150,14 @@ function IssueRow({
   queueBehind: boolean;
   onQueueBehind: (on: boolean) => void;
   onOpenColony?: (session: Session) => void;
+  /** Opens the colony a duplicate refusal names, when this mothership lists it (issue #832). */
+  openColonyById?: (id: string) => (() => void) | undefined;
   onCreated: (session: Session) => void;
 }) {
   const api = useApi();
   const toast = useToast();
   const [instructions, setInstructions] = useState("");
+  const [refusal, setRefusal] = useState<DuplicateHolder | null>(null);
   const [autopilot, setAutopilot] = useState<boolean | null>(null);
   const [starting, setStarting] = useState(false);
   const [launchError, setLaunchError] = useState<string | null>(null);
@@ -1148,6 +1167,7 @@ function IssueRow({
   const start = async () => {
     setStarting(true);
     setLaunchError(null);
+    setRefusal(null);
     try {
       const session = await api.createSession({
         repo,
@@ -1166,8 +1186,11 @@ function IssueRow({
       );
       onCreated(session);
     } catch (error) {
-      // A 409 names the holder; keep its message on screen so the override below reads as the fix.
-      if (error instanceof ApiError && error.status === 409) setLaunchError(errorMessage(error));
+      // A 409 names the holder (issue #832: with a link to it); keep it on screen so the override
+      // below reads as the fix.
+      const holder = duplicateHolder(error);
+      if (holder) setRefusal(holder);
+      else if (error instanceof ApiError && error.status === 409) setLaunchError(errorMessage(error));
       else toast(errorMessage(error), "error");
     } finally {
       setStarting(false);
@@ -1262,7 +1285,10 @@ function IssueRow({
               ). Check <span className="font-medium">Wait behind the holder</span> to queue for it instead.
             </p>
           )}
-          {(holder || launchError) && (
+          {refusal && !allowDuplicate && (
+            <DuplicateNotice holder={refusal} onOpen={refusal.colony ? openColonyById?.(refusal.colony) : undefined} />
+          )}
+          {(holder || launchError || refusal) && (
             <>
               <label className="flex cursor-pointer items-center gap-2 text-[12.5px] text-muted">
                 <input

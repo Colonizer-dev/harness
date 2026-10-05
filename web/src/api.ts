@@ -19,7 +19,7 @@ import { handoffHttp, type HandoffApi } from "./features/handoff/api";
 
 export { ApiError, SOCKET_OPEN, splitNdjson } from "./http";
 export type { SocketLike } from "./http";
-export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor, claimWaitPosition } from "./features/repos/claims";
+export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor, claimWaitPosition, duplicateHolder } from "./features/repos/claims";
 export type { SaveModuleRequest } from "./features/modules/api";
 export type { BehindInfo, CatchUpResult, StopReply } from "./features/sessions/api";
 

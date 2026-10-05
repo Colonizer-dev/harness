@@ -139,6 +139,7 @@ fn overlap_request(repo: &str, serialize: Option<bool>) -> Json<NewSession> {
         allow_epic: false,
         queue_behind_holder: false,
         supply_chain: None,
+        supply_chain_targets: Vec::new(),
         model_tier: None,
         model_override: None,
         subagent_model_override: None,
@@ -378,7 +379,7 @@ fn allow_duplicate_bypasses_the_hold_that_blocks_a_second_claim() {
     blocked.issue = Some(7);
     let refused = try_claim_session(&mut sessions, true, blocked, "acme/repo", Some(7), false, false, false);
     assert!(
-        matches!(&refused, Err(held) if held.id == "first"),
+        matches!(&refused, Err(refused) if refused.is_held_by("first")),
         "a live holder refuses a second claim without allow_duplicate"
     );
     assert_eq!(sessions.len(), 1, "the refused claim inserted nothing");
@@ -408,13 +409,13 @@ fn the_in_lock_claim_refuses_a_second_colony_for_one_target_and_admits_with_allo
     second.repo = "acme/repo".into();
     second.supply_chain = Some(crate::supersede::SupplyChainTarget::new("lodash", "ghsa-1"));
     assert!(
-        crate::supersede::supply_chain_held_by(&sessions, "acme/repo", second.supply_chain.as_ref().unwrap()).is_some(),
+        crate::duplicates::supply_chain_held_by(&sessions, &[], &crate::duplicates::Work::of(&second)).is_some(),
         "the same hold the pre-check read holds under the lock"
     );
     assert!(
         matches!(
             try_claim_session(&mut sessions, true, second.clone(), "acme/repo", None, false, false, false),
-            Err(held) if held.id == "holder"
+            Err(refused) if refused.is_held_by("holder")
         ),
         "a launch that did not ask to duplicate is refused with the holder"
     );
@@ -474,7 +475,7 @@ fn the_default_still_refuses_and_allow_duplicate_still_wins_over_queueing() {
     assert!(
         matches!(
             try_claim_session(&mut sessions, true, plain, "acme/repo", Some(7), false, false, false),
-            Err(held) if held.id == "holder"
+            Err(refused) if refused.is_held_by("holder")
         ),
         "a launch that did not ask to queue is refused as ever"
     );
@@ -498,7 +499,7 @@ fn with_only_waiters_left_the_oldest_one_holds_the_issue() {
     ];
     let held = issue_held_by(&sessions, "acme/repo", 7).expect("a waiter holds the issue once the holder is gone");
     assert_eq!(held.id, "first", "the oldest waiter holds it");
-    let message = duplicate_message(&held, 7);
+    let message = crate::duplicates::issue_message(&held, 7);
     assert!(
         message.contains("colony first is already on #7") && message.contains("allow_duplicate"),
         "{message}"
@@ -512,7 +513,7 @@ fn with_only_waiters_left_the_oldest_one_holds_the_issue() {
     assert!(
         matches!(
             try_claim_session(&mut sessions, true, fresh.clone(), "acme/repo", Some(7), false, false, false),
-            Err(held) if held.id == "first"
+            Err(refused) if refused.is_held_by("first")
         ),
         "a fresh default launch is refused naming the oldest waiter"
     );
@@ -576,7 +577,7 @@ async fn two_simultaneous_claims_on_one_issue_let_exactly_one_through() {
         held.id
     );
     // And the loser's 409 reads the way the handler's does.
-    let message = duplicate_message(&held, 7);
+    let message = crate::duplicates::issue_message(&held, 7);
     assert!(
         message.contains(&format!("colony {} is already on #7", held.id)) && message.contains("allow_duplicate"),
         "{message}"
@@ -617,6 +618,7 @@ async fn a_switched_off_org_refuses_new_colonies_and_names_the_way_back_on() {
             allow_epic: false,
             queue_behind_holder: false,
             supply_chain: None,
+            supply_chain_targets: Vec::new(),
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -701,6 +703,7 @@ async fn starting_a_colony_marks_its_org_known_so_the_operator_is_never_asked_ab
             allow_epic: false,
             queue_behind_holder: false,
             supply_chain: None,
+            supply_chain_targets: Vec::new(),
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -745,6 +748,7 @@ fn stack_request(repo: &str, after: Option<String>, stack: bool) -> Json<NewSess
         allow_epic: false,
         queue_behind_holder: false,
         supply_chain: None,
+        supply_chain_targets: Vec::new(),
         model_tier: None,
         model_override: None,
         subagent_model_override: None,

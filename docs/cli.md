@@ -118,7 +118,9 @@ launch guard: `--allow-duplicate` starts a second colony on an issue another col
 `--queue-behind-holder` waits behind the holder instead (the colony comes back `queued` and starts
 when the issue is its own), and `--allow-epic` starts one on an epic (an issue with sub-issues).
 Without them, an issue another colony holds or an epic is refused with a 409 (exit 5) that names
-the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
+the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `--package P --advisory A` (always
+together) launches a supply-chain fix: a second live colony on the same package and advisory — one
+the Packages tab or the supply-chain loop started included — is refused the same way. `list` filters
 client-side: `--org` by repository owner, `--status` by the API's state names, case-insensitively.
 `answer` matches its argument against the pending question: a 1-based option number wins, then a
 whole-label match case-insensitively, and anything else goes to the agent as a free-text note —
