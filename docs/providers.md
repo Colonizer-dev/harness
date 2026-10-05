@@ -119,11 +119,13 @@ them so the form prefills.
 - **`pricing`** — dollars per million input, output, cache-read, cache-write and thinking tokens. Unset,
   routed requests cost `$0` but their tokens are still counted, so the sandbox module's `budget_tokens`
   still holds a colony on a prepaid plan that `budget_usd` never can.
-- **`quota`** — `{"url", "pointer"}`, where to read what is left in a prepaid token plan. The gateway sends
+- **`quota`** — `{"url", "pointer", "limit_pointer"?}`, where to read what is left in a prepaid token plan. The gateway sends
   a `GET` to `url` with the connection's own credential, so `url` must have the same scheme, host and
   port as `base_url`, and reads the number (or numeric string) at `pointer`, an RFC 6901 JSON pointer.
   The provider health check (`GET /api/providers/{id}/health`) then answers `quota: {remaining, error}`,
-  and the provider card shows "N left in plan". A failed quota read never marks the connection
+  and the provider card shows "N left in plan". The optional `limit_pointer` names the plan's total in
+  the same answer (`quota: {remaining, limit, error}`), so the model switcher can draw used against
+  limit and the percent left; without it the switcher shows the balance alone. A failed quota read never marks the connection
   unreachable. `quota` omitted on a `PUT` keeps the saved probe; an empty `url` clears it.
 - **Moving a connection.** The credential is sent wherever `base_url` points, so a `PUT` that moves a
   keyed connection to a different origin — scheme, host or port — is refused unless the API key is

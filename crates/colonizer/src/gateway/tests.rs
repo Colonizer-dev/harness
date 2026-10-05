@@ -2500,7 +2500,7 @@ async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
         .route("/v1/models", axum::routing::get(|| async { StatusCode::OK }))
         .route(
             "/plan",
-            axum::routing::get(|| async { axum::Json(json!({"data": {"remaining": 12_345_678}})) }),
+            axum::routing::get(|| async { axum::Json(json!({"data": {"remaining": 12_345_678, "total": "20000000"}})) }),
         )
         .route("/broken", axum::routing::get(|| async { StatusCode::NOT_FOUND }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2513,6 +2513,7 @@ async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
         Some(QuotaProbe {
             url: format!("{base_url}{path}"),
             pointer: pointer.into(),
+            limit_pointer: None,
         })
     };
     // A prepaid plan usually renames Claude's models to its own (#295's model_map); the probe
@@ -2529,6 +2530,25 @@ async fn a_quota_probe_rides_along_on_the_health_answer_without_changing_it() {
     .await;
     assert_eq!(healthy["reachable"], true);
     assert_eq!(healthy["quota"], json!({"remaining": 12_345_678, "error": null}));
+
+    // A limit pointer reads the plan's total from the same answer, a quoted count included.
+    let with_limit = probe(
+        &app,
+        &Provider {
+            base_url: base_url.clone(),
+            quota: Some(QuotaProbe {
+                url: format!("{base_url}/plan"),
+                pointer: "/data/remaining".into(),
+                limit_pointer: Some("/data/total".into()),
+            }),
+            ..provider("x", None)
+        },
+    )
+    .await;
+    assert_eq!(
+        with_limit["quota"],
+        json!({"remaining": 12_345_678, "limit": 20_000_000, "error": null})
+    );
 
     let refused = probe(
         &app,

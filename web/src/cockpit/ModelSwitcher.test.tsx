@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import type { Api } from "../api";
 import { ApiContext } from "../context";
 import { createMockApi } from "../mock";
-import type { ModelAssignments, ModelSwitchReply, SwitchableModel } from "../types";
+import type { ModelAssignments, ModelProfile, ModelSwitchReply, SwitchableModel } from "../types";
 import { ColonizePane, DRAFT_START } from "./Colonize";
 import { Header } from "./Header";
 import {
@@ -26,10 +26,14 @@ import {
   modelOptionLabel,
   pickModule,
   pickRole,
+  profileDraft,
+  profileNote,
   pushRecent,
   recentChoices,
+  roleQuotaBadge,
   rowSelectValue,
   scopeView,
+  selectionRoles,
   shortModelName,
   sourceLabel,
   switchRequest,
@@ -304,6 +308,106 @@ describe("the ⌘K command", () => {
     expect(pane("/model")).toContain(">Switch model…</span>");
     expect(pane("fix the build")).not.toContain("Switch model…");
     expect(pane("")).toContain("switches models");
+  });
+});
+
+describe("plan usage and quota badges", () => {
+  it("badges a role whose model's plan is out, with the countdown", () => {
+    const now = Date.UTC(2026, 9, 6, 6, 50, 0);
+    expect(roleQuotaBadge("bailian/qwen3.8-max", MODELS, now)).toEqual({
+      text: "Bailian out · 2 h 10 min",
+      title: "Bailian plan exhausted: out of quota until Oct 6, 09:00 UTC",
+    });
+    expect(roleQuotaBadge("zai/glm-5", MODELS, now)).toBeNull();
+    expect(roleQuotaBadge("", MODELS, now)).toBeNull();
+  });
+
+  it("renders the plans section and the badge beside the role on the exhausted plan", () => {
+    const html = render({
+      initialOpen: true,
+      initialScope: { kind: "org", org: "beta" },
+      initialDraft: { roles: {} },
+      initialPlans: [
+        {
+          id: "bailian", name: "Bailian", kind: "provider", used_by: ["orchestrator"], exhausted: true, reset_at: null,
+          reset_unix: Date.UTC(2026, 9, 6, 9, 0, 0) / 1000, last_limit: null, requests: 12, failures: 0, last_request_at: null, since: null, balance: null,
+        },
+      ],
+    });
+    expect(html).toContain('aria-label="plan usage"');
+    expect(html).toContain('data-plan="bailian" data-tone="err"');
+    const withBadge = render({ initialOpen: true, initialDraft: { roles: { model: "bailian/qwen3.8-max" } } });
+    expect(withBadge).toContain("data-quota-badge");
+    expect(withBadge).toContain("Bailian out");
+    expect(render({ initialOpen: true })).not.toContain("data-quota-badge");
+  });
+});
+
+describe("profiles", () => {
+  const profile = (roles: Record<string, string>, over: Partial<ModelProfile> = {}): ModelProfile => ({ id: "p-1", name: "Night shift", module: "claude-code", roles, builtin: false, ...over });
+
+  it("saves the current selection: draft picks, else what each role resolves to", () => {
+    const view = scopeView(ASSIGNMENTS, INSTALL_SCOPE);
+    expect(selectionRoles(view, { roles: { subagent_model: "zai/glm-5", background_model: null } })).toEqual({
+      model: "claude-opus-5-5",
+      subagent_model: "zai/glm-5",
+      background_model: "",
+      summary_model: "",
+      model_low: "",
+      model_high: "",
+    });
+  });
+
+  it("loads a profile into the draft for the install, and Apply sends it as a normal switch", () => {
+    const loaded = profileDraft(ASSIGNMENTS, INSTALL_SCOPE, EMPTY_DRAFT, profile({ model: "sonnet", subagent_model: "zai/glm-5", model_high: "" }));
+    expect(loaded.skipped).toEqual([]);
+    expect(loaded.draft.roles).toEqual({ model: "sonnet", subagent_model: "zai/glm-5" });
+    expect(switchRequest(INSTALL_SCOPE, loaded.draft, "running", true)).toEqual({
+      scope: "install",
+      roles: { model: "sonnet", subagent_model: "zai/glm-5" },
+      apply: "running",
+      dry_run: true,
+    });
+  });
+
+  it("applies to one org only the roles an org can set, and names the skipped ones", () => {
+    const acme = { kind: "org" as const, org: "acme" };
+    const loaded = profileDraft(ASSIGNMENTS, acme, EMPTY_DRAFT, profile({ model: "", subagent_model: "zai/glm-5", model_high: "sonnet" }));
+    expect(loaded.draft.roles).toEqual({ model: null, subagent_model: "zai/glm-5" });
+    expect(loaded.skipped).toEqual(["Model for large tasks"]);
+    expect(profileNote("Night shift", loaded.applied.length, loaded.skipped)).toBe(
+      "Loaded “Night shift” — Apply to switch. Skipped (not settable here): Model for large tasks.",
+    );
+    expect(switchRequest(acme, loaded.draft, "new")).toEqual({ scope: "org", org: "acme", roles: { model: null, subagent_model: "zai/glm-5" }, apply: "new" });
+  });
+
+  it("lists saved profiles and starters, with rename and delete only for saved ones", () => {
+    const html = render({
+      initialOpen: true,
+      initialProfiles: [profile({ model: "sonnet" }), profile({ model: "opus" }, { id: "starter-claude", name: "Claude only", builtin: true })],
+    });
+    expect(html).toContain('aria-label="model profiles"');
+    expect(html).toContain('<optgroup label="Saved"><option value="p-1" title="orchestrator sonnet">Night shift</option></optgroup>');
+    expect(html).toContain('<optgroup label="Starters"><option value="starter-claude" title="orchestrator opus">Claude only</option></optgroup>');
+    expect(html).toContain("Save as profile…");
+  });
+
+  it("saves, renames and deletes profiles on the mock install, which the demo shows", async () => {
+    const api = createMockApi();
+    const { profiles } = await api.modelProfiles();
+    expect(profiles.some((p) => !p.builtin)).toBe(true);
+    expect(profiles.some((p) => p.builtin && p.name === "Claude only")).toBe(true);
+    const saved = await api.createModelProfile({ name: "Cheap crew", module: "claude-code", roles: { model: "sonnet" } });
+    await expect(api.createModelProfile({ name: "cheap CREW", roles: { model: "opus" } })).rejects.toThrow(/already exists/);
+    expect((await api.updateModelProfile(saved.id, { name: "Cheaper crew" })).name).toBe("Cheaper crew");
+    await expect(api.deleteModelProfile("starter-claude")).rejects.toThrow(/starter/);
+    await api.deleteModelProfile(saved.id);
+    expect((await api.modelProfiles()).profiles.some((p) => p.id === saved.id)).toBe(false);
+
+    const { plans } = await api.modelPlans();
+    expect(plans.find((p) => p.kind === "claude")?.used_by).toContain("orchestrator");
+    expect(plans.some((p) => p.exhausted), "an exhausted plan to show").toBe(true);
+    expect(plans.some((p) => p.balance?.pct_left != null), "a plan with a bar").toBe(true);
   });
 });
 

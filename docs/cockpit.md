@@ -96,6 +96,27 @@ The chip at the top right names the install's main model, for example **Opus 5.5
 its provider's health: green when healthy, amber when its provider is failing requests, red while it
 is out of quota. Click it, or type `/model` in ⌘K, to open the switcher:
 
+- **Plans in use**: one row per plan the install's model roles use: the Claude account, then each
+  provider a role routes to, plus any plan that is out. Each row names the roles that use the plan,
+  and has a bar of used against limit with what is left. An exhausted plan sorts first, is red with
+  a full bar, and counts down to its reset in local time ("Out · 2 h 10 min"). The numbers come only
+  from what the mothership knows:
+  - a provider's plan-balance probe (`quota`, with `limit_pointer` for the plan's total), which
+    draws the bar and the percent left;
+  - the balance alone when the total isn't reported;
+  - the request count through the gateway and the last limit hit, for a provider that reports no
+    quota at all.
+
+  Claude reports its session and weekly limits only once one is hit, and the row says so. The
+  rows refresh every 30 seconds while the popover is open.
+- **Profiles**: named sets of role → model choices, stored in the install config
+  (`model-profiles.json`) and shared by every device. **Save as profile…** stores the current
+  selection. Pick a profile and press **Use** to load its models into the scope you picked, then
+  **Apply** as usual (new colonies only, or also the running ones). Under one org, only the roles an
+  org can set are loaded, and the popover names the ones it skipped. Saved profiles can be renamed
+  and deleted. The **Starters** are built from what this install has configured: "Claude only"
+  with a Claude login, and "Claude lead, <provider> crew" (or "All <provider>") for each of the
+  first three providers that list a model. With nothing configured there are no starters.
 - **Scope**: **All orgs (install default)** changes the install's agent settings, which every org
   without an override of its own follows. Pick an org to change only that org. Each role says where
   its value comes from: set install-wide, the module's default, an org override, or the install
@@ -108,7 +129,8 @@ is out of quota. Click it, or type `/model` in ⌘K, to open the switcher:
   six; Codex three; OpenCode two; Pi, Hermes, Grok Build and ACP one. An org can override the
   orchestrator, subagent and background models; the others are install-wide only. Each picker lists
   the models on offer grouped by provider, with the provider's failure rate, and a model whose
-  provider is out of quota is shown disabled with its reset time.
+  provider is out of quota is shown disabled with its reset time. A role whose current model is
+  on an exhausted plan has a red badge beside its name, e.g. "BytePlus out · 2 h 10 min".
 - **Apply to**: **New colonies only** (the default) saves the settings, as Settings would. **Also
   switch running colonies** first says how many running, parked or queued colonies in the scope
   would restart, then, once you confirm, restarts them on the new models the way the [provider out of

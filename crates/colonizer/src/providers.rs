@@ -91,10 +91,14 @@ impl Pricing {
 /// Where to read what is left in a prepaid token plan (issue #199): a `GET` to `url` with the
 /// provider's credential, and `pointer` — an RFC 6901 JSON pointer — naming the remaining-token
 /// number in the answer. The credential rides along, so `url` is pinned to the base URL's origin.
+/// `limit_pointer`, when set, names the plan's total in the same answer, so the model switcher can
+/// draw used against limit; without it only the remaining count is known.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct QuotaProbe {
     pub url: String,
     pub pointer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_pointer: Option<String>,
 }
 
 /// Per-provider dialect quirks: what one endpoint rejects that the Anthropic wire otherwise allows.
@@ -914,7 +918,7 @@ pub fn harness_disabled_tool_lines(agent: &AgentModule, runner_env: &Map<String,
 /// `<provider-id>/<model>`, named for a human, e.g. `["subagent_model"]`. Empty means no model setting
 /// points at it. A bare alias or a partial id prefix is Claude's or another provider's model, so it
 /// doesn't match, same rule as [`ColonyRoutes::used`].
-fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
+pub(crate) fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> {
     let mut used: Vec<&'static str> = Vec::new();
     for env in envs {
         for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
@@ -932,7 +936,7 @@ fn used_by(provider_id: &str, envs: &[Map<String, Value>]) -> Vec<&'static str> 
 
 /// The claude-code runner env for the global agent settings (schema defaults layered under
 /// modules.json), plus one per org that overrides them: every configuration a colony could start with.
-async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
+pub(crate) async fn runner_envs(app: &App) -> Vec<Map<String, Value>> {
     let Some(agent) = app.agents.iter().find(|a| a.id == "claude-code") else {
         return Vec::new();
     };
@@ -1023,7 +1027,7 @@ impl QuotaProviderDetail {
 }
 
 /// The plain words for a model setting, as the banner lists what an exhausted plan affects.
-fn role_label(setting: &str) -> &'static str {
+pub(crate) fn role_label(setting: &str) -> &'static str {
     match setting {
         "model" => "orchestrator",
         "subagent_model" => "subagents",
@@ -1038,7 +1042,7 @@ fn role_label(setting: &str) -> &'static str {
 /// The roles that run on the Claude account rather than a configured provider: every model setting
 /// whose value names no provider's model. An empty setting is the agent's own default, which is a
 /// Claude model, so it counts too — but only the orchestrator, since the others fall back to it.
-fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]) -> Vec<&'static str> {
+pub(crate) fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]) -> Vec<&'static str> {
     let mut used: Vec<&'static str> = Vec::new();
     for env in envs {
         for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
@@ -1326,9 +1330,21 @@ pub async fn put(State(app): State<Shared>, Path(id): Path<String>, Json(req): J
                     "quota JSON pointer must be non-empty and start with / (RFC 6901), like /data/remaining_tokens",
                 ));
             }
+            let limit_pointer = quota
+                .limit_pointer
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string);
+            if limit_pointer.as_deref().is_some_and(|p| !p.starts_with('/')) {
+                return Err(bad(
+                    "quota limit JSON pointer must start with / (RFC 6901), like /data/total_tokens, or be empty",
+                ));
+            }
             Some(Some(QuotaProbe {
                 url: url.into(),
                 pointer: quota.pointer.trim().into(),
+                limit_pointer,
             }))
         }
         None => None,
@@ -2750,6 +2766,7 @@ mod tests {
         req.quota = Some(QuotaProbe {
             url: "https://balances.example.com/plan".into(),
             pointer: "/data/remaining".into(),
+            limit_pointer: None,
         });
         let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -2772,6 +2789,7 @@ mod tests {
             req.quota = Some(QuotaProbe {
                 url: url.into(),
                 pointer: "/data/remaining".into(),
+                limit_pointer: None,
             });
             let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -2791,6 +2809,7 @@ mod tests {
             req.quota = Some(QuotaProbe {
                 url: "https://api.deepseek.com/plan".into(),
                 pointer: pointer.into(),
+                limit_pointer: None,
             });
             let err = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST);
@@ -2808,6 +2827,7 @@ mod tests {
         req.quota = Some(QuotaProbe {
             url: "https://api.deepseek.com/plan/".into(),
             pointer: " /data/remaining ".into(),
+            limit_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let saved = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
@@ -2815,7 +2835,8 @@ mod tests {
             saved.quota,
             Some(QuotaProbe {
                 url: "https://api.deepseek.com/plan".into(),
-                pointer: "/data/remaining".into()
+                pointer: "/data/remaining".into(),
+                limit_pointer: None,
             })
         );
 
@@ -2829,6 +2850,7 @@ mod tests {
         req.quota = Some(QuotaProbe {
             url: "  ".into(),
             pointer: String::new(),
+            limit_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(req)).await.unwrap();
         let cleared = app.providers().into_iter().find(|p| p.id == "deepseek").unwrap();
@@ -2955,6 +2977,7 @@ mod tests {
         first.quota = Some(QuotaProbe {
             url: "https://api.deepseek.com/plan".into(),
             pointer: "/data/remaining".into(),
+            limit_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(first)).await.unwrap();
 
@@ -2982,6 +3005,7 @@ mod tests {
         retried.quota = Some(QuotaProbe {
             url: "https://api.example.com/plan".into(),
             pointer: "/data/remaining".into(),
+            limit_pointer: None,
         });
         let _ = put(State(app.clone()), Path("deepseek".into()), Json(retried)).await.unwrap();
         assert_eq!(app.providers()[0].base_url, "https://api.example.com/anthropic");
