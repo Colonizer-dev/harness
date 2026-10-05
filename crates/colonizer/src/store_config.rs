@@ -9,6 +9,7 @@
 
 use crate::config::Settings;
 use crate::store::{self, LocalDirStore, MigrationReport, SessionStore};
+use crate::store_s3::{Credentials, MirroredStore, S3Config, S3Store};
 use crate::util;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -29,13 +30,38 @@ pub(crate) enum Backend {
     /// release has written.
     #[default]
     Local,
+    /// An S3-compatible bucket (R2, MinIO, AWS S3), mirrored through the data dir's working copy
+    /// (`store_s3::MirroredStore`). Credentials come from the secrets mechanism, never this file.
+    S3(S3Config),
 }
 
 impl Backend {
-    /// Opens the backend.
+    /// Opens the backend the way a mothership runs on it: a bucket through the mirror over the
+    /// data dir's working copy (hydrated from the bucket when the working copy has no index), with
+    /// its uploader started.
     pub(crate) async fn open(&self, cfg: &Settings) -> Result<Arc<dyn SessionStore>> {
         match self {
             Backend::Local => Ok(Arc::new(LocalDirStore::new(cfg.data_dir.clone()))),
+            Backend::S3(_) => {
+                let remote = self.open_direct(cfg).await?;
+                let mirror = MirroredStore::open(cfg.data_dir.clone(), remote)
+                    .await
+                    .with_context(|| format!("could not open {}", self.describe(&cfg.data_dir)))?;
+                mirror.spawn_uploader();
+                Ok(mirror)
+            }
+        }
+    }
+
+    /// Opens the backend's store of record itself, with no working copy: what a migration copies
+    /// into and out of.
+    pub(crate) async fn open_direct(&self, cfg: &Settings) -> Result<Arc<dyn SessionStore>> {
+        match self {
+            Backend::Local => Ok(Arc::new(LocalDirStore::new(cfg.data_dir.clone()))),
+            Backend::S3(config) => {
+                let creds = Credentials::resolve(&cfg.config_dir)?;
+                Ok(Arc::new(S3Store::new(config.clone(), creds)?))
+            }
         }
     }
 
@@ -43,6 +69,7 @@ impl Backend {
     pub(crate) fn describe(&self, data_dir: &Path) -> String {
         match self {
             Backend::Local => format!("the local store in {}", data_dir.display()),
+            Backend::S3(config) => format!("the bucket {}", config.describe()),
         }
     }
 }
@@ -57,10 +84,14 @@ pub(crate) enum StoreRef {
 }
 
 impl StoreRef {
-    /// Parses `local` (this install's local store), `local:<dir>` or a bare directory path
-    /// (anything with a `/`, or starting with `.` or `~`).
+    /// Parses `local` (this install's local store), `local:<dir>`, a bare directory path (anything
+    /// with a `/`, or starting with `.` or `~`), or a bucket,
+    /// `s3://<bucket>[/<prefix>]?endpoint=<url>[&region=<region>]`.
     pub(crate) fn parse(spec: &str) -> Result<StoreRef> {
         let spec = spec.trim();
+        if spec.starts_with("s3://") {
+            return Ok(StoreRef::Backend(Backend::S3(S3Config::parse(spec)?)));
+        }
         if spec == "local" {
             return Ok(StoreRef::Backend(Backend::Local));
         }
@@ -73,12 +104,14 @@ impl StoreRef {
         if spec.contains('/') || spec.starts_with('.') || spec.starts_with('~') {
             return Ok(StoreRef::Dir(expand_home(spec)));
         }
-        bail!("unknown session store {spec:?}: use local, local:<dir>, or a directory path")
+        bail!(
+            "unknown session store {spec:?}: use local, local:<dir>, a directory path, or s3://<bucket>/<prefix>?endpoint=<url>"
+        )
     }
 
     async fn open(&self, cfg: &Settings) -> Result<Arc<dyn SessionStore>> {
         match self {
-            StoreRef::Backend(backend) => backend.open(cfg).await,
+            StoreRef::Backend(backend) => backend.open_direct(cfg).await,
             StoreRef::Dir(dir) => Ok(Arc::new(LocalDirStore::new(dir.clone()))),
         }
     }
@@ -95,6 +128,7 @@ impl StoreRef {
         match self {
             StoreRef::Backend(Backend::Local) => Some(data_dir),
             StoreRef::Dir(dir) => Some(dir),
+            StoreRef::Backend(Backend::S3(_)) => None,
         }
     }
 

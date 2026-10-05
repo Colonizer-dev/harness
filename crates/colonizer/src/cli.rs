@@ -296,7 +296,8 @@ enum SessionsCommand {
     /// file), then switch this install to it. Idempotent and resumable: run it again after an
     /// interruption and it copies only what is missing
     Migrate {
-        /// The store to copy into: local:<dir>, or a directory path
+        /// The store to copy into: local, local:<dir>, a directory path, or
+        /// s3://<bucket>[/<prefix>]?endpoint=<url>[&region=<region>]
         #[arg(long, value_name = "BACKEND")]
         to: String,
         /// The store to copy from (default: the configured one). The setting is switched only when

@@ -109,6 +109,23 @@ The store an install runs on is named in `<config dir>/session-store.json` (`COL
 { "backend": "local" }
 ```
 
+or a bucket on any S3-compatible service (Cloudflare R2, MinIO, AWS S3):
+
+```json
+{ "backend": "s3", "endpoint": "https://<account>.r2.cloudflarestorage.com", "bucket": "colonies", "prefix": "home", "region": "auto" }
+```
+
+`endpoint` is the service's base URL (requests are path-style, `<endpoint>/<bucket>/<key>`, which
+all three serve); `prefix` is optional and puts the store under `<prefix>/`; `region` is the signing
+region (`auto` for R2, `us-east-1` for MinIO's default, the bucket's own on AWS). On the command line
+the same bucket is `s3://colonies/home?endpoint=https://<account>.r2.cloudflarestorage.com`.
+The key pair never goes in the file: it comes from `COLONIZER_SESSION_STORE_ACCESS_KEY_ID` and
+`COLONIZER_SESSION_STORE_SECRET_ACCESS_KEY`, or else from the saved secrets
+`session-store-access-key-id` and `session-store-secret-access-key` in the config dir, read through
+the same mechanism as every provider key (the keychain, or a 0600 file encrypted under
+`COLONIZER_MASTER_KEY` when that is set). Give the key read, write, list and delete on the prefix
+and nothing else: a bucket protects the colony tokens it holds by access control, not mode bits.
+
 No file means `local`: `sessions.json` and `sessions/<id>/` under the data dir, the layout every
 release has written, so an existing install reads unchanged. A file the build cannot read stops the
 mothership at startup with the file's path in the error, rather than starting it on an empty colony
@@ -118,6 +135,35 @@ and it writes it only after a copy that verified itself.
 Whatever the backend, the data dir keeps a working copy of every session: a microVM mounts its
 session's `vm/` and `out/` from a host path, so the backend decides where the records are kept, not
 where a colony runs.
+
+## The bucket backend
+
+`crates/colonizer/src/store_s3.rs` has two layers.
+
+- **`S3Store`** speaks to the bucket directly, signing every request with AWS Signature Version 4.
+  A replace is one whole-object put. An append is a read-modify-write under a conditional put
+  (`If-Match` on the ETag it read, `If-None-Match: *` for a new object), retried when another writer
+  won, so the single-writer rule is enforced rather than assumed. Throttling (429), server errors
+  (5xx) and dropped connections are retried five times with exponential backoff and jitter; an
+  access error is not retried. A quarantine is copy-then-delete. `colonizer sessions migrate` copies
+  into and out of this layer.
+- **`MirroredStore`** is what a mothership runs on: a write-ahead local cache with upload. Every
+  write lands in the working copy first, byte for byte as the local store writes it, and the object
+  is owed to the bucket; the upload state (`session-store-sync.json`, beside the index) is saved
+  before the write returns, so a crash between the write and its upload is caught up on the next
+  start. An uploader sends what is owed about a second after the last write (a burst of appends to
+  one log uploads once, as the whole file), backs off while the bucket refuses, and every 30 seconds
+  sweeps the working copy for files that changed without going through the store: what the microVM
+  wrote into `out/` or `transcripts/`, the gateway's audit log. Reads are served from the working
+  copy. When the working copy has no index and the bucket has one, startup hydrates it from the
+  bucket, credentials owner-only and the index last, which is how a fresh host takes over another
+  host's colonies.
+
+**The read-lag bound.** A write through the store reaches the bucket within the upload delay (one
+second) while the bucket answers, and a file written into the working copy directly within the
+sweep interval (30 seconds); a bucket that refuses delays both by its backoff, and the owed objects
+wait in the upload state until it answers. Another host reading the bucket can be that far behind
+this one.
 
 ## Migration and rollback
 
@@ -142,7 +188,8 @@ rollback is pointing the mothership back at the old store, which never changed:
    the mothership at it with `COLONIZER_DATA_DIR`, as the command says.
 
 `--from` names a source other than the configured store; the setting is then left alone. A store is
-named as `local` (this install's local store), `local:<dir>`, or a bare directory path.
+named as `local` (this install's local store), `local:<dir>`, a bare directory path, or a bucket,
+`s3://<bucket>[/<prefix>]?endpoint=<url>[&region=<region>]`.
 
 **Idempotent and resumable.** The destination may be empty, hold part of this source's copy (an
 interrupted run), or hold all of it (a finished run). A file the destination already holds byte for
@@ -161,7 +208,11 @@ form of the same copy, kept for scripts written against it. It never changes the
 ## Limits
 
 - **One writer per session.** A store holds no lock of its own; the mothership that owns a colony
-  is the only process that writes it, and a migration needs the mothership stopped.
+  is the only process that writes it, and a migration needs the mothership stopped. The bucket
+  enforces it for appends with conditional puts; the mirror's whole-object uploads assume it, so two
+  motherships must never run on one prefix.
+- **Upload on the next start.** The mirror has no shutdown flush: what was owed when the mothership
+  stopped is uploaded when it next starts (the upload state survives). Until then the bucket lags.
 - **What still uses a local path.** Some reads and writes cannot go through the store API, because
   something other than the mothership's own code consumes a path: the microVM mounts `vm/`, `out/`,
   `transcripts/` and the services directory; `gh --body-file` reads `finding-body.md`, `review.md`
@@ -206,4 +257,12 @@ migration (`a_migration_round_trips_local_to_memory_and_back_byte_for_byte`,
 (`store_config::tests::sessions_migrate_dry_runs_copies_reruns_and_leaves_the_setting_for_a_directory`,
 `the_migrate_store_command_dry_runs_then_copies`), the checked-in v0.1.9 data dir
 (`the_v0_1_9_fixture_reads_and_writes_byte_for_byte`), the startup read
-(`app::tests::startup_loads_the_index_through_the_store`), and the static check above.
+(`app::tests::startup_loads_the_index_through_the_store`), and the static check above. The bucket
+backend runs the same conformance suite against an in-process S3-compatible server that checks
+every request's signature (`store_s3::tests::the_contract_holds_for_the_s3_store`,
+`the_contract_holds_for_the_mirror_and_a_flush_makes_the_bucket_match`), with the signer checked
+against AWS's published SigV4 examples, retries, racing appends, hydration, the sweep, and the
+whole move into a bucket and back (`sessions_migrate_moves_to_a_bucket_switches_and_moves_back`).
+Set `COLONIZER_TEST_S3` to an `s3://` URL, with the two key variables, and
+`the_contract_holds_against_a_real_bucket_when_one_is_named` runs the suite against a real bucket
+(MinIO or R2) under a fresh prefix.

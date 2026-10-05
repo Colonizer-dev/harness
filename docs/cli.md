@@ -71,6 +71,7 @@ colonizer hotspots --repo acme/app       # a repository's mirror instead of the 
 colonizer sessions migrate --to local:/new/data --dry-run   # count what would move, write nothing
 colonizer sessions migrate --to local:/new/data             # copy this install's colonies, verified
 colonizer sessions migrate --from /old/data --to /new/data  # copy from a store other than the configured one
+colonizer sessions migrate --to 's3://colonies/home?endpoint=https://acct.r2.cloudflarestorage.com'  # move to a bucket, and switch
 ```
 
 `hotspots` reads a git repository on this machine — no mothership — and ranks the files its
