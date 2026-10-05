@@ -1808,6 +1808,14 @@ mod tests {
             .is_ok(),
             "an empty stack is not set, not an error"
         );
+        assert!(
+            validate(&OrgSettings {
+                exec_policy: Some("   ".into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "a blank exec policy is not set, not an error"
+        );
         let bad_model = OrgSettings {
             agent: Some(AgentOverrides {
                 model: Some("two words".into()),
@@ -2000,6 +2008,7 @@ mod tests {
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
+            exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny", "command": "rm -rf"}]}"#.into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
                 ..Default::default()
@@ -2053,6 +2062,10 @@ mod tests {
         assert_eq!(
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
+        );
+        assert_eq!(
+            incoming.exec_policy, saved.exec_policy,
+            "an org's exec policy survives a save from a web build that predates it"
         );
         assert_eq!(
             incoming.repo_max_parallel,
