@@ -1,6 +1,6 @@
 // The mock's per-call state slice for the remote feature (issue #827). The one shared state object
 // (MockState in src/mockState.ts) carries these fields so a reassignment is seen by every feature.
-import type { ApiTokenMeta, Phones, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "../../types";
+import type { ApiTokenMeta, LinkDevices, Phones, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "../../types";
 import { ago } from "../../mockShared";
 import { defaultPushPrefs } from "../../push";
 import type { MockState } from "../../mockState";
@@ -9,6 +9,7 @@ export type RemoteMockState = {
     remotePairingState: RemotePairing;
     remoteState: RemoteStatus;
     phoneState: Phones;
+    linkState: LinkDevices;
     remoteHost: string;
     apiTokens: ApiTokenMeta[];
     pushSubs: PushSubscriptionSummary[];
@@ -45,6 +46,7 @@ export function installRemoteMockState(ms: MockState): void {
   ms.remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
   ms.remoteState = { enabled: false, host: null, connected: false, since: null, replaced: false };
   ms.phoneState = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
+  ms.linkState = { devices: [], pending: [] };
   ms.remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
   ms.remotePairingState = {
     owner: null,

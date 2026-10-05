@@ -109,6 +109,8 @@ pub(crate) const KINDS: &[&str] = &[
     "remote.pair",
     "remote.pair_reject",
     "remote.unpair",
+    "remote.device_approve",
+    "remote.device_revoke",
     "workspace.enable",
     "workspace.disable",
     "workspace.settings",

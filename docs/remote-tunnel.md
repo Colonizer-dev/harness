@@ -15,14 +15,12 @@ tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558
 switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, described in
 [Pairing and the owner](#pairing-and-the-owner)), and the security review
 ([remote-access-review.md](remote-access-review.md), #536). The relay is deployed at
-my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Of the review's
-findings, R1 (#659), R2, R4 and R5 are fixed; R3 is fixed only for plaintext relays, and the rest of
-it (the relay sees the cockpit token, which survives a reset) waits on a product decision
-([remote-access-review.md](remote-access-review.md#status-on-main-re-checked-2026-09-27)). The
-deployed Worker predates the R2, R4 and R5 fixes until it is redeployed. The whole link is verified
-end to end against the real relay code run locally — register, tunnel, owner pairing, a cockpit GET
-and websocket through the relay, unpair, reset (`the_whole_link_round_trips_through_the_real_relay`
-in `crates/colonizer/src/remote.rs`, over `services/relay/scripts/local-relay.mjs`). The feature is
+my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Every finding of
+the review is fixed (R1 in #659, R2–R5 in #1030); the deployed Worker carries the relay-side
+fixes once it is redeployed. The whole link is verified end to end against the real relay code
+run locally — register, tunnel, owner pairing, signing a browser in on the link, a cockpit GET and
+websocket through the relay, unpair, reset (`the_whole_link_round_trips_through_the_real_relay` in
+`crates/colonizer/src/remote.rs`, over `services/relay/scripts/local-relay.mjs`). The feature is
 off by default. The two halves do not follow this contract in several places, listed in
 [Where the code differs today](#where-the-code-differs-today). The client as
 built is described in [protocol.md §6.10](protocol.md#610-remote-access-tunnel). Where this
@@ -240,7 +238,21 @@ one-year `Max-Age`, host-only, and carries no `Secure` on localhost and the LAN,
 `http://`; the tunnel client adds `Secure` to every cookie it sends back through the tunnel.
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the
-cockpit auth run unchanged; the relay does not bypass either. The tunnel client marks each request
+cockpit auth run on them; the relay does not bypass either. One thing differs (review finding R3):
+the install token is never accepted on a tunnelled request — not as a bearer, not as the
+`colonizer_token` cookie, not as the `?token=` sign-in link — so it never has to cross the relay.
+The owner's browser elsewhere signs in with a **link credential** (`clk_…`), and a link credential
+authenticates nothing that did not come through the tunnel. It carries the owner's full reach
+through the link (pairing confirms stay local-only, as below), is stored only as a hash in
+`<config_dir>/remote/links.json`, and is handed over the way a phone pairs: Settings → Remote
+access → *Sign in on another device* mints a single-use, five-minute invite
+(`POST /api/remote/devices/invites` answers `https://<host>/?pair=<invite>`), which opens only
+through the tunnel; the page there shows six digits, typed into the local cockpit
+(`POST /api/remote/devices/confirm`, local-only); the browser's poll (`POST /api/phone/claim`)
+then sets the credential as its `colonizer_token` cookie on the link's origin. `GET
+/api/remote/devices` lists them and `DELETE /api/remote/devices/{id}` signs one out; Reset link
+rotates them all. Either way their in-flight requests, streams and sockets end at once (the
+revocation phones use). Paired phones (`cph_…`) work through the link as before. The tunnel client marks each request
 with a request extension that only it can set, and the fence exemption keys off that marker, never
 off the `Host` header alone — a local process can send any `Host` header to `127.0.0.1`. With the
 marker, and only while remote access is on (checked per request, not at connect time),

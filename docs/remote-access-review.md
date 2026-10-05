@@ -52,7 +52,7 @@ which still has no endpoint that deletes one. R3–R5 are unchanged: `http_base`
 for any host, the relay still passes `Domain=` through, the cockpit cookie still has no `Secure`
 (`set_cookie_header` in `auth.rs`), and `ws_in` and `bodies` are still unbounded channels.
 
-**Since then (re-checked 2026-10-05).** R2, R4 and R5 are fixed, and R3 in part; each fix has
+**Since then (re-checked 2026-10-05).** R2, R3, R4 and R5 are fixed; each fix has
 tests that fail without it, and the whole link now runs end to end against the real relay code
 (`the_whole_link_round_trips_through_the_real_relay` in `remote.rs`, over
 `services/relay/scripts/local-relay.mjs`). The deployed Worker predates these fixes until it is
@@ -62,23 +62,16 @@ redeployed.
 | :--- | :--- | :--- |
 | R1 | Fixed | #659, as above. |
 | R2 | Fixed (`a787f94`) | The relay has a signed `DELETE /api/installs/<id>` that deletes the install, its owner and its pairings and closes its tunnel `4404`. Reset link calls it with the old key before replacing it, and if the relay cannot be told it answers `502` and keeps the old link, so a reset never leaves the old install live. Only an unreadable old key is replaced regardless, since nothing can sign for it. |
-| R3 | Partly fixed (`7853719`) | `COLONIZER_REMOTE_URL` takes plaintext `ws://` only for a loopback relay. **Not changed, by decision pending:** the relay terminates TLS, so it sees the `colonizer_token` cookie and every body, and that token survives Reset link. Closing that needs a product choice, set out below. |
+| R3 | Fixed (`7853719`, and the link-credential commit of #1030) | `COLONIZER_REMOTE_URL` takes plaintext `ws://` only for a loopback relay. This machine's install token is never accepted through the tunnel — bearer, cookie or `?token=` — so it never needs to cross the relay. The owner's browser elsewhere signs in with a **link credential** (`clk_…`) instead: owner-scoped, stored hashed, valid only on tunnelled requests, handed over like a phone pairing (a single-use invite opened on the link, six digits confirmed locally, then the credential set as that browser's cookie on the link's origin). Reset link rotates every link credential at once, ending their requests and sockets through the same revocation phones use, and one device can be signed out alone. |
 | R4 | Fixed (`8574073`) | The relay drops every `Domain` attribute from a forwarded `set-cookie` and drops a cookie named like its own `__Host-` cookies; the tunnel client adds `Secure` to every `Set-Cookie` it sends back through the tunnel. |
 | R5 | Fixed (`9e64ff4`) | The tunnel socket takes no message or frame over 1 MiB; body frames wait in a 16-frame queue (the reader pauses) and are dropped once a stream has its body; a chunk is size-checked before it is decoded; websocket frames wait in a 64-frame queue, and a socket that falls behind is closed `1008` and its stream freed within 5 s. The relay closes a passthrough `1009` on a browser message over 128 KiB. |
 
-**What R3 still needs: a decision.** Every option changes what the owner can do through the link,
-so none was picked here:
-
-- *Refuse the install token through the tunnel*, so a remote browser has to pair as a phone
-  (`phone.rs`): a per-device, revocable credential that Reset link could revoke. The owner would
-  then lose, through the link, what a phone cannot do — revoking a lost phone among it, which
-  `phone.rs` deliberately allows through the relay today.
-- *A link-scoped owner token*: a second token, valid only through the tunnel and rotated by Reset
-  link, handed to the remote browser by a sign-in link the cockpit shows. Needs a Settings UI.
-- *Rotate the install token on Reset link*: signs out the local browser and every script that
-  cached it.
-- *Accept the relay's trust level in writing*, as this review's deploy list allows: the relay can
-  read everything and act as the owner while a session lasts.
+**How R3 was closed.** The maintainer chose the link-scoped owner credential over the other
+options (pairing remote browsers as phones, which would have lost owner powers through the link;
+rotating the install token on reset; or accepting the relay's trust level in writing). What the
+relay can still see is a link credential, never the install token, and only until the next Reset
+link. Paired phones (`cph_…`) still work through the link as before: they are per-device and
+revocable, and remain phones.
 
 No issue with any of the five R titles is in the public tracker as of 2026-09-27; if they were
 filed privately (as security advisories), this document cannot see them.
@@ -196,9 +189,9 @@ Each was confirmed by code reading; L1 also by a proof-of-concept run.
 
 - R1 fixed, with a relay e2e test that uses the Rust client's exact frame shape. Done in #659.
 - R2 and R3 fixed, or the relay's trust level — it can read everything and act as the owner —
-  accepted in writing. R2 is fixed (`a787f94`); R3 is fixed only for plaintext relays (`7853719`),
-  and the rest waits on the decision under *Status on `main`*. R4 and R5 are fixed too
-  (`8574073`, `9e64ff4`); the deployed Worker needs a redeploy to carry them.
+  accepted in writing. R2 is fixed (`a787f94`) and R3 too (`7853719` and the link credential in
+  #1030); R4 and R5 are fixed as well (`8574073`, `9e64ff4`). The deployed Worker needs a redeploy
+  to carry the relay-side halves.
 - Deploy configuration: `SESSION_SECRET` set (the relay fails closed without it), `REGISTER_LIMITER`
   and `DIAL_LIMITER` bindings deployed, the real `GITHUB_CLIENT_ID` and D1 `database_id` in place of
   `wrangler.toml`'s placeholders, and the GitHub OAuth app's wildcard callback matching enabled
