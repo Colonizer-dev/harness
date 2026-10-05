@@ -185,7 +185,7 @@ back to an initial. The same record is the seen-set behind the prompt:
 when approved, or `reviewed: false` when stored with review off.
 
 **Watchdog.** New module kind `watchdog` (provider `default`, on by default; settings
-`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30) and kind `memory` (provider `files`,
+`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 4) and kind `memory` (provider `files`,
 on by default; setting `require_review` = true; off lets only `repo` notes skip review). `Session`
 gains `last_activity_at` and `attention`:
 
@@ -202,7 +202,17 @@ colony blocked on an exhausted provider is flagged `provider_quota_exhausted` in
 (§6.5, Provider out of quota cards). A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
-`autopilot_held`. A flag carries a `detail` when the mothership can say why in one line: a claim
+`autopilot_held`. An error the retry classifier calls transient (a gateway 5xx, 429 or 529, an
+unreachable or overloaded provider, a timeout, a dropped or refused connection) is retried first
+(issue #980): the colony parks with `parked.reason` and `attention.reason` `provider_retry`, and the
+queue tick continues it after 2, 5, 10 and 20 minutes, re-checking under the lifecycle lock that it
+is still parked for that reason. After `provider_retry_max_attempts` (0–4; 0 turns the retry off)
+it is held as `autopilot_held`, with a message naming the provider's error; a clean turn end resets
+the count (`Session.provider_retries`). A colony whose Claude account answered 401 or 403 parks
+with reason `waiting_for_account` ahead of all of this (Claude account health, in
+[harness-api.md](harness-api.md#get-apistatus)). On every tick, whether or not the watchdog is
+enabled, a colony that is `waiting_for_answer` with no question actually pending is set back to
+`idle` with a colony log line saying why (issue #981). A flag carries a `detail` when the mothership can say why in one line: a claim
 held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
 (Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
