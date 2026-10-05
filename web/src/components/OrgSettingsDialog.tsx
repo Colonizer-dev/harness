@@ -20,6 +20,7 @@ type FieldKey =
   | "budget_usd"
   | "host_disk"
   | "stack"
+  | "exec_policy"
   | "memory_enabled"
   | "memory_deja"
   | "watchdog_enabled"
@@ -31,7 +32,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos";
+  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos" | "json";
   min?: number;
   max?: number;
   unit?: string;
@@ -45,6 +46,7 @@ const FIELDS: FieldSpec[] = [
   { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
   { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
+  { key: "exec_policy", group: "Colonies", label: "Exec policy", hint: "JSON rules this org's colonies narrow the install's exec policy with; a repository's own .colonizer/exec-policy.json narrows further", kind: "json" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
   { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
   { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
@@ -81,6 +83,8 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.host_disk === "" ? "0" : settings.host_disk;
     case "stack":
       return settings.stack;
+    case "exec_policy":
+      return settings.exec_policy;
     case "memory_enabled":
       return settings.memory?.enabled;
     case "memory_deja":
@@ -125,6 +129,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return setting("sandbox", "host_disk");
     case "stack":
       return setting("sandbox", "preset");
+    case "exec_policy":
+      // The install agent module's own `exec_policy` setting, the layer an org narrows.
+      return setting("agent", "exec_policy");
     case "memory_enabled":
       return toggle("memory");
     case "memory_deja":
@@ -138,6 +145,9 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
 }
 
 function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = null): string {
+  if (spec.key === "exec_policy")
+    // A policy is multi-line JSON, so name the layer it narrows instead of printing it.
+    return value ? "the install's policy" : "none";
   if (spec.key === "close_superseded_prs") {
     const list = typeof value === "string" ? parseRepoList(value) : [];
     return list.length ? list.join(", ") : "never closes";
@@ -175,8 +185,10 @@ function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
   for (const spec of FIELDS) {
     const own = readSetting(settings, spec.key);
     const fallback = globalValue(modules, spec.key);
-    const override =
-      own !== undefined && own !== null && !(spec.kind === "model" && own === "") && !(spec.kind === "repos" && own === "");
+    // A blank list or policy is no override, and a policy the server stores trimmed: a saved value
+    // that is only whitespace reads as inherit there, so it must read as inherit here too.
+    const blank = spec.kind === "repos" ? own === "" : spec.kind === "json" ? String(own ?? "").trim() === "" : false;
+    const override = own !== undefined && own !== null && !(spec.kind === "model" && own === "") && !blank;
     const base = override ? own : fallback;
     draft[spec.key] = {
       override,
@@ -202,7 +214,23 @@ function parseSize(raw: string): string | null {
   return /^\d+[KkMmGgTt]?$/.test(text) ? text : null;
 }
 
-/** Inherited fields are sent as null; an empty model or size override also means inherit. */
+/** The server's rule, mirrored for instant feedback: a policy is a JSON object with a `rules` array,
+ *  within the 64 KiB it measures in bytes. The runner's own cap counts UTF-16 units, so on a policy
+ *  with non-ASCII in it the server's is the tighter of the two — measure bytes, as the server does,
+ *  rather than `length`, so the two agree. */
+function isPolicyJson(raw: string): boolean {
+  const text = raw.trim();
+  if (text === "") return true; // an override left empty is no override at all
+  if (new TextEncoder().encode(text).length > 64 * 1024) return false;
+  try {
+    const parsed = JSON.parse(text);
+    return !!parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.rules);
+  } catch {
+    return false;
+  }
+}
+
+/** Inherited fields are sent as null; an empty model, size or policy override also means inherit. */
 function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null } {
   const pick = (key: FieldKey): string | number | boolean | null => {
     const field = draft[key];
@@ -215,6 +243,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       const text = parseSize(String(field.value));
       return text === "" ? null : text; // an override left empty is no override at all
     }
+    if (spec.kind === "json") return String(field.value).trim() || null;
     return parseNumber(spec, String(field.value));
   };
   const invalid = FIELDS.find(
@@ -222,7 +251,8 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       draft[spec.key].override &&
       ((spec.kind === "number" && parseNumber(spec, String(draft[spec.key].value)) === null) ||
         (spec.kind === "size" && parseSize(String(draft[spec.key].value)) === null) ||
-        (spec.kind === "repos" && !isRepoList(String(draft[spec.key].value)))),
+        (spec.kind === "repos" && !isRepoList(String(draft[spec.key].value))) ||
+        (spec.kind === "json" && !isPolicyJson(String(draft[spec.key].value)))),
   );
   const settings: OrgSettings = {
     agent: {
@@ -238,6 +268,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
+    exec_policy: pick("exec_policy") as string | null,
     memory: { enabled: pick("memory_enabled") as boolean | null, deja: pick("memory_deja") as boolean | null },
     watchdog: {
       enabled: pick("watchdog_enabled") as boolean | null,
@@ -252,7 +283,9 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
         ? `${invalid.label} must be a size like 512M or 16G, or 0 for unlimited`
         : invalid.kind === "repos"
           ? `${invalid.label} entries must be repositories like acme/api`
-          : numberError(invalid)
+          : invalid.kind === "json"
+            ? `${invalid.label} must be JSON with a "rules" array`
+            : numberError(invalid)
       : null,
   };
 }
@@ -562,6 +595,21 @@ export function OrgSettingsForm({
                         className={cx(
                           inputClass,
                           !isRepoList(String(draft[spec.key].value)) && "border-err focus:border-err",
+                        )}
+                      />
+                    )}
+                    {spec.kind === "json" && (
+                      <textarea
+                        value={String(draft[spec.key].value)}
+                        onChange={(e) => set(spec.key, { value: e.target.value })}
+                        placeholder={'{\n  "rules": []\n}'}
+                        rows={4}
+                        spellCheck={false}
+                        aria-label={`${spec.label} JSON for ${org}`}
+                        aria-invalid={!isPolicyJson(String(draft[spec.key].value))}
+                        className={cx(
+                          "w-full resize-y rounded-lg border bg-panel px-2.5 py-2 font-mono text-[12.5px]",
+                          !isPolicyJson(String(draft[spec.key].value)) ? "border-err" : "border-border",
                         )}
                       />
                     )}

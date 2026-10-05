@@ -80,6 +80,14 @@ gateway half).
 shadowing the sandbox module's `preset` (`auto`, which reads each repository's stack at boot, unless
 something is pinned above it). `null` inherits.
 
+`exec_policy` (issue #924) is this org's layer of the exec policy, as the JSON a runner reads: an
+object with a `rules` array, at most 64 KiB — the cap both runners put on a layer, so a larger one is
+refused at save time rather than dropped at boot. (The API counts bytes and the runners count UTF-16
+units, so a policy with non-ASCII in it is capped a little tighter here than there.) It narrows the install agent module's
+`exec_policy` setting and is narrowed again by a colony's own `.colonizer/exec-policy.json`
+([exec policy](../../modules/agents/claude-code/README.md#exec-policy)); `null` adds no layer. An org's colonies on an agent module that does
+not apply the policy refuse to boot while any layer is set, the same as for the install's.
+
 `close_superseded_prs` (issue #673) is not inherited either: a list of this org's repositories, full
 `owner/name`, whose superseded colonies' pull requests Colonizer may close on GitHub when another
 colony's pull request merges over them (*Duplicate-colony prevention*, *Superseded colony work*).
@@ -119,6 +127,7 @@ recorded never matches, and the list must name at least one vendor or be cleared
   "budget_usd": 20,
   "host_disk": "32G",
   "stack": "rust",
+  "exec_policy": "{\"rules\": [{\"id\": \"deny-rm\", \"decision\": \"deny\", \"command\": \"rm -rf\"}]}",
   "egress": {"mode": null, "allow": ["registry.npmjs.org"], "block": null},
   "memory": {"enabled": true},
   "watchdog": {"enabled": true, "stall_minutes": 15, "max_nudges": 3},

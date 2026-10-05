@@ -154,6 +154,11 @@ pub struct OrgSettings {
     /// choose. `None` inherits the sandbox module's `preset`.
     #[serde(default)]
     pub stack: Option<String>,
+    /// This org's layer of the exec policy, as the JSON a runner reads (issue #924): an object with
+    /// a `rules` array. It narrows the install module's `exec_policy` setting and is narrowed again
+    /// by a colony's own `.colonizer/exec-policy.json`; `None` adds no layer.
+    #[serde(default)]
+    pub exec_policy: Option<String>,
     /// The egress policy this org's colonies boot with (#303): mode and allow/block entries on top
     /// of the global sandbox module's, which always apply too. `None` inherits it whole.
     #[serde(default)]
@@ -719,6 +724,25 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
     }
 }
 
+/// A policy layer's cap, matching `EXEC_POLICY_MAX_BYTES` in the modules' `execpolicy.mjs`: a policy
+/// file is rules, not data, and more is a mistake. This is measured in bytes and the runner measures
+/// UTF-16 code units, so on a layer with non-ASCII in it this cap is the tighter of the two — a
+/// policy refused here would have been dropped at boot anyway.
+const EXEC_POLICY_MAX_BYTES: usize = 64 * 1024;
+
+/// An org's exec policy as a runner reads it: a JSON object with a `rules` array, within the cap.
+/// Blank and whitespace-only read as unset, like every other string setting — the resolver would
+/// drop the layer anyway, so refusing it here would reject a value the runner would have ignored.
+fn valid_exec_policy(policy: &str) -> Result<(), String> {
+    if policy.len() > EXEC_POLICY_MAX_BYTES {
+        return Err("the exec policy is over 64 KiB, the cap on a policy layer".into());
+    }
+    match serde_json::from_str::<Value>(policy) {
+        Ok(value) if value.is_object() && value.get("rules").is_some_and(Value::is_array) => Ok(()),
+        _ => Err(r#"the exec policy must be a JSON object with a "rules" array"#.into()),
+    }
+}
+
 fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
@@ -786,6 +810,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
         && !crate::presets::ids().contains(&stack)
     {
         return Err(format!("stack must be one of {}", crate::presets::ids().join(", ")));
+    }
+    if let Some(policy) = settings.exec_policy.as_deref().map(str::trim).filter(|p| !p.is_empty())
+        && let Err(problem) = valid_exec_policy(policy)
+    {
+        return Err(problem);
     }
     // A blank mode is inherit, like the stack; entries must each parse, with the parser's own
     // message, so a fence that would silently not hold is never saved.
@@ -971,6 +1000,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     }
     if !named("stack") {
         incoming.stack = saved.stack.clone();
+    }
+    if !named("exec_policy") {
+        incoming.exec_policy = saved.exec_policy.clone();
     }
     if !named("egress") {
         incoming.egress = saved.egress.clone();
@@ -1694,6 +1726,40 @@ mod tests {
             .is_ok(),
             "an empty stack is not set, not an error"
         );
+        assert!(
+            validate(&OrgSettings {
+                exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny"}]}"#.into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "a rules object is what a runner reads"
+        );
+        assert!(
+            validate(&OrgSettings {
+                exec_policy: Some("   ".into()),
+                ..Default::default()
+            })
+            .is_ok(),
+            "a blank exec policy is not set, not an error"
+        );
+        for bad in [r#"{"rules": {}}"#, r#"["rules"]"#, "not json"] {
+            assert!(
+                validate(&OrgSettings {
+                    exec_policy: Some(bad.into()),
+                    ..Default::default()
+                })
+                .is_err(),
+                "{bad:?} is not a policy a runner would read"
+            );
+        }
+        assert!(
+            validate(&OrgSettings {
+                exec_policy: Some(format!(r#"{{"rules": [], "pad": "{}"}}"#, "x".repeat(70 * 1024))),
+                ..Default::default()
+            })
+            .is_err(),
+            "a policy over the 64 KiB cap is dropped at boot, so it is refused here"
+        );
         let bad_model = OrgSettings {
             agent: Some(AgentOverrides {
                 model: Some("two words".into()),
@@ -1886,6 +1952,7 @@ mod tests {
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
+            exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny"}]}"#.into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
                 ..Default::default()
@@ -1939,6 +2006,10 @@ mod tests {
         assert_eq!(
             incoming.max_parallel, None,
             "a field the client names as null is a real request to inherit"
+        );
+        assert_eq!(
+            incoming.exec_policy, saved.exec_policy,
+            "an org's exec policy a web build from before it survives the save"
         );
         assert_eq!(
             incoming.repo_max_parallel,

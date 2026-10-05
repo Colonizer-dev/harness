@@ -28,6 +28,12 @@ export interface OrgSettings {
   host_disk?: string | null;
   /** The sandbox stack this org's colonies boot, pinning what the global `preset` would otherwise choose; `null` inherits. */
   stack?: string | null;
+  /**
+   * This org's layer of the exec policy (issue #924), as the JSON a runner reads: an object with a
+   * `rules` array. It narrows the install module's `exec_policy` setting and is narrowed again by a
+   * colony's own `.colonizer/exec-policy.json`; `null` adds no layer.
+   */
+  exec_policy?: string | null;
   /** `deja` is the recall toggle; null or absent inherits the install setting. */
   memory?: { enabled?: boolean | null; deja?: boolean | null } | null;
   watchdog?: { enabled?: boolean | null; stall_minutes?: number | null; max_nudges?: number | null } | null;

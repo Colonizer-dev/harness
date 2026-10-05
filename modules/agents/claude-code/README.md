@@ -36,7 +36,7 @@ in a real colony end to end (`scripts/colony-e2e.mjs`); the other modules are te
 | `COLONIZER_JEV_COMPACTION`, `COLONIZER_JEV_KEEP_THRESHOLD`, `COLONIZER_JEV_PRESERVE_RECENT` | off, 0.5, 6 | Compaction by Jev score instead of Claude Code's summary |
 | `COLONIZER_TASK_LABELS` | unset | Comma-separated task labels (set by the mothership from the issue) for `.colonizer/instructions.toml` label rules |
 | `COLONIZER_EXEC_POLICY` | unset | The install layer's exec policy as JSON (the `exec_policy` setting); see Exec policy below |
-| `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON; narrows the install layer, is narrowed by the repo file |
+| `COLONIZER_EXEC_POLICY_ORG` | unset | An org layer's exec policy as JSON (the org's `exec_policy` setting, Org settings); narrows the install layer, is narrowed by the repo file |
 | `COLONIZER_FINDINGS`, `COLONIZER_LOOP`, `COLONIZER_LOOP_SELF_PACED`, `COLONIZER_RESUME_SESSION`, `COLONIZER_IMAGE` | set by the mothership | The findings tool, a loop colony's tools, the Claude Code session to resume (a suspended colony picks up where it stopped), and the image named in the prompt |
 
 The module's settings in the cockpit (Settings → Modules) set most of these; `summaries`,
@@ -180,7 +180,7 @@ Layers, in order: **default** (built in: deny `secret-paths` — `~/.ssh`, `.env
 path policy masks, with committed env templates (`*.example`, `*.sample`, `*.template`, `*.dist`)
 not counting; deny `script-egress` — network calls in a script, while a direct `curl` command
 stays the egress policy's business; ask `writes-outside-repo`), **install** (the agent module's
-`exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (`COLONIZER_EXEC_POLICY_ORG`) and
+`exec_policy` setting, `COLONIZER_EXEC_POLICY`), **org** (`COLONIZER_EXEC_POLICY_ORG`, the org's `exec_policy` setting in Org settings) and
 **repo** (`.colonizer/exec-policy.json` in the worktree, read once at start so the agent cannot
 rewrite it mid-run). A malformed layer is dropped with a warning; the default always holds. Note
 this is guidance in front of the model, like the delegation gate — not a boundary; the microVM is.
