@@ -3,7 +3,7 @@ import { SecretsNavContext } from "./secretsNav";
 import { useApi } from "./context";
 import { IconMenu, IconSpark } from "./components/icons";
 import { MemoryView } from "./components/MemoryView";
-import { OrgPromptCard } from "./components/OrgPromptCard";
+import { OrgNotices } from "./components/OrgNotice";
 import { OrgSettingsDialog } from "./components/OrgSettingsDialog";
 import { SessionView, type InterfaceFlags } from "./components/SessionView";
 import { SettingsBody, SettingsDialog, type SectionId } from "./components/SettingsDialog";
@@ -38,7 +38,7 @@ import {
   upsertSession as upsertSessionList,
   type LiveConnection,
 } from "./liveStream";
-import { orgEntries, pendingOrgPrompt, reconcileSelectedOrg } from "./orgs";
+import { orgEntries, pendingOrgPrompts, reconcileSelectedOrg } from "./orgs";
 import { usePushPresence } from "./push";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { UpdatePrompt } from "./components/UpdatePrompt";
@@ -568,7 +568,7 @@ export function App() {
   }, []);
 
   // The one newly-appeared org to ask about now, if any; several pending are asked one at a time.
-  const pendingOrg = useMemo(() => pendingOrgPrompt(orgs, answeredOrgs), [orgs, answeredOrgs]);
+  const pendingOrgs = useMemo(() => pendingOrgPrompts(orgs, answeredOrgs), [orgs, answeredOrgs]);
 
   /** The prompt card's answer, folded back so the sidebar moves at once; the 15 s poll confirms it. */
   const answerPendingOrg = useCallback((org: string, settings: OrgSettings) => {
@@ -733,12 +733,12 @@ export function App() {
     />
   );
 
-  const orgPrompt = pendingOrg && (
-    // A standalone card at the top of the pane: seen without hunting for it, but nothing
-    // behind it is blocked while the decision waits.
-    <div className="shrink-0 border-b border-border px-4 py-3 sm:px-6">
-      <div className="mx-auto w-full max-w-xl">
-        <OrgPromptCard org={pendingOrg.org} avatarUrl={pendingOrg.avatar_url} onAnswered={answerPendingOrg} />
+  const orgPrompt = pendingOrgs.length > 0 && (
+    // A notification strip at the top of the pane: seen without hunting for it, answered in one
+    // click, and nothing behind it is blocked while it waits. Not a colony decision.
+    <div className="shrink-0 border-b border-border bg-panel px-4 sm:px-6">
+      <div className="mx-auto w-full max-w-3xl">
+        <OrgNotices orgs={pendingOrgs} onAnswered={answerPendingOrg} />
       </div>
     </div>
   );
