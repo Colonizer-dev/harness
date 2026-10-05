@@ -18,7 +18,7 @@ export function SearchBox({ value, onChange, placeholder, label, className }: { 
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         aria-label={label}
-        className="w-full min-w-0 rounded-md border border-border bg-transparent py-1 pl-6 pr-2 text-[12.5px] text-text outline-none placeholder:text-faint focus:border-border-strong"
+        className="w-full min-w-0 rounded-md border border-border bg-transparent py-1 pl-6 pr-2 text-small-lg text-text outline-none placeholder:text-faint focus:border-border-strong"
       />
     </label>
   );
@@ -38,7 +38,7 @@ export function FilterSelect({ value, onChange, label, allLabel, options }: { va
       value={value}
       onChange={(e) => onChange(e.target.value)}
       aria-label={label}
-      className={cx("max-w-[14rem] rounded-md border bg-panel px-2 py-1 text-[12.5px]", value === "all" ? "border-border text-muted" : "border-accent text-text")}
+      className={cx("max-w-[14rem] rounded-md border bg-panel px-2 py-1 text-small-lg", value === "all" ? "border-border text-muted" : "border-accent text-text")}
     >
       <option value="all">{allLabel}</option>
       {options.map((o) => (
@@ -75,7 +75,7 @@ export function Segmented<T extends string>({ value, onChange, options, label }:
           aria-pressed={value === o.value}
           title={o.title}
           onClick={() => onChange(o.value)}
-          className={cx("inline-flex cursor-pointer items-center gap-1.5 rounded-md border-0 px-3 py-1 text-[12.5px]", value === o.value ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text")}
+          className={cx("inline-flex cursor-pointer items-center gap-1.5 rounded-md border-0 px-3 py-1 text-small-lg", value === o.value ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text")}
         >
           {o.label}
         </button>
@@ -87,9 +87,9 @@ export function Segmented<T extends string>({ value, onChange, options, label }:
 /** "11–20 of 54" with previous / page numbers / next. Draws only the count when everything fits on one page. */
 export function Pagination({ view, onPage, noun = "rows", className }: { view: PageView<unknown>; onPage: (page: number) => void; noun?: string; className?: string }): ReactElement | null {
   if (view.total === 0) return null;
-  const btn = "inline-flex min-w-7 cursor-pointer items-center justify-center rounded-md border-0 px-2 py-1 text-[12.5px] tabular-nums disabled:cursor-default disabled:opacity-40";
+  const btn = "inline-flex min-w-7 cursor-pointer items-center justify-center rounded-md border-0 px-2 py-1 text-small-lg tabular-nums disabled:cursor-default disabled:opacity-40";
   return (
-    <nav aria-label="pages" className={cx("flex flex-wrap items-center gap-x-3 gap-y-2 text-[12.5px] text-muted", className ?? "mt-2")}>
+    <nav aria-label="pages" className={cx("flex flex-wrap items-center gap-x-3 gap-y-2 text-small-lg text-muted", className ?? "mt-2")}>
       <span className="tabular-nums text-faint">
         {view.pageCount > 1 ? `${view.from}–${view.to} of ${view.total}` : `${view.total}`} {noun}
       </span>

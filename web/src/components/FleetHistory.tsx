@@ -57,7 +57,7 @@ export function HistoryFilterBar({ page, filters, onChange }: { page: FleetHisto
 /** The totals at the top: everything filtered, then per member and per repository. */
 export function HistoryStats({ stats }: { stats: FleetHistoryPage["stats"] }): ReactElement {
   return (
-    <div className="space-y-1 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
+    <div className="space-y-1 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
       <p className="font-semibold">{totalsText(stats.total)}</p>
       {stats.members.map((m) => (
         <p key={m.member_id} className="text-muted">
@@ -83,11 +83,11 @@ export function HistoryRow({ entry, open, onOpen }: { entry: FleetHistoryEntry; 
       className={cx("block w-full border-b border-border px-3.5 py-2.5 text-left last:border-b-0 hover:bg-panel-2", open && "bg-panel-2")}
     >
       <div className="flex min-w-0 items-center gap-2">
-        <span className="truncate text-[13px] font-medium">{r.issue_title || r.branch || r.original_id}</span>
+        <span className="truncate text-body-sm font-medium">{r.issue_title || r.branch || r.original_id}</span>
         {status && <Badge tone={status.tone}>{status.label}</Badge>}
         {entry.member_removed && <Badge tone="warn">Member removed</Badge>}
       </div>
-      <div className="truncate text-[11.5px] text-faint">
+      <div className="truncate text-meta-lg text-faint">
         <span className="font-mono">{r.repo}</span> · {finishedOn(entry)} · {timeAgo(r.updated_at)}
         {r.cost_usd != null && ` · ${formatCost(r.cost_usd)}`}
       </div>
@@ -121,10 +121,10 @@ export function HistoryDrawer({ detail, log, logName, logError, onLog, onClose }
   return (
     <section aria-label="Fleet history entry" className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
       <div className="flex items-center justify-between gap-2">
-        <p className="truncate text-[13px] font-semibold">{r.issue_title || r.original_id}</p>
+        <p className="truncate text-body-sm font-semibold">{r.issue_title || r.original_id}</p>
         <Button size="sm" onClick={onClose}>Close</Button>
       </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12px]">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-small">
         {fields.filter(([, v]) => v).map(([k, v]) => (
           <div key={k} className="contents">
             <dt className="text-faint">{k}</dt>
@@ -139,11 +139,11 @@ export function HistoryDrawer({ detail, log, logName, logError, onLog, onClose }
             {l.name} · {formatBytes(l.bytes)}
           </Button>
         ))}
-        {detail.logs.length === 0 && <p className="text-[11.5px] text-faint">No logs were synced for this colony.</p>}
+        {detail.logs.length === 0 && <p className="text-meta-lg text-faint">No logs were synced for this colony.</p>}
       </div>
-      {logError && <p className="text-[12px] text-warn">Couldn’t read the log: {logError}</p>}
+      {logError && <p className="text-small text-warn">Couldn’t read the log: {logError}</p>}
       {logName && log != null && (
-        <pre aria-label={`${logName} contents`} className="max-h-72 overflow-auto rounded-lg border border-border bg-panel px-2.5 py-2 font-mono text-[11px] whitespace-pre-wrap break-all">{log}</pre>
+        <pre aria-label={`${logName} contents`} className="max-h-72 overflow-auto rounded-lg border border-border bg-panel px-2.5 py-2 font-mono text-meta whitespace-pre-wrap break-all">{log}</pre>
       )}
     </section>
   );
@@ -233,16 +233,16 @@ export function FleetHistory({ initial, hideWhenEmpty = false }: {
 
   return (
     <div className="space-y-2 border-t border-border pt-4">
-      <h4 className="text-[12.5px] font-semibold">Fleet history</h4>
-      <p className="text-[11.5px] text-faint">
+      <h4 className="text-small-lg font-semibold">Fleet history</h4>
+      <p className="text-meta-lg text-faint">
         Colonies your members finished and synced with history sync on{page ? `, kept ${page.retention_days} days after they arrive` : ""}. A removed member’s history stays.
       </p>
       <HistoryFilterBar page={page} filters={filters} onChange={setFilters} />
-      {error && <p className="text-[12.5px] text-warn">Couldn’t read the fleet history: {error}</p>}
-      {!page && !error && <p className="flex items-center gap-2 text-[12.5px] text-muted"><Spinner className="size-3" /> Loading…</p>}
+      {error && <p className="text-small-lg text-warn">Couldn’t read the fleet history: {error}</p>}
+      {!page && !error && <p className="flex items-center gap-2 text-small-lg text-muted"><Spinner className="size-3" /> Loading…</p>}
       {page && <HistoryStats stats={page.stats} />}
       {page && rows.length === 0 && (
-        <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+        <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
           {filtered ? "No synced colony matches these filters." : "Nothing synced yet. A member sends its finished colonies once its operator turns history sync on."}
         </p>
       )}
@@ -256,9 +256,9 @@ export function FleetHistory({ initial, hideWhenEmpty = false }: {
                   {detail ? (
                     <HistoryDrawer detail={detail} log={log} logName={logName} logError={logError} onLog={(name) => void readLog(name)} onClose={() => void open(entry)} />
                   ) : logError ? (
-                    <p className="text-[12px] text-warn">Couldn’t read this colony: {logError}</p>
+                    <p className="text-small text-warn">Couldn’t read this colony: {logError}</p>
                   ) : (
-                    <p className="flex items-center gap-2 text-[12px] text-muted"><Spinner className="size-3" /> Loading…</p>
+                    <p className="flex items-center gap-2 text-small text-muted"><Spinner className="size-3" /> Loading…</p>
                   )}
                 </div>
               )}

@@ -543,7 +543,7 @@ export function SettingsBody({
       {/* The cockpit has its own header and crumb, so the embedded frame does not repeat them. */}
       {!embedded && (
         <div className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-3">
-          <h2 id="settings-title" className="min-w-0 flex-1 text-[16px] font-semibold">
+          <h2 id="settings-title" className="min-w-0 flex-1 text-title-sm font-semibold">
             Settings
           </h2>
           <button
@@ -716,7 +716,7 @@ const SECTIONS: SectionEntry[] = [
         />
       ) : (
         <Pane title={kindInfo(kind).title} back={c.back}>
-          <p className="flex items-center gap-2 text-[13px] text-muted">
+          <p className="flex items-center gap-2 text-body-sm text-muted">
             <Spinner /> Loading…
           </p>
         </Pane>

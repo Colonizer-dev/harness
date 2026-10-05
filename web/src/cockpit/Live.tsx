@@ -13,7 +13,7 @@ export function LiveIndicator({ connection = "connecting" }: { connection?: Live
     <span
       role="status"
       title={live ? "realtime updates from /api/stream" : "the stream dropped — polls cover until it reconnects"}
-      className={`inline-flex items-center gap-2 whitespace-nowrap text-[13px] ${live ? "text-muted" : "text-faint"}`}
+      className={`inline-flex items-center gap-2 whitespace-nowrap text-body-sm ${live ? "text-muted" : "text-faint"}`}
     >
       <span aria-hidden="true" className={live ? "v3-live-dot" : "inline-block h-[7px] w-[7px] rounded-full bg-faint"} />
       {live ? "Live" : "reconnecting…"}

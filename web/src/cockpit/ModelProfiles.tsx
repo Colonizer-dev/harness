@@ -45,8 +45,8 @@ export interface ProfileBarProps {
   initialMode?: Mode;
 }
 
-const BUTTON = "cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-[12px] text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50";
-const LINK = "cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-muted hover:text-text hover:underline disabled:cursor-not-allowed disabled:opacity-50";
+const BUTTON = "cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-small text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50";
+const LINK = "cursor-pointer border-0 bg-transparent p-0 text-meta-lg text-muted hover:text-text hover:underline disabled:cursor-not-allowed disabled:opacity-50";
 
 export function ProfileBar(p: ProfileBarProps): ReactElement {
   const [selected, setSelected] = useState<string>(p.initialSelected ?? "");
@@ -55,7 +55,7 @@ export function ProfileBar(p: ProfileBarProps): ReactElement {
   const saved = profiles.filter((x) => !x.builtin);
   const starters = profiles.filter((x) => x.builtin);
   const current = profiles.find((x) => x.id === selected) ?? null;
-  const input = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-[12.5px] text-text";
+  const input = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-small-lg text-text";
 
   const submit = async () => {
     if (mode.kind === "save" && (await p.onSave(mode.name))) setMode({ kind: "idle" });
@@ -64,7 +64,7 @@ export function ProfileBar(p: ProfileBarProps): ReactElement {
 
   return (
     <section aria-label="model profiles" className="mb-3">
-      <div className="mb-1 flex items-baseline justify-between gap-2 text-[11.5px] text-muted">
+      <div className="mb-1 flex items-baseline justify-between gap-2 text-meta-lg text-muted">
         <span>Profiles</span>
         {mode.kind === "idle" && (
           <button type="button" className={LINK} disabled={p.busy || !p.canSave} onClick={() => setMode({ kind: "save", name: "" })}>
@@ -127,7 +127,7 @@ export function ProfileBar(p: ProfileBarProps): ReactElement {
       )}
 
       {current && mode.kind === "idle" && (
-        <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-2 text-[11px] text-faint">
+        <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-2 text-meta text-faint">
           <span className="min-w-0">{profileSummary(current)}</span>
           {!current.builtin && (
             <span className="flex shrink-0 gap-2">
@@ -143,7 +143,7 @@ export function ProfileBar(p: ProfileBarProps): ReactElement {
       )}
 
       {mode.kind === "delete" && current && (
-        <div role="alertdialog" aria-label="delete the profile" className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-border bg-panel-2 px-2 py-1.5 text-[12px] text-text">
+        <div role="alertdialog" aria-label="delete the profile" className="mt-1.5 flex items-center justify-between gap-2 rounded-lg border border-border bg-panel-2 px-2 py-1.5 text-small text-text">
           <span className="min-w-0">Delete “{current.name}” on every device?</span>
           <span className="flex shrink-0 gap-1.5">
             <button type="button" className={BUTTON} onClick={() => setMode({ kind: "idle" })}>
@@ -169,7 +169,7 @@ export function ProfileBar(p: ProfileBarProps): ReactElement {
       )}
 
       {p.note && (
-        <p role={p.noteTone === "err" ? "alert" : "status"} className={cx("m-0 mt-1 text-[11.5px]", p.noteTone === "err" ? "text-err" : "text-muted")}>
+        <p role={p.noteTone === "err" ? "alert" : "status"} className={cx("m-0 mt-1 text-meta-lg", p.noteTone === "err" ? "text-err" : "text-muted")}>
           {p.note}
         </p>
       )}

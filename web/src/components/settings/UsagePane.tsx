@@ -50,7 +50,7 @@ export function UsagePane({
   return (
     <Pane title="Usage data" subtitle="An anonymous batch, shown here in full — sent at most once a day, only to an endpoint you name" info={info} back={back}>
       {!usage ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
@@ -66,20 +66,20 @@ export function UsagePane({
             />
           </Row>
           {usage.blocked_by && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               Kept off by <Code>{usage.blocked_by}</Code> in the Mothership’s environment.
             </p>
           )}
-          <p className="text-[12.5px] text-muted">
+          <p className="text-small-lg text-muted">
             On by default. Switch it off here or with <Code>colonizer telemetry off</Code>; the Mothership’s environment can also hold it
             off whatever this switch says — <Code>COLONIZER_TELEMETRY=0</Code>, <Code>DO_NOT_TRACK=1</Code> or <Code>CI=true</Code>.
           </p>
           <div>
-            <h4 className="mb-1.5 text-[12.5px] font-semibold">The whole batch</h4>
-            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-[12px] leading-5">
+            <h4 className="mb-1.5 text-small-lg font-semibold">The whole batch</h4>
+            <pre className="scroll-thin overflow-x-auto rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 font-mono text-small leading-5">
               {JSON.stringify(usage.batch, null, 2)}
             </pre>
-            <p className="mt-2 text-[12.5px] text-muted">
+            <p className="mt-2 text-small-lg text-muted">
               Every byte a send carries, verbatim — <Code>install</Code> is all zeros while the switch is off, a batch the sender will
               not post. Nothing else is in it: no repository, branch or issue names, no paths, no prompts or agent output, no tokens or
               URLs, and no setting values — setting names only.

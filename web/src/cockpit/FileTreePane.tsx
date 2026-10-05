@@ -145,23 +145,23 @@ export function FileTreePane({
           }
           title={node.path}
           className={cx(
-            "flex h-[22px] items-center gap-1 whitespace-nowrap pr-2 font-mono text-[12px]",
+            "flex h-[22px] items-center gap-1 whitespace-nowrap pr-2 font-mono text-small",
             "cursor-pointer",
             mark ? "bg-accent-soft text-accent" : holds ? "text-text" : "text-muted",
             !mark && "hover:bg-panel-2",
           )}
           style={{ paddingLeft: 8 + depth * 12 }}
         >
-          <span aria-hidden="true" className="inline-block w-3 shrink-0 text-center text-[9px] text-faint">
+          <span aria-hidden="true" className="inline-block w-3 shrink-0 text-center text-micro-sm text-faint">
             {node.dir ? (expanded ? "▾" : "▸") : ""}
           </span>
-          <span aria-hidden="true" className="shrink-0 text-[11px]">
+          <span aria-hidden="true" className="shrink-0 text-meta">
             {node.dir ? (expanded ? "📂" : "📁") : "📄"}
           </span>
           <span className="truncate">{node.name}</span>
           {holds && <span aria-hidden="true" className="ml-1 size-1.5 shrink-0 rounded-full bg-accent" />}
           {change ? (
-            <span className="ml-auto shrink-0 rounded px-1 text-[10px] font-semibold text-warn" title="a live colony is changing this file — click to see the diff">
+            <span className="ml-auto shrink-0 rounded px-1 text-micro-lg font-semibold text-warn" title="a live colony is changing this file — click to see the diff">
               M
             </span>
           ) : (
@@ -193,8 +193,8 @@ export function FileTreePane({
       <>
       <div className="flex items-start gap-2 border-b border-border px-3 py-2.5">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-semibold text-text">{title}</div>
-          <div className="truncate font-mono text-[11px] text-faint">
+          <div className="truncate text-body-sm font-semibold text-text">{title}</div>
+          <div className="truncate font-mono text-meta text-faint">
             {repo}
             {revision ? ` @ ${revision.slice(0, 7)}` : ""} · {markedCount} {markedCount === 1 ? "file" : "files"} marked
           </div>
@@ -209,18 +209,18 @@ export function FileTreePane({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Filter files…"
           aria-label="filter files"
-          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-[12px] text-text outline-none placeholder:text-faint focus:border-border-strong"
+          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-2 py-1 text-small text-text outline-none placeholder:text-faint focus:border-border-strong"
         />
-        <label className="flex shrink-0 cursor-pointer items-center gap-1 text-[11.5px] text-muted">
+        <label className="flex shrink-0 cursor-pointer items-center gap-1 text-meta-lg text-muted">
           <input type="checkbox" checked={onlyMarked} onChange={(e) => setOnlyMarked(e.target.checked)} />
           marked only
         </label>
       </div>
       <div role="tree" aria-label="repository files" className="scroll-thin min-h-0 flex-1 overflow-auto py-1">
         {error ? (
-          <p className="px-3 py-2 text-[12.5px] text-err">{error}</p>
+          <p className="px-3 py-2 text-small-lg text-err">{error}</p>
         ) : !tree ? (
-          <p className="px-3 py-2 text-[12.5px] text-faint">Loading files…</p>
+          <p className="px-3 py-2 text-small-lg text-faint">Loading files…</p>
         ) : (
           tree.children.map((c) => row(c, 0))
         )}

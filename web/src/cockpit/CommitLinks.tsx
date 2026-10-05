@@ -10,17 +10,17 @@ export const ORPHANED_TOOLTIP =
 
 export function CommitLinks({ commits }: { commits: CommitLink[] }): ReactElement {
   if (commits.length === 0) {
-    return <div className="rounded-md bg-panel-2 px-3 py-2 text-[12px] text-faint">no commits recorded yet</div>;
+    return <div className="rounded-md bg-panel-2 px-3 py-2 text-small text-faint">no commits recorded yet</div>;
   }
   return (
     <div className="flex flex-col gap-1.5">
       {commits.map((c) => (
-        <div key={c.sha} className="flex items-center gap-2.5 text-[12px] text-muted">
-          <span className="font-mono text-[11px] text-text" title={c.sha}>
+        <div key={c.sha} className="flex items-center gap-2.5 text-small text-muted">
+          <span className="font-mono text-meta text-text" title={c.sha}>
             {c.sha.slice(0, 7)}
           </span>
           {c.previous.length > 0 && (
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint" title={c.previous.join(" → ")}>
+            <span className="min-w-0 flex-1 truncate font-mono text-meta text-faint" title={c.previous.join(" → ")}>
               was {c.previous[c.previous.length - 1].slice(0, 7)}
             </span>
           )}

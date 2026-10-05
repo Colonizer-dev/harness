@@ -92,8 +92,8 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
         <span className="grid size-6 place-items-center rounded-full bg-accent text-on-accent">
           <IconQuestion size={14} />
         </span>
-        <span className="text-[13px] font-semibold">The agent needs your decision</span>
-        <span className="ml-auto text-[12px] text-muted">
+        <span className="text-body-sm font-semibold">The agent needs your decision</span>
+        <span className="ml-auto text-small text-muted">
           {questions.length === 1 ? "1 question" : `${questions.length} questions`}
         </span>
       </div>
@@ -112,7 +112,7 @@ function OpenCard({ questionId, questions }: { questionId: string; questions: Qu
       </div>
 
       <div className="flex flex-wrap items-center gap-3 border-t border-border bg-panel-2/60 px-4 py-3">
-        <p className="min-w-0 flex-1 text-[12.5px] text-muted">
+        <p className="min-w-0 flex-1 text-small-lg text-muted">
           {blockedBy === "ended"
             ? "This colony has finished, so the agent cannot be answered."
             : blockedBy === "disconnected"
@@ -167,13 +167,13 @@ function QuestionSection({
     <fieldset className="min-w-0 px-4 py-4" aria-labelledby={headingId} disabled={disabled}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         {question.header && (
-          <span className="rounded-md bg-panel-3 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+          <span className="rounded-md bg-panel-3 px-2 py-0.5 text-meta font-semibold uppercase tracking-wide text-muted">
             {question.header}
           </span>
         )}
-        <span className="text-[11.5px] text-faint">{multi ? "Choose any that apply" : "Choose one"}</span>
+        <span className="text-meta-lg text-faint">{multi ? "Choose any that apply" : "Choose one"}</span>
       </div>
-      <h3 id={headingId} className="mb-3 text-[15px] font-semibold leading-snug">
+      <h3 id={headingId} className="mb-3 text-lead font-semibold leading-snug">
         {question.question}
       </h3>
 
@@ -207,7 +207,7 @@ function QuestionSection({
           <Indicator multi={multi} checked={draft.otherOn} />
           <span className="min-w-0 flex-1">
             <span className="block font-medium">Other…</span>
-            {!draft.otherOn && <span className="block text-[13px] text-muted">Type your own answer</span>}
+            {!draft.otherOn && <span className="block text-body-sm text-muted">Type your own answer</span>}
             {draft.otherOn && (
               <input
                 id={otherInputId}
@@ -251,7 +251,7 @@ function OptionCard({
       <Indicator multi={multi} checked={checked} />
       <span className="min-w-0 flex-1">
         <span className="block font-medium leading-snug">{option.label}</span>
-        {option.description && <span className="mt-0.5 block text-[13px] leading-snug text-muted">{option.description}</span>}
+        {option.description && <span className="mt-0.5 block text-body-sm leading-snug text-muted">{option.description}</span>}
         {option.preview && <Preview content={option.preview} />}
       </span>
     </label>
@@ -287,7 +287,7 @@ function Preview({ content }: { content: string }) {
           className="block h-40 w-full rounded-lg border border-border bg-white"
         />
       ) : (
-        <pre className="max-h-48 cursor-text overflow-auto whitespace-pre rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-[12px] leading-relaxed text-text">
+        <pre className="max-h-48 cursor-text overflow-auto whitespace-pre rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-small leading-relaxed text-text">
           {text}
         </pre>
       )}
@@ -316,13 +316,13 @@ function AnsweredCard({ questions, result }: { questions: Question[]; result: As
           <IconCheck size={12} strokeWidth={3} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className={cx("block text-[12px] font-semibold", judge ? "text-info" : "text-muted")}>
+          <span className={cx("block text-small font-semibold", judge ? "text-info" : "text-muted")}>
             {judge ? "Answered by the autonomy judge" : "You answered"}
           </span>
           {result.response ? (
-            <span className="block text-[13.5px]">{result.response}</span>
+            <span className="block text-body">{result.response}</span>
           ) : (
-            <span className="mt-0.5 flex flex-wrap gap-x-3 gap-y-1 text-[13.5px]">
+            <span className="mt-0.5 flex flex-wrap gap-x-3 gap-y-1 text-body">
               {questions.map((q) => (
                 <span key={q.question} className="min-w-0">
                   <span className="text-faint">{q.header || "Answer"}:</span>{" "}
@@ -335,7 +335,7 @@ function AnsweredCard({ questions, result }: { questions: Question[]; result: As
         <IconChevronDown size={15} className={cx("mt-0.5 shrink-0 text-faint transition-transform", expanded && "rotate-180")} />
       </button>
       {expanded && (
-        <div className="space-y-2 border-t border-border px-3 py-2.5 text-[13px]">
+        <div className="space-y-2 border-t border-border px-3 py-2.5 text-body-sm">
           {questions.map((q) => (
             <div key={q.question}>
               <div className="text-muted">{q.question}</div>

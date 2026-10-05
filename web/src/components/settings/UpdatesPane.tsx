@@ -89,14 +89,14 @@ export function UpdatesPane({
   return (
     <Pane title="Updates" subtitle="Which Colonizer this is, and whether a newer one is out" info={info} back={back}>
       {!update ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
         <div className="space-y-4">
-          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px]">
+          <div className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span className="font-semibold text-[13px]">{update.installed.version}</span>
+              <span className="font-semibold text-body-sm">{update.installed.version}</span>
               {update.installed.dirty && <Badge tone="warn">built from a modified tree</Badge>}
             </div>
             <p className="mt-1 text-muted">
@@ -113,13 +113,13 @@ export function UpdatesPane({
           </div>
 
           {update.available && update.latest && (
-            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-[12.5px]">
-              <p className="font-semibold text-[13px]">Colonizer {update.latest.version} is available</p>
+            <div className="rounded-xl border border-ok/40 bg-ok-soft px-3.5 py-2.5 text-small-lg">
+              <p className="font-semibold text-body-sm">Colonizer {update.latest.version} is available</p>
               {behindLabel(update.installed.built_at, update.latest.published_at) && (
                 <p className="text-muted">{behindLabel(update.installed.built_at, update.latest.published_at)}</p>
               )}
               {update.latest.notes && (
-                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-[12.5px] text-muted">
+                <pre className="scroll-thin mt-1.5 max-h-48 overflow-auto whitespace-pre-wrap font-sans text-small-lg text-muted">
                   {update.latest.notes}
                 </pre>
               )}
@@ -187,16 +187,16 @@ export function UpdatesPane({
           </Row>
 
           {update.blocked_by && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               Kept off by <Code>{update.blocked_by}</Code> in the Mothership’s environment.
             </p>
           )}
           {!update.enabled && !update.blocked_by && (
-            <p className="text-[12.5px] text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
+            <p className="text-small-lg text-muted">Off: the Mothership makes no request to GitHub about releases.</p>
           )}
-          {update.error && <p className="text-[12.5px] text-err">Last check failed: {update.error}</p>}
+          {update.error && <p className="text-small-lg text-err">Last check failed: {update.error}</p>}
           {update.enabled && update.last_checked && !update.error && (
-            <p className="text-[12.5px] text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
+            <p className="text-small-lg text-faint">Last checked {new Date(update.last_checked).toLocaleString()}.</p>
           )}
         </div>
       )}

@@ -44,7 +44,7 @@ export function AccountBanner({
             <button
               type="button"
               onClick={onSignIn}
-              className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-[12.5px] font-semibold hover:underline"
+              className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-small-lg font-semibold hover:underline"
             >
               Sign in
             </button>

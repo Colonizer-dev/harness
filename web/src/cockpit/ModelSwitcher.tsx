@@ -454,11 +454,11 @@ export function ModelSwitcher(props: ModelSwitcherProps): ReactElement | null {
         aria-label={`Models · main model ${name}`}
         title="Switch models · /model in ⌘K"
         onClick={() => (open ? setOpen(false) : show())}
-        className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-[12.5px] font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
+        className="inline-flex h-8 max-w-[11rem] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-transparent px-2.5 text-small-lg font-medium text-text transition-colors hover:border-border-strong hover:bg-panel-2"
       >
         <span aria-hidden="true" data-health={tone} className={cx("size-1.5 shrink-0 rounded-full", TONE_DOT[tone])} />
         <span className="truncate">{name}</span>
-        <span aria-hidden="true" className="text-[10px] text-faint">▾</span>
+        <span aria-hidden="true" className="text-micro-lg text-faint">▾</span>
       </button>
       {open && (
         <ModelSwitcherPanel
@@ -566,7 +566,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
   const busy = stage.step === "counting" || stage.step === "applying";
   const mainNow = view.rows.find((r) => r.role === "model")?.value ?? "";
   const recent = recentChoices(p.recent, mainNow);
-  const select = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-[12.5px] text-text disabled:opacity-60";
+  const select = "w-full min-w-0 rounded-md border border-border bg-panel-2 px-2 py-1 text-small-lg text-text disabled:opacity-60";
   const scopeValue = scope.kind === "org" ? `org:${scope.org}` : "install";
   const moduleValue = scope.kind === "org" && view.moduleSource === "install" ? "" : view.module;
   const blocked = a.modules.find((m) => m.id === view.module)?.blocked ?? null;
@@ -578,15 +578,15 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       className="absolute right-0 top-10 z-50 flex max-h-[min(80vh,640px)] w-[380px] flex-col overflow-y-auto rounded-xl border border-border-strong bg-panel p-3 shadow-[0_16px_48px_rgb(0_0_0/0.35)] max-sm:fixed max-sm:inset-x-4 max-sm:top-14 max-sm:w-auto"
     >
       <div className="mb-2 flex items-center justify-between">
-        <h2 className="m-0 text-[13px] font-semibold text-text">Models</h2>
-        <button type="button" aria-label="Close" onClick={p.onClose} className="cursor-pointer border-0 bg-transparent text-[15px] text-faint hover:text-text">
+        <h2 className="m-0 text-body-sm font-semibold text-text">Models</h2>
+        <button type="button" aria-label="Close" onClick={p.onClose} className="cursor-pointer border-0 bg-transparent text-lead text-faint hover:text-text">
           ×
         </button>
       </div>
 
       <PlanList plans={p.plans ?? null} error={p.plansError} nowMs={p.nowMs} />
 
-      <label className="mb-2 block text-[11.5px] text-muted">
+      <label className="mb-2 block text-meta-lg text-muted">
         Scope
         <select
           aria-label="scope"
@@ -616,7 +616,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
         onDelete={(profile) => p.onDeleteProfile?.(profile) ?? Promise.resolve(false)}
       />
 
-      <label className="mb-1 block text-[11.5px] text-muted">
+      <label className="mb-1 block text-meta-lg text-muted">
         Agent
         <select
           aria-label="agent module"
@@ -634,10 +634,10 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
           ))}
         </select>
       </label>
-      <p className="m-0 mb-2 text-[11px] text-faint">
+      <p className="m-0 mb-2 text-meta text-faint">
         {scope.kind === "org" ? (view.moduleSource === "org" ? "This org's own pick" : "From the install") : "The install's agent module"} · new colonies only
       </p>
-      {blocked && <p className="m-0 mb-2 text-[11.5px] text-warn">{blocked}</p>}
+      {blocked && <p className="m-0 mb-2 text-meta-lg text-warn">{blocked}</p>}
 
       <div role="group" aria-label="model roles" className="space-y-2">
         {view.rows.map((row) => {
@@ -651,15 +651,15 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
               : "Module default";
           return (
             <div key={row.role} data-role={row.role}>
-              <div className="mb-0.5 flex items-center justify-between gap-2 text-[11.5px]">
+              <div className="mb-0.5 flex items-center justify-between gap-2 text-meta-lg">
                 <span className="min-w-0 truncate text-muted">{row.title}</span>
                 <span className="flex shrink-0 items-center gap-1">
                   {badge && (
-                    <span data-quota-badge title={badge.title} className="rounded-full bg-err-soft px-1.5 py-px text-[10.5px] font-semibold text-err">
+                    <span data-quota-badge title={badge.title} className="rounded-full bg-err-soft px-1.5 py-px text-meta-sm font-semibold text-err">
                       {badge.text}
                     </span>
                   )}
-                  <span className={cx("rounded-full px-1.5 py-px text-[10.5px]", SOURCE_TONE[row.source])}>
+                  <span className={cx("rounded-full px-1.5 py-px text-meta-sm", SOURCE_TONE[row.source])}>
                     {row.role in draft.roles ? "changed" : row.editable ? sourceLabel(row.source, scope) : "install-wide only"}
                   </span>
                 </span>
@@ -689,14 +689,14 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       </div>
 
       <fieldset className="m-0 mt-3 border-0 p-0">
-        <legend className="mb-1 p-0 text-[11.5px] text-muted">Apply to</legend>
+        <legend className="mb-1 p-0 text-meta-lg text-muted">Apply to</legend>
         {(
           [
             ["new", "New colonies only"],
             ["running", "Also switch running colonies"],
           ] as const
         ).map(([mode, label]) => (
-          <label key={mode} className="mr-3 inline-flex items-center gap-1.5 text-[12.5px] text-text">
+          <label key={mode} className="mr-3 inline-flex items-center gap-1.5 text-small-lg text-text">
             <input type="radio" name="model-apply" value={mode} checked={p.apply === mode} disabled={busy} onChange={() => p.onApplyMode(mode)} />
             {label}
           </label>
@@ -704,19 +704,19 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
       </fieldset>
 
       {p.error && (
-        <p role="alert" className="m-0 mt-2 whitespace-pre-line text-[12px] text-err">
+        <p role="alert" className="m-0 mt-2 whitespace-pre-line text-small text-err">
           {p.error}
         </p>
       )}
 
       {stage.step === "confirm" ? (
         <div role="alertdialog" aria-label="confirm the switch" className="mt-3 rounded-lg border border-border bg-panel-2 p-2">
-          <p className="m-0 text-[12.5px] text-text">{confirmLine(stage.affected.length)}</p>
+          <p className="m-0 text-small-lg text-text">{confirmLine(stage.affected.length)}</p>
           <div className="mt-2 flex justify-end gap-2">
-            <button type="button" onClick={p.onCancel} className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:text-text">
+            <button type="button" onClick={p.onCancel} className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted hover:text-text">
               Cancel
             </button>
-            <button type="button" onClick={p.onConfirm} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-[12.5px] font-semibold text-on-accent hover:brightness-110">
+            <button type="button" onClick={p.onConfirm} className="cursor-pointer rounded-md border-0 bg-accent px-2.5 py-1 text-small-lg font-semibold text-on-accent hover:brightness-110">
               {stage.affected.length ? `Switch and restart ${stage.affected.length}` : "Switch"}
             </button>
           </div>
@@ -727,7 +727,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
             type="button"
             disabled={!draftDirty(draft) || busy}
             onClick={p.onApply}
-            className="cursor-pointer rounded-md border-0 bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            className="cursor-pointer rounded-md border-0 bg-accent px-3 py-1.5 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {stage.step === "counting" ? "Counting colonies…" : stage.step === "applying" ? "Switching…" : "Apply"}
           </button>
@@ -736,7 +736,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
 
       {recent.length > 0 && (
         <div className="mt-3 border-t border-border pt-2">
-          <div className="mb-1 text-[11.5px] text-muted">Recent · main model, new colonies</div>
+          <div className="mb-1 text-meta-lg text-muted">Recent · main model, new colonies</div>
           <div className="flex flex-wrap gap-1.5">
             {recent.map((id) => {
               const m = a.models.find((x) => x.id === id);
@@ -747,7 +747,7 @@ export function ModelSwitcherPanel(p: ModelSwitcherPanelProps): ReactElement {
                   disabled={busy || m?.out_of_quota === true}
                   title={m?.out_of_quota ? quotaUntil(m) : `Switch the main model to ${id}`}
                   onClick={() => p.onRecent(id)}
-                  className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-[12px] text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-small text-text hover:border-border-strong disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span aria-hidden="true" className={cx("size-1.5 rounded-full", TONE_DOT[modelHealth(id, a.models)])} />
                   {shortModelName(id, a.models)}

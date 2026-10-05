@@ -96,9 +96,9 @@ export function ProvidersPane({
         <ProviderQuotaCards reloadProviders={reload} />
         <div className="space-y-2">
           <ClaudeRow claude={claude} models={models} onOpenConnections={onOpenConnections} />
-          {error && <p className="text-[13px] text-err">{error}</p>}
+          {error && <p className="text-body-sm text-err">{error}</p>}
           {!providers && !error && (
-            <p className="flex items-center gap-2 py-1 text-[13px] text-muted">
+            <p className="flex items-center gap-2 py-1 text-body-sm text-muted">
               <Spinner /> Loading providers…
             </p>
           )}
@@ -106,7 +106,7 @@ export function ProvidersPane({
         {providers && (
           <div className="space-y-2">
             {providers.length === 0 && editing?.mode !== "new" && (
-              <p className="rounded-xl border border-dashed border-border-strong px-3.5 py-4 text-center text-[13px] text-muted">
+              <p className="rounded-xl border border-dashed border-border-strong px-3.5 py-4 text-center text-body-sm text-muted">
                 No extra providers yet. Claude works without one.
               </p>
             )}
@@ -160,7 +160,7 @@ export function ProvidersPane({
           </div>
         )}
         <div role="group" aria-labelledby={addLabelId} className="space-y-2">
-          <span id={addLabelId} className="block text-[12.5px] text-muted">
+          <span id={addLabelId} className="block text-small-lg text-muted">
             Add a provider
           </span>
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
@@ -173,7 +173,7 @@ export function ProvidersPane({
                   onClick={() => setEditing({ mode: "new", preset })}
                   className={cx(
                     "flex cursor-pointer select-none flex-col items-center gap-2 rounded-xl border border-border bg-panel px-1.5 py-3",
-                    "text-[12px] font-medium text-text transition-colors hover:bg-panel-2",
+                    "text-small font-medium text-text transition-colors hover:bg-panel-2",
                     "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel",
                   )}
                 >
@@ -189,7 +189,7 @@ export function ProvidersPane({
               onClick={() => setBrowsing((open) => !open)}
               className={cx(
                 "flex cursor-pointer select-none flex-col items-center gap-2 rounded-xl border border-dashed border-border-strong bg-panel px-1.5 py-3",
-                "text-[12px] font-medium text-muted transition-colors hover:bg-panel-2 hover:text-text",
+                "text-small font-medium text-muted transition-colors hover:bg-panel-2 hover:text-text",
                 "disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-panel",
               )}
             >
@@ -205,7 +205,7 @@ export function ProvidersPane({
             setEditing({ mode: "new", preset: id });
           }} />}
         </div>
-        <p className="text-[11.5px] leading-snug text-faint">
+        <p className="text-meta-lg leading-snug text-faint">
           Logos and names are the property of their owners. Colonizer is not affiliated with, endorsed by or connected to any of them.
         </p>
       </div>
@@ -269,25 +269,25 @@ function ClaudeRow({ claude, models, onOpenConnections }: { claude: HarnessStatu
       <ProviderMark preset="anthropic" name="Anthropic" />
       <div className="min-w-0 flex-1 basis-48">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[14px] font-semibold">Anthropic</span>
+          <span className="text-body-lg font-semibold">Anthropic</span>
           <Badge>Built-in</Badge>
           {claude && <Badge tone={claude.configured ? "ok" : "err"}>{claude.configured ? "Connected" : "Not connected"}</Badge>}
         </div>
-        <div className="mt-0.5 text-[12px] text-muted">
+        <div className="mt-0.5 text-small text-muted">
           {claude?.configured ? [claude.account, claude.source ?? "Connected", "managed in Connections"].filter(Boolean).join(" · ") : "Managed in Connections"}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {own.length === 0 ? (
-            <span className="text-[12px] text-faint">Model list not loaded.</span>
+            <span className="text-small text-faint">Model list not loaded.</span>
           ) : (
             own.map((model) => (
-              <span key={model.id} title={model.label} className="rounded bg-panel-2 px-1.5 py-px font-mono text-[11.5px] text-muted">
+              <span key={model.id} title={model.label} className="rounded bg-panel-2 px-1.5 py-px font-mono text-meta-lg text-muted">
                 {model.id}
               </span>
             ))
           )}
         </div>
-        <p className="mt-1.5 text-[12px] text-faint">The default. A model id with no provider prefix, and a provider's fallback, go here.</p>
+        <p className="mt-1.5 text-small text-faint">The default. A model id with no provider prefix, and a provider's fallback, go here.</p>
       </div>
       <div className="flex shrink-0 gap-1.5">
         <Button size="sm" onClick={onOpenConnections}>
@@ -303,7 +303,7 @@ type HealthView = { state: "checking" } | { state: "done"; result: ProviderHealt
 export function HealthStatus({ health, degraded }: { health: HealthView; degraded?: boolean }) {
   if (health.state === "checking") {
     return (
-      <span role="status" className="flex items-center gap-1.5 text-[12px] text-muted">
+      <span role="status" className="flex items-center gap-1.5 text-small text-muted">
         <Spinner className="size-3" /> Checking from the Mothership…
       </span>
     );
@@ -345,7 +345,7 @@ export function HealthStatus({ health, degraded }: { health: HealthView; degrade
     <span
       role="status"
       title={title || undefined}
-      className={cx("flex items-start gap-1.5 text-[12px] font-medium", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-err")}
+      className={cx("flex items-start gap-1.5 text-small font-medium", tone === "ok" ? "text-ok" : tone === "warn" ? "text-warn" : "text-err")}
     >
       <span className="mt-[5px] size-1.5 shrink-0 rounded-full bg-current" />
       <span className="min-w-0 [overflow-wrap:anywhere]">{text}</span>
@@ -445,7 +445,7 @@ function UsageLine({ provider }: { provider: ModelProvider }) {
   }
 
   return (
-    <div className="mt-1 text-[12px] text-faint" title="Counted at the Mothership gateway since it first kept tally; the counts survive a restart.">
+    <div className="mt-1 text-small text-faint" title="Counted at the Mothership gateway since it first kept tally; the counts survive a restart.">
       {segments.map((segment, index) => (
         <span key={index}>
           {index > 0 && " · "}
@@ -486,8 +486,8 @@ function ProviderRow({
       <ProviderMark preset={provider.preset} name={provider.name} />
       <div className="min-w-0 flex-1 basis-48">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[14px] font-semibold">{provider.name}</span>
-          <span className="font-mono text-[12px] text-faint">{provider.id}</span>
+          <span className="text-body-lg font-semibold">{provider.name}</span>
+          <span className="font-mono text-small text-faint">{provider.id}</span>
           <KeyBadge provider={provider} />
           {provider.wire === "openai" && (
             <Badge tone="info" title="Speaks the OpenAI protocol; the Mothership gateway translates">
@@ -508,19 +508,19 @@ function ProviderRow({
             </Badge>
           )}
         </div>
-        <div className="mt-0.5 font-mono text-[12px] text-muted [overflow-wrap:anywhere]">{provider.base_url}</div>
+        <div className="mt-0.5 font-mono text-small text-muted [overflow-wrap:anywhere]">{provider.base_url}</div>
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
           {provider.models.length === 0 ? (
-            <span className="text-[12px] text-faint">No models listed; type model IDs where you pick a model.</span>
+            <span className="text-small text-faint">No models listed; type model IDs where you pick a model.</span>
           ) : (
             provider.models.map((model) => (
-              <span key={model} className="rounded bg-panel-2 px-1.5 py-px font-mono text-[11.5px] text-muted">
+              <span key={model} className="rounded bg-panel-2 px-1.5 py-px font-mono text-meta-lg text-muted">
                 {model}
               </span>
             ))
           )}
         </div>
-        {limits.length > 0 && <div className="mt-1 text-[12px] text-faint">{limits.join(" · ")}</div>}
+        {limits.length > 0 && <div className="mt-1 text-small text-faint">{limits.join(" · ")}</div>}
         <UsageLine provider={provider} />
         {health && (
           <div className="mt-2">
@@ -590,16 +590,16 @@ function CatalogBrowser({
             >
               <ProviderMark preset={entry.id} name={entry.name} />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] font-medium">{entry.name}</span>
-                <span className="block truncate font-mono text-[11.5px] text-faint">{hostOf(entry.base_url)}</span>
+                <span className="block truncate text-body-sm font-medium">{entry.name}</span>
+                <span className="block truncate font-mono text-meta-lg text-faint">{hostOf(entry.base_url)}</span>
               </span>
               {entry.wire === "openai" && <Badge tone="info">{WIRE_LABEL.openai}</Badge>}
             </button>
           </li>
         ))}
-        {matches.length === 0 && <li className="px-2 py-3 text-[13px] text-faint">Nothing matches that.</li>}
+        {matches.length === 0 && <li className="px-2 py-3 text-body-sm text-faint">Nothing matches that.</li>}
       </ul>
-      <p className="px-1 text-[11.5px] leading-snug text-faint">
+      <p className="px-1 text-meta-lg leading-snug text-faint">
         {PROVIDER_CATALOG.length} endpoints, from the cc-switch catalogue. Colonizer neither vets nor endorses them, and many resell
         access rather than run the model themselves.
       </p>

@@ -620,7 +620,7 @@ export function Cockpit({
       case "chat":
         return (
           <Page width="full">
-            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-body-sm text-muted">Loading chat…</div>}>
               <ChatView
                 org={selectedOrg}
                 repos={repos}
@@ -809,7 +809,7 @@ export function Cockpit({
             <div className="px-6 pt-4">
               <div
                 role="status"
-                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-small-lg text-warn"
               >
                 Draining for an update or restart: new colonies stay queued until it finishes.
               </div>
@@ -827,7 +827,7 @@ export function Cockpit({
               <button
                 type="button"
                 onClick={() => setDashOpen(true)}
-                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-[12.5px] text-muted transition-colors hover:text-text"
+                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-small-lg text-muted transition-colors hover:text-text"
               >
                 Dashboard
               </button>

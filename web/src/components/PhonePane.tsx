@@ -126,7 +126,7 @@ export function PhonePane({
       <div className="space-y-5">
         {!invite ? (
           <div className="space-y-3">
-            <p className="text-[12.5px] text-muted">
+            <p className="text-small-lg text-muted">
               Shows a single-use QR code. Scan it with your phone, then type the six-digit code the phone shows into this pane. The phone
               gets a sign-in of its own that you can revoke here at any time; the code expires in five minutes.
             </p>
@@ -139,7 +139,7 @@ export function PhonePane({
           <div className="space-y-4">
             <div className="flex flex-wrap items-start gap-4">
               {origin && <QrCode text={inviteUrl(origin, invite.code)} />}
-              <div className="min-w-0 flex-1 space-y-1.5 text-[12.5px] text-muted">
+              <div className="min-w-0 flex-1 space-y-1.5 text-small-lg text-muted">
                 <p>1. Point your phone's camera here and open the link.</p>
                 <p>2. Type the code your phone then shows:</p>
                 <form
@@ -165,7 +165,7 @@ export function PhonePane({
                 </form>
                 {origin && (
                   <p className="pt-1">
-                    <span className="font-medium text-text">{KIND_LABEL[origin.kind]}</span> · <span className="break-all font-mono text-[12px]">{origin.url}</span>
+                    <span className="font-medium text-text">{KIND_LABEL[origin.kind]}</span> · <span className="break-all font-mono text-small">{origin.url}</span>
                   </p>
                 )}
                 <p>{inviteExpiry(invite)} · single use</p>
@@ -176,40 +176,40 @@ export function PhonePane({
             </div>
 
             {noneReachable && (
-              <div role="note" className="space-y-1 rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-[12.5px] text-warn">
+              <div role="note" className="space-y-1 rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-small-lg text-warn">
                 <p className="font-medium">Your phone can't reach this machine from outside yet.</p>
                 {origins.map((o) => o.note && <p key={o.url}>{o.note}</p>)}
                 <p>Turning on Remote access (Settings → Remote access) gives the phone an https link that works from anywhere.</p>
               </div>
             )}
             {origins.length === 0 && (
-              <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-[12.5px] text-warn">
+              <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-small-lg text-warn">
                 No address a phone could open was found. Turn on Remote access (Settings → Remote access) for an https link that works
                 from anywhere.
               </p>
             )}
             {origin && origin.reachable && !origin.secure && (
-              <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-[12.5px] text-warn">
+              <p role="note" className="rounded-xl border border-warn/25 bg-warn-soft px-3.5 py-2.5 text-small-lg text-warn">
                 This address is plain http and only works on {origin.kind === "tailnet" ? "your tailnet" : "your network"}: the pairing
                 crosses it unencrypted, and the phone can't install the app or get notifications over it. The relay link from Remote
                 access has neither problem.
               </p>
             )}
-            <p className="text-[12px] text-faint">
+            <p className="text-small text-faint">
               The installed app belongs to the address it was installed from: pairing through a different one means installing the app
               again.
             </p>
           </div>
         )}
 
-        {error && <p className="text-[12.5px] text-err">{error}</p>}
+        {error && <p className="text-small-lg text-err">{error}</p>}
 
         {pending.length > 0 && (
           <div>
-            <h4 className="mb-1.5 text-[12.5px] font-semibold">Waiting for their code</h4>
+            <h4 className="mb-1.5 text-small-lg font-semibold">Waiting for their code</h4>
             <ul className="space-y-1.5">
               {pending.map((p) => (
-                <li key={p.id} className="flex items-center gap-2 text-[12.5px]">
+                <li key={p.id} className="flex items-center gap-2 text-small-lg">
                   <span className="min-w-0 flex-1">
                     {p.label} <span className="text-faint">· {inviteExpiry(p)}</span>
                   </span>
@@ -223,13 +223,13 @@ export function PhonePane({
         )}
 
         <div>
-          <h4 className="mb-1.5 text-[12.5px] font-semibold">Paired phones</h4>
+          <h4 className="mb-1.5 text-small-lg font-semibold">Paired phones</h4>
           {devices.length === 0 ? (
-            <p className="text-[12.5px] text-muted">No phone is paired yet.</p>
+            <p className="text-small-lg text-muted">No phone is paired yet.</p>
           ) : (
             <ul className="space-y-1.5">
               {devices.map((d) => (
-                <li key={d.id} className="flex items-center gap-2 text-[12.5px]">
+                <li key={d.id} className="flex items-center gap-2 text-small-lg">
                   <span className="min-w-0 flex-1">
                     {d.label} <span className="text-faint">· paired {timeAgo(d.paired_at)}</span>
                   </span>

@@ -110,14 +110,14 @@ export function MemoryView({
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-[17px] font-semibold leading-snug">Memory</h1>
+              <h1 className="text-title font-semibold leading-snug">Memory</h1>
               {selectedOrg && (
                 <Badge>
                   <IconOrg size={11} /> {selectedOrg}
                 </Badge>
               )}
             </div>
-            <p className="mt-0.5 text-[12.5px] text-muted">
+            <p className="mt-0.5 text-small-lg text-muted">
               Notes colonies can search while they work. Colonies propose new notes; nothing is shared until you approve it.
             </p>
           </div>
@@ -131,19 +131,19 @@ export function MemoryView({
           <div className="space-y-8">
           <section aria-labelledby="proposals-title" className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 id="proposals-title" className="text-[14.5px] font-semibold">
+              <h2 id="proposals-title" className="text-lead-sm font-semibold">
                 Waiting for review
               </h2>
               {visible.length > 0 && <Badge tone="accent">{visible.length}</Badge>}
             </div>
-            {error && <p className="text-[13px] text-err">{error}</p>}
+            {error && <p className="text-body-sm text-err">{error}</p>}
             {!proposals && !error && (
-              <p className="flex items-center gap-2 text-[13px] text-muted">
+              <p className="flex items-center gap-2 text-body-sm text-muted">
                 <Spinner /> Loading proposals…
               </p>
             )}
             {proposals && visible.length === 0 && (
-              <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-[13px] text-muted">
+              <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-body-sm text-muted">
                 Nothing to review. Colonies propose notes when they learn something worth keeping.
               </p>
             )}
@@ -151,7 +151,7 @@ export function MemoryView({
               <ProposalGroup key={group.id} group={group} onResolved={resolved} onReload={loadProposals} />
             ))}
             {hidden > 0 && (
-              <p className="text-[12.5px] text-faint">
+              <p className="text-small-lg text-faint">
                 {hidden} more for other orgs. Switch to All orgs to see {hidden === 1 ? "it" : "them"}.
               </p>
             )}
@@ -185,8 +185,8 @@ function SourceLabel({ note }: { note: MemoryNote }) {
   if ("user" in note.source) return <span>Written by you</span>;
   return (
     <span className="min-w-0 [overflow-wrap:anywhere]">
-      From colony <code className="font-mono text-[12px] text-text">{note.source.session_id}</code> on{" "}
-      <span className="font-mono text-[12px]">{note.source.repo}</span>
+      From colony <code className="font-mono text-small text-text">{note.source.session_id}</code> on{" "}
+      <span className="font-mono text-small">{note.source.repo}</span>
     </span>
   );
 }
@@ -196,7 +196,7 @@ function Tags({ tags }: { tags: string[] }) {
   return (
     <div className="mt-2 flex flex-wrap gap-1">
       {tags.map((tag) => (
-        <span key={tag} className="rounded bg-panel-2 px-1.5 py-px font-mono text-[11.5px] text-muted">
+        <span key={tag} className="rounded bg-panel-2 px-1.5 py-px font-mono text-meta-lg text-muted">
           #{tag}
         </span>
       ))}
@@ -241,7 +241,7 @@ function ProposalCard({
 
   return (
     <article className="rounded-xl border border-border bg-panel">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 text-[12.5px] text-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 pt-3 text-small-lg text-muted">
         <ScopeBadge scope={proposal.scope} keyName={proposal.key} />
         <span className="text-faint">· {timeAgo(proposal.created_at)}</span>
       </div>
@@ -259,12 +259,12 @@ function ProposalCard({
               onChange={(e) => setContent(e.target.value)}
               aria-label="Note content (Markdown)"
               rows={Math.min(14, Math.max(4, content.split("\n").length + 1))}
-              className={cx(inputClass, "resize-y font-mono text-[13px] leading-relaxed")}
+              className={cx(inputClass, "resize-y font-mono text-body-sm leading-relaxed")}
             />
           </div>
         ) : (
           <>
-            <h3 className="text-[14.5px] font-semibold [overflow-wrap:anywhere]">
+            <h3 className="text-lead-sm font-semibold [overflow-wrap:anywhere]">
               <InlineCode text={proposal.title} />
             </h3>
             <MarkdownBlock className="mt-1 text-text">{proposal.content}</MarkdownBlock>
@@ -351,13 +351,13 @@ function ProposalGroup({
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-muted">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-small-lg text-muted">
         {group.sessionId === null ? (
           <span>Other</span>
         ) : (
           <span className="min-w-0 [overflow-wrap:anywhere]">
-            Colony <code className="font-mono text-[12px] text-text">{shortId(group.sessionId)}</code> on{" "}
-            <span className="font-mono text-[12px]">{group.repo}</span>
+            Colony <code className="font-mono text-small text-text">{shortId(group.sessionId)}</code> on{" "}
+            <span className="font-mono text-small">{group.repo}</span>
           </span>
         )}
         <span>· {group.origin}</span>
@@ -475,7 +475,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
   return (
     <section aria-labelledby="notes-title" className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <h2 id="notes-title" className="mr-auto text-[14.5px] font-semibold">
+        <h2 id="notes-title" className="mr-auto text-lead-sm font-semibold">
           Notes
         </h2>
         {!adding && (
@@ -495,7 +495,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
               aria-selected={scope === s.id}
               onClick={() => setScope(s.id)}
               className={cx(
-                "cursor-pointer rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+                "cursor-pointer rounded-md px-2.5 py-1 text-small-lg font-medium transition-colors",
                 scope === s.id ? "bg-panel text-text shadow-sm" : "text-muted hover:text-text",
               )}
             >
@@ -508,7 +508,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
             value={org}
             onChange={(e) => setOrg(e.target.value)}
             aria-label="Organisation"
-            className={cx(pickerClass, "text-[13px]")}
+            className={cx(pickerClass, "text-body-sm")}
           >
             {orgNames.length === 0 && <option value="">No organisations</option>}
             {orgNames.map((name) => (
@@ -523,7 +523,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
             value={repo}
             onChange={(e) => setRepo(e.target.value)}
             aria-label="Repository"
-            className={cx(pickerClass, "font-mono text-[12.5px]")}
+            className={cx(pickerClass, "font-mono text-small-lg")}
           >
             {orgRepos.length === 0 && <option value="">No repositories</option>}
             {orgRepos.map((r) => (
@@ -534,7 +534,7 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
           </select>
         )}
       </div>
-      <p className="text-[12.5px] text-muted">
+      <p className="text-small-lg text-muted">
         {description}
         {provider === "mem0" && " Stored in your mem0 project."}
       </p>
@@ -551,14 +551,14 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
         />
       )}
 
-      {error && <p className="text-[13px] text-err">{error}</p>}
+      {error && <p className="text-body-sm text-err">{error}</p>}
       {!notes && !error && (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading notes…
         </p>
       )}
       {notes && notes.length === 0 && !adding && (
-        <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-[13px] text-muted">
+        <p className="rounded-xl border border-dashed border-border-strong px-4 py-5 text-center text-body-sm text-muted">
           No notes here yet.
         </p>
       )}
@@ -566,10 +566,10 @@ function NotesSection({ selectedOrg, orgs, version }: { selectedOrg: string | nu
         <article key={note.id} className="group rounded-xl border border-border bg-panel px-4 py-3">
           <div className="flex items-start gap-2">
             <div className="min-w-0 flex-1">
-              <h3 className="text-[14px] font-semibold [overflow-wrap:anywhere]">
+              <h3 className="text-body-lg font-semibold [overflow-wrap:anywhere]">
                 <InlineCode text={note.title} />
               </h3>
-              <div className="mt-0.5 flex flex-wrap gap-x-1.5 text-[12px] text-faint">
+              <div className="mt-0.5 flex flex-wrap gap-x-1.5 text-small text-faint">
                 <SourceLabel note={note} />
                 <span>· {timeAgo(note.created_at)}</span>
               </div>
@@ -625,7 +625,7 @@ function NoteForm({
         }
       }}
     >
-      <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+      <div className="flex flex-wrap items-center gap-2 text-small-lg text-muted">
         New note in <ScopeBadge scope={scope} keyName={keyName} />
       </div>
       <input
@@ -642,7 +642,7 @@ function NoteForm({
         placeholder="What colonies should know. Markdown works."
         aria-label="Content (Markdown)"
         rows={5}
-        className={cx(inputClass, "resize-y font-mono text-[13px] leading-relaxed")}
+        className={cx(inputClass, "resize-y font-mono text-body-sm leading-relaxed")}
       />
       <div className="flex justify-end gap-2">
         <Button size="sm" variant="ghost" onClick={onCancel}>

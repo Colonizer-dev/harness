@@ -106,9 +106,9 @@ export function PlanRow({ plan, nowMs }: { plan: PlanUsage; nowMs?: number }): R
   const label = `${plan.name}: ${v.figure}. ${[v.usedBy, ...v.details].filter(Boolean).join(". ")}`;
   return (
     <li data-plan={plan.id} data-tone={v.tone} className={cx("rounded-lg px-2 py-1.5", plan.exhausted ? "bg-err-soft" : "bg-panel-2")} aria-label={label}>
-      <div className="flex items-baseline justify-between gap-2 text-[12.5px]">
+      <div className="flex items-baseline justify-between gap-2 text-small-lg">
         <span className="min-w-0 truncate font-semibold text-text">{plan.name}</span>
-        <span className={cx("shrink-0 tabular-nums text-[11.5px]", FIGURE[v.tone])}>{v.figure}</span>
+        <span className={cx("shrink-0 tabular-nums text-meta-lg", FIGURE[v.tone])}>{v.figure}</span>
       </div>
       <div
         role="meter"
@@ -121,7 +121,7 @@ export function PlanRow({ plan, nowMs }: { plan: PlanUsage; nowMs?: number }): R
       >
         {v.usedPct != null && <div className={cx("h-full rounded-full", FILL[v.tone])} style={{ width: `${Math.max(v.usedPct, 2)}%` }} />}
       </div>
-      <p className="m-0 mt-1 text-[11px] leading-snug text-faint">
+      <p className="m-0 mt-1 text-meta leading-snug text-faint">
         {[v.usedBy, ...v.details].filter(Boolean).join(" · ")}
       </p>
     </li>
@@ -132,16 +132,16 @@ export function PlanRow({ plan, nowMs }: { plan: PlanUsage; nowMs?: number }): R
 export function PlanList({ plans, error, nowMs }: { plans: PlanUsage[] | null; error?: string | null; nowMs?: number }): ReactElement {
   return (
     <section aria-label="plan usage" className="mb-3">
-      <div className="mb-1 flex items-baseline justify-between text-[11.5px] text-muted">
+      <div className="mb-1 flex items-baseline justify-between text-meta-lg text-muted">
         <span>Plans in use</span>
         {plans && plans.some((p) => p.exhausted) && <span className="text-err">{plans.filter((p) => p.exhausted).length} out</span>}
       </div>
       {error ? (
-        <p className="m-0 text-[11.5px] text-faint">Plan usage unavailable: {error}</p>
+        <p className="m-0 text-meta-lg text-faint">Plan usage unavailable: {error}</p>
       ) : plans === null ? (
-        <p className="m-0 text-[11.5px] text-faint">Reading plan usage…</p>
+        <p className="m-0 text-meta-lg text-faint">Reading plan usage…</p>
       ) : plans.length === 0 ? (
-        <p className="m-0 text-[11.5px] text-faint">No plan in use reports anything yet.</p>
+        <p className="m-0 text-meta-lg text-faint">No plan in use reports anything yet.</p>
       ) : (
         <ul className="m-0 list-none space-y-1.5 p-0">
           {sortPlans(plans).map((p) => (

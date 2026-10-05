@@ -38,13 +38,13 @@ export function LaunchView({
 }): ReactElement {
   return (
     <Page width="readable">
-      <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Launch</h1>
-      <p className="mt-2 text-[14px] text-pretty text-muted">
+      <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">Launch</h1>
+      <p className="mt-2 text-body-lg text-pretty text-muted">
         Send a settler out{org ? ` into ${org}` : ""}:
         one colony each, in its own microvm on a fresh worktree
         {maxParallel != null ? ` · queued past ${maxParallel} in parallel` : ""}.
       </p>
-      <p className="mt-1 text-[12px] text-faint">
+      <p className="mt-1 text-small text-faint">
         Duplicate check is per-host; other motherships in the fleet are not consulted.
       </p>
       <div className="mt-8 border-y border-border">

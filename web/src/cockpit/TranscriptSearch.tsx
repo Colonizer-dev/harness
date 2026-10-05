@@ -55,7 +55,7 @@ function HitRow({ hit, onOpen }: { hit: HistoryHit; onOpen: (colony: string, tur
         onClick={() => openHit(hit, onOpen)}
         className="block w-full cursor-pointer border-0 bg-transparent px-3.5 py-2.5 text-left hover:bg-panel-2"
       >
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-faint">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-meta-lg text-faint">
           <span className="font-mono text-muted">{hit.repo}</span>
           <span aria-hidden="true">·</span>
           <span>{hit.agent}</span>
@@ -63,9 +63,9 @@ function HitRow({ hit, onOpen }: { hit: HistoryHit; onOpen: (colony: string, tur
           {status ? <Badge tone={status.tone}>{status.label}</Badge> : <span>{hit.status}</span>}
           <span aria-hidden="true">·</span>
           <time dateTime={hit.ts} title={new Date(hit.ts).toLocaleString()}>{hit.ts}</time>
-          <span className="ml-auto rounded-full border border-border px-1.5 py-px text-[11px] leading-4 text-muted">{hit.role === "user" ? "You" : "Agent"}</span>
+          <span className="ml-auto rounded-full border border-border px-1.5 py-px text-meta leading-4 text-muted">{hit.role === "user" ? "You" : "Agent"}</span>
         </span>
-        <span className="mt-1 block text-[13px] text-text [overflow-wrap:anywhere]">{hit.snippet}</span>
+        <span className="mt-1 block text-body-sm text-text [overflow-wrap:anywhere]">{hit.snippet}</span>
       </button>
     </li>
   );
@@ -103,13 +103,13 @@ export function TranscriptSearch({ org, onOpen, initial = null }: {
     }
   };
 
-  const field = cx(inputClass, "w-auto text-[12.5px]");
+  const field = cx(inputClass, "w-auto text-small-lg");
 
   return (
     <section aria-label="Search colony transcripts" className="flex flex-col gap-3">
       <div className="min-w-0">
-        <h2 className="m-0 text-[15px] font-semibold">Search transcripts</h2>
-        <p className="mt-0.5 text-[12.5px] text-muted">Find a phrase in what you and your colonies said, and open the turn it came from.</p>
+        <h2 className="m-0 text-lead font-semibold">Search transcripts</h2>
+        <p className="mt-0.5 text-small-lg text-muted">Find a phrase in what you and your colonies said, and open the turn it came from.</p>
       </div>
       <form onSubmit={submit} className="flex flex-wrap items-center gap-2" role="search">
         <SearchBox value={filters.q} onChange={(q) => setFilters((f) => ({ ...f, q }))} placeholder="Search conversations…" label="search colony transcripts" className="w-full sm:w-64" />
@@ -127,16 +127,16 @@ export function TranscriptSearch({ org, onOpen, initial = null }: {
         <button
           type="submit"
           disabled={busy || filters.q.trim() === ""}
-          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 py-1.5 text-[12.5px] text-text hover:border-border-strong disabled:cursor-default disabled:opacity-50"
+          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-3 py-1.5 text-small-lg text-text hover:border-border-strong disabled:cursor-default disabled:opacity-50"
         >
           {busy && <Spinner className="size-3" />}
           Search
         </button>
       </form>
 
-      {error && <p role="status" className="text-[12.5px] text-warn">Couldn’t search transcripts: {error}</p>}
+      {error && <p role="status" className="text-small-lg text-warn">Couldn’t search transcripts: {error}</p>}
       {hits && hits.length === 0 && !error && (
-        <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">No turn matches this search.</p>
+        <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">No turn matches this search.</p>
       )}
       {hits && hits.length > 0 && (
         <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-xl border border-border">

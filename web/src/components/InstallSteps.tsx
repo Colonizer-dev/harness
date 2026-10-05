@@ -47,7 +47,7 @@ export function InstallSteps({
       /* nothing to copy into; the address is on screen anyway */
     }
   };
-  const note = "rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted";
+  const note = "rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted";
 
   if (platform === "installed") {
     return (
@@ -88,7 +88,7 @@ export function InstallSteps({
             {safari && (
               <a
                 href={safari}
-                className="inline-flex min-h-11 items-center rounded-lg border border-border bg-panel px-3.5 text-[12.5px] no-underline text-text"
+                className="inline-flex min-h-11 items-center rounded-lg border border-border bg-panel px-3.5 text-small-lg no-underline text-text"
               >
                 Open in Safari
               </a>
@@ -96,7 +96,7 @@ export function InstallSteps({
             <Button size="sm" className="min-h-11" onClick={() => void copy()}>
               {copied ? "Copied" : "Copy link"}
             </Button>
-            {!safari && <span className="text-[12.5px] text-muted">then paste it into Safari</span>}
+            {!safari && <span className="text-small-lg text-muted">then paste it into Safari</span>}
           </div>
         )}
       </div>
@@ -109,7 +109,7 @@ export function InstallSteps({
         <Button size="sm" variant="primary" className="min-h-11" onClick={() => void onInstall()}>
           Install app
         </Button>
-        <span className="min-w-0 flex-1 text-[12.5px] text-muted">Its own icon; same cockpit, same sign-in.</span>
+        <span className="min-w-0 flex-1 text-small-lg text-muted">Its own icon; same cockpit, same sign-in.</span>
       </div>
     );
   }

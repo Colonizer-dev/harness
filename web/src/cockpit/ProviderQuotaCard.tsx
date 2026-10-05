@@ -164,18 +164,18 @@ export function ProviderQuotaCard({
     <div
       role="group"
       aria-label={`Provider out of quota: ${card.provider}`}
-      className="rounded-md border border-warn bg-warn-soft px-3.5 py-3 text-[13px] text-text"
+      className="rounded-md border border-warn bg-warn-soft px-3.5 py-3 text-body-sm text-text"
     >
-      <div className="font-mono text-[11.5px] text-warn">Provider out of quota</div>
-      <div className="mt-1 text-[15px] font-semibold [text-wrap:pretty]">{quotaCardHeader(card, now)}</div>
-      {waiting && <div className="mt-1 text-[12.5px] text-warn">{waiting}</div>}
-      <div className="mt-2 text-[12.5px] text-muted">
+      <div className="font-mono text-meta-lg text-warn">Provider out of quota</div>
+      <div className="mt-1 text-lead font-semibold [text-wrap:pretty]">{quotaCardHeader(card, now)}</div>
+      {waiting && <div className="mt-1 text-small-lg text-warn">{waiting}</div>}
+      <div className="mt-2 text-small-lg text-muted">
         {count} {count === 1 ? "colony" : "colonies"} blocked
         {card.orgs.length > 0 ? ` in ${card.orgs.join(", ")}` : ""}:
       </div>
       <ul className="m-0 mt-1 list-none p-0">
         {card.colonies.map((colony) => (
-          <li key={colony.id} className="flex items-center gap-2 py-0.5 font-mono text-[12px]">
+          <li key={colony.id} className="flex items-center gap-2 py-0.5 font-mono text-small">
             <button
               type="button"
               onClick={() => onOpenColony?.(colony.id)}
@@ -199,7 +199,7 @@ export function ProviderQuotaCard({
           id={`quota-model-${card.provider}`}
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          className={cx(inputClass, "h-8 w-auto max-w-[22rem] text-[12.5px]")}
+          className={cx(inputClass, "h-8 w-auto max-w-[22rem] text-small-lg")}
         >
           {card.alternatives.map((alt) => (
             <option key={alt.id} value={alt.id} disabled={!alt.healthy}>
@@ -214,7 +214,7 @@ export function ProviderQuotaCard({
           id={`quota-scope-${card.provider}`}
           value={scope}
           onChange={(e) => setScope(e.target.value as SwitchScope)}
-          className={cx(inputClass, "h-8 w-auto text-[12.5px]")}
+          className={cx(inputClass, "h-8 w-auto text-small-lg")}
         >
           <option value="colonies">these colonies</option>
           <option value="org">this org ({card.orgs.join(", ") || "none"})</option>
@@ -229,7 +229,7 @@ export function ProviderQuotaCard({
           {busy === "switch" ? "Switching…" : "Switch model"}
         </Button>
         <label
-          className={cx("flex items-center gap-1.5 text-[12px]", canRemember(card, model) ? "text-muted" : "text-faint")}
+          className={cx("flex items-center gap-1.5 text-small", canRemember(card, model) ? "text-muted" : "text-faint")}
           title="Save it as this provider's fallback_model, so the next time its plan runs out colonies retry on it by themselves. A Claude model, or a model on a provider that speaks the same wire."
         >
           <input
@@ -248,7 +248,7 @@ export function ProviderQuotaCard({
         <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void run({ action: "stop" })}>
           {busy === "stop" ? "Stopping…" : count === 1 ? "Stop it" : `Stop all ${count}`}
         </Button>
-        {card.fallback_model && <span className="text-[12px] text-faint">fallback: {card.fallback_model}</span>}
+        {card.fallback_model && <span className="text-small text-faint">fallback: {card.fallback_model}</span>}
       </div>
     </div>
   );
@@ -291,7 +291,7 @@ export function QuotaChangeSummary({
     <div
       role="status"
       aria-label={`Switched ${reply.provider}`}
-      className="rounded-md border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-text"
+      className="rounded-md border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-text"
     >
       <div className="flex items-center gap-2">
         <span className="font-medium">{quotaActionSummary(reply)}</span>
@@ -299,13 +299,13 @@ export function QuotaChangeSummary({
           <button
             type="button"
             onClick={onDismiss}
-            className="ml-auto cursor-pointer border-0 bg-transparent p-0 text-[12px] text-muted hover:underline"
+            className="ml-auto cursor-pointer border-0 bg-transparent p-0 text-small text-muted hover:underline"
           >
             Dismiss
           </button>
         )}
       </div>
-      <ul className="m-0 mt-1 list-none p-0 font-mono text-[12px] text-muted">
+      <ul className="m-0 mt-1 list-none p-0 font-mono text-small text-muted">
         {lines.map((line) => (
           <li key={line}>{line}</li>
         ))}

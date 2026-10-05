@@ -347,13 +347,13 @@ export function OrgDashboard({
   return (
     <div className="flex flex-col gap-10">
       <div>
-        <button type="button" onClick={onBack} className="mb-3 cursor-pointer border-0 bg-transparent p-0 text-[13px] text-muted hover:text-text">
+        <button type="button" onClick={onBack} className="mb-3 cursor-pointer border-0 bg-transparent p-0 text-body-sm text-muted hover:text-text">
           ← All workspaces
         </button>
         {/* The primary action shares the title's row and centres on it; narrow, it wraps under the
             title rather than floating mid-block. The range controls stay below, at the right. */}
         <div data-org-title-row className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-          <h1 className="m-0 flex min-w-0 items-center gap-3 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">
+          <h1 className="m-0 flex min-w-0 items-center gap-3 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">
             <OrgTile org={org.org} avatar={org.avatar} size={28} />
             <span className="truncate">{org.org}</span>
           </h1>
@@ -361,8 +361,8 @@ export function OrgDashboard({
         </div>
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="min-w-0">
-            {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-[14px] leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
-            <div className="mt-2 text-[14px] text-muted">
+            {org.description && <p data-org-description className="m-0 mt-2 max-w-[640px] text-body-lg leading-snug text-text/80 [text-wrap:pretty]">{org.description}</p>}
+            <div className="mt-2 text-body-lg text-muted">
               {counts.live} live · {counts["need you"]} need you · {queued} queued · {repos.length} {repos.length === 1 ? "repo" : "repos"}
               {repo ? ` · filtered to ${shortRepo(repo)}${pkg ? ` / ${pkgLabel(pkg)}` : ""}` : ""}
             </div>
@@ -442,7 +442,7 @@ export function OrgDashboard({
                 role="tab"
                 aria-selected={codeTab === t}
                 onClick={() => setCodeTab(t)}
-                className={`cursor-pointer rounded-md border-0 px-3 py-1 text-[12.5px] ${codeTab === t ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
+                className={`cursor-pointer rounded-md border-0 px-3 py-1 text-small-lg ${codeTab === t ? "bg-panel-3 text-text" : "bg-transparent text-muted hover:text-text"}`}
               >
                 {t === "repositories" ? "Repositories" : "Packages"}
               </button>
@@ -455,11 +455,11 @@ export function OrgDashboard({
         ) : (
         <Rules>
           {repos.length === 0 ? (
-            <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
+            <div className="py-3.5 text-body-sm text-faint">No colonies right now.</div>
           ) : (
             <div className="overflow-x-auto">
               <div className="min-w-[640px]">
-                <div className={`${REPO_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
+                <div className={`${REPO_GRID} border-b border-border py-2.5 text-small-lg text-muted`}>
                   <span>Repository</span>
                   <span className="text-right">Colonies</span>
                   <span>Merge rate</span>
@@ -538,9 +538,9 @@ export function OrgDashboard({
       >
         <Rules>
           {colonies.length === 0 ? (
-            <div className="py-3.5 text-[13px] text-faint">No colonies right now.</div>
+            <div className="py-3.5 text-body-sm text-faint">No colonies right now.</div>
           ) : colonyList.total === 0 ? (
-            <div className="py-3.5 text-[13px] text-muted">
+            <div className="py-3.5 text-body-sm text-muted">
               nothing matches this search and these filters ·{" "}
               <button type="button" onClick={colonyList.reset} className="cursor-pointer border-0 bg-transparent p-0 font-medium text-text underline underline-offset-[3px]">
                 clear filters ×
@@ -567,7 +567,7 @@ export function OrgDashboard({
         </Rules>
       </Section>
 
-      <div className="-mt-6 text-[12.5px] text-faint">
+      <div className="-mt-6 text-small-lg text-faint">
         {formatTokens(sumTokens(current, org.org))} tokens in range · per-day latency and coverage have no API to read from (the API serves no coverage).
       </div>
     </div>
@@ -661,7 +661,7 @@ function RepoTableRow({
         }
       }}
       title={title}
-      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent ${active ? "bg-panel-2" : "bg-transparent"}`}
+      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border py-3.5 text-left text-body tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent ${active ? "bg-panel-2" : "bg-transparent"}`}
     >
       <span className="flex min-w-0 items-center gap-2">
         {mono && (
@@ -680,9 +680,9 @@ function RepoTableRow({
             </svg>
           </button>
         )}
-        <span className="min-w-0 truncate font-mono text-[13px]">{name}</span>
+        <span className="min-w-0 truncate font-mono text-body-sm">{name}</span>
         {mono && (
-          <span className="shrink-0 rounded-full border border-border px-1.5 py-px text-[11px] text-muted" title={mono.tool ? `detected from ${mono.tool}` : undefined}>
+          <span className="shrink-0 rounded-full border border-border px-1.5 py-px text-meta text-muted" title={mono.tool ? `detected from ${mono.tool}` : undefined}>
             monorepo · {mono.count} packages
           </span>
         )}
@@ -714,12 +714,12 @@ function PackageTableRow({ row, active, onClick }: { row: PackageRow; active: bo
             : "Colonies whose pull-request file list has not been read yet"
           : `Filter the dashboard to ${row.path} — a colony that touched several packages counts in each`
       }
-      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-dashed border-border py-2.5 text-left text-[13px] tabular-nums text-text hover:bg-panel-2 ${active ? "bg-panel-2" : "bg-transparent"}`}
+      className={`${REPO_GRID} -mt-px w-full cursor-pointer border-0 border-t border-dashed border-border py-2.5 text-left text-body-sm tabular-nums text-text hover:bg-panel-2 ${active ? "bg-panel-2" : "bg-transparent"}`}
     >
       <span className="flex min-w-0 items-center gap-2 pl-7">
         <span aria-hidden="true" className="h-3 w-2 shrink-0 border-b border-l border-border-strong" />
-        <span className={`min-w-0 truncate ${special ? "italic text-muted" : "font-mono text-[12.5px]"}`}>{row.name}</span>
-        {row.path && <span className="min-w-0 truncate text-[11.5px] text-faint">{row.path}</span>}
+        <span className={`min-w-0 truncate ${special ? "italic text-muted" : "font-mono text-small-lg"}`}>{row.name}</span>
+        {row.path && <span className="min-w-0 truncate text-meta-lg text-faint">{row.path}</span>}
       </span>
       <span className="text-right text-muted">{row.colonies}</span>
       <RateBar rate={row.rate} />

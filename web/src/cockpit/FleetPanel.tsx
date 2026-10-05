@@ -50,27 +50,27 @@ function FleetHostRow({ host }: { host: FleetHost }): ReactElement {
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border px-3.5 py-2 last:border-b-0">
       <span aria-hidden="true" className={`h-[7px] w-[7px] shrink-0 rounded-full ${HEALTH_DOT[host.health]}`} />
-      <span className="min-w-0 truncate font-mono text-[11.5px] font-semibold" title={host.id}>
+      <span className="min-w-0 truncate font-mono text-meta-lg font-semibold" title={host.id}>
         {host.name}
       </span>
       {(host.platform || host.os) && (
-        <span className="truncate font-mono text-[11px] text-faint">
+        <span className="truncate font-mono text-meta text-faint">
           {[host.platform, host.os].filter(Boolean).join(" · ")}
         </span>
       )}
-      <span className="whitespace-nowrap font-mono text-[11px] font-medium" style={{ color: edge }}>
+      <span className="whitespace-nowrap font-mono text-meta font-medium" style={{ color: edge }}>
         {HEALTH_LABEL[host.health]}
       </span>
       {facts.map((fact, i) => (
-        <span key={i} title={fact.title} className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-[11px] text-faint">
+        <span key={i} title={fact.title} className="inline-flex items-center gap-1 whitespace-nowrap font-mono text-meta text-faint">
           {fact.icon === "server" && <IconServer size={11} className="shrink-0" />}
           {fact.value}
         </span>
       ))}
-      <span title="when this host last answered a poll" className="ml-auto whitespace-nowrap font-mono text-[11px] text-faint">
+      <span title="when this host last answered a poll" className="ml-auto whitespace-nowrap font-mono text-meta text-faint">
         {timeSinceHeartbeat(host.last_heartbeat)}
       </span>
-      {note && <span className="w-full text-[11px] text-err">{note}</span>}
+      {note && <span className="w-full text-meta text-err">{note}</span>}
     </div>
   );
 }
@@ -84,7 +84,7 @@ export function FleetPanel({ hosts }: { hosts: FleetHost[] }): ReactElement | nu
   if (hosts.length <= 1) return null;
   return (
     <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-panel">
-      <div className="border-b border-border px-3.5 py-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
+      <div className="border-b border-border px-3.5 py-2 font-mono text-meta-sm tracking-[0.12em] text-faint">
         FLEET · {hosts.length} hosts
       </div>
       {hosts.map((host) => (

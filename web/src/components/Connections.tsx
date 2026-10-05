@@ -28,7 +28,7 @@ function ClaudeCredential({ claude }: { claude: HarnessStatus["claude"] }) {
   const daysLeft = msLeft != null && msLeft > 0 ? msLeft / 86_400_000 : null;
   const expiringSoon = daysLeft != null && daysLeft <= 30;
   return (
-    <div className="space-y-1 text-[12.5px] [overflow-wrap:anywhere]">
+    <div className="space-y-1 text-small-lg [overflow-wrap:anywhere]">
       {claude.account_note && <p className="text-muted">{claude.account_note}</p>}
       {(savedAt || expiresAt) && (
         <p className="text-muted">
@@ -193,13 +193,13 @@ export function ClaudeLoginSection({
       {login.state !== "idle" && (
         <div role="status" className="space-y-3 rounded-lg border border-dashed border-border-strong p-3.5">
           {login.state === "starting" && (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
+            <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Starting claude setup-token…
             </p>
           )}
           {(login.state === "awaiting_code" || login.state === "verifying") && (
             <>
-              <ol className="space-y-1.5 text-[13px]">
+              <ol className="space-y-1.5 text-body-sm">
                 <li>
                   <span className="mr-1 font-semibold">1.</span>
                   {login.url?.startsWith("https://") ? (
@@ -240,15 +240,15 @@ export function ClaudeLoginSection({
             </>
           )}
           {login.state === "done" && (
-            <p className="flex items-center gap-2 text-[13px] text-ok">
+            <p className="flex items-center gap-2 text-body-sm text-ok">
               <IconCheck size={14} /> {login.message ?? "Connected"}
             </p>
           )}
-          {login.state === "error" && <p className="text-[13px] text-err">{login.message ?? "Sign-in failed"}</p>}
+          {login.state === "error" && <p className="text-body-sm text-err">{login.message ?? "Sign-in failed"}</p>}
         </div>
       )}
 
-      <details className="text-[13px]">
+      <details className="text-body-sm">
         <summary className="cursor-pointer text-muted hover:text-text">Use a token or API key instead</summary>
         <form
           className="mt-2 flex flex-wrap gap-2"

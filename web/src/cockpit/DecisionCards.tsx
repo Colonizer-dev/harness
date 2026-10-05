@@ -63,20 +63,20 @@ export function DecisionsSection({
   return (
     <section aria-label="Decisions" className="flex min-w-0 flex-col gap-3">
       <div className="flex items-baseline gap-2.5">
-        <h2 className="m-0 text-[14px] font-medium">Decisions</h2>
-        <span className="text-[12px] text-muted">
+        <h2 className="m-0 text-body-lg font-medium">Decisions</h2>
+        <span className="text-small text-muted">
           {view.decisions.length + view.prs.length} from GitHub · not colony questions
         </span>
       </div>
       {blocked && (
-        <div role="note" className="rounded-xl border border-border bg-panel-2/60 px-3 py-2 text-[12.5px] text-muted">
+        <div role="note" className="rounded-xl border border-border bg-panel-2/60 px-3 py-2 text-small-lg text-muted">
           Read-only: {blocked}.
         </div>
       )}
       {view.decisions.map((card) => (
         <DecisionCardView key={card.id} card={card} blocked={blocked} onAnswer={onAnswer} />
       ))}
-      {view.prs.length > 0 && <h3 className="m-0 mt-1 text-[13px] font-medium text-muted">Pull requests that need you</h3>}
+      {view.prs.length > 0 && <h3 className="m-0 mt-1 text-body-sm font-medium text-muted">Pull requests that need you</h3>}
       {view.prs.map((card) => (
         <PrCardView key={card.id} card={card} blocked={blocked} onAction={onPrAction} onOpenColony={onOpenColony} />
       ))}
@@ -123,12 +123,12 @@ export function DecisionCardView({
         <span className="grid size-6 shrink-0 place-items-center rounded-full bg-accent text-on-accent">
           <IconQuestion size={14} />
         </span>
-        <span className="text-[13px] font-semibold">A decision for you</span>
+        <span className="text-body-sm font-semibold">A decision for you</span>
         <a
           href={card.url}
           target="_blank"
           rel="noreferrer"
-          className="ml-auto inline-flex max-w-full items-center gap-1 font-mono text-[12px] text-muted [overflow-wrap:anywhere] hover:text-text"
+          className="ml-auto inline-flex max-w-full items-center gap-1 font-mono text-small text-muted [overflow-wrap:anywhere] hover:text-text"
           title={card.title}
         >
           {cardRef(card.repo, card.number)} <IconExternal size={11} className="shrink-0" />
@@ -136,15 +136,15 @@ export function DecisionCardView({
       </div>
       <fieldset className="min-w-0 px-4 py-4" disabled={sending || blocked !== null}>
         <div className="mb-2 flex flex-wrap items-center gap-2">
-          <span className="rounded-md bg-panel-3 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-muted">
+          <span className="rounded-md bg-panel-3 px-2 py-0.5 text-meta font-semibold uppercase tracking-wide text-muted">
             {card.labelled ? "needs-decision" : card.source === "comment" ? "from a comment" : "from the issue"}
           </span>
-          <span className="min-w-0 flex-1 text-[11.5px] leading-snug text-faint [overflow-wrap:anywhere]">{card.title}</span>
+          <span className="min-w-0 flex-1 text-meta-lg leading-snug text-faint [overflow-wrap:anywhere]">{card.title}</span>
         </div>
-        <h3 className={cx("text-[15px] font-semibold leading-snug [text-wrap:pretty]", card.context ? "mb-1.5" : "mb-3")}>{card.question}</h3>
-        {card.context && <p className="mb-3 text-[13px] leading-snug text-muted [text-wrap:pretty]">{card.context}</p>}
+        <h3 className={cx("text-lead font-semibold leading-snug [text-wrap:pretty]", card.context ? "mb-1.5" : "mb-3")}>{card.question}</h3>
+        {card.context && <p className="mb-3 text-body-sm leading-snug text-muted [text-wrap:pretty]">{card.context}</p>}
         {card.more > 0 && (
-          <p className="-mt-1.5 mb-3 text-[12px] text-muted">
+          <p className="-mt-1.5 mb-3 text-small text-muted">
             The issue asks {card.more} more {card.more === 1 ? "question" : "questions"}; answer them on GitHub.
           </p>
         )}
@@ -165,7 +165,7 @@ export function DecisionCardView({
                   {card.recommended === option && <Badge tone="ok">Recommended</Badge>}
                 </span>
                 {card.option_details?.[i] && (
-                  <span className="mt-0.5 block text-[13px] leading-snug text-muted">{card.option_details[i]}</span>
+                  <span className="mt-0.5 block text-body-sm leading-snug text-muted">{card.option_details[i]}</span>
                 )}
               </span>
             </label>
@@ -199,12 +199,12 @@ export function DecisionCardView({
             rows={2}
             placeholder="A note for the comment (optional)"
             aria-label="Note"
-            className="w-full resize-y rounded-lg border border-border bg-panel px-3 py-2 text-[13px] outline-none focus:border-accent focus:ring-2 focus:ring-[var(--accent-ring)]"
+            className="w-full resize-y rounded-lg border border-border bg-panel px-3 py-2 text-body-sm outline-none focus:border-accent focus:ring-2 focus:ring-[var(--accent-ring)]"
           />
         </div>
       </fieldset>
       <div className="flex flex-wrap items-center gap-3 border-t border-border bg-panel-2/60 px-4 py-3">
-        <p className="min-w-0 flex-1 text-[12.5px] text-muted">
+        <p className="min-w-0 flex-1 text-small-lg text-muted">
           {blocked
             ? `Answering is off: ${blocked}.`
             : sending
@@ -252,12 +252,12 @@ export function PrCardView({
           <IconGitPR size={14} />
         </span>
         <Badge tone={reason.tone}>{reason.label}</Badge>
-        <span className="ml-auto min-w-0 font-mono text-[12px] text-muted [overflow-wrap:anywhere]">{cardRef(card.repo, card.number)}</span>
+        <span className="ml-auto min-w-0 font-mono text-small text-muted [overflow-wrap:anywhere]">{cardRef(card.repo, card.number)}</span>
       </div>
       <div className="px-4 py-3.5">
-        <div className="text-[15px] font-semibold leading-snug [text-wrap:pretty]">{card.title}</div>
-        {!card.url && <p className="mt-1 text-[13px] font-medium text-warn">{NO_PR_YET}.</p>}
-        <p className="mt-1 text-[13px] text-muted [text-wrap:pretty]">Why it needs you: {card.why}.</p>
+        <div className="text-lead font-semibold leading-snug [text-wrap:pretty]">{card.title}</div>
+        {!card.url && <p className="mt-1 text-body-sm font-medium text-warn">{NO_PR_YET}.</p>}
+        <p className="mt-1 text-body-sm text-muted [text-wrap:pretty]">Why it needs you: {card.why}.</p>
       </div>
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-panel-2/60 px-4 py-3">
         {card.actions.map((action) => (
@@ -293,7 +293,7 @@ export function PrCardView({
             href={card.url}
             target="_blank"
             rel="noreferrer"
-            className="ml-auto inline-flex items-center gap-1.5 text-[12.5px] text-muted no-underline hover:text-text"
+            className="ml-auto inline-flex items-center gap-1.5 text-small-lg text-muted no-underline hover:text-text"
           >
             Open on GitHub <IconExternal size={12} />
           </a>

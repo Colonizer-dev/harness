@@ -34,7 +34,7 @@ export function WebhookDeliveries({
     <div
       role="status"
       className={cx(
-        "rounded-xl border px-4 py-3 text-[12.5px]",
+        "rounded-xl border px-4 py-3 text-small-lg",
         trouble ? "border-warn/40 bg-warn-soft text-warn" : "border-border bg-panel-2/40 text-muted",
       )}
     >

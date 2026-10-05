@@ -120,16 +120,16 @@ export function LinkDevicesBlock({ initialDevices }: { initialDevices?: LinkDevi
 
   return (
     <div>
-      <h4 className="mb-1.5 text-[12.5px] font-semibold">Sign in on another device</h4>
-      <p className="mb-2 text-[12.5px] text-muted">
+      <h4 className="mb-1.5 text-small-lg font-semibold">Sign in on another device</h4>
+      <p className="mb-2 text-small-lg text-muted">
         This machine’s access token never works through the link. To use the cockpit from another computer or phone, open a
         one-time link there and type the six digits it shows here. That browser gets a sign-in of its own; Reset link signs every
         one of them out.
       </p>
       {invite ? (
         <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
-          <p className="text-[12.5px] text-muted">Open this on the other device (it works once, for five minutes):</p>
-          <code className="block break-all font-mono text-[12px] select-all" aria-label="One-time sign-in link">
+          <p className="text-small-lg text-muted">Open this on the other device (it works once, for five minutes):</p>
+          <code className="block break-all font-mono text-small select-all" aria-label="One-time sign-in link">
             {invite.url}
           </code>
           <QrCode text={invite.url} size={140} />
@@ -140,7 +140,7 @@ export function LinkDevicesBlock({ initialDevices }: { initialDevices?: LinkDevi
               placeholder="123 456"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              className="w-28 rounded-lg border border-border bg-panel px-2.5 py-1.5 font-mono text-[13px] tracking-widest"
+              className="w-28 rounded-lg border border-border bg-panel px-2.5 py-1.5 font-mono text-body-sm tracking-widest"
             />
             <Button size="sm" variant="primary" disabled={busy !== null || code.replace(/\D/g, "").length !== 6} onClick={() => void confirm()}>
               {busy === "confirm" && <Spinner className="size-3" />}
@@ -161,7 +161,7 @@ export function LinkDevicesBlock({ initialDevices }: { initialDevices?: LinkDevi
         <div className="mt-3 overflow-hidden rounded-xl border border-border">
           {devices.devices.map((device) => (
             <div key={device.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2 last:border-b-0">
-              <div className="min-w-0 flex-1 truncate text-[12.5px]">
+              <div className="min-w-0 flex-1 truncate text-small-lg">
                 {device.label}
                 <span className="text-faint"> · signed in {new Date(device.paired_at).toLocaleDateString()}</span>
               </div>
@@ -326,7 +326,7 @@ export function RemoteAccessPane({
   return (
     <Pane title="Remote access" subtitle="Open this cockpit from your phone or another computer" back={back}>
       {!remote ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
@@ -341,7 +341,7 @@ export function RemoteAccessPane({
               onChange={(checked) => void toggle(checked)}
             />
           </Row>
-          <div className="space-y-2 text-[12.5px] text-muted">
+          <div className="space-y-2 text-small-lg text-muted">
             <p>
               While on, this machine dials out an encrypted tunnel to the Colonizer relay and serves this cockpit on a link of its
               own. Nothing listens on a public port here, and switching off drops the tunnel and every request in flight at once.
@@ -359,14 +359,14 @@ export function RemoteAccessPane({
           {remote.enabled && (
             <div className="space-y-4 border-t border-border pt-4">
               <div>
-                <h4 className="mb-1.5 text-[12.5px] font-semibold">Your link</h4>
+                <h4 className="mb-1.5 text-small-lg font-semibold">Your link</h4>
                 {link ? (
                   // At phone width the link takes the whole row and the buttons sit under it. The
                   // display gets a <wbr> after every dot, so it wraps on the dots and only breaks
                   // mid-segment if one is longer than a line; Copy and the QR keep the plain link.
                   <div className="flex flex-wrap items-center gap-2">
                     <code
-                      className="w-full min-w-0 break-words rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-[12.5px] select-all text-text sm:w-auto sm:flex-1"
+                      className="w-full min-w-0 break-words rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-small-lg select-all text-text sm:w-auto sm:flex-1"
                       aria-label="Remote access link"
                     >
                       {link.split(".").flatMap((part, i) => (i === 0 ? [part] : [".", <wbr key={i} />, part]))}
@@ -379,15 +379,15 @@ export function RemoteAccessPane({
                     </Button>
                   </div>
                 ) : (
-                  <p className="text-[12.5px] text-muted">The link appears once the relay has answered the registration.</p>
+                  <p className="text-small-lg text-muted">The link appears once the relay has answered the registration.</p>
                 )}
                 {showQr && link && (
                   <div className="mt-3">
                     <QrCode text={link} />
-                    <p className="mt-1.5 text-[12px] text-faint">Point a phone camera here to open the link.</p>
+                    <p className="mt-1.5 text-small text-faint">Point a phone camera here to open the link.</p>
                   </div>
                 )}
-                <p role="status" className={cx("mt-2 flex items-center gap-1.5 text-[12.5px]", remote.connected ? "text-ok" : "text-warn")}>
+                <p role="status" className={cx("mt-2 flex items-center gap-1.5 text-small-lg", remote.connected ? "text-ok" : "text-warn")}>
                   <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", remote.connected ? "bg-ok" : "bg-warn")} />
                   {connectionText(remote)}
                 </p>
@@ -395,22 +395,22 @@ export function RemoteAccessPane({
 
               {!pairing && pairingError && (
                 <div>
-                  <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
-                  <p className="text-[12.5px] text-warn">Couldn’t read the pairing from the relay: {pairingError}</p>
+                  <h4 className="mb-1.5 text-small-lg font-semibold">Pairing</h4>
+                  <p className="text-small-lg text-warn">Couldn’t read the pairing from the relay: {pairingError}</p>
                 </div>
               )}
 
               {pairing && (
                 <div>
-                  <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
+                  <h4 className="mb-1.5 text-small-lg font-semibold">Pairing</h4>
                   {pairing.owner ? (
                     <div className="space-y-2">
-                      <p className="text-[12.5px] text-muted">
+                      <p className="text-small-lg text-muted">
                         Paired with @{pairing.owner.github_login} — only that GitHub account can sign in to the link.
                       </p>
                       {askUnbind ? (
                         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">
-                          <p className="min-w-0 flex-1 text-[12.5px] text-muted">
+                          <p className="min-w-0 flex-1 text-small-lg text-muted">
                             Unbind @{pairing.owner.github_login}? Their sign-in stops working at once.
                           </p>
                           <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void unbind()}>
@@ -428,12 +428,12 @@ export function RemoteAccessPane({
                       )}
                     </div>
                   ) : pairing.pending.length === 0 ? (
-                    <p className="text-[12.5px] text-muted">
+                    <p className="text-small-lg text-muted">
                       No pending requests. The first sign-in to the link shows a code that appears here to confirm.
                     </p>
                   ) : (
                     <>
-                      <p className="mb-1.5 text-[12.5px] text-muted">
+                      <p className="mb-1.5 text-small-lg text-muted">
                         A sign-in to the link is waiting. Confirm only if your phone shows the same code; reject it if you
                         did not just sign in.
                       </p>
@@ -443,8 +443,8 @@ export function RemoteAccessPane({
                           // meta line stays one line of its own instead of orphan-wrapping.
                           <div key={request.code} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
                             <div className="min-w-0 flex-1">
-                              <div className="font-mono text-[15px] font-semibold tabular-nums tracking-widest">{formatPairingCode(request.code)}</div>
-                              <div className="truncate text-[12px] text-faint">
+                              <div className="font-mono text-lead font-semibold tabular-nums tracking-widest">{formatPairingCode(request.code)}</div>
+                              <div className="truncate text-small text-faint">
                                 @{request.github_login} · {expiryText(request.expires_at)}
                               </div>
                             </div>
@@ -471,7 +471,7 @@ export function RemoteAccessPane({
               <div className="border-t border-border pt-4">
                 {askReset ? (
                   <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">
-                    <p className="min-w-0 flex-1 text-[12.5px] text-muted">Really reset? The old link stops working.</p>
+                    <p className="min-w-0 flex-1 text-small-lg text-muted">Really reset? The old link stops working.</p>
                     <Button size="sm" variant="danger" disabled={saving} onClick={() => void resetLink()}>
                       {saving && <Spinner className="size-3" />}
                       Confirm
@@ -485,7 +485,7 @@ export function RemoteAccessPane({
                     <Button size="sm" variant="danger" disabled={saving} onClick={() => setAskReset(true)}>
                       Reset link
                     </Button>
-                    <span className="text-[12.5px] text-muted">
+                    <span className="text-small-lg text-muted">
                       A fresh identity and link; the old link is retired at the relay, its owner unbound, and every browser signed in to it
                       signed out. The way out of a leaked one.
                     </span>
