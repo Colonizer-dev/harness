@@ -309,7 +309,7 @@ What the mothership keeps in the config directory:
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
 | `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
-| `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
+| `voice-keys/`, `memory-keys/`, `notify-secret`, `webhook-subscriptions.json`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, webhook subscriptions and their secrets, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
 | `api-token`, `api-tokens.json` | The owner token behind the sign-in link, and scoped API tokens ([docs/cli.md](cli.md#scoped-api-tokens)) |
 | `telemetry.json`, `usage.json`, `usage-last.json`, `usage-sent.json` | The [live map](telemetry.md) and [usage data](usage-data.md) answers, the last usage batch built, and when the last one was sent |

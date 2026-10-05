@@ -1,0 +1,3 @@
+/api/webhooks                                        GET    unauth=401    token=operate          activity=-
+/api/webhooks                                        POST   unauth=401    token=operate          activity=settings.save
+/api/webhooks/{id}                                   DELETE unauth=401    token=operate          activity=settings.remove

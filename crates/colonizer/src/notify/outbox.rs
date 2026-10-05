@@ -187,17 +187,21 @@ fn jitter() -> f64 {
     f64::from(u16::from_le_bytes(bytes)) / f64::from(u16::MAX) * 2.0 - 1.0
 }
 
-/// The signing secret for a target, read where it is used.
-fn signing_secret(app: &App, target: &str) -> Option<String> {
+/// The signing secret for a target, read where it is used: the owner's, or a webhook
+/// subscription's own (issue #899). `None` when the target is gone — a subscription deleted since
+/// the delivery was queued — and `Some(None)` when it signs nothing.
+fn signing_secret(app: &App, target: &str) -> Option<Option<String>> {
     match target {
-        OWNER => secret(app).map(|(value, _)| value),
-        _ => None,
+        OWNER => Some(secret(app).map(|(value, _)| value)),
+        _ => super::subscriptions::secret_for(app, target),
     }
 }
 
 /// One attempt at a delivery: the same body, signed afresh.
 async fn attempt(app: &App, client: &reqwest::Client, delivery: &Delivery) -> anyhow::Result<()> {
-    let signing = signing_secret(app, &delivery.target);
+    let Some(signing) = signing_secret(app, &delivery.target) else {
+        anyhow::bail!("its webhook subscription was deleted");
+    };
     post(client, &delivery.url, signing.as_deref(), &delivery.event_id, &delivery.body).await
 }
 
@@ -271,8 +275,15 @@ pub async fn send(app: &App, client: &reqwest::Client, delivery: Delivery) -> Re
 pub async fn retry_due(app: &App, client: &reqwest::Client, now: DateTime<Utc>) -> usize {
     let due: Vec<Delivery> = {
         let _guard = STORE.lock().await;
-        load(app)
-            .pending
+        let mut book = load(app);
+        // A delivery to a subscription deleted since is dropped, not retried or dead-lettered:
+        // nobody is left to want it.
+        let before = book.pending.len();
+        book.pending.retain(|d| signing_secret(app, &d.target).is_some());
+        if book.pending.len() != before {
+            save(app, &book);
+        }
+        book.pending
             .into_iter()
             .filter(|d| d.next_at.is_none_or(|at| at <= now))
             .collect()

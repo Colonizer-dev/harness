@@ -91,7 +91,6 @@ pub const SCHEMA_VERSION: u64 = 1;
 /// Every lifecycle event name, one per status a colony can enter plus `cleaned` (issue #897).
 /// `question`, `pull_request` and `failed` are also the names of the events a person is told about,
 /// and carry the same id either way.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const LIFECYCLE_EVENTS: &[&str] = &[
     "queued",
     "started",
@@ -113,7 +112,6 @@ pub const LIFECYCLE_EVENTS: &[&str] = &[
 
 /// Every `event` a webhook payload can carry: the lifecycle, the events a person is told about,
 /// and the host-level ones. `docs/webhook-events.schema.json` enumerates the same list.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const EVENT_NAMES: &[&str] = &[
     "queued",
     "started",
@@ -1005,6 +1003,9 @@ pub async fn run(app: Shared) {
                     "pr_url": None::<Value>,
                     "provider": None::<Value>,
                 });
+            if let Some(client) = client.as_ref() {
+                subscriptions::fan_out(&app, client, &payload, None).await;
+            }
             if deliver(&app, client.as_ref(), &summary, &payload, None, &settings, &mut reasons).await {
                 app.ledger.commit_digest(&held, at).await;
             }
@@ -1106,6 +1107,15 @@ async fn dispatch(
     settings: &NotifySettings,
     reasons: &mut Reasons,
 ) {
+    // Webhook subscriptions (issue #899) take a colony's transitions from the lifecycle stream —
+    // each once, whatever the owner's switches — plus the watchdog's flags, which are not
+    // transitions. Outside the ledger, like the lifecycle: a subscriber is a machine keeping a
+    // record, and each one chose its own events.
+    if let Some(client) = client
+        && (matches!(event, Event::Lifecycle(_)) || !event.is_transition())
+    {
+        subscriptions::fan_out(app, client, &payload(event, Utc::now(), session), Some(session)).await;
+    }
     if let Event::Lifecycle(_) = event {
         announce_lifecycle(app, client, session, event, settings, reasons).await;
     } else {
@@ -1170,6 +1180,11 @@ async fn announce_routed(
     reasons: &mut Reasons,
     route: PushRoute<'_>,
 ) {
+    // The owner's webhook subscriptions (issue #899) get every host-level event, outside the
+    // ledger as colony events are; a scoped token's never do, since no host event is in its scope.
+    if let Some(client) = client {
+        subscriptions::fan_out(app, client, &payload, None).await;
+    }
     let verdict = app.ledger.check(&candidate, Utc::now());
     if verdict != ledger::Verdict::Deliver {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
@@ -1515,6 +1530,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 }
 
 pub(crate) mod outbox;
+pub(crate) mod subscriptions;
 
 #[cfg(test)]
 mod tests;

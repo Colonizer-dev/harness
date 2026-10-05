@@ -1469,3 +1469,305 @@ async fn a_failed_replay_stays_dead_and_a_discard_removes_it() {
     assert!(outbox::load(&app).dead.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+// ---------------------------------------------------------------------------
+// Webhook subscriptions for scoped tokens (issue #899)
+// ---------------------------------------------------------------------------
+
+/// A scoped token as the registry mints one, answered as the extension `host_guard` attaches.
+async fn token(app: &App, name: &str, scope: &str, orgs: &[&str]) -> crate::api_tokens::ScopedToken {
+    let created = app
+        .api_tokens
+        .create(crate::api_tokens::NewToken {
+            name: name.into(),
+            scope: scope.into(),
+            orgs: orgs.iter().map(|o| o.to_string()).collect(),
+            repos: Vec::new(),
+            max_concurrent: None,
+            budget_usd_per_day: None,
+        })
+        .await
+        .unwrap();
+    app.api_tokens.scoped(&created.meta.id).await.unwrap()
+}
+
+fn events_received(received: &Received) -> Vec<String> {
+    received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, body)| {
+            serde_json::from_str::<Value>(body).unwrap()["event"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// End to end: one colony event and one host-level event, five subscriptions. The owner's gets
+/// both; a token scoped to the colony's org gets the colony event only, signed with its own secret
+/// and carrying the same id; a token scoped elsewhere, a revoked one and a subscription to other
+/// events get nothing.
+#[tokio::test]
+async fn a_scoped_token_only_receives_events_within_its_scope() {
+    let owner_rx: Received = Default::default();
+    let acme_rx: Received = Default::default();
+    let globex_rx: Received = Default::default();
+    let revoked_rx: Received = Default::default();
+    let merged_only_rx: Received = Default::default();
+    let (app, root, client) = outbox_app("subs");
+    crate::push::tests::notify_on(&app).await;
+    let acme = token(&app, "acme ci", "operate", &["acme"]).await;
+    let globex = token(&app, "globex ci", "launch", &["globex"]).await;
+    let revoked = token(&app, "old ci", "operate", &[]).await;
+    subscriptions::insert(&app, &receiver(owner_rx.clone(), Vec::new()).await, &[], None, None).await;
+    subscriptions::insert(
+        &app,
+        &receiver(acme_rx.clone(), Vec::new()).await,
+        &[],
+        Some("acme-secret"),
+        Some(&acme.id),
+    )
+    .await;
+    subscriptions::insert(
+        &app,
+        &receiver(globex_rx.clone(), Vec::new()).await,
+        &[],
+        None,
+        Some(&globex.id),
+    )
+    .await;
+    subscriptions::insert(
+        &app,
+        &receiver(revoked_rx.clone(), Vec::new()).await,
+        &[],
+        None,
+        Some(&revoked.id),
+    )
+    .await;
+    subscriptions::insert(
+        &app,
+        &receiver(merged_only_rx.clone(), Vec::new()).await,
+        &["merged"],
+        None,
+        Some(&acme.id),
+    )
+    .await;
+    app.api_tokens.revoke(&revoked.id).await.unwrap();
+
+    // A colony in acme fails: one lifecycle transition (the owner's webhook URL is unset, so only
+    // subscriptions are in play), then a host-level line.
+    let session = colony("c1", SessionStatus::Failed);
+    dispatch(
+        &app,
+        Some(&client),
+        &session,
+        Event::Lifecycle("failed"),
+        &settings(),
+        &mut Reasons::default(),
+    )
+    .await;
+    announce_line(&app, "ci_unavailable", "merge-train:ci".into(), "acme/webshop CI can't run").await;
+
+    assert_eq!(
+        events_received(&owner_rx),
+        ["failed", "ci_unavailable"],
+        "the owner sees everything"
+    );
+    assert_eq!(
+        events_received(&acme_rx),
+        ["failed"],
+        "its own org's colony, and no host event"
+    );
+    assert!(events_received(&globex_rx).is_empty(), "another org's colony is out of scope");
+    assert!(
+        events_received(&revoked_rx).is_empty(),
+        "a revoked token's subscription is dead"
+    );
+    assert!(events_received(&merged_only_rx).is_empty(), "it asked for merged only");
+
+    let (headers, body) = acme_rx.lock().unwrap()[0].clone();
+    let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
+    assert_eq!(
+        headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
+        format!("sha256={}", signature("acme-secret", timestamp, &body)),
+        "signed with the subscription's own secret"
+    );
+    assert!(!body.contains("acme-secret"));
+    let owner_first: Value = serde_json::from_str(&owner_rx.lock().unwrap()[0].1).unwrap();
+    assert_eq!(
+        headers.get(EVENT_ID_HEADER).unwrap().to_str().unwrap(),
+        owner_first["id"],
+        "every receiver gets the same event id"
+    );
+
+    // The other way round: a colony in globex reaches the globex token, and not the acme one.
+    let elsewhere = serde_json::from_value::<Session>(json!({
+        "id": "c2", "repo": "globex/site", "org": "globex", "issue": 1, "issue_title": "",
+        "status": "merged", "branch": "b", "worktree": "", "sandbox": "s", "agent": "claude",
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+    }))
+    .unwrap();
+    dispatch(
+        &app,
+        Some(&client),
+        &elsewhere,
+        Event::Lifecycle("merged"),
+        &settings(),
+        &mut Reasons::default(),
+    )
+    .await;
+    assert_eq!(events_received(&globex_rx), ["merged"]);
+    assert!(
+        events_received(&merged_only_rx).is_empty(),
+        "merged, but in an org the acme token cannot see"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A transition the person is told about reaches a subscription once, from the lifecycle stream,
+/// not a second time from the person's path.
+#[tokio::test]
+async fn a_subscription_gets_each_transition_once() {
+    let rx: Received = Default::default();
+    let (app, root, client) = outbox_app("subs-once");
+    subscriptions::insert(&app, &receiver(rx.clone(), Vec::new()).await, &[], None, None).await;
+    let session = colony("c1", SessionStatus::Failed);
+    for event in [Event::Failed, Event::Lifecycle("failed"), Event::Attention("stalled")] {
+        dispatch(&app, Some(&client), &session, event, &settings(), &mut Reasons::default()).await;
+    }
+    assert_eq!(events_received(&rx), ["failed", "attention"]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The API: what a scoped token may register, what it sees and what it may delete.
+#[tokio::test]
+async fn the_subscription_api_keeps_each_token_to_its_own() {
+    use axum::{Extension, extract::Path};
+    let (app, root, _) = outbox_app("subs-api");
+    let acme = token(&app, "acme ci", "operate", &["acme"]).await;
+    let other = token(&app, "other ci", "launch", &[]).await;
+    let new = |url: &str, events: &[&str], secret: Option<&str>| {
+        serde_json::from_value::<subscriptions::NewSubscription>(json!({
+            "url": url, "events": events, "secret": secret,
+        }))
+        .unwrap()
+    };
+    let as_acme = || Some(Extension(acme.clone()));
+    let create = |scoped, body| subscriptions::create(State(app.clone()), scoped, Json(body));
+
+    // Refused to a scoped token: this machine or its network, an event outside every token's
+    // scope, an unknown event, credentials in the address, a bad secret.
+    for (url, events, secret) in [
+        ("http://127.0.0.1:7878/hook", vec![], None),
+        ("http://localhost/hook", vec![], None),
+        ("http://10.1.2.3/hook", vec![], None),
+        ("http://[::1]/hook", vec![], None),
+        ("http://100.100.1.1/hook", vec![], None),
+        ("http://intranet/hook", vec![], None),
+        ("ftp://hooks.example.com/hook", vec![], None),
+        ("https://hooks.example.com/hook", vec!["provider_degraded"], None),
+        ("https://hooks.example.com/hook", vec!["no_such_event"], None),
+        ("https://user:pw@hooks.example.com/hook", vec![], None),
+        ("https://hooks.example.com/hook", vec![], Some("has a space")),
+    ] {
+        let refused = create(as_acme(), new(url, &events, secret)).await;
+        assert!(refused.is_err(), "{url} {events:?} {secret:?} should be refused");
+    }
+    // The owner may point one at this machine, and at host-level events.
+    let owner_sub = create(None, new("http://127.0.0.1:9/hook", &["provider_degraded"], None))
+        .await
+        .unwrap()
+        .0;
+
+    let made = create(
+        as_acme(),
+        new("https://hooks.example.com/acme", &["merged", "failed"], Some("s3cret")),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(made["token"], json!(acme.id));
+    assert_eq!(made["events"], json!(["merged", "failed"]));
+    assert_eq!(made["has_secret"], true);
+    assert!(made.get("secret").is_none() && !made.to_string().contains("s3cret"), "{made}");
+    let theirs = create(
+        Some(Extension(other.clone())),
+        new("https://hooks.example.com/other", &[], None),
+    )
+    .await
+    .unwrap()
+    .0;
+
+    // Each token lists its own; the owner lists all three.
+    let listed = subscriptions::list(State(app.clone()), as_acme()).await.0;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], made["id"]);
+    assert_eq!(subscriptions::list(State(app.clone()), None).await.0.len(), 3);
+    assert!(
+        !serde_json::to_string(&subscriptions::list(State(app.clone()), None).await.0)
+            .unwrap()
+            .contains("s3cret"),
+        "the secret is never answered"
+    );
+
+    // A token deletes only its own: someone else's, or the owner's, is an unknown id.
+    let id = |v: &Value| v["id"].as_str().unwrap().to_string();
+    assert!(
+        subscriptions::remove(State(app.clone()), as_acme(), Path(id(&theirs)))
+            .await
+            .is_err()
+    );
+    assert!(
+        subscriptions::remove(State(app.clone()), as_acme(), Path(id(&owner_sub)))
+            .await
+            .is_err()
+    );
+    let deleted = subscriptions::remove(State(app.clone()), as_acme(), Path(id(&made)))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(deleted["deleted"], made["id"]);
+    assert!(subscriptions::list(State(app.clone()), as_acme()).await.0.is_empty());
+    // The owner deletes anyone's.
+    let deleted = subscriptions::remove(State(app.clone()), None, Path(id(&theirs)))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(deleted["deleted"], theirs["id"]);
+    assert_eq!(subscriptions::list(State(app.clone()), None).await.0.len(), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A delivery to a subscription that has since been deleted is dropped, not retried.
+#[tokio::test]
+async fn a_deleted_subscription_drops_its_pending_retries() {
+    let rx: Received = Default::default();
+    let (app, root, client) = outbox_app("subs-gone");
+    let id = subscriptions::insert(&app, &receiver(rx.clone(), vec![500]).await, &[], None, None).await;
+    let session = colony("c1", SessionStatus::Failed);
+    dispatch(
+        &app,
+        Some(&client),
+        &session,
+        Event::Lifecycle("failed"),
+        &settings(),
+        &mut Reasons::default(),
+    )
+    .await;
+    assert_eq!(outbox::load(&app).pending.len(), 1);
+    let deleted = subscriptions::remove(State(app.clone()), None, axum::extract::Path(id.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(deleted["deleted"], json!(id));
+    assert_eq!(
+        outbox::retry_due(&app, &client, Utc::now() + chrono::Duration::hours(1)).await,
+        0
+    );
+    let book = outbox::load(&app);
+    assert!(book.pending.is_empty() && book.dead.is_empty(), "{book:?}");
+    assert_eq!(rx.lock().unwrap().len(), 1, "no retry went out");
+    let _ = std::fs::remove_dir_all(root);
+}
