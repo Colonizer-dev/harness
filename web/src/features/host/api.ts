@@ -2,7 +2,7 @@
 // The root `Api` interface composes this with the other features.
 import { del, post, put, request } from "../../http";
 import type { LoginView } from "../sessions/types";
-import type { ArchiveListing, HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RetentionRequest, StorageSummary, TelemetryStatus, UpdateStatus, UsageStatus } from "./types";
+import type { ArchiveListing, HarnessStatus, HeadroomStatus, LoginItemStatus, PullStatus, RetentionPlan, RetentionRequest, StorageSummary, RestartOnNewVersion, TelemetryStatus, UpdateStatus, UsageStatus } from "./types";
 
 export interface HostApi {
   /**
@@ -18,6 +18,11 @@ export interface HostApi {
   update(): Promise<UpdateStatus>;
   setUpdateCheck(enabled: boolean): Promise<UpdateStatus>;
   applyUpdate(): Promise<{ started: boolean }>;
+  /**
+   * POST /api/update/restart (issue #1097): stop and resume colonies still on a previous version's
+   * components, by id or all of them, so they boot on this one. Runs in the background.
+   */
+  restartOnNewVersion(body: { ids: string[] } | { all: true }): Promise<RestartOnNewVersion>;
   setTelemetry(enabled: boolean): Promise<TelemetryStatus>;
   usage(): Promise<UsageStatus>;
   setUsage(enabled: boolean): Promise<UsageStatus>;
@@ -51,6 +56,7 @@ export const hostHttp: HostApi = {
   update: () => request("/api/update"),
   setUpdateCheck: (enabled) => put("/api/update", { enabled }),
   applyUpdate: () => post("/api/update/apply"),
+  restartOnNewVersion: (body) => post("/api/update/restart", body),
   setTelemetry: (enabled) => put("/api/telemetry", { enabled }),
   usage: () => request("/api/telemetry/usage"),
   setUsage: (enabled) => put("/api/telemetry/usage", { enabled }),

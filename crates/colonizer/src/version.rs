@@ -197,6 +197,11 @@ pub struct Latest {
     pub url: String,
     pub notes: String,
     pub published_at: Option<DateTime<Utc>>,
+    /// What the release says about itself to the mothership that would install it (issue #1097):
+    /// read from the block in its body, which `notes` leaves out. Answered filtered, as
+    /// `/api/update`'s `notices`, so not serialized here.
+    #[serde(skip)]
+    pub notices: Vec<crate::update_notices::Notice>,
 }
 
 /// What the last check found. Named for the check, not the app: `State` is axum's extractor.
@@ -249,10 +254,13 @@ async fn fetch_release(client: &reqwest::Client, url: &str) -> Result<Latest> {
         anyhow::bail!("the latest release is a draft or prerelease");
     }
     let version = release["tag_name"].as_str().context("the release has no tag")?.to_string();
+    let body = release["body"].as_str().unwrap_or_default();
     Ok(Latest {
         version,
         url: release["html_url"].as_str().unwrap_or_default().to_string(),
-        notes: util::truncate(release["body"].as_str().unwrap_or_default(), 4000),
+        // The notices are read from the whole body, before the notes are clipped for display.
+        notices: crate::update_notices::parse(body),
+        notes: util::truncate(&crate::update_notices::strip(body), 4000),
         published_at: release["published_at"]
             .as_str()
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
@@ -346,6 +354,11 @@ impl Updates {
         self.state.lock().await.latest.as_ref().map(|l| l.version.clone())
     }
 
+    /// The whole latest release the check has seen, notices included.
+    pub async fn latest(&self) -> Option<Latest> {
+        self.state.lock().await.latest.clone()
+    }
+
     async fn view(&self) -> Value {
         let state = self.state.lock().await;
         let build = build();
@@ -397,6 +410,9 @@ pub async fn full_status(app: &Shared) -> Value {
         Some(reason) => json!({ "ok": false, "reason": reason }),
         None => json!({ "ok": true, "reason": Value::Null }),
     };
+    // Issue #1097: the notices newer than this build, the colonies still on a previous version,
+    // the restarts onto this one, and how a source build switches to releases.
+    crate::update_notices::extend(app, &mut view).await;
     view
 }
 

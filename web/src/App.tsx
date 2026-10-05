@@ -793,6 +793,7 @@ export function App() {
               remoteOn={remote?.enabled ?? false}
               fleet={fleet}
               update={updateStatus}
+              onUpdateChanged={setUpdateStatus}
               liveConnection={liveConnection}
               liveStorage={liveStorage}
               autopilotDefault={autopilotDefault}

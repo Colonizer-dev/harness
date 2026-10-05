@@ -211,6 +211,82 @@ export let mockUpdate: UpdateStatus = {
   apply: { phase: "idle", version: null, started_at: null, error: null, log: "", colonies: [], backup: null },
 };
 
+/**
+ * Issue #1097's states, by `?update=`: `critical` gives the newer release a critical notice whose
+ * probe matched two live colonies (the cockpit banner); `behind` is the install after that update,
+ * with the live colonies still on the previous slot and offered a restart; `dev` is a development
+ * build, which says why it cannot update here and how to switch to releases. Without it, none.
+ */
+export const mockUpdateParam = () => {
+  try {
+    return new URLSearchParams(location.search).get("update");
+  } catch {
+    return null;
+  }
+};
+
+const MOCK_NOTICE_LINE = "Fixes colonies failing with UND_ERR_SOCKET (sandbox credential scanner)";
+export const mockRestarting = new Set<string>();
+export const mockRestarted = new Set<string>();
+
+/** The update view with the #1097 fields the `?update=` parameter asks for. */
+export function mockUpdateView(ms: MockState, update: UpdateStatus): UpdateStatus {
+  const param = mockUpdateParam();
+  const live = [...ms.sessions.values()].map((s) => s.session).filter((s) => isLive(s.status) && s.status !== "starting");
+  const restarts = { restarting: [...mockRestarting], failed: {} };
+  const base = { ...update, notices: [], behind: [], restarts, switch_to_releases: null };
+  if (param === "critical") {
+    const hit = live.slice(0, 2).map((s) => s.id);
+    return {
+      ...base,
+      notices: [
+        {
+          version: update.latest?.version ?? "v0.1.4",
+          severity: "critical",
+          line: MOCK_NOTICE_LINE,
+          probe: "msb-body-secret-violation",
+          issue: 1096,
+          affected: { count: hit.length, colonies: hit },
+        },
+      ],
+    };
+  }
+  if (param === "behind") {
+    const latest = update.latest?.version ?? "v0.1.4";
+    return {
+      ...base,
+      installed: { ...update.installed, version: latest, release: latest },
+      available: false,
+      behind: live
+        .filter((s) => !mockRestarted.has(s.id))
+        .map((s, i) => ({
+          id: s.id,
+          repo: s.repo,
+          status: s.status,
+          slot: "~/.local/share/colonizer/app-a",
+          affected_by: i === 0 ? [MOCK_NOTICE_LINE] : [],
+        })),
+    };
+  }
+  if (param === "dev") {
+    const version = `${update.installed.release ?? "v0.1.3"}-12-gabc1234`;
+    return {
+      ...base,
+      installed: { ...update.installed, version },
+      can_apply: {
+        ok: false,
+        reason: `running \`${version}\` (development build, 12 commits ahead of release \`${update.installed.release ?? "v0.1.3"}\`) — refusing to replace a source build with a release`,
+      },
+      switch_to_releases: {
+        reason: `${version} is a development build, which holds work no release contains`,
+        command: "colonizer update --force",
+        then: "It installs the latest release over this build, backing sessions.json up first. Later releases then update from here.",
+      },
+    };
+  }
+  return base;
+}
+
 export let mockTelemetry: TelemetryStatus = {
   enabled: null,
   blocked_by: null,
@@ -364,7 +440,23 @@ export function hostMock(ms: MockState): HostApi {
       }
       return clone(mockHeadroom);
     },
-    update: async () => clone(mockUpdate),
+    update: async () => clone(mockUpdateView(ms, mockUpdate)),
+    restartOnNewVersion: async (body) => {
+      await sleep(200);
+      const view = mockUpdateView(ms, mockUpdate);
+      const behind = (view.behind ?? []).map((c) => c.id);
+      const asked = "all" in body ? behind : body.ids;
+      const restarting = asked.filter((id) => behind.includes(id) && !mockRestarting.has(id));
+      const skipped = asked.filter((id) => !restarting.includes(id)).map((id) => ({ id, reason: "not running on a previous version" }));
+      for (const id of restarting) {
+        mockRestarting.add(id);
+        setTimeout(() => {
+          mockRestarting.delete(id);
+          mockRestarted.add(id);
+        }, 2000);
+      }
+      return { restarting, skipped };
+    },
     setUpdateCheck: async (enabled) => {
       await sleep(200);
       // Matches the backend: switching off forgets the last answer, so no banner
@@ -372,7 +464,7 @@ export function hostMock(ms: MockState): HostApi {
       mockUpdate = enabled
     ? { ...mockUpdate, enabled, latest: MOCK_LATEST, available: true, last_checked: new Date().toISOString() }
     : { ...mockUpdate, enabled, latest: null, available: false, last_checked: null, error: null };
-      return clone(mockUpdate);
+      return clone(mockUpdateView(ms, mockUpdate));
     },
     telemetry: async () => clone(mockTelemetry),
     setTelemetry: async (enabled) => {

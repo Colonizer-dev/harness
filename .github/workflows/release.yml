@@ -267,12 +267,18 @@ jobs:
           cd release
           sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
-          # A shipped, per-release notes file (docs/release-notes/<tag>.md, if the tagged commit has
-          # one) goes at the top of the body, above the generic text every release carries below.
-          if [ -f "../docs/release-notes/$TAG.md" ]; then
-            cat "../docs/release-notes/$TAG.md"
-            echo
-          fi > notes.md
+          # Issue #1097: the critical and fixes-running notices come first, as a visible list and a
+          # block `/api/update` reads (it carries the notices of the releases just before, too), so a
+          # mothership hears why the update matters. Nothing is printed when there are none. Then a
+          # shipped, per-release notes file (docs/release-notes/<tag>.md, if the tagged commit has
+          # one), above the generic text every release carries below.
+          {
+            node ../scripts/changelog.mjs notices --release "$TAG"
+            if [ -f "../docs/release-notes/$TAG.md" ]; then
+              cat "../docs/release-notes/$TAG.md"
+              echo
+            fi
+          } > notes.md
           {
             echo "Prebuilt Colonizer for Linux x86_64 (with KVM) and Apple Silicon Macs, built from ${{ github.sha }}."
             echo
