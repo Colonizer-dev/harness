@@ -528,6 +528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "colonizer-billing"
+version = "0.2.7"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "colonizer-harness"
 version = "0.2.7"
 dependencies = [
