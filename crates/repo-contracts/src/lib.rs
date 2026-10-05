@@ -17,6 +17,8 @@ mod boundary;
 #[cfg(test)]
 mod events;
 #[cfg(test)]
+mod exec_policy;
+#[cfg(test)]
 mod fleet_export;
 #[cfg(test)]
 mod graft;

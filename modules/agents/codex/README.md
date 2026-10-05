@@ -170,5 +170,5 @@ only these stubbed contract tests.
   resolve-and-fetch path with a stub, but no end-to-end colony has booted on the downloaded build
   ([#602](https://github.com/Colonizer-dev/harness/issues/602)).
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
-  launch a codex colony while one is set (the install's `exec_policy` setting, or a repo
+  launch a codex colony while one is set (the install's `exec_policy` setting, the org's exec policy, or a repo
   `.colonizer/exec-policy.json`).

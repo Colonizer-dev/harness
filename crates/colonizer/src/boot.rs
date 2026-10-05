@@ -1054,7 +1054,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut runner_env = agent_env(&agent, &agent_choice);
     // The exec policy is the operator's rule about commands, not a model setting: it follows the
     // colony to this module pick, or the boot refuses when the pick cannot apply it.
-    apply_exec_policy(&agent, &modules.agent, &app.agents, &wt, &mut runner_env)?;
+    // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
+    let org_policy = orgs::org_exec_policy(&org_settings).map(|policy| (s.org.as_str(), policy));
+    apply_exec_policy(&agent, &modules.agent, org_policy, &app.agents, &wt, &mut runner_env)?;
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.

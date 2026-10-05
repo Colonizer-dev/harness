@@ -125,7 +125,7 @@ rewrites both locks and the `module.json` pin.
   hermes-agent install skipped it silently has no `ask_user` tool, and the model then has no
   channel to ask anything.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
-  launch a Hermes colony while one is set (the install's `exec_policy` setting, or a repo
+  launch a Hermes colony while one is set (the install's `exec_policy` setting, the org's exec policy, or a repo
   `.colonizer/exec-policy.json`).
 - No end-to-end colony run: the live verification above used a fake Anthropic-wire gateway and no
   microVM, so the real gateway's pricing and budget path has not yet seen Hermes traffic. The
