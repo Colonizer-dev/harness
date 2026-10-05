@@ -232,7 +232,7 @@ describe("mock push subscriptions (issue #516)", () => {
 describe("mock remote access (issue #535)", () => {
   it("starts off, and switching on mints the host, a live tunnel and an activity row", async () => {
     const api = createMockApi();
-    expect(await api.remote()).toEqual({ enabled: false, host: null, connected: false, since: null, replaced: false });
+    expect(await api.remote()).toEqual({ enabled: false, host: null, connected: false, since: null, replaced: false, require_github: false });
     const on = await api.setRemote(true);
     expect(on).toMatchObject({ enabled: true, connected: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev" });
     expect(on.since).toBeTruthy();
@@ -248,6 +248,19 @@ describe("mock remote access (issue #535)", () => {
     const before = (await api.activity({ kind: "remote" })).entries.length;
     expect(await api.setRemote(false)).toEqual(off);
     expect((await api.activity({ kind: "remote" })).entries).toHaveLength(before);
+  });
+
+  it("the GitHub gate is off for a new link, switches with an activity row, and survives switching the link off and on", async () => {
+    const api = createMockApi();
+    const on = await api.setRemoteRequireGithub(true);
+    expect(on.require_github).toBe(true);
+    expect((await api.activity({ kind: "remote.require_github" })).entries[0]).toMatchObject({ target: "on", section: "remote" });
+    const before = (await api.activity({ kind: "remote" })).entries.length;
+    expect(await api.setRemoteRequireGithub(true)).toEqual(on); // no change records nothing
+    expect((await api.activity({ kind: "remote" })).entries).toHaveLength(before);
+    await api.setRemote(true);
+    expect((await api.remote()).require_github).toBe(true);
+    expect((await api.setRemoteRequireGithub(false)).require_github).toBe(false);
   });
 
   it("a reset changes the host, so the old link stops working", async () => {

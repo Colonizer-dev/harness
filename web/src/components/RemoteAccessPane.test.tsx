@@ -11,8 +11,8 @@ import { QrCode, RemoteAccessPane, connectionText, expiryText, formatPairingCode
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={{} as Api}>{node}</ApiContext.Provider>);
 
-const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
-const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00", replaced: false };
+const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false, require_github: false };
+const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00", replaced: false, require_github: false };
 const onOffline: RemoteStatus = { ...onConnected, connected: false, since: null };
 const onReplaced: RemoteStatus = { ...onConnected, connected: false, since: null, replaced: true };
 const pendingPairing: RemotePairing = {
@@ -53,6 +53,17 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain(">Reject</button>");
     expect(html).toContain("same code");
     expect(html).not.toContain(">Unbind</button>"); // no owner yet
+  });
+
+  it("offers the GitHub gate as an optional switch, off for a new link, and says what each way means (#1086)", () => {
+    const html = pane(off);
+    expect(html).toContain("Ask for GitHub sign-in first");
+    expect(html).toContain("pair code alone is enough");
+    expect(html).toContain("gets a page telling it how to pair");
+    expect(html).not.toContain("also asks for a GitHub sign-in");
+    const gated = pane({ ...onConnected, require_github: true });
+    expect(gated).toContain("also asks for a GitHub sign-in");
+    expect(gated).toMatch(/id="remote-github"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="remote-github"/);
   });
 
   it("says the tunnel is offline — reconnecting while enabled but not connected", () => {

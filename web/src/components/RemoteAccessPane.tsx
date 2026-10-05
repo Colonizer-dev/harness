@@ -1,7 +1,8 @@
 // Settings → Remote access (issue #535): the switch behind the relay tunnel of remote.rs
 // (docs/protocol.md §6.10), the link and its QR code, the live link status, the pairing codes
 // waiting to be confirmed or rejected and the bound owner to unbind (#599, all local-only at the
-// mothership), and the reset that retires a leaked link. The switch state itself is
+// mothership), whether the relay asks for GitHub sign-in before the pair code (#1086, local-only
+// too), and the reset that retires a leaked link. The switch state itself is
 // owned by App — the top bar's badge reads the same view — so every answer is folded back up
 // through `onChanged`.
 import { useEffect, useRef, useState, type ReactElement } from "react";
@@ -261,6 +262,19 @@ export function RemoteAccessPane({
     }
   };
 
+  const toggleGithub = async (requireGithub: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setRemoteRequireGithub(requireGithub));
+      toast(requireGithub ? "The link asks for GitHub sign-in first" : "Devices pair with the link by code alone");
+    } catch (e) {
+      // A 502 says the relay refused or predates the setting; nothing changed then.
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const copyLink = async (link: string) => {
     if (!navigator.clipboard) {
       toast("This browser has no clipboard to copy into", "error");
@@ -347,14 +361,32 @@ export function RemoteAccessPane({
               own. Nothing listens on a public port here, and switching off drops the tunnel and every request in flight at once.
             </p>
             <p>
-              The link only works for you: it asks for a GitHub sign-in, and the first one waits for a six-digit code that you
-              confirm here; the cockpit behind it then asks that browser to sign in too, with a code you confirm here as well —
-              this machine’s own access token is never accepted through the link. What it
+              The link only works for devices you pair here: a one-time link opened on the device shows six digits, and nothing
+              reaches this cockpit until you type them here.
+              {remote.require_github
+                ? " Before that, the relay also asks for a GitHub sign-in, and the first one waits for a code you confirm here."
+                : " The relay lets nothing else through: a browser that is not paired gets a page telling it how to pair."}{" "}
+              This machine’s own access token is never accepted through the link. What it
               exposes is this cockpit — everything you can see and do here, colony terminals included — and nothing else on this
               machine: no other port or service, and no file or shell access beyond what the cockpit itself offers. The relay
               routes the traffic and stores no request data — only this install’s public key and the pairing.
             </p>
           </div>
+
+          <Row id="remote-github" label="Ask for GitHub sign-in first" inline>
+            <Switch
+              id="remote-github"
+              labelledBy="remote-github-label"
+              label="Ask for GitHub sign-in first"
+              checked={remote.require_github}
+              disabled={saving}
+              onChange={(checked) => void toggleGithub(checked)}
+            />
+          </Row>
+          <p className="text-small-lg text-muted">
+            Optional. On, the relay sends every device through GitHub sign-in as the link’s owner before the pair code; off, the
+            pair code alone is enough. The relay limits how often a device or the link may try, either way.
+          </p>
 
           {remote.enabled && (
             <div className="space-y-4 border-t border-border pt-4">
@@ -400,13 +432,18 @@ export function RemoteAccessPane({
                 </div>
               )}
 
-              {pairing && (
+              {/* The GitHub owner binding (#534) matters only behind the GitHub gate; without it the block
+                  stays while there is still an owner to unbind or a sign-in waiting. */}
+              {pairing && (remote.require_github || pairing.owner || pairing.pending.length > 0) && (
                 <div>
                   <h4 className="mb-1.5 text-small-lg font-semibold">Pairing</h4>
                   {pairing.owner ? (
                     <div className="space-y-2">
                       <p className="text-small-lg text-muted">
-                        Paired with @{pairing.owner.github_login} — only that GitHub account can sign in to the link.
+                        Paired with @{pairing.owner.github_login} —{" "}
+                        {remote.require_github
+                          ? "only that GitHub account can sign in to the link."
+                          : "GitHub sign-in is off, so this only matters if you switch it back on."}
                       </p>
                       {askUnbind ? (
                         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">

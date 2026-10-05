@@ -44,7 +44,7 @@ export function installRemoteMockState(ms: MockState): void {
   // waits at the relay, the shape of #534's view; confirming binds it, single-use, rejecting drops it,
   // and unbinding (or a reset) clears the owner (#599).
   ms.remoteInstallId = () => Array.from({ length: 20 }, () => "abcdefghijklmnopqrstuvwxyz234567"[Math.floor(Math.random() * 32)]).join("");
-  ms.remoteState = { enabled: false, host: null, connected: false, since: null, replaced: false };
+  ms.remoteState = { enabled: false, host: null, connected: false, since: null, replaced: false, require_github: false };
   ms.phoneState = { devices: [{ id: "dev_demo01", label: "iPhone", paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString() }], pending: [] };
   ms.linkState = { devices: [], pending: [] };
   ms.remoteHost = "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev";
