@@ -102,7 +102,7 @@ export function UpdateBanner({
   const restarting = new Set(update?.restarts?.restarting ?? []);
   const busy = affected.length > 0 && affected.every((id) => restarting.has(id));
   const tone = critical ? "border-err bg-err-soft text-err" : "border-warn bg-warn-soft text-warn";
-  const button = "cursor-pointer rounded-md px-2 py-0.5 text-[12.5px] font-semibold hover:underline disabled:cursor-default disabled:opacity-60";
+  const button = "cursor-pointer rounded-md px-2 py-0.5 text-small-lg font-semibold hover:underline disabled:cursor-default disabled:opacity-60";
   return (
     <div className="px-6 pt-4">
       {notice ? (
