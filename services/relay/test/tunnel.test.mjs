@@ -646,3 +646,24 @@ test('a finished stream logs one templated line, and bodies and storage never le
   assert.deepEqual(touched, []);
 });
 
+
+test('retiring the install closes its live tunnel 4404 and fails what rides on it (R2)', async () => {
+  const ms = await FakeMothership.create();
+  const { relay } = makeDo();
+  const socket = await ms.connect(relay);
+  const open = within(relay.fetch(proxyRequest('/events', { headers: { upgrade: 'websocket' } })));
+  await within(ms.next('ws_open'), 'no ws_open');
+  assert.equal((await open).status, 101);
+  const browserGone = closed(browserEnds.at(-1));
+  const pending = within(relay.fetch(proxyRequest('/slow')), 'slow never finished');
+  await within(ms.next('req'), 'no req frame');
+  const tunnelGone = closed(socket);
+
+  const retired = await relay.fetch(new Request('https://my.colonizer.dev/_retire', { method: 'POST', headers: { 'x-relay-kind': 'retire' } }));
+  assert.equal(retired.status, 204);
+  assert.equal((await tunnelGone).code, 4404);
+  assert.equal((await pending).status, 502);
+  assert.equal((await browserGone).code, 1012);
+  // Nothing is left to forward to.
+  assert.equal((await relay.fetch(proxyRequest('/after'))).status, 502);
+});

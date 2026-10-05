@@ -50,8 +50,13 @@ answers the current view and records nothing.
 
 A fresh key, registered at once and persisted in place of the old identity; if the switch was on
 the tunnel redials immediately under it. The way to retire a key that leaked. It answers the new
-view. Before the old key is replaced, the old install's owner is unbound at the relay (a signed
-`DELETE`, best effort), so the new link starts unowned and the old one has no owner left.
+view. Before the old key is replaced, the old install is retired at the relay: a signed
+`DELETE /api/installs/<old id>` deletes it with its owner and pending pairings and closes its tunnel
+(`4404`), so a leaked copy of the old key reaches nothing afterwards. If the relay cannot be told
+(unreachable, or it refuses the old key's signature), the answer is **502** and nothing changes: the
+old link and key stay, and the install registered a moment earlier is withdrawn again, best effort.
+Only an old key that can no longer be read is replaced regardless, since nothing can sign for it.
+A relay older than the retire endpoint gets the old owner unbound instead (`DELETE …/owner`).
 
 The three switches record `remote.enable`, `remote.disable` and `remote.reset` in the activity
 log (§6.9), with actor `you`, but only when the state actually changes.

@@ -48,8 +48,17 @@ export class InstallTunnel {
   }
 
   async fetch(request) {
-    if (request.headers.get('x-relay-kind') === 'tunnel') return this.#dial(request);
+    const kind = request.headers.get('x-relay-kind');
+    if (kind === 'tunnel') return this.#dial(request);
+    if (kind === 'retire') return this.#retire();
     return this.#proxy(request);
+  }
+
+  // The install was retired (worker.js `retire`): the live tunnel and everything riding on it end now,
+  // with 4404 so the mothership knows the install is gone. Its redial then meets the worker's 404.
+  #retire() {
+    if (this.tunnel) this.#killTunnel(this.tunnel, 4404, 'install retired');
+    return new Response(null, { status: 204 });
   }
 
   // ---- mothership side ------------------------------------------------------------------
@@ -124,7 +133,8 @@ export class InstallTunnel {
     this.onEstablish?.(ws, installId);
   }
 
-  // Drop the tunnel and everything riding on it. code 4000 = replaced, 1006 = socket closed, 1000 = idle.
+  // Drop the tunnel and everything riding on it. code 4000 = replaced, 4404 = retired, 1006 = socket closed,
+  // 1000 = idle.
   #killTunnel(tunnel, code, reason) {
     clearInterval(this.pingTimer);
     clearTimeout(this.idleTimer);

@@ -278,14 +278,30 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
     })?;
     let relay = app.remote.relay().await;
     let (install_id, host) = register(&relay, &key).await?;
-    // The old install's owner binding goes with the old link (#534: "reset link" unbinds): signed
-    // with the old key, before it is overwritten. Best effort — the new install starts unowned
-    // whatever happens here, and the old host has no tunnel left to forward to.
-    let old = app.remote.saved().await.install_id;
-    if let (Some(old), Ok(old_key)) = (old, read_key(&app.remote.dir))
-        && let Err(e) = signed_call(&relay, &old, &old_key, Method::DELETE, "/owner", None).await
-    {
-        eprintln!("remote: could not unbind the old link's owner at the relay: {}", e.message());
+    // The old install is retired at the relay (review finding R2): its row, owner and pairings are
+    // deleted and its tunnel closed, signed with the old key before it is overwritten, so a leaked
+    // copy of that key reaches nothing afterwards. If the relay cannot be told, the reset stops
+    // here and the old link stays in place — a reset that left the old install live would be the
+    // finding itself — and the install just registered is withdrawn again, best effort. Only an
+    // unreadable old key goes on regardless: nothing can sign for that install any more.
+    if let Some(old) = app.remote.saved().await.install_id {
+        match read_key(&app.remote.dir) {
+            Ok(old_key) => {
+                if let Err(e) = retire_install(&relay, &old, &old_key).await {
+                    if let Err(undo) = signed_call(&relay, &install_id, &key, Method::DELETE, "", None).await {
+                        eprintln!(
+                            "remote: could not withdraw the unused new install at the relay: {}",
+                            undo.message()
+                        );
+                    }
+                    return Err(client_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("could not retire the old link at the relay, so it was kept: {}", e.message()),
+                    ));
+                }
+            }
+            Err(e) => eprintln!("remote: the old link cannot be retired at the relay, its key is unreadable: {e:#}"),
+        }
     }
     util::write_private(&app.remote.dir.join(KEY_FILE), doc.as_ref())?;
     let mut saved = app.remote.saved().await;
@@ -295,6 +311,22 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
     app.remote.set_replaced(false).await; // a reset is the way out of a taken-over link
     app.remote.signal.send_replace(()); // an immediate redial under the new identity
     Ok(app.remote.view().await)
+}
+
+/// Retires `install_id` at the relay: a signed `DELETE /api/installs/<id>` deletes the install, its
+/// owner and its pairings, and closes its tunnel. An install the relay no longer knows is already
+/// retired. A relay older than that endpoint answers its catch-all `404 not found`; there the old
+/// owner is at least unbound (`DELETE …/owner`, #663), which is all such a relay can do.
+async fn retire_install(relay: &str, install_id: &str, key: &Ed25519KeyPair) -> Result<(), AppError> {
+    match signed_call(relay, install_id, key, Method::DELETE, "", None).await? {
+        (StatusCode::NO_CONTENT | StatusCode::OK, _) => Ok(()),
+        (StatusCode::NOT_FOUND, answer) if answer["error"] == "unknown install" => Ok(()),
+        (StatusCode::NOT_FOUND, _) => match signed_call(relay, install_id, key, Method::DELETE, "/owner", None).await? {
+            (StatusCode::NO_CONTENT | StatusCode::OK, _) => Ok(()),
+            (status, answer) => Err(relay_refused(status, &answer)),
+        },
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
 }
 
 /// The key pair to sign with, from the stored file — minted only when there is no file yet. Key
@@ -1418,7 +1450,8 @@ mod tests {
 
     // -- The fake relay -----------------------------------------------------
 
-    /// A fake relay on 127.0.0.1:0: `POST /api/installs` registers a public key, and
+    /// A fake relay on 127.0.0.1:0: `POST /api/installs` registers a public key, `DELETE
+    /// /api/installs/<id>` retires one, and
     /// `GET /tunnel/<id>` speaks the challenge/hello handshake — verifying the signature against
     /// the registered key the way the real relay must — then hands the live socket to the test.
     async fn spawn_relay() -> (String, mpsc::UnboundedReceiver<RelayWs>) {
@@ -1448,6 +1481,11 @@ mod tests {
                         let body =
                             json!({"install_id": install_id, "host": format!("{install_id}.my.colonizer.dev")}).to_string();
                         io.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    } else if method == "DELETE" && path.starts_with("/api/installs/") {
+                        // A reset retiring the old install (R2); this fake checks no signature.
+                        io.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
                     } else if let Some(install_id) = path.strip_prefix("/tunnel/") {
                         let ws_key = header_of(&head, "sec-websocket-key").unwrap();
                         let accept = util::b64_encode(
@@ -2214,7 +2252,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        // Reset link also unbinds: the old host's owner is gone, so it pairs anew.
+        // Reset link retires the old install outright (review finding R2): its owner is gone with
+        // it, and its host is unknown to the relay.
         let (_, page) = sign_in(port, &host, "4242:alice").await;
         let code = code_on(&page);
         let (status, _) = local(
@@ -2228,8 +2267,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = sign_in(port, &host, "4242:alice").await;
-        assert_eq!(status, 200, "after a reset the old link has no owner left");
+        let (status, _, _) = relay_http(port, "/_auth?next=/", &host, None).await;
+        assert_eq!(status, 404, "after a reset the relay no longer knows the old link");
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
         assert_eq!(view, json!({"owner": null, "pending": []}), "the new link starts unowned");
 
@@ -2238,6 +2277,102 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "remote.pair").count(), 2);
         assert_eq!(kinds.iter().filter(|k| *k == "remote.pair_reject").count(), 1);
         assert_eq!(kinds.iter().filter(|k| *k == "remote.unpair").count(), 1);
+    }
+
+    /// A signed `GET …/pairing` for `install_id` with `key`, straight at the relay: its status.
+    async fn relay_knows(relay: &str, install_id: &str, key: &Ed25519KeyPair) -> StatusCode {
+        signed_call(relay, install_id, key, Method::GET, "/pairing", None)
+            .await
+            .expect("the local relay answers")
+            .0
+    }
+
+    #[tokio::test]
+    async fn a_reset_retires_the_old_install_at_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let relay = format!("ws://127.0.0.1:{port}");
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(relay.clone()).await;
+        let router = remote_router(&app, idle_park());
+        tokio::spawn(run(app.clone(), router.clone()));
+        set_enabled(&app, true).await.unwrap();
+        until(&app, |v| v["connected"] == true, "the tunnel never connected").await;
+        // What a thief would have copied out of <config>/remote/ before the owner reset the link.
+        let old = app.remote.saved().await.install_id.unwrap();
+        let leaked = read_key(&app.remote.dir).unwrap();
+        assert_eq!(relay_knows(&relay, &old, &leaked).await, StatusCode::OK);
+
+        let (status, view) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let new = app.remote.saved().await.install_id.unwrap();
+        assert_ne!(new, old);
+
+        // The old install is gone at the relay: the leaked key signs for nothing, its tunnel dial is
+        // a 404, and its host shows the unknown-install page.
+        assert_eq!(relay_knows(&relay, &old, &leaked).await, StatusCode::NOT_FOUND);
+        let dial = format!("{relay}/tunnel/{old}").into_client_request().unwrap();
+        let refused = tokio_tungstenite::connect_async(dial)
+            .await
+            .expect_err("the old install cannot dial");
+        assert!(
+            matches!(&refused, tungstenite::Error::Http(res) if res.status() == StatusCode::NOT_FOUND),
+            "{refused:?}"
+        );
+        let old_host = format!("{old}.my.colonizer.dev");
+        let (status, _, _) = relay_http(port, "/", &old_host, None).await;
+        assert_eq!(status, 404);
+        // The new link is live under the new key.
+        let key = read_key(&app.remote.dir).unwrap();
+        assert_eq!(relay_knows(&relay, &new, &key).await, StatusCode::OK);
+        until(&app, |v| v["connected"] == true, "the new tunnel never connected").await;
+    }
+
+    #[tokio::test]
+    async fn a_reset_the_relay_cannot_hear_keeps_the_old_link() {
+        // A relay that registers but refuses everything signed (here: a fake that answers 503).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0;
+            loop {
+                let Ok((mut io, _)) = listener.accept().await else { return };
+                let head = read_head(&mut io).await;
+                n += 1;
+                let len: usize = header_of(&head, "content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let mut body = vec![0u8; len];
+                io.read_exact(&mut body).await.unwrap();
+                let answer = if head.starts_with("POST /api/installs ") {
+                    let body =
+                        json!({"install_id": format!("install{n}"), "host": format!("install{n}.my.colonizer.dev")}).to_string();
+                    format!(
+                        "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                };
+                io.write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        set_enabled(&app, true).await.unwrap();
+        let before = app.remote.saved().await.install_id.unwrap();
+        let key_before = std::fs::read(app.remote.dir.join(KEY_FILE)).unwrap();
+        let (status, answer) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{answer}");
+        assert!(answer.to_string().contains("could not retire the old link"), "{answer}");
+        assert_eq!(app.remote.saved().await.install_id.unwrap(), before, "the old link is kept");
+        assert_eq!(
+            std::fs::read(app.remote.dir.join(KEY_FILE)).unwrap(),
+            key_before,
+            "and its key"
+        );
     }
 
     #[tokio::test]
