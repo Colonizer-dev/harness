@@ -83,7 +83,12 @@ fn policy() -> Policy {
     Policy::new(PolicyConfig::default(), ContentGate::closed(), None)
 }
 
+/// Stands in for the SHA-256 of the line's raw bytes. The keys are sorted first: a workspace build
+/// can turn on serde_json's `preserve_order` (feature unification), and the `json!` text would then
+/// keep source order and change the record ids in the golden.
 fn digest(line: &Value) -> [u8; 32] {
+    let mut line = line.clone();
+    line.sort_all_objects();
     let d = ring::digest::digest(&ring::digest::SHA256, line.to_string().as_bytes());
     let mut out = [0u8; 32];
     out.copy_from_slice(d.as_ref());
