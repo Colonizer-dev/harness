@@ -11,6 +11,8 @@
 //   node scripts/changelog.mjs check --release v0.2.0         the tagged commit: its section exists, no fragment is left
 //   node scripts/changelog.mjs assemble --version v0.2.0 [--date 2026-10-01] [--dry-run]
 //   node scripts/changelog.mjs convert                        move entries written under `## Unreleased` into fragments
+//   node scripts/changelog.mjs notices --release v0.2.0 [--last 10]
+//                                                             the release body's notices block (below)
 //
 // A fragment is `changelog.d/<issue-or-slug>.<type>.md`, `<type>` one of TYPES below. Its content is
 // the entry, written the way CHANGELOG.md's bullets are (a bold one-line summary, then what changed),
@@ -18,6 +20,14 @@
 // `[#123]: …/issues/123` (GitHub forwards that to the pull request when 123 is one). Any other
 // reference-style link is defined at the fragment's foot (`[mem0]: https://mem0.ai`), and assemble
 // moves the definition to CHANGELOG.md's block, deduplicated and sorted. HTML comments are dropped.
+//
+// A fragment for a fix the operator should hear about before updating opens with a notice (issue
+// #1097): a `critical: <one line>` or `fixes-running: <one line>` line, optionally followed by
+// `probe: <id>`, the id of a read-only check compiled into the harness (update_notices.rs `PROBES`)
+// that counts the colonies the fix is for. assemble keeps it on the entry in CHANGELOG.md as a
+// `<!-- colonizer-notice {…} -->` comment, and `notices` turns this release's notices (and those of
+// the releases just before it) into the block the release workflow puts at the top of the release
+// body, which `/api/update` reads and the cockpit shows as a banner.
 //
 // assemble writes `## [vX.Y.Z] - DATE` right under `## Unreleased`, with a `### <Section>` per type in
 // TYPES order and the entries in each sorted by file name (issue numbers numerically first), then
@@ -51,6 +61,14 @@ const NOT_FRAGMENTS = new Set(['README.md', '.gitkeep']);
 const CODE_PATHS = [/^crates\//, /^modules\//, /^services\//, /^web\/src\//, /^scripts\/[^/]+\.(mjs|sh)$/];
 
 const LINK_DEF = /^\[([^\]]+)\]:\s+(\S+)\s*$/;
+// A fragment's notice lines, and the comment assemble writes for one into CHANGELOG.md.
+const NOTICE_LINE = /^(critical|fixes-running):[ \t]*(.*)$/i;
+const PROBE_LINE = /^probe:[ \t]*(.*)$/i;
+const PROBE_ID = /^[a-z0-9-]{1,64}$/;
+const NOTICE_COMMENT = /<!-- colonizer-notice (\{.*?\}) -->/;
+// What the release body's block opens with; update_notices.rs `MARKER` reads it.
+export const NOTICES_MARKER = '<!-- colonizer:notices';
+const NOTICE_TITLES = { critical: 'Critical', 'fixes-running': 'Fixes running colonies' };
 const NAME = /^([a-z0-9]+(?:-[a-z0-9]+)*)\.([a-z-]+)\.md$/;
 const RELEASE_HEADING = /^## \[(v\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}\s*$/;
 
@@ -67,14 +85,38 @@ export function parseName(file) {
 }
 
 /**
- * A fragment's text as `{ body, links }`: `body` is the entry without its leading `- ` and with the
- * continuation lines' two-space indent removed, `links` the reference definitions at its foot.
+ * A fragment's leading notice lines, taken off `lines` in place: `{ severity, line, probe }` with the
+ * raw values (lint judges them), or null when the fragment has none.
+ */
+function takeNotice(lines) {
+  let notice = null;
+  while (lines.length) {
+    const line = lines[0].trim();
+    const severity = NOTICE_LINE.exec(line);
+    const probe = PROBE_LINE.exec(line);
+    if (line === '') lines.shift();
+    else if (severity) {
+      notice = { ...(notice ?? {}), severity: severity[1].toLowerCase(), line: severity[2].trim(), repeated: notice?.severity !== undefined };
+      lines.shift();
+    } else if (probe) {
+      notice = { ...(notice ?? {}), probe: probe[1].trim() };
+      lines.shift();
+    } else break;
+  }
+  return notice;
+}
+
+/**
+ * A fragment's text as `{ body, links, notice }`: `body` is the entry without its leading `- ` and
+ * with the continuation lines' two-space indent removed, `links` the reference definitions at its
+ * foot, and `notice` its leading `critical:`/`fixes-running:` and `probe:` lines, or null.
  */
 export function parseFragment(text) {
   const lines = text
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/\r\n/g, '\n')
     .split('\n');
+  const notice = takeNotice(lines);
   const links = [];
   const kept = [];
   for (const line of lines) {
@@ -90,7 +132,19 @@ export function parseFragment(text) {
       for (let i = 1; i < kept.length; i++) kept[i] = kept[i].slice(2);
     }
   }
-  return { body: kept.join('\n'), links };
+  return { body: kept.join('\n'), links, notice };
+}
+
+/** A notice as JSON that can sit inside an HTML comment: no `>` to close it early. */
+function noticeJson(value) {
+  return JSON.stringify(value).replace(/>/g, '\\u003e');
+}
+
+/** The comment assemble keeps a fragment's notice in, on its entry in CHANGELOG.md. */
+export function renderNotice(notice) {
+  const value = { severity: notice.severity, line: notice.line };
+  if (notice.probe) value.probe = notice.probe;
+  return `<!-- colonizer-notice ${noticeJson(value)} -->`;
 }
 
 /** The entry as a CHANGELOG.md bullet. */
@@ -109,11 +163,21 @@ export function lintFragment(file, text) {
   const errors = [];
   if (!body.trim()) errors.push(`${file}: empty — write the entry (a bold one-line summary, then what changed)`);
   if (/^#{1,6} /m.test(body)) errors.push(`${file}: no headings in a fragment; its type (${name.type}) picks the section`);
+  const { notice } = parseFragment(text);
+  if (notice) {
+    if (!notice.severity) errors.push(`${file}: "probe:" needs a "critical: <line>" or "fixes-running: <line>" line before it`);
+    else if (!notice.line) errors.push(`${file}: "${notice.severity}:" needs the one line the operator reads, after the colon`);
+    else if (notice.line.length > 200) errors.push(`${file}: the ${notice.severity} line is ${notice.line.length} characters; keep it under 200`);
+    if (notice.repeated) errors.push(`${file}: one notice per fragment`);
+    if (notice.probe !== undefined && !PROBE_ID.test(notice.probe)) {
+      errors.push(`${file}: probe "${notice.probe}" is not a probe id (lowercase letters, digits and dashes)`);
+    }
+  }
   // Written as a bullet, a second bullet at the margin is a second entry: it would sort as one.
   const raw = text
     .replace(/<!--[\s\S]*?-->/g, '')
     .split('\n')
-    .filter((l) => l.trim() && !LINK_DEF.test(l));
+    .filter((l) => l.trim() && !LINK_DEF.test(l) && !NOTICE_LINE.test(l.trim()) && !PROBE_LINE.test(l.trim()));
   if (raw.length && /^[-*] /.test(raw[0])) {
     const second = raw.slice(1).find((l) => /^[-*] /.test(l));
     if (second) errors.push(`${file}: one entry per fragment — put "${second.slice(0, 40)}…" in a file of its own`);
@@ -215,6 +279,76 @@ export function releases(text) {
     .map((l) => RELEASE_HEADING.exec(l))
     .filter(Boolean)
     .map((m) => m[1]);
+}
+
+/**
+ * The notices CHANGELOG.md records, release by release, newest first: `[{ version, severity, line,
+ * probe?, issue? }]`, `issue` being the first `[#N]` of the entry the notice sits on.
+ */
+export function releaseNotices(text) {
+  const out = [];
+  let version = null;
+  let entry = null;
+  const flush = () => {
+    if (!entry || !version) return;
+    const m = NOTICE_COMMENT.exec(entry);
+    if (!m) return;
+    let value;
+    try {
+      value = JSON.parse(m[1]);
+    } catch {
+      return;
+    }
+    if (!NOTICE_TITLES[value.severity] || typeof value.line !== 'string' || !value.line.trim()) return;
+    const issue = /\[#(\d+)\]/.exec(entry.replace(NOTICE_COMMENT, ''))?.[1];
+    out.push({
+      version,
+      severity: value.severity,
+      line: value.line.trim(),
+      ...(value.probe ? { probe: value.probe } : {}),
+      ...(issue ? { issue: Number(issue) } : {}),
+    });
+  };
+  for (const line of text.split('\n')) {
+    if (/^#{1,6} /.test(line)) {
+      flush();
+      entry = null;
+      const heading = RELEASE_HEADING.exec(line);
+      if (heading) version = heading[1];
+      else if (/^#{1,2} /.test(line)) version = null;
+    } else if (/^[-*] /.test(line)) {
+      flush();
+      entry = line;
+    } else if (entry !== null) {
+      entry += `\n${line}`;
+    }
+  }
+  flush();
+  return out;
+}
+
+/**
+ * The block the release workflow puts at the top of `release`'s body: a visible list of its own
+ * notices, then every notice of it and the `last - 1` releases before it as JSON in a comment, so a
+ * mothership several releases behind still hears about the fixes in between. Empty when there are
+ * none.
+ */
+export function noticesBlock(changelog, release, last = 10) {
+  const order = releases(changelog);
+  const at = order.indexOf(release);
+  if (at < 0) throw new Error(`CHANGELOG.md has no "## [${release}] - <date>" section`);
+  const window = new Set(order.slice(at, at + Math.max(1, last)));
+  const notices = releaseNotices(changelog).filter((n) => window.has(n.version));
+  if (!notices.length) return '';
+  const own = notices.filter((n) => n.version === release);
+  const lines = [];
+  if (own.length) {
+    lines.push('### Before you update', '');
+    for (const n of own) lines.push(`- **${NOTICE_TITLES[n.severity]}:** ${n.line}${n.issue ? ` (#${n.issue})` : ''}`);
+    lines.push('');
+  }
+  lines.push(NOTICES_MARKER, noticeJson(notices), '-->', '');
+  return lines.join('\n');
 }
 
 /** What `## Unreleased` says once its entries live in fragments; `convert` writes it back. */
@@ -345,7 +479,12 @@ export function assemble(changelog, fragments, { version, date }) {
   for (const [type, title] of TYPES) {
     const entries = parsed.filter((f) => f.type === type);
     if (!entries.length) continue;
-    section.push('', `### ${title}`, '', ...entries.map((f) => renderEntry(f.body)));
+    section.push(
+      '',
+      `### ${title}`,
+      '',
+      ...entries.map((f) => renderEntry(f.notice ? `${f.body}\n${renderNotice(f.notice)}` : f.body)),
+    );
   }
 
   const { prose, links } = splitLinks(changelog);
@@ -388,6 +527,25 @@ function crateVersion(root) {
 }
 
 /**
+ * The probe ids the harness can run: `PROBES` in update_notices.rs, each name resolved to its
+ * string. Null when the file is not there to read (a checkout of something else).
+ */
+export function knownProbes(root) {
+  const path = join(root, 'crates/colonizer/src/update_notices.rs');
+  if (!existsSync(path)) return null;
+  const source = readFileSync(path, 'utf8');
+  const list = /pub const PROBES: &\[&str\] = &\[([^\]]*)\]/.exec(source);
+  if (!list) return null;
+  const consts = new Map([...source.matchAll(/pub const ([A-Z0-9_]+): &str = "([^"]*)";/g)].map((m) => [m[1], m[2]]));
+  return list[1]
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => (item.startsWith('"') ? item.slice(1, -1) : consts.get(item)))
+    .filter(Boolean);
+}
+
+/**
  * Every problem `check` finds, as `{ errors, warnings }`. With `base`, CHANGELOG.md may change only in
  * a release: one that adds the `## [vX.Y.Z]` heading matching the crate version.
  */
@@ -398,6 +556,16 @@ export function check(root, { base, release, allowChangelogEdit = false } = {}) 
   const { fragments, errors: nameErrors } = readFragments(dir);
   errors.push(...nameErrors.map((e) => `${FRAGMENT_DIR}/${e}`));
   for (const f of fragments) errors.push(...lintFragment(f.file, f.text).map((e) => `${FRAGMENT_DIR}/${e}`));
+  const probes = knownProbes(root);
+  for (const f of fragments) {
+    const probe = parseFragment(f.text).notice?.probe;
+    if (probes && probe && PROBE_ID.test(probe) && !probes.includes(probe)) {
+      errors.push(
+        `${FRAGMENT_DIR}/${f.file}: probe "${probe}" is not one the harness has (${probes.join(', ')}); ` +
+          'add it to PROBES in crates/colonizer/src/update_notices.rs in the same pull request',
+      );
+    }
+  }
 
   const changelogPath = join(root, 'CHANGELOG.md');
   const changelog = existsSync(changelogPath) ? readFileSync(changelogPath, 'utf8') : '';
@@ -450,14 +618,15 @@ const USAGE = `usage:
   changelog.mjs check [--base <ref>] [--release <vX.Y.Z>] [--allow-changelog-edit]
   changelog.mjs assemble --version <vX.Y.Z> [--date <YYYY-MM-DD>] [--dry-run]
   changelog.mjs convert [--dry-run]
+  changelog.mjs notices --release <vX.Y.Z> [--last <n>]
   (any command: [--root <dir>], the repository root; default the one this script is in)
 types: ${TYPES.map(([t]) => t).join(', ')}`;
 
 /** Parses argv into `{ command, positional, flags }`, or `{ error }`. */
 export function parseArgs(argv) {
   const [command, ...rest] = argv;
-  if (!['new', 'check', 'assemble', 'convert'].includes(command)) return { error: USAGE };
-  const valued = new Set(['--text', '--base', '--release', '--version', '--date', '--root']);
+  if (!['new', 'check', 'assemble', 'convert', 'notices'].includes(command)) return { error: USAGE };
+  const valued = new Set(['--text', '--base', '--release', '--version', '--date', '--root', '--last']);
   const bare = new Set(['--dry-run', '--allow-changelog-edit']);
   const flags = {};
   const positional = [];
@@ -477,6 +646,8 @@ const TEMPLATE = `<!--
 One entry, the way CHANGELOG.md's bullets read: a bold one-line summary of what a user notices,
 then what changed and anything they should know, ending with the issue or pull request as ([#123]).
 [#123] needs no definition; define any other reference-style link at the foot of this file.
+A fix the operator should hear about before updating opens with "critical: <one line>" or
+"fixes-running: <one line>", and optionally "probe: <id>" (changelog.d/README.md).
 Everything inside this comment is dropped. Delete it once the entry is written.
 -->
 `;
@@ -535,6 +706,25 @@ export function main(argv = process.argv.slice(2)) {
     for (const e of result.errors) annotate('error', e);
     if (result.errors.length) return 1;
     console.log(`changelog: ${result.fragments} pending fragment(s), all valid`);
+    return 0;
+  }
+
+  if (command === 'notices') {
+    if (!flags.release) {
+      console.error(`notices needs --release\n${USAGE}`);
+      return 2;
+    }
+    const last = flags.last === undefined ? 10 : Number(flags.last);
+    if (!Number.isInteger(last) || last < 1) {
+      console.error(`--last must be a whole number of releases, not "${flags.last}"`);
+      return 2;
+    }
+    try {
+      process.stdout.write(noticesBlock(readFileSync(join(root, 'CHANGELOG.md'), 'utf8'), flags.release, last));
+    } catch (e) {
+      console.error(e.message);
+      return 1;
+    }
     return 0;
   }
 

@@ -66,12 +66,12 @@ function Explorer({ tree, active, dirty, onOpen }: { tree: TreeNode | null; acti
           }
           title={n.path}
           className={cx(
-            "flex h-[22px] w-full cursor-pointer items-center gap-1 border-0 bg-transparent pr-2 text-left font-mono text-[12px]",
+            "flex h-[22px] w-full cursor-pointer items-center gap-1 border-0 bg-transparent pr-2 text-left font-mono text-small",
             active === n.path ? "bg-accent-soft text-accent" : "text-muted hover:bg-panel-2 hover:text-text",
           )}
           style={{ paddingLeft: 6 + depth * 12 }}
         >
-          <span aria-hidden="true" className="w-3 shrink-0 text-center text-[9px] text-faint">
+          <span aria-hidden="true" className="w-3 shrink-0 text-center text-micro-sm text-faint">
             {n.dir ? (expanded ? "▾" : "▸") : ""}
           </span>
           <span className="truncate">{n.name}</span>
@@ -84,10 +84,10 @@ function Explorer({ tree, active, dirty, onOpen }: { tree: TreeNode | null; acti
   return (
     <aside aria-label="explorer" className="flex w-[260px] shrink-0 flex-col border-r border-border bg-panel">
       <div className="px-2 py-2">
-        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…" aria-label="filter files" className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-[12px] text-text outline-none placeholder:text-faint focus:border-border-strong" />
+        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…" aria-label="filter files" className="w-full rounded-md border border-border bg-transparent px-2 py-1 text-small text-text outline-none placeholder:text-faint focus:border-border-strong" />
       </div>
       <div role="tree" aria-label="repository files" className="scroll-thin min-h-0 flex-1 overflow-auto pb-2">
-        {tree ? tree.children.map((c) => row(c, 0)) : <p className="px-3 text-[12px] text-faint">Loading files…</p>}
+        {tree ? tree.children.map((c) => row(c, 0)) : <p className="px-3 text-small text-faint">Loading files…</p>}
       </div>
     </aside>
   );
@@ -99,7 +99,7 @@ function BranchSwitcher({ branches, value, onPick }: { branches: RepoBranch[]; v
   const list = branches.filter((b) => b.name.toLowerCase().includes(q.trim().toLowerCase()));
   return (
     <div className="relative">
-      <button type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-2.5 font-mono text-[12px] text-text hover:border-border-strong">
+      <button type="button" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen((o) => !o)} className="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-panel px-2.5 font-mono text-small text-text hover:border-border-strong">
         <span aria-hidden="true">⎇</span>
         <span className="max-w-[220px] truncate">{value}</span>
         <span aria-hidden="true" className="text-faint">▾</span>
@@ -108,7 +108,7 @@ function BranchSwitcher({ branches, value, onPick }: { branches: RepoBranch[]; v
         <>
           <div aria-hidden="true" className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div role="listbox" aria-label="branches" onKeyDown={(e) => e.key === "Escape" && setOpen(false)} className="v3-pop absolute left-0 top-9 z-50 flex max-h-[420px] w-[440px] flex-col overflow-hidden rounded-xl border border-border-strong shadow-[0_16px_48px_rgb(0_0_0/0.4)]">
-            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a branch…" aria-label="find a branch" className="m-2 rounded-md border border-border bg-transparent px-2 py-1 text-[12.5px] text-text outline-none" />
+            <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Find a branch…" aria-label="find a branch" className="m-2 rounded-md border border-border bg-transparent px-2 py-1 text-small-lg text-text outline-none" />
             <div className="scroll-thin min-h-0 flex-1 overflow-y-auto pb-1">
               {list.map((b) => (
                 <button
@@ -123,17 +123,17 @@ function BranchSwitcher({ branches, value, onPick }: { branches: RepoBranch[]; v
                   className={cx("flex w-full cursor-pointer flex-col gap-0.5 border-0 px-3 py-1.5 text-left hover:bg-panel-2", b.name === value ? "bg-panel-2" : "bg-transparent")}
                 >
                   <span className="flex items-center gap-1.5">
-                    <span className="truncate font-mono text-[12.5px] text-text">{b.name}</span>
-                    {b.default && <span className="rounded bg-accent-soft px-1 text-[10px] text-accent">default</span>}
-                    {b.protected && <span className="rounded bg-panel-3 px-1 text-[10px] text-muted">protected</span>}
-                    {b.colony && <span className="rounded bg-panel-3 px-1 text-[10px] text-muted">colony</span>}
+                    <span className="truncate font-mono text-small-lg text-text">{b.name}</span>
+                    {b.default && <span className="rounded bg-accent-soft px-1 text-micro-lg text-accent">default</span>}
+                    {b.protected && <span className="rounded bg-panel-3 px-1 text-micro-lg text-muted">protected</span>}
+                    {b.colony && <span className="rounded bg-panel-3 px-1 text-micro-lg text-muted">colony</span>}
                     {!b.default && (
-                      <span className="ml-auto shrink-0 font-mono text-[10.5px] text-faint" title="ahead / behind the default branch">
+                      <span className="ml-auto shrink-0 font-mono text-meta-sm text-faint" title="ahead / behind the default branch">
                         ↑{b.ahead} ↓{b.behind}
                       </span>
                     )}
                   </span>
-                  <span className="flex items-center gap-1.5 text-[11px] text-faint">
+                  <span className="flex items-center gap-1.5 text-meta text-faint">
                     <span className="truncate">{b.message}</span>
                     <span className="shrink-0">· {b.author} · {timeAgo(b.date)}</span>
                     {b.pr && (
@@ -193,15 +193,15 @@ function CreatePrDialog({
       setBusy(false);
     }
   };
-  const field = "w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-[13px] text-text outline-none focus:border-border-strong";
+  const field = "w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-body-sm text-text outline-none focus:border-border-strong";
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="create-pr-title" className="m-auto w-[min(820px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
       <div className="flex max-h-[calc(100dvh-24px)] flex-col">
-        <h2 id="create-pr-title" className="m-0 border-b border-border px-5 py-3 text-[16px] font-semibold">
-          Create a pull request · <span className="font-mono text-[13px] text-muted">{repo}</span>
+        <h2 id="create-pr-title" className="m-0 border-b border-border px-5 py-3 text-title-sm font-semibold">
+          Create a pull request · <span className="font-mono text-body-sm text-muted">{repo}</span>
         </h2>
         <div className="scroll-thin grid min-h-0 flex-1 gap-3 overflow-y-auto px-5 py-4 sm:grid-cols-2">
-          <label className="text-[12px] text-muted">
+          <label className="text-small text-muted">
             Into (base)
             <select value={base} onChange={(e) => setBase(e.target.value)} className={field}>
               {[current, defaultBranch, ...branches.map((b) => b.name)]
@@ -213,27 +213,27 @@ function CreatePrDialog({
                 ))}
             </select>
           </label>
-          <label className="text-[12px] text-muted">
+          <label className="text-small text-muted">
             New branch
             <input value={branch} onChange={(e) => setBranch(e.target.value)} className={cx(field, "font-mono")} />
           </label>
-          <label className="text-[12px] text-muted sm:col-span-2">
+          <label className="text-small text-muted sm:col-span-2">
             Commit message
             <input value={message} onChange={(e) => setMessage(e.target.value)} className={field} />
           </label>
-          <label className="text-[12px] text-muted sm:col-span-2">
+          <label className="text-small text-muted sm:col-span-2">
             Pull request title
             <input value={title} onChange={(e) => setTitle(e.target.value)} className={field} />
           </label>
-          <label className="text-[12px] text-muted sm:col-span-2">
+          <label className="text-small text-muted sm:col-span-2">
             Description
             <textarea value={body} onChange={(e) => setBody(e.target.value)} rows={3} className={field} />
           </label>
           <div className="sm:col-span-2">
-            <div className="mb-1 text-[12px] text-muted">
+            <div className="mb-1 text-small text-muted">
               {tabs.length} {tabs.length === 1 ? "file" : "files"} · the whole change
             </div>
-            <pre className="scroll-thin m-0 max-h-[300px] overflow-auto rounded-lg border border-border bg-panel-2 p-3 font-mono text-[11.5px] leading-relaxed">
+            <pre className="scroll-thin m-0 max-h-[300px] overflow-auto rounded-lg border border-border bg-panel-2 p-3 font-mono text-meta-lg leading-relaxed">
               {diff.split("\n").map((l, i) => (
                 <div key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "bg-ok/10 text-ok" : l.startsWith("-") && !l.startsWith("---") ? "bg-err/10 text-err" : "text-muted"}>
                   {l || " "}
@@ -243,7 +243,7 @@ function CreatePrDialog({
           </div>
         </div>
         <div className="flex items-center gap-2 border-t border-border px-5 py-3">
-          <span className="mr-auto text-[12px] text-muted">Pushes branch {branch} and opens the pull request on GitHub as you.</span>
+          <span className="mr-auto text-small text-muted">Pushes branch {branch} and opens the pull request on GitHub as you.</span>
           <Button onClick={() => ref.current?.close()}>Cancel</Button>
           <Button variant="primary" disabled={busy || !branch.trim() || !title.trim() || !message.trim()} onClick={() => void submit()}>
             {busy && <Spinner />} Create pull request
@@ -508,15 +508,15 @@ export default function CodeEditor({
   const readOnly = narrow || !!tab?.binary || !!tab?.tooLarge;
   const diffOriginal = compare?.text ?? (tab?.conflict != null ? tab.conflict : showDiff && tab && tab.content !== tab.original ? tab.original : null);
   const iconButton = (on: boolean) =>
-    cx("inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-[12.5px]", on ? "border-accent bg-accent-soft text-accent" : "border-border bg-panel text-muted hover:border-border-strong hover:text-text");
+    cx("inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-small-lg", on ? "border-accent bg-accent-soft text-accent" : "border-border bg-panel text-muted hover:border-border-strong hover:text-text");
 
   return (
     <section aria-label={`editor · ${repo}`} className={cx("flex min-h-0 flex-1 flex-col bg-bg", full && "fixed inset-0 z-[90]")}>
       <header className="flex flex-wrap items-center gap-2 border-b border-border px-3 py-2">
-        <button type="button" onClick={onClose} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-[12.5px] text-muted hover:bg-panel-2 hover:text-text" aria-label="back to the Code page">
+        <button type="button" onClick={onClose} className="cursor-pointer rounded-md border-0 bg-transparent px-2 py-1 text-small-lg text-muted hover:bg-panel-2 hover:text-text" aria-label="back to the Code page">
           ←
         </button>
-        <span className="font-mono text-[13px] font-semibold text-text">{repo}</span>
+        <span className="font-mono text-body-sm font-semibold text-text">{repo}</span>
         {ref && <BranchSwitcher branches={branches} value={ref} onPick={(b) => (dirtyTabs.length > 0 && !autosave ? toast({ title: "Unsaved changes", body: "Turn autosave on or create a pull request before switching branches.", kind: "warn" }) : setRef(b))} />}
         <span className="flex-1" />
         <button type="button" className={iconButton(blameOn)} aria-pressed={blameOn} onClick={() => setBlameOn((b) => !b)} disabled={!tab}>
@@ -544,7 +544,7 @@ export default function CodeEditor({
         <div className="flex min-w-0 flex-1 flex-col">
           <div role="tablist" aria-label="open files" className="scroll-thin flex shrink-0 overflow-x-auto border-b border-border bg-panel">
             {tabs.map((t) => (
-              <div key={t.path} role="tab" aria-selected={t.path === active} className={cx("flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 font-mono text-[12px]", t.path === active ? "bg-bg text-text" : "text-muted")}>
+              <div key={t.path} role="tab" aria-selected={t.path === active} className={cx("flex shrink-0 items-center gap-1.5 border-r border-border px-3 py-1.5 font-mono text-small", t.path === active ? "bg-bg text-text" : "text-muted")}>
                 <button type="button" onClick={() => setActive(t.path)} className="cursor-pointer border-0 bg-transparent p-0 text-inherit" title={t.path}>
                   {t.path.split("/").pop()}
                 </button>
@@ -556,43 +556,43 @@ export default function CodeEditor({
             ))}
           </div>
           {tab?.restored && tab.conflict == null && tab.content !== tab.original && (
-            <div className="flex items-center gap-2 border-b border-border bg-accent-soft px-3 py-1.5 text-[12px] text-accent">
+            <div className="flex items-center gap-2 border-b border-border bg-accent-soft px-3 py-1.5 text-small text-accent">
               Restored draft — autosaved on this mothership, not yet on GitHub.
-              <button type="button" onClick={() => discard(tab.path)} className="ml-auto cursor-pointer border-0 bg-transparent text-[12px] underline">
+              <button type="button" onClick={() => discard(tab.path)} className="ml-auto cursor-pointer border-0 bg-transparent text-small underline">
                 Discard draft
               </button>
             </div>
           )}
           {tab?.conflict != null && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-[12px] text-warn">
+            <div className="flex flex-wrap items-center gap-2 border-b border-border bg-warn/10 px-3 py-1.5 text-small text-warn">
               This file changed on {ref} since the draft was made. Left: upstream now; right: your draft.
-              <button type="button" onClick={() => setTabs((ts) => ts.map((t) => (t.path === tab.path ? { ...t, conflict: null } : t)))} className="ml-auto cursor-pointer rounded border border-warn/40 bg-transparent px-2 py-0.5 text-[12px] text-warn">
+              <button type="button" onClick={() => setTabs((ts) => ts.map((t) => (t.path === tab.path ? { ...t, conflict: null } : t)))} className="ml-auto cursor-pointer rounded border border-warn/40 bg-transparent px-2 py-0.5 text-small text-warn">
                 Keep mine
               </button>
-              <button type="button" onClick={() => discard(tab.path)} className="cursor-pointer rounded border border-warn/40 bg-transparent px-2 py-0.5 text-[12px] text-warn">
+              <button type="button" onClick={() => discard(tab.path)} className="cursor-pointer rounded border border-warn/40 bg-transparent px-2 py-0.5 text-small text-warn">
                 Take upstream
               </button>
             </div>
           )}
           {compare && (
-            <div className="flex items-center gap-2 border-b border-border bg-panel-2 px-3 py-1.5 text-[12px] text-muted">
+            <div className="flex items-center gap-2 border-b border-border bg-panel-2 px-3 py-1.5 text-small text-muted">
               Comparing {compare.label} (left) with the current file (right).
-              <button type="button" onClick={() => setCompare(null)} className="ml-auto cursor-pointer border-0 bg-transparent text-[12px] underline">
+              <button type="button" onClick={() => setCompare(null)} className="ml-auto cursor-pointer border-0 bg-transparent text-small underline">
                 Close compare
               </button>
             </div>
           )}
           <div className="min-h-0 flex-1">
             {!tab ? (
-              <div className="flex h-full items-center justify-center text-[13px] text-faint">{tree ? "Open a file from the explorer." : "Loading…"}</div>
+              <div className="flex h-full items-center justify-center text-body-sm text-faint">{tree ? "Open a file from the explorer." : "Loading…"}</div>
             ) : tab.binary ? (
-              <div className="flex h-full items-center justify-center text-[13px] text-faint">Binary file — not shown.</div>
+              <div className="flex h-full items-center justify-center text-body-sm text-faint">Binary file — not shown.</div>
             ) : tab.tooLarge ? (
-              <div className="flex h-full items-center justify-center text-[13px] text-faint">Larger than 1 MB — not shown.</div>
+              <div className="flex h-full items-center justify-center text-body-sm text-faint">Larger than 1 MB — not shown.</div>
             ) : (
               <Suspense
                 fallback={
-                  <div className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
+                  <div className="flex h-full items-center justify-center gap-2 text-body-sm text-muted">
                     <Spinner /> Loading the editor…
                   </div>
                 }
@@ -610,7 +610,7 @@ export default function CodeEditor({
               </Suspense>
             )}
           </div>
-          <footer className="flex shrink-0 items-center gap-3 border-t border-border bg-panel px-3 py-1 text-[11.5px] text-faint">
+          <footer className="flex shrink-0 items-center gap-3 border-t border-border bg-panel px-3 py-1 text-meta-lg text-faint">
             {tab && <span className="font-mono">{tab.path}</span>}
             {treeSha && <span className="font-mono">@ {treeSha.slice(0, 7)}</span>}
             {narrow && <span>read-only on a narrow screen</span>}
@@ -633,11 +633,11 @@ export default function CodeEditor({
 
         {panel === "history" && tab && (
           <aside aria-label="file history" className="scroll-thin w-[300px] shrink-0 overflow-y-auto border-l border-border bg-panel p-3">
-            <h3 className="m-0 mb-2 text-[13px] font-semibold text-text">History · {tab.path.split("/").pop()}</h3>
+            <h3 className="m-0 mb-2 text-body-sm font-semibold text-text">History · {tab.path.split("/").pop()}</h3>
             {!history ? (
-              <p className="text-[12px] text-faint">Loading…</p>
+              <p className="text-small text-faint">Loading…</p>
             ) : history.length === 0 ? (
-              <p className="text-[12px] text-faint">No commits touch this file on {ref}.</p>
+              <p className="text-small text-faint">No commits touch this file on {ref}.</p>
             ) : (
               <ul className="m-0 list-none space-y-1 p-0">
                 {history.map((c) => (
@@ -654,8 +654,8 @@ export default function CodeEditor({
                       }}
                       className="w-full cursor-pointer rounded-md border-0 bg-transparent px-2 py-1.5 text-left hover:bg-panel-2"
                     >
-                      <span className="block truncate text-[12.5px] text-text">{c.message}</span>
-                      <span className="block font-mono text-[11px] text-faint">
+                      <span className="block truncate text-small-lg text-text">{c.message}</span>
+                      <span className="block font-mono text-meta text-faint">
                         {c.sha.slice(0, 7)} · {c.author} · {timeAgo(c.date)}
                       </span>
                     </button>
@@ -668,9 +668,9 @@ export default function CodeEditor({
 
         {panel === "ask" && tab && (
           <aside aria-label="ask AI about this file" className="flex w-[340px] shrink-0 flex-col gap-2 border-l border-border bg-panel p-3">
-            <h3 className="m-0 text-[13px] font-semibold text-text">Ask about {tab.path.split("/").pop()}</h3>
-            <p className="m-0 text-[11.5px] text-faint">{selection ? `About lines ${selection[0]}–${selection[1]}.` : "Select lines to ask about just those."}</p>
-            <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={4} placeholder="What does this do? Where is X handled?" aria-label="your question" className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-[13px] text-text outline-none focus:border-border-strong" />
+            <h3 className="m-0 text-body-sm font-semibold text-text">Ask about {tab.path.split("/").pop()}</h3>
+            <p className="m-0 text-meta-lg text-faint">{selection ? `About lines ${selection[0]}–${selection[1]}.` : "Select lines to ask about just those."}</p>
+            <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={4} placeholder="What does this do? Where is X handled?" aria-label="your question" className="w-full rounded-md border border-border bg-transparent px-2 py-1.5 text-body-sm text-text outline-none focus:border-border-strong" />
             <div className="flex gap-2">
               <Button variant="primary" disabled={!question.trim() || asking} onClick={() => void ask()}>
                 {asking && <Spinner />} Answer here
@@ -679,13 +679,13 @@ export default function CodeEditor({
                 Hand to a colony
               </Button>
             </div>
-            <div className="scroll-thin min-h-0 flex-1 overflow-y-auto text-[13px] leading-relaxed text-text">
+            <div className="scroll-thin min-h-0 flex-1 overflow-y-auto text-body-sm leading-relaxed text-text">
               {answer && (
                 <>
                   <div className="prose-sm">
                     <ReactMarkdown>{answer.text}</ReactMarkdown>
                   </div>
-                  <p className="mt-2 text-[11px] text-faint">Answered by {answer.model}</p>
+                  <p className="mt-2 text-meta text-faint">Answered by {answer.model}</p>
                 </>
               )}
             </div>

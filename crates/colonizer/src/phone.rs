@@ -89,6 +89,10 @@ fn normalize_confirm(code: &str) -> String {
 struct Invite {
     hash: String,
     expires_at: i64,
+    /// A remote-link invite (remote.rs, review finding R3): it opens only through the tunnel, and
+    /// its pairing, once confirmed in Settings → Remote access, mints a link credential, not a
+    /// phone's.
+    link: bool,
 }
 
 struct Pairing {
@@ -99,6 +103,7 @@ struct Pairing {
     label: String,
     expires_at: i64,
     approved: bool,
+    link: bool,
 }
 
 /// What a claim found.
@@ -108,6 +113,8 @@ pub(crate) enum Claim {
     Pending,
     /// Approved: the pairing is gone, and the caller mints the credential under this label.
     Approved(String),
+    /// An approved remote-link pairing: the caller mints a link credential (remote.rs).
+    ApprovedLink(String),
     /// Unknown, wrong secret, or expired — one answer for all three.
     Gone,
 }
@@ -115,6 +122,8 @@ pub(crate) enum Claim {
 /// What a spent invite hands the phone: the pairing's id and secret (its cookie) and the code.
 #[derive(Debug)]
 pub(crate) struct Opened {
+    /// A remote-link pairing: the page sends the owner to Settings → Remote access.
+    pub(crate) link: bool,
     pub(crate) id: String,
     pub(crate) secret: String,
     pub(crate) confirm_code: String,
@@ -137,18 +146,27 @@ impl Book {
     }
 
     /// Whether pairing is shut for now: [`MAX_FAILURES`] failures inside the window.
-    fn limited(&mut self, now: i64) -> bool {
+    pub(crate) fn limited(&mut self, now: i64) -> bool {
         self.prune(now);
         self.failures.len() >= MAX_FAILURES
     }
 
     /// Records one failed pairing step.
-    fn failed(&mut self, now: i64) {
+    pub(crate) fn failed(&mut self, now: i64) {
         self.failures.push_back(now);
     }
 
     /// Mints an invite, storing only its hash; `None` when [`MAX_OPEN`] are already open.
     fn mint(&mut self, now: i64) -> Option<String> {
+        self.mint_kind(now, false)
+    }
+
+    /// Mints a remote-link invite ("Sign in on another device", remote.rs).
+    pub(crate) fn mint_link(&mut self, now: i64) -> Option<String> {
+        self.mint_kind(now, true)
+    }
+
+    fn mint_kind(&mut self, now: i64, link: bool) -> Option<String> {
         self.prune(now);
         if self.invites.len() >= MAX_OPEN {
             return None;
@@ -157,6 +175,7 @@ impl Book {
         self.invites.push(Invite {
             hash: digest(&code),
             expires_at: now + TTL_SECS,
+            link,
         });
         Some(code)
     }
@@ -164,18 +183,28 @@ impl Book {
     /// Spends an invite on its first presentation and opens a pairing bound to the presenting
     /// browser. `None` for an unknown, spent or expired invite, and when [`MAX_OPEN`] pairings
     /// already wait — the invite is spent either way, so it can never be presented twice.
+    #[cfg(test)]
     fn open(&mut self, code: &str, label: &str, now: i64) -> Option<Opened> {
+        self.open_from(code, label, false, now)
+    }
+
+    /// [`Book::open`], knowing whether the browser came through the tunnel: a remote-link invite
+    /// is spent but opens nothing anywhere else, since its credential works only there.
+    fn open_from(&mut self, code: &str, label: &str, tunnelled: bool, now: i64) -> Option<Opened> {
         self.prune(now);
         let hash = digest(code);
         let at = self
             .invites
             .iter()
             .position(|i| constant_time_eq(i.hash.as_bytes(), hash.as_bytes()))?;
-        self.invites.remove(at);
-        if self.pairings.len() >= MAX_OPEN {
+        let invite = self.invites.remove(at);
+        if self.pairings.len() >= MAX_OPEN || (invite.link && !tunnelled) {
             return None;
         }
+        // A link invite is usually opened on a computer, which the phone labels miss.
+        let label = if invite.link && label == "Phone" { "Browser" } else { label };
         let opened = Opened {
+            link: invite.link,
             id: format!("ph_{}", util::short_id()),
             secret: util::random_token(),
             confirm_code: new_confirm_code(),
@@ -187,6 +216,7 @@ impl Book {
             label: label.to_string(),
             expires_at: now + TTL_SECS,
             approved: false,
+            link: invite.link,
         });
         Some(opened)
     }
@@ -194,15 +224,23 @@ impl Book {
     /// Approves the waiting pairing whose confirm code this is; its label, or `None` for a code
     /// that matches no live, unapproved pairing.
     fn confirm(&mut self, code: &str, now: i64) -> Option<String> {
+        self.confirm_kind(code, false, now)
+    }
+
+    /// [`Book::confirm`] for a remote-link pairing (Settings → Remote access).
+    pub(crate) fn confirm_link(&mut self, code: &str, now: i64) -> Option<String> {
+        self.confirm_kind(code, true, now)
+    }
+
+    fn confirm_kind(&mut self, code: &str, link: bool, now: i64) -> Option<String> {
         self.prune(now);
         let typed = normalize_confirm(code);
         if typed.len() != 6 {
             return None;
         }
-        let pairing = self
-            .pairings
-            .iter_mut()
-            .find(|p| !p.approved && constant_time_eq(normalize_confirm(&p.confirm_code).as_bytes(), typed.as_bytes()))?;
+        let pairing = self.pairings.iter_mut().find(|p| {
+            !p.approved && p.link == link && constant_time_eq(normalize_confirm(&p.confirm_code).as_bytes(), typed.as_bytes())
+        })?;
         pairing.approved = true;
         Some(pairing.label.clone())
     }
@@ -230,20 +268,34 @@ impl Book {
         if !self.pairings[at].approved {
             return Claim::Pending;
         }
-        Claim::Approved(self.pairings.remove(at).label)
+        let pairing = self.pairings.remove(at);
+        if pairing.link {
+            Claim::ApprovedLink(pairing.label)
+        } else {
+            Claim::Approved(pairing.label)
+        }
     }
 
     fn pending_view(&mut self, now: i64) -> Vec<Value> {
+        self.pending_kind(now, false)
+    }
+
+    /// The remote-link pairings waiting for their code (Settings → Remote access).
+    pub(crate) fn pending_link_view(&mut self, now: i64) -> Vec<Value> {
+        self.pending_kind(now, true)
+    }
+
+    fn pending_kind(&mut self, now: i64, link: bool) -> Vec<Value> {
         self.prune(now);
         self.pairings
             .iter()
-            .filter(|p| !p.approved)
+            .filter(|p| !p.approved && p.link == link)
             .map(|p| json!({"id": p.id, "label": p.label, "expires_at": rfc3339(p.expires_at)}))
             .collect()
     }
 }
 
-fn rfc3339(unix: i64) -> String {
+pub(crate) fn rfc3339(unix: i64) -> String {
     Utc.timestamp_opt(unix, 0)
         .single()
         .unwrap_or_default()
@@ -255,7 +307,7 @@ fn rfc3339(unix: i64) -> String {
 pub(crate) struct Limited;
 
 /// Unix seconds now.
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     Utc::now().timestamp()
 }
 
@@ -314,7 +366,7 @@ impl PhoneStore {
         }
     }
 
-    fn book(&self) -> MutexGuard<'_, Book> {
+    pub(crate) fn book(&self) -> MutexGuard<'_, Book> {
         self.book.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -387,13 +439,13 @@ impl PhoneStore {
 
     /// `host_guard`'s half of step 2: spends the invite and opens the pairing. `Err(Limited)`
     /// when the rate limit refused the attempt outright; an invite that opens nothing counts.
-    pub(crate) fn open(&self, code: &str, user_agent: &str) -> Result<Option<Opened>, Limited> {
+    pub(crate) fn open(&self, code: &str, user_agent: &str, tunnelled: bool) -> Result<Option<Opened>, Limited> {
         let now = now_secs();
         let mut book = self.book();
         if book.limited(now) {
             return Err(Limited);
         }
-        let opened = book.open(code, device_label(user_agent), now);
+        let opened = book.open_from(code, device_label(user_agent), tunnelled, now);
         if opened.is_none() {
             book.failed(now);
         }
@@ -594,7 +646,11 @@ fn pair_cookie(headers: &HeaderMap) -> Option<(String, String)> {
 /// authentication is the pairing cookie only the phone that spent the invite holds. 202 while the
 /// owner has not confirmed; 200 with the phone's own credential as its cookie once they have;
 /// 404 for anything else. Rate-limited like every pairing step.
-pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Response {
+pub(crate) async fn claim(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<remote::Tunnelled>>,
+    headers: HeaderMap,
+) -> Response {
     let now = now_secs();
     let found = {
         let mut book = app.phones.book();
@@ -615,6 +671,7 @@ pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Resp
         found
     };
     let over = found != Claim::Pending;
+    let found_gone = found == Claim::Gone;
     let mut res = match found {
         Claim::Pending => (StatusCode::ACCEPTED, Json(json!({"status": "pending"}))).into_response(),
         Claim::Gone => (
@@ -622,6 +679,20 @@ pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Resp
             Json(json!({"error": "this pairing expired or was turned down; scan a new code"})),
         )
             .into_response(),
+        Claim::ApprovedLink(label) => match app.remote.add_link(&label) {
+            None => (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "too many devices are signed in to the link; reset it first"})),
+            )
+                .into_response(),
+            Some(token) => {
+                let mut res = (StatusCode::OK, Json(json!({"status": "paired"}))).into_response();
+                if let Ok(cookie) = crate::auth::set_cookie_header(&token).parse() {
+                    res.headers_mut().append(header::SET_COOKIE, cookie);
+                }
+                res
+            }
+        },
         Claim::Approved(label) => match app.phones.add(&label) {
             None => (
                 StatusCode::CONFLICT,
@@ -643,13 +714,25 @@ pub(crate) async fn claim(State(app): State<Shared>, headers: HeaderMap) -> Resp
     if over && let Ok(clear) = format!("{PAIR_COOKIE}=; HttpOnly; SameSite=Strict; Path=/api/phone/claim; Max-Age=0").parse() {
         res.headers_mut().append(header::SET_COOKIE, clear);
     }
+    // Through the tunnel, a pairing secret that finds nothing counts at the relay too (#1086).
+    if found_gone && tunnelled.is_some() {
+        return remote::mark_rejected(res);
+    }
     res
 }
 
 /// The page a spent invite answers (`host_guard`): the confirm code to type into the cockpit, the
 /// device secret as a cookie only the claim route receives, and a poll that finishes the sign-in.
 pub(crate) fn pairing_response(opened: &Opened) -> Response {
-    let page = include_str!("pages/phone_pairing.html").replace("{{CONFIRM_CODE}}", &opened.confirm_code);
+    let mut page = include_str!("pages/phone_pairing.html").replace("{{CONFIRM_CODE}}", &opened.confirm_code);
+    if opened.link {
+        page = page
+            .replace(
+                "Settings &rarr; Add your phone",
+                "Settings &rarr; Remote access &rarr; Sign in on another device",
+            )
+            .replace("signs this phone in", "signs this browser in");
+    }
     let mut res = Html(page).into_response();
     let headers = res.headers_mut();
     let cookie = format!(
@@ -946,10 +1029,10 @@ mod tests {
         let store = PhoneStore::load(&root);
         let real = store.book().mint(now_secs()).unwrap();
         for guess in 0..MAX_FAILURES {
-            assert!(matches!(store.open(&format!("guess-{guess}"), "",), Ok(None)));
+            assert!(matches!(store.open(&format!("guess-{guess}"), "", false), Ok(None)));
         }
         assert!(
-            store.open(&real, "iPhone").is_err(),
+            store.open(&real, "iPhone", false).is_err(),
             "limited: refused before it is looked at"
         );
         assert!(store.book().invites.len() == 1, "and the real invite was not spent");

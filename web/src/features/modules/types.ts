@@ -56,3 +56,49 @@ export interface AutonomyStatus {
   consecutive_failures: number;
   alerted: boolean;
 }
+
+/** One webhook delivery as GET /api/notify/deliveries lists it (issue #898): never the body, and the address without its query. */
+export interface WebhookDelivery {
+  key: string;
+  event_id: string;
+  event: string;
+  target: string;
+  url: string;
+  colony: string | null;
+  attempts: number;
+  first_at: string;
+  last_at: string;
+  /** When the next retry is due; null in the dead letter. */
+  next_at: string | null;
+  last_error: string;
+}
+
+/** GET /api/notify/deliveries (issue #898): what is waiting for a retry, the dead letter (newest first), and the last success. */
+export interface WebhookDeliveries {
+  pending: WebhookDelivery[];
+  dead_letters: WebhookDelivery[];
+  last_success_at: string | null;
+  max_attempts: number;
+}
+
+/**
+ * GET /api/observability/status (issue #839): whether OTLP export is on, why not, where each
+ * setting came from, the header names (never values) and the exporter add-on's own health.
+ */
+export interface ObservabilityStatus {
+  state: "off" | "invalid" | "no_addon" | "starting" | "running" | "restarting" | "refused" | "failed";
+  configured: boolean;
+  reason?: string;
+  error?: string | null;
+  endpoint?: string;
+  protocol?: string;
+  headers?: { source: "env" | "secret" | "none"; names: string[] };
+  exporter?: { state?: string; exported?: number; last_error?: string | null; dropped?: Record<string, number> } | null;
+}
+
+/** POST /api/observability/test: what the backend answered for each signal. */
+export interface ObservabilityTest {
+  ok: boolean;
+  error?: string;
+  signals?: Record<string, { ok: boolean; status?: number; error?: string; rejected?: number }>;
+}

@@ -150,32 +150,34 @@ pub(crate) fn is_credential_file(rel: &str) -> bool {
             .any(|part| part.starts_with("secrets") || part.starts_with("colony-secrets"))
 }
 
-/// A session file's bytes as they may leave the session directory: a log (`*.jsonl`, `*.log`,
-/// rotated `events-N.jsonl` included) goes through the #761 redactor, so one written before
-/// redaction existed is scrubbed on its way out; anything else is kept as it is.
+/// A session file's bytes as they may leave the session directory, through the shared #761
+/// redactor: a log (`*.jsonl`, `*.log`, rotated `events-N.jsonl` included) line by line, so one
+/// written before redaction existed is scrubbed on its way out and JSON lines stay JSON; any other
+/// UTF-8 file as one text, which covers what the agent wrote raw (`out/pr.md`, `review.md`, a
+/// staged vault note) and keeps a multi-line PEM block whole for its detector. A binary file is
+/// kept as it is.
 pub(crate) fn redact_for_bundle(rel: &str, bytes: Vec<u8>) -> Vec<u8> {
-    if !(rel.ends_with(".jsonl") || rel.ends_with(".log")) {
-        return bytes;
+    if rel.ends_with(".jsonl") || rel.ends_with(".log") {
+        return match crate::redact::redact_jsonl(&bytes) {
+            std::borrow::Cow::Owned(redacted) => redacted,
+            std::borrow::Cow::Borrowed(_) => bytes,
+        };
     }
-    match crate::redact::redact_jsonl(&bytes) {
-        std::borrow::Cow::Owned(redacted) => redacted,
-        std::borrow::Cow::Borrowed(_) => bytes,
+    match std::str::from_utf8(&bytes).map(crate::redact::redact_text) {
+        Ok(std::borrow::Cow::Owned(redacted)) => redacted.into_bytes(),
+        _ => bytes,
     }
 }
 
-/// The session directory read through the session store (#325), so a future remote backend serves
-/// the archive like everything else, plus its fingerprint. `None` when there is no session directory.
-async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(String, u64, Vec<u8>)>, String)>> {
-    let dir = data_dir.join("sessions").join(id);
-    match tokio::fs::metadata(&dir).await {
-        Ok(m) if m.is_dir() => {}
-        Ok(_) => return Ok(None),
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+/// The session's files read through the session store (#325), so a remote backend serves the
+/// archive like everything else, plus its fingerprint. `None` when the session has no files.
+async fn snapshot(store: &dyn SessionStore, id: &str) -> anyhow::Result<Option<(Vec<(String, u64, Vec<u8>)>, String)>> {
+    let names = store.list_files(id).await?;
+    if names.is_empty() {
+        return Ok(None);
     }
-    let store = crate::store::LocalDirStore::new(data_dir);
     let (mut files, mut total, mut newest) = (Vec::new(), 0u64, 0u64);
-    for name in store.list_files(id).await? {
+    for name in names {
         // Credentials are never read, so they neither travel nor move the fingerprint (a resumed
         // colony's fresh tokens are not a change to its logs).
         if is_credential_file(&name) {
@@ -186,10 +188,12 @@ async fn snapshot(data_dir: &Path, id: &str) -> anyhow::Result<Option<(Vec<(Stri
         };
         // #761: a log written before redaction existed is redacted on its way into the bundle.
         let bytes = redact_for_bundle(&name, bytes);
-        let mtime = tokio::fs::metadata(dir.join(&name))
+        let mtime = store
+            .stat(id, &name)
             .await
             .ok()
-            .and_then(|m| m.modified().ok())
+            .flatten()
+            .and_then(|stat| stat.modified)
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             // Nanoseconds: a same-size rewrite inside the second that wrote the last bundle must
             // still read as a change.
@@ -272,11 +276,16 @@ fn write_bundle(dir: &Path, id: &str, mut revision: u32, files: Vec<(String, u64
 /// the archive root. `None` when there is nothing to do: no session directory, or a fingerprint
 /// that already matches the newest bundle.
 pub(crate) async fn archive_session(app: &App, s: &Session) -> anyhow::Result<Option<String>> {
-    archive_data(&app.cfg.data_dir, s, &crate::runtime::host_id(app)).await
+    archive_data(app.store(), &app.cfg.data_dir, s, &crate::runtime::host_id(app)).await
 }
 
-async fn archive_data(data_dir: &Path, s: &Session, mothership: &str) -> anyhow::Result<Option<String>> {
-    let Some((files, fingerprint)) = snapshot(data_dir, &s.id).await? else {
+async fn archive_data(
+    store: &dyn SessionStore,
+    data_dir: &Path,
+    s: &Session,
+    mothership: &str,
+) -> anyhow::Result<Option<String>> {
+    let Some((files, fingerprint)) = snapshot(store, &s.id).await? else {
         return Ok(None);
     };
     let rel_dir = rel_dir_of(s);
@@ -325,9 +334,9 @@ async fn archive_data(data_dir: &Path, s: &Session, mothership: &str) -> anyhow:
 /// Hook A (issue #496): the colony just crossed onto a terminal status. Snapshot its logs off the
 /// update path — an archive must never block or fail a colony that just finished, so the spawned
 /// task's whole error path is a printout.
-pub(crate) fn spawn_on_end(data_dir: PathBuf, session: Session, mothership: String) {
+pub(crate) fn spawn_on_end(store: std::sync::Arc<dyn SessionStore>, data_dir: PathBuf, session: Session, mothership: String) {
     tokio::spawn(async move {
-        if let Err(e) = archive_data(&data_dir, &session, &mothership).await {
+        if let Err(e) = archive_data(store.as_ref(), &data_dir, &session, &mothership).await {
             eprintln!("archive: could not archive {}'s logs: {e:#}", session.id);
         }
     });
@@ -840,7 +849,10 @@ mod tests {
             ("events-1.jsonl", format!("{{\"text\":\"key {aws}\"}}\n")),
             ("findings.jsonl", format!("{{\"title\":\"leak {aws}\"}}\n")),
             ("transcripts/a.jsonl", format!("{{\"said\":\"{aws}\"}}\n")),
-            ("out/pr.md", "the pull request\n".to_string()),
+            // What the agent wrote raw, and the vault notes staged for it: text, not logs.
+            ("out/pr.md", format!("# Rotate the key\n\nThe old one was {aws}.\n")),
+            ("review.md", format!("the fixture hard-codes {aws}\n")),
+            ("vm/vault/ops.md", format!("deploy key {aws}\n")),
         ];
         for (name, text) in &logs {
             let path = dir.join(name);
@@ -898,6 +910,26 @@ mod tests {
         assert!(names.contains(&"logs/abc/events.jsonl"), "the archive fallback: {names:?}");
         no_credentials("export from the archive", &exported);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #761: every text file is redacted on its way into a bundle (a log line by line, anything
+    /// else as one text), a clean file is kept byte for byte, and a binary file is never touched.
+    #[test]
+    fn bundled_text_is_redacted_and_binary_files_are_kept() {
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let pr = redact_for_bundle("out/pr.md", format!("# Rotate\n\nold: {token}\n").into_bytes());
+        assert_eq!(String::from_utf8(pr).unwrap(), "# Rotate\n\nold: [REDACTED:github_token]\n");
+        let log = redact_for_bundle("events-2.jsonl", format!("{{\"text\":\"{token}\"}}\n").into_bytes());
+        assert_eq!(String::from_utf8(log).unwrap(), "{\"text\":\"[REDACTED:github_token]\"}\n");
+        let clean = b"# Render PDFs\n\nCloses #14.\n".to_vec();
+        assert_eq!(redact_for_bundle("out/pr.md", clean.clone()), clean);
+        let mut png = vec![0x89, b'P', b'N', b'G', 0xff, 0xfe];
+        png.extend_from_slice(token.as_bytes());
+        assert_eq!(
+            redact_for_bundle("out/shot.png", png.clone()),
+            png,
+            "not UTF-8: kept as it is"
+        );
     }
 
     #[test]

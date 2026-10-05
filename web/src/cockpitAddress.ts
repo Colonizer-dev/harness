@@ -5,7 +5,7 @@
 // a stable address with no query string, no hash and nothing token-like in it. The sign-in link in
 // the terminal (?token=…, one use) and the pairing code (#…) must never end up in a bookmark.
 import { runningStandalone } from "./installApp";
-import { isIosSafari } from "./launchUrl";
+import { isBraveBrowser, isIosDevice, isIosSafari } from "./launchUrl";
 import { chosenOrigin } from "./phoneOrigins";
 import type { PhoneOrigin, RemoteStatus } from "./types";
 import { store, stored } from "./components/ui";
@@ -166,29 +166,25 @@ export function bookmarkShortcut(userAgent: string = browserUserAgent()): string
 
 export type InstallPlatform = "installed" | "ios-safari" | "ios-other" | "android-chrome" | "android-other" | "desktop";
 
-/** In-app browsers on iOS: they share Safari's WebKit but cannot add to the Home Screen usefully. */
-const IOS_IN_APP = /FBAN|FBAV|FB_IAB|Instagram|Line\/|GSA\/|Twitter|MicroMessenger|SnapChat/;
-/** Other real browsers on iOS (Chrome, Firefox, Edge, Opera, DuckDuckGo) — Safari's engine, not Safari. */
-const IOS_OTHER = /CriOS|FxiOS|EdgiOS|OPiOS|DuckDuckGo/;
 /** Android browsers that are not Chrome: install is still offered, but by a menu, not a prompt. */
 const ANDROID_NOT_CHROME = /EdgA|OPR|SamsungBrowser|FxiOS|CriOS|DuckDuckGo|GSA/;
 
 /**
  * Which install story to tell: already the app, iOS Safari's share sheet, another iOS browser, an
  * Android Chrome (the one with a native prompt), another Android browser, or a desktop. iOS is
- * detected through launchUrl's `isIosSafari`, so an iPad reporting itself as a Macintosh with a
- * touch screen is still iOS.
+ * detected through launchUrl's `isIosDevice`, so an iPad reporting itself as a Macintosh with a
+ * touch screen is still iOS, and Safari through `isIosSafari`, so Brave (Safari's user agent, plus
+ * `navigator.brave`), Chrome, Firefox, Edge, Opera and in-app webviews all get the Safari hand-off.
  */
 export function installPlatform(
   userAgent: string = browserUserAgent(),
   standalone: boolean = runningStandalone(),
   maxTouchPoints: number = typeof navigator === "undefined" ? 0 : (navigator.maxTouchPoints ?? 0),
+  brave: boolean = isBraveBrowser(),
 ): InstallPlatform {
   if (standalone) return "installed";
-  // iOS is launchUrl's device check (an iPad posing as a Macintosh still counts); the two regexes
-  // then split Safari from the other WebKit browsers and in-app webviews.
-  if (isIosSafari(userAgent, maxTouchPoints)) {
-    return IOS_IN_APP.test(userAgent) || IOS_OTHER.test(userAgent) ? "ios-other" : "ios-safari";
+  if (isIosDevice(userAgent, maxTouchPoints)) {
+    return isIosSafari(userAgent, maxTouchPoints, brave) ? "ios-safari" : "ios-other";
   }
   if (/Android/.test(userAgent)) {
     return /Chrome\//.test(userAgent) && !ANDROID_NOT_CHROME.test(userAgent) ? "android-chrome" : "android-other";

@@ -109,6 +109,9 @@ pub(crate) const KINDS: &[&str] = &[
     "remote.pair",
     "remote.pair_reject",
     "remote.unpair",
+    "remote.device_approve",
+    "remote.device_revoke",
+    "remote.require_github",
     "workspace.enable",
     "workspace.disable",
     "workspace.settings",
@@ -434,6 +437,7 @@ pub(crate) const fn rule(method: &'static str, route: &'static str, kind: &'stat
 const RULES: &[Rule] = &[
     rule("POST", "/api/sessions", "colony.launch", Target::NewColony),
     rule("POST", "/api/sessions/{id}/stop", "colony.stop", Target::Colony),
+    rule("POST", "/uhp/v1/sessions/{id}/cancel", "colony.stop", Target::Colony),
     rule("POST", "/api/sessions/{id}/resume", "colony.resume", Target::Colony),
     rule("POST", "/api/sessions/{id}/keep", "colony.keep", Target::Colony),
     rule("DELETE", "/api/sessions/{id}", "colony.delete", Target::Colony),
@@ -600,6 +604,12 @@ const RULES: &[Rule] = &[
         Target::Named("Colonizer", "updates"),
     ),
     rule(
+        "POST",
+        "/api/update/restart",
+        "app.update",
+        Target::Fixed("restarted colonies on the new version", "updates"),
+    ),
+    rule(
         "PUT",
         "/api/memory/mem0",
         "settings.save",
@@ -610,6 +620,12 @@ const RULES: &[Rule] = &[
         "/api/notify/secret",
         "settings.save",
         Target::Named("notification secret", "notifications"),
+    ),
+    rule(
+        "DELETE",
+        "/api/notify/dead-letters/{key}",
+        "settings.remove",
+        Target::Fixed("a webhook dead letter", "notifications"),
     ),
     rule(
         "PUT",

@@ -43,9 +43,10 @@ it is the only way to a fix (and then explain it in the pull request). Its origi
 A target is **not** dispatched, and the report says why, when:
 
 - `COLONIZER_NO_EXTERNAL_EFFECTS` (or `COLONIZER_NO_WRITE`) is set: the run reports only;
-- a supply-chain colony on the same repository and ecosystem is still live, queued, parked or has
-  its pull request open, and was given any of the same findings (or a Packages-tab hand-off on one
-  of the same packages is still open): the duplicate target is refused;
+- a colony of the same repository is still live, queued, parked or has its pull request open on
+  any of the same findings — another loop colony, a Packages-tab hand-off, or a `colonizer launch
+  --package --advisory` — by the one rule every launch uses
+  ([duplicates](../protocol/duplicates.md)): the duplicate target is refused, naming that colony;
 - the repository is cooling down: 12 hours after its last dispatch by default;
 - the run has reached its caps: 1 colony per repository and 3 per run by default. Repositories are
   checked one at a time, so a run never bursts.

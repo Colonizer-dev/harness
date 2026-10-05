@@ -16,6 +16,10 @@ pub fn env_nonempty(key: &str) -> Option<String> {
 /// Renders a command for error messages without leaking environment values (tokens live in env).
 pub fn describe(cmd: &Command) -> String {
     let std = cmd.as_std();
+    // A call the GitHub breaker refused (issue #1074) is a shell standing in for `gh`/`git`.
+    if std.get_envs().any(|(k, _)| k == crate::github_breaker::REFUSAL_ENV) {
+        return "github (paused)".into();
+    }
     let program = std.get_program().to_string_lossy().into_owned();
     let mut parts = vec![program.clone()];
     let mut args = std.get_args();
@@ -38,11 +42,10 @@ pub async fn exec(cmd: &mut Command) -> Result<String> {
         .await
         .with_context(|| format!("failed to start `{desc}`"))?;
     if !out.status.success() {
-        bail!(
-            "`{desc}` failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // A GitHub call's refusal feeds the account's circuit breaker (issue #1074).
+        crate::github_breaker::observe_command(cmd, &stderr);
+        bail!("`{desc}` failed ({}): {}", out.status, stderr.trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -64,10 +67,15 @@ pub async fn exec_capture(limit: Duration, cmd: &mut Command) -> Result<(String,
         .await
         .with_context(|| format!("`{desc}` timed out after {limit:?}"))?
         .with_context(|| format!("failed to start `{desc}`"))?;
-    Ok((
+    let (stdout, stderr) = (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).trim().to_string(),
-    ))
+    );
+    // `gh api -i` puts the status line and the body on stdout, so both feed the breaker (issue #1074).
+    if !out.status.success() {
+        crate::github_breaker::observe_command(cmd, &format!("{stdout}\n{stderr}"));
+    }
+    Ok((stdout, stderr))
 }
 
 /// Runs a command for its exit status only.

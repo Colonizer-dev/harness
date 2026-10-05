@@ -86,6 +86,25 @@ Two more misconfigurations refuse the launch the same way, before any probe runs
 - an unknown tool in the harness `disabled_tools` setting — the message names the agent module and
   the tools it knows: `agent module '<id>' setting 'disabled_tools': unknown tool '<name>' (known: …)`.
 
+## Base URLs
+
+The gateway joins the request's own path (`/v1/messages`, `/v1/chat/completions`, `/v1/responses`,
+and `/v1/models` for the health probe) to `base_url`, ignoring any trailing `/`. Enter the base the
+provider documents as its API root:
+
+- **A base whose path ends in a version segment** — `/v1`, `/v3`, `/api/v3`, `/api/coding/v3`, any
+  `/v<digits>` — is taken as that root, and the request path's leading `/v1` is dropped, so
+  `https://ark.ap-southeast.bytepluses.com/api/coding/v3` posts to `…/api/coding/v3/chat/completions`
+  and `https://api.x.ai/v1` to `…/v1/chat/completions`. This holds for every route, on either wire.
+- **Any other base** gets the full path appended: `https://api.deepseek.com/anthropic` posts to
+  `…/anthropic/v1/messages`, and `http://host:8000` to `http://host:8000/v1/chat/completions`.
+- An `anthropic`-wire base that ends in `/v1` is refused on save; enter it without the `/v1`.
+
+Saving a new provider, or changing its base URL, wire or key, in Settings → Providers sends a
+one-token test request through the colony's route and shows the URL it hit and the status. An
+upstream `404` or `405` during a colony's turn is logged with that URL too (no userinfo or query), and
+names the base URL as the likely cause.
+
 ## Plans, quotas and trust
 
 A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers,
@@ -100,11 +119,13 @@ them so the form prefills.
 - **`pricing`** — dollars per million input, output, cache-read, cache-write and thinking tokens. Unset,
   routed requests cost `$0` but their tokens are still counted, so the sandbox module's `budget_tokens`
   still holds a colony on a prepaid plan that `budget_usd` never can.
-- **`quota`** — `{"url", "pointer"}`, where to read what is left in a prepaid token plan. The gateway sends
+- **`quota`** — `{"url", "pointer", "limit_pointer"?}`, where to read what is left in a prepaid token plan. The gateway sends
   a `GET` to `url` with the connection's own credential, so `url` must have the same scheme, host and
   port as `base_url`, and reads the number (or numeric string) at `pointer`, an RFC 6901 JSON pointer.
   The provider health check (`GET /api/providers/{id}/health`) then answers `quota: {remaining, error}`,
-  and the provider card shows "N left in plan". A failed quota read never marks the connection
+  and the provider card shows "N left in plan". The optional `limit_pointer` names the plan's total in
+  the same answer (`quota: {remaining, limit, error}`), so the model switcher can draw used against
+  limit and the percent left; without it the switcher shows the balance alone. A failed quota read never marks the connection
   unreachable. `quota` omitted on a `PUT` keeps the saved probe; an empty `url` clears it.
 - **Moving a connection.** The credential is sent wherever `base_url` points, so a `PUT` that moves a
   keyed connection to a different origin — scheme, host or port — is refused unless the API key is
@@ -131,7 +152,10 @@ them so the form prefills.
   connection's `fallback_model` — a Claude model, or a model on a same-wire connection — so the next
   exhaustion retries on it by itself. **Wait until reset**
   parks them and resumes them at the reset. **Stop** stops them. The API is
-  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
+  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5). With the
+  notify module on, a card opening is also one notification per provider (`on_quota`, and the
+  device's "Provider out of quota" switch for Web Push) naming the provider and its reset; tapping
+  it opens the Inbox.
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
   and the colony log says why. The launch resolves the orchestrator, subagent, background and small

@@ -40,11 +40,11 @@ function StepHeader({ title, onBack }: { title: ReactNode; onBack?: () => void }
   return (
     <div className="flex items-center gap-2 border-b border-border px-2 py-1.5">
       {onBack && (
-        <button type="button" onClick={onBack} aria-label="back" className="cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-0.5 text-[13px] text-faint hover:bg-panel-2 hover:text-text">
+        <button type="button" onClick={onBack} aria-label="back" className="cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-0.5 text-body-sm text-faint hover:bg-panel-2 hover:text-text">
           ←
         </button>
       )}
-      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-muted">{title}</span>
+      <span className="min-w-0 flex-1 truncate text-small-lg font-medium text-muted">{title}</span>
     </div>
   );
 }
@@ -149,7 +149,7 @@ function ColonyStep({ sessions, onPick, onBack, avatarFor }: { sessions: readonl
             keywords: `${s.repo} ${s.status} ${s.issue_title}`,
             leading: <Avatar name={orgOf(s)} src={avatarFor(orgOf(s))} size={20} rounded="md" />,
             trailing: (
-              <span className={cx("shrink-0 rounded-full px-1.5 py-px text-[10.5px]", status.live ? "bg-accent-soft text-accent" : status.tone === "err" ? "bg-err/10 text-err" : "bg-panel-2 text-muted")}>
+              <span className={cx("shrink-0 rounded-full px-1.5 py-px text-meta-sm", status.live ? "bg-accent-soft text-accent" : status.tone === "err" ? "bg-err/10 text-err" : "bg-panel-2 text-muted")}>
                 {status.label}
               </span>
             ),
@@ -230,7 +230,7 @@ function SnippetStep({ onAdd, onBack }: { onAdd: (label: string, text: string) =
     <div className="flex flex-col">
       <StepHeader title="Paste a snippet" onBack={onBack} />
       <div className="flex flex-col gap-2 p-3">
-        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (optional) — e.g. stack trace" aria-label="snippet label" className="rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none placeholder:text-faint focus:border-accent" />
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Label (optional) — e.g. stack trace" aria-label="snippet label" className="rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none placeholder:text-faint focus:border-accent" />
         <textarea
           ref={area}
           value={text}
@@ -241,10 +241,10 @@ function SnippetStep({ onAdd, onBack }: { onAdd: (label: string, text: string) =
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && text.trim() && !over) onAdd(label.trim(), text);
           }}
-          className="scroll-thin resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 font-mono text-[12.5px] text-text outline-none placeholder:text-faint focus:border-accent"
+          className="scroll-thin resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 font-mono text-small-lg text-text outline-none placeholder:text-faint focus:border-accent"
         />
         <div className="flex items-center gap-2">
-          <span className={cx("flex-1 text-[11.5px]", over ? "text-err" : "text-faint")}>{over ? "Over 60 KB" : `${text.length.toLocaleString()} characters`}</span>
+          <span className={cx("flex-1 text-meta-lg", over ? "text-err" : "text-faint")}>{over ? "Over 60 KB" : `${text.length.toLocaleString()} characters`}</span>
           <Button variant="primary" size="sm" disabled={!text.trim() || over} onClick={() => onAdd(label.trim(), text)}>
             Attach
           </Button>

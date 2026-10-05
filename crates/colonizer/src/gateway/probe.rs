@@ -115,14 +115,15 @@ async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
     if let Some((name, value)) = credential_header(app, provider) {
         request = request.header(name, value);
     }
-    let (error, remaining) = match request.send().await {
+    let (error, remaining, limit) = match request.send().await {
         Ok(response) => {
             let status = response.status();
             let body: Value = response.json().await.unwrap_or(Value::Null);
             if status.is_success() {
-                (None, quota_remaining(&body, &quota.pointer))
+                let limit = quota.limit_pointer.as_deref().and_then(|p| quota_remaining(&body, p));
+                (None, quota_remaining(&body, &quota.pointer), limit)
             } else {
-                (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None)
+                (Some(format!("quota endpoint answered HTTP {}", status.as_u16())), None, None)
             }
         }
         Err(e) => {
@@ -133,12 +134,17 @@ async fn quota_probe(app: &App, provider: &Provider) -> Option<Value> {
             } else {
                 e.without_url().to_string()
             };
-            (Some(error), None)
+            (Some(error), None, None)
         }
     };
     // A success with nothing readable at the pointer is the usual typo, so it gets its own words.
     let error = error.or_else(|| remaining.is_none().then(|| format!("no number at {}", quota.pointer)));
-    Some(json!({"remaining": remaining, "error": error}))
+    let mut answer = json!({"remaining": remaining, "error": error});
+    // The plan's total only when a limit pointer is configured, so older readers see the same shape.
+    if quota.limit_pointer.is_some() {
+        answer["limit"] = limit.unwrap_or(Value::Null);
+    }
+    Some(answer)
 }
 
 /// The number a quota pointer points at: a JSON number, or a numeric string — some plans quote the
@@ -168,6 +174,101 @@ pub async fn provider_health(State(app): State<Shared>, Path(id): Path<String>) 
     Ok(Json(health))
 }
 
+/// How long the save-time test request may take: longer than the models probe, since it asks for a
+/// real (one-token) completion, but short enough that the Settings form never hangs on it.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Sends a one-token request through the same route a colony's turn takes — the anthropic wire's
+/// `/v1/messages`, or the openai wire's translated `/v1/chat/completions` — joined to the base URL
+/// exactly as the gateway joins it, with the provider's credential and connection policy (issue
+/// #1018). The answer names the final URL (redacted: no userinfo or query) and the status, so a base
+/// URL that misses the provider's API root shows up when the provider is saved, not in a hundred
+/// failed colony turns. It tests with the provider's first listed model.
+pub async fn test_request(app: &App, provider: &Provider) -> Value {
+    let failed = |url: Option<String>, model: Option<&str>, error: String| json!({"ok": false, "url": url, "status": null, "model": model, "latency_ms": null, "error": error});
+    let Some(model) = provider.models.first().map(String::as_str) else {
+        return failed(None, None, "list at least one model to test with".into());
+    };
+    let request = json!({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]});
+    let raw = Bytes::from(request.to_string());
+    let body = apply_connection_policy(&raw, provider).map(Bytes::from).unwrap_or(raw);
+    let (path, body) = match provider.wire {
+        Wire::Anthropic => {
+            let body = normalize_anthropic_body(&body, provider.quirks()).map_or(body, |(normalized, _)| normalized);
+            ("/v1/messages", body)
+        }
+        Wire::Openai => match openai::translate_request(&body) {
+            Ok((translated, _)) => ("/v1/chat/completions", Bytes::from(translated)),
+            Err(message) => return failed(None, Some(model), message),
+        },
+    };
+    let url = upstream_url(&provider.base_url, path, None).expect("the test path is clean");
+    let shown = reqwest::Url::parse(&url).map(|u| redacted_url(&u)).ok();
+    let mut request = app
+        .gateway
+        .client
+        .post(&url)
+        .timeout(TEST_TIMEOUT)
+        .header("content-type", "application/json")
+        .body(body);
+    if provider.wire == Wire::Anthropic {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+    if let Some((name, value)) = credential_header(app, provider) {
+        request = request.header(name, value);
+    }
+    let started = Instant::now();
+    match request.send().await {
+        Ok(response) => {
+            let status = response.status();
+            let shown = redacted_url(response.url());
+            let latency_ms = started.elapsed().as_millis() as u64;
+            let bytes = response.bytes().await.unwrap_or_default();
+            let error = (!status.is_success()).then(|| {
+                let parsed: Value = serde_json::from_slice(&bytes).unwrap_or_default();
+                let detail = parsed["error"]["message"]
+                    .as_str()
+                    .or_else(|| parsed["message"].as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+                let detail: String = detail.chars().take(300).collect();
+                match wrong_route_hint(status.as_u16(), &shown) {
+                    Some(hint) => format!("{detail} ({hint})"),
+                    None => detail,
+                }
+            });
+            json!({
+                "ok": status.is_success(),
+                "url": shown,
+                "status": status.as_u16(),
+                "model": model,
+                "latency_ms": latency_ms,
+                "error": error,
+            })
+        }
+        Err(e) => {
+            let error = if e.is_timeout() {
+                format!("no response within {} s", TEST_TIMEOUT.as_secs())
+            } else if e.is_connect() {
+                "connection failed".to_string()
+            } else {
+                e.without_url().to_string()
+            };
+            failed(shown, Some(model), error)
+        }
+    }
+}
+
+/// `POST /api/providers/{id}/test`: [`test_request`] against a saved provider.
+pub async fn provider_test(State(app): State<Shared>, Path(id): Path<String>) -> ApiResult<Value> {
+    let provider = app
+        .providers()
+        .into_iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such provider"))?;
+    Ok(Json(test_request(&app, &provider).await))
+}
+
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
 pub(crate) fn start_tasks(app: &crate::Shared) {
     tokio::spawn(flush_loop(app.clone()));
@@ -177,5 +278,7 @@ pub(crate) fn start_tasks(app: &crate::Shared) {
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
-    axum::Router::new().route("/api/providers/{id}/health", routing::get(provider_health))
+    axum::Router::new()
+        .route("/api/providers/{id}/health", routing::get(provider_health))
+        .route("/api/providers/{id}/test", routing::post(provider_test))
 }

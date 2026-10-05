@@ -345,19 +345,19 @@ export function OverviewView({
   return (
     <Page frameClassName="flex flex-col gap-10">
         {quota?.paused && !quotaBannerVisible ? (
-          <div role="status" className="-mb-4 border-y border-warn/40 py-2.5 text-[13px] text-warn">
+          <div role="status" className="-mb-4 border-y border-warn/40 py-2.5 text-body-sm text-warn">
             Queue paused — {quota.reason ?? "every provider's quota is exhausted"}
           </div>
         ) : null}
 
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
-            <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Overview</h1>
+            <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">Overview</h1>
             {colonize}
           </div>
           <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="min-w-0">
-            <div className="text-[14px] text-muted">
+            <div className="text-body-lg text-muted">
               {needList.length} {needList.length === 1 ? "colony needs" : "colonies need"} you · {counts.live} live · {counts.queued} queued across {workspaces.length}{" "}
               {workspaces.length === 1 ? "workspace" : "workspaces"}
               {headerCost !== null && <> · {formatCost(headerCost)} spent</>}
@@ -369,7 +369,7 @@ export function OverviewView({
         </div>
 
         {(filtered || hiddenOrgs.length > 0) && (
-          <div className="-mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint" role="status">
+          <div className="-mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-small-lg text-faint" role="status">
             {filtered && (
               <span>
                 colonies filtered · showing {tableSessions.length} of {visibleSessions.length}
@@ -402,19 +402,19 @@ export function OverviewView({
                     className={`-mt-px grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 border-t border-border py-3 transition-colors duration-[1200ms] ${isFlashed(events, session.id, nowMs) ? "v3-flash" : ""}`}
                   >
                     <span className="flex min-w-0 flex-col gap-0.5">
-                      <span className="truncate text-[14px]" title={taskTooltip(session)}>{taskLine(session, short)}</span>
-                      {questions[session.id] && <span className="line-clamp-2 text-[13px] text-warn [text-wrap:pretty]">{questions[session.id]}</span>}
-                      <span className="text-[12.5px] text-faint">
-                        <span className="font-mono text-[12px]">{short}</span> · {org}
+                      <span className="truncate text-body-lg" title={taskTooltip(session)}>{taskLine(session, short)}</span>
+                      {questions[session.id] && <span className="line-clamp-2 text-body-sm text-warn [text-wrap:pretty]">{questions[session.id]}</span>}
+                      <span className="text-small-lg text-faint">
+                        <span className="font-mono text-small">{short}</span> · {org}
                       </span>
                     </span>
-                    <span className={`text-[13px] tabular-nums ${waitMs > 2 * 3_600_000 ? "text-err" : "text-warn"}`} title={waitingSince(session)}>
+                    <span className={`text-body-sm tabular-nums ${waitMs > 2 * 3_600_000 ? "text-err" : "text-warn"}`} title={waitingSince(session)}>
                       {formatWait(waitMs)}
                     </span>
                     <button
                       type="button"
                       onClick={() => onOpenColony(session.id)}
-                      className="cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 text-[13px] font-medium text-bg hover:opacity-85"
+                      className="cursor-pointer rounded-md border-0 bg-text px-3 py-1.5 text-body-sm font-medium text-bg hover:opacity-85"
                     >
                       Answer
                     </button>
@@ -429,7 +429,7 @@ export function OverviewView({
           title="Merged PRs per day"
           legend={
             ghost ? (
-              <span className="inline-flex items-center gap-1.5 text-[12.5px] text-muted">
+              <span className="inline-flex items-center gap-1.5 text-small-lg text-muted">
                 <span aria-hidden="true" className="h-0 w-3 border-t border-dashed border-muted" />
                 prev {range}d{prevEmpty ? " · no activity" : ""}
               </span>
@@ -492,7 +492,7 @@ export function OverviewView({
             <Rules>
               <div className="overflow-x-auto">
                 <div className="min-w-[760px]">
-                  <div className={`${WS_GRID} border-b border-border py-2.5 text-[12.5px] text-muted`}>
+                  <div className={`${WS_GRID} border-b border-border py-2.5 text-small-lg text-muted`}>
                     <span>Name</span>
                     <span className="text-right">Colonies</span>
                     <span className="text-right">Need</span>
@@ -516,7 +516,7 @@ export function OverviewView({
                         }
                       }}
                       title={`open the ${c.org} dashboard`}
-                      className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-[13.5px] tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
+                      className={`${WS_GRID} -mt-px w-full cursor-pointer border-0 border-t border-solid border-border bg-transparent py-3.5 text-left text-body tabular-nums text-text hover:bg-panel-2 focus-visible:outline-2 focus-visible:outline-accent`}
                     >
                       <span className="flex min-w-0 items-center gap-2.5">
                         <OrgTile org={c.org} avatar={c.avatar} size={22} />
@@ -552,14 +552,14 @@ export function OverviewView({
             meta={String(tableSessions.length)}
             right={
               filtered ? (
-                <button type="button" onClick={clearFilters} className="cursor-pointer border-0 bg-transparent p-0 text-[12.5px] text-muted underline underline-offset-[3px] hover:text-text">
+                <button type="button" onClick={clearFilters} className="cursor-pointer border-0 bg-transparent p-0 text-small-lg text-muted underline underline-offset-[3px] hover:text-text">
                   clear filters
                 </button>
               ) : undefined
             }
           >
             {held.count > 0 && (
-              <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-[12.5px] ${stalled ? "text-warn" : "text-faint"}`}>
+              <div role="status" title="idle colonies holding parallel slots while autopilot holds their pull request" className={`mb-3 text-small-lg ${stalled ? "text-warn" : "text-faint"}`}>
                 {held.count} held{held.oldestAgeMs != null ? ` · oldest ${formatDuration(held.oldestAgeMs)}` : ""}
               </div>
             )}
@@ -583,7 +583,7 @@ export function OverviewView({
               )}
               {tableSessions.length === 0 ? (
                 filtered ? (
-                  <div className="py-3.5 text-[13px] text-muted">
+                  <div className="py-3.5 text-body-sm text-muted">
                     <div>
                       nothing matches these filters
                       {visibleSessions.length > 0 && <> · {visibleSessions.length} in other bucket{visibleSessions.length === 1 ? "" : "s"}</>}
@@ -594,7 +594,7 @@ export function OverviewView({
                     </button>
                   </div>
                 ) : (
-                  <div className="py-3.5 text-[13px] text-faint">No colonies in these workspaces yet.</div>
+                  <div className="py-3.5 text-body-sm text-faint">No colonies in these workspaces yet.</div>
                 )
               ) : (
                 <div className="overflow-x-auto">
@@ -619,7 +619,7 @@ export function OverviewView({
           </Section>
         </div>
 
-        <div className="flex flex-wrap gap-x-6 gap-y-2 text-[12.5px] text-faint">
+        <div className="flex flex-wrap gap-x-6 gap-y-2 text-small-lg text-faint">
           {host && (
             <span title="the machine every listed colony boots on">
               Host {host.hostname || host.id.slice(0, 8)}
@@ -684,11 +684,11 @@ function RedTeamActions({ org, live, onStart, onHistory }: { org: string; live: 
         onClick={stop(onStart)}
         aria-label={`start a red team on ${org}`}
         title="Hunt for bugs with a red-team swarm"
-        className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-panel px-2 py-1 text-[12px] text-text hover:border-border-strong hover:bg-panel-2"
+        className="inline-flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md border border-border bg-panel px-2 py-1 text-small text-text hover:border-border-strong hover:bg-panel-2"
       >
         <HackerIcon size={14} />
         Red team
-        {live > 0 && <span className="rounded-full bg-accent px-1.5 text-[10.5px] tabular-nums text-on-accent">{live}</span>}
+        {live > 0 && <span className="rounded-full bg-accent px-1.5 text-meta-sm tabular-nums text-on-accent">{live}</span>}
       </button>
       <button
         type="button"
@@ -742,35 +742,35 @@ function ShareCard({
       <div className="flex items-center gap-2.5">
         <OrgTile org={org} avatar={avatar} size={32} />
         <div className="min-w-0">
-          <div className="truncate text-[13.5px] font-semibold text-text">{org}</div>
+          <div className="truncate text-body font-semibold text-text">{org}</div>
           {description ? (
-            <div className="line-clamp-2 text-[12px] leading-snug text-muted">{description}</div>
+            <div className="line-clamp-2 text-small leading-snug text-muted">{description}</div>
           ) : (
-            <div className="text-[12px] text-faint">No GitHub description</div>
+            <div className="text-small text-faint">No GitHub description</div>
           )}
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2 border-t border-border pt-2.5 tabular-nums">
         <div>
-          <div className="text-[15px] font-semibold text-text">{merged}</div>
-          <div className="text-[11px] text-faint">merged · {range}d</div>
+          <div className="text-lead font-semibold text-text">{merged}</div>
+          <div className="text-meta text-faint">merged · {range}d</div>
         </div>
         <div>
-          <div className="text-[15px] font-semibold" style={{ color }}>
+          <div className="text-lead font-semibold" style={{ color }}>
             {share == null ? "—" : `${Math.round(share)}%`}
           </div>
-          <div className="text-[11px] text-faint">of all merged</div>
+          <div className="text-meta text-faint">of all merged</div>
         </div>
         <div>
-          <div className="text-[15px] font-semibold text-text">
+          <div className="text-lead font-semibold text-text">
             {live}
-            <span className="text-[12px] font-normal text-faint">/{total}</span>
+            <span className="text-small font-normal text-faint">/{total}</span>
           </div>
-          <div className="text-[11px] text-faint">live / colonies</div>
+          <div className="text-meta text-faint">live / colonies</div>
         </div>
       </div>
-      {need > 0 && <div className="text-[12px] text-warn">{need} need you</div>}
-      <div className="text-[11.5px] text-faint">Click to open the {org} dashboard</div>
+      {need > 0 && <div className="text-small text-warn">{need} need you</div>}
+      <div className="text-meta-lg text-faint">Click to open the {org} dashboard</div>
     </div>
   );
 }

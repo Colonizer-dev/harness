@@ -3,7 +3,7 @@
 // them. The iOS guess is pinned here too, so the Home-Screen sheet can only ever show on iOS.
 import { describe, expect, it } from "vitest";
 
-import { holdingSession, isIosSafari, sharedIssueFromUrl, sessionWithPull, stripLaunchParams, viewFromUrl, welcomeFromUrl } from "./launchUrl";
+import { holdingSession, isBraveBrowser, isIosDevice, isIosSafari, sharedIssueFromUrl, sessionWithPull, stripLaunchParams, viewFromUrl, welcomeFromUrl } from "./launchUrl";
 import type { Session } from "./types";
 
 const iPhoneUA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
@@ -14,6 +14,12 @@ const macSafariUA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
 const iosChromeUA =
   "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/124.0.6367.111 Mobile/15E148 Safari/604.1";
+const iosFirefoxUA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/127.0 Mobile/15E148 Safari/605.1.15";
+const iosEdgeUA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/125.2535.60 Mobile/15E148 Safari/605.1.15";
+const iosOperaUA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 OPiOS/16.0.15 Mobile/15E148 Safari/9537.53";
 const androidChromeUA =
   "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36";
 const windowsChromeUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
@@ -184,7 +190,39 @@ describe("isIosSafari", () => {
     expect(isIosSafari("", 0)).toBe(false);
   });
 
-  it("says yes to other browsers on iOS — since 16.4 they all offer Add to Home Screen too", () => {
-    expect(isIosSafari(iosChromeUA, 5)).toBe(true);
+  it("says no to the other browsers on iOS, which have no Add to Home Screen (#1083)", () => {
+    expect(isIosSafari(iosChromeUA, 5)).toBe(false);
+    expect(isIosSafari(iosFirefoxUA, 5)).toBe(false);
+    expect(isIosSafari(iosEdgeUA, 5)).toBe(false);
+    expect(isIosSafari(iosOperaUA, 5)).toBe(false);
+  });
+
+  it("says no to Brave on iOS, which sends Safari's user agent but exposes navigator.brave", () => {
+    expect(isIosSafari(iPhoneUA, 5, true)).toBe(false);
+    expect(isIosSafari(iPadAsMacUA, 5, true)).toBe(false);
+    expect(isIosSafari(iPhoneUA, 5, false)).toBe(true);
+  });
+});
+
+describe("isIosDevice", () => {
+  it("is every browser on an iPhone or iPad, and iPadOS posing as a Mac", () => {
+    for (const ua of [iPhoneUA, iPadUA, iosChromeUA, iosFirefoxUA, iosEdgeUA, iosOperaUA]) expect(isIosDevice(ua, 5)).toBe(true);
+    expect(isIosDevice(iPadAsMacUA, 5)).toBe(true);
+  });
+
+  it("is not desktop Safari, Android or Windows", () => {
+    expect(isIosDevice(macSafariUA, 0)).toBe(false);
+    expect(isIosDevice(androidChromeUA, 5)).toBe(false);
+    expect(isIosDevice(windowsChromeUA, 0)).toBe(false);
+  });
+});
+
+describe("isBraveBrowser", () => {
+  it("reads navigator.brave, and nothing else", () => {
+    expect(isBraveBrowser({ brave: { isBrave: () => Promise.resolve(true) }, userAgent: iPhoneUA })).toBe(true);
+    expect(isBraveBrowser({ userAgent: iPhoneUA })).toBe(false);
+    expect(isBraveBrowser({ brave: undefined })).toBe(false);
+    expect(isBraveBrowser(undefined)).toBe(false);
+    expect(isBraveBrowser(null)).toBe(false);
   });
 });

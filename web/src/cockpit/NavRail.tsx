@@ -186,7 +186,7 @@ function Tip({ label, show, children }: { label: string; show: boolean; children
         <span
           role="tooltip"
           style={at ? { left: at.left, top: at.top } : undefined}
-          className={`v3-pop pointer-events-none fixed z-50 -translate-y-1/2 whitespace-nowrap rounded-md border border-border-strong px-2 py-1 text-[12.5px] text-text shadow-[0_8px_24px_rgb(0_0_0/0.3)] transition-opacity duration-100 ${at ? "opacity-100" : "left-0 top-0 opacity-0"}`}
+          className={`v3-pop pointer-events-none fixed z-50 -translate-y-1/2 whitespace-nowrap rounded-md border border-border-strong px-2 py-1 text-small-lg text-text shadow-[0_8px_24px_rgb(0_0_0/0.3)] transition-opacity duration-100 ${at ? "opacity-100" : "left-0 top-0 opacity-0"}`}
         >
           {label}
         </span>
@@ -199,12 +199,12 @@ function Tip({ label, show, children }: { label: string; show: boolean; children
 function Count({ value, urgent, expanded }: { value: number | ""; urgent?: boolean; expanded: boolean }): ReactElement | null {
   if (value === "") return null;
   if (expanded) {
-    return <span className={`ml-auto text-[12px] tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{value}</span>;
+    return <span className={`ml-auto text-small tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{value}</span>;
   }
   return (
     <span
       aria-hidden="true"
-      className={`absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-[9.5px] font-semibold tabular-nums ${urgent ? "bg-warn text-bg" : "bg-panel-3 text-muted"}`}
+      className={`absolute -right-0.5 -top-0.5 grid h-4 min-w-4 place-items-center rounded-full px-1 font-mono text-micro font-semibold tabular-nums ${urgent ? "bg-warn text-bg" : "bg-panel-3 text-muted"}`}
     >
       {value}
     </span>
@@ -212,7 +212,7 @@ function Count({ value, urgent, expanded }: { value: number | ""; urgent?: boole
 }
 
 const ITEM =
-  "group relative flex h-10 w-full cursor-pointer items-center gap-3 rounded-[10px] border-0 bg-transparent text-[13.5px] transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+  "group relative flex h-10 w-full cursor-pointer items-center gap-3 rounded-[10px] border-0 bg-transparent text-body transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
 export function NavRail(props: {
   /** Workspaces only: orgEntries() has already dropped the undecided and the switched-off. */
@@ -294,7 +294,7 @@ export function NavRail(props: {
               className="flex h-10 min-w-0 cursor-pointer items-center gap-2.5 rounded-[10px] border-0 bg-transparent px-1.5"
             >
               <BrandMark />
-              <span className="text-[18px] font-semibold lowercase leading-none tracking-[-0.035em] text-text">colonizer</span>
+              <span className="text-title-lg font-semibold lowercase leading-none tracking-[-0.035em] text-text">colonizer</span>
             </button>
             <Tip label={`Minimise sidebar · ${SHORTCUT}`} show>
               <button
@@ -348,11 +348,11 @@ export function NavRail(props: {
           aria-keyshortcuts="Meta+K Control+K"
           aria-current={!onColonize && view === "launch" ? "page" : undefined}
           onClick={() => (onColonize ? onColonize() : onNavigate("launch"))}
-          className={`v3-launch ant-glyph-host mb-3 flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-[10px] border-0 font-semibold text-[13.5px] transition-[filter,transform] duration-150 hover:brightness-110 active:scale-[0.98] ${pad}`}
+          className={`v3-launch ant-glyph-host mb-3 flex h-10 w-full cursor-pointer items-center gap-2.5 rounded-[10px] border-0 font-semibold text-body transition-[filter,transform] duration-150 hover:brightness-110 active:scale-[0.98] ${pad}`}
         >
           <AntGlyph size={24} className="-m-[3px]" />
           {expanded && "Colonize"}
-          {expanded && <kbd className="ml-auto font-sans text-[11px] font-medium opacity-70">⌘K</kbd>}
+          {expanded && <kbd className="ml-auto font-sans text-meta font-medium opacity-70">⌘K</kbd>}
         </button>
       </Tip>
 
@@ -577,8 +577,8 @@ function ScopeSwitcher({
           {expanded && (
             <>
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13.5px] font-medium text-text">{name}</span>
-                <span className={`block text-[11.5px] tabular-nums ${needHere > 0 ? "text-warn" : "text-faint"}`}>
+                <span className="block truncate text-body font-medium text-text">{name}</span>
+                <span className={`block text-meta-lg tabular-nums ${needHere > 0 ? "text-warn" : "text-faint"}`}>
                   {needHere > 0 ? `${needHere} need you` : current ? `${current.live} live · ${current.total} colonies` : `${orgs.length} workspaces`}
                 </span>
               </span>
@@ -614,13 +614,13 @@ function ScopeSwitcher({
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Find a workspace…"
                   aria-label="find a workspace"
-                  className="bare-field min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-text outline-none placeholder:text-faint focus-visible:outline-none"
+                  className="bare-field min-w-0 flex-1 border-0 bg-transparent p-0 text-body-sm text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 />
               </div>
             )}
             {!q && <ScopeRow label="All workspaces" sub={scopeStats(orgs.reduce((a, o) => a + o.live, 0), orgs.reduce((a, o) => a + o.queued, 0), orgs.reduce((a, o) => a + o.total, 0), `${orgs.length} workspaces`)} note={needTotal > 0 ? `${needTotal} need you` : ""} urgent={needTotal > 0} active={selectedOrg === null} icon={<AllMark size={28} />} onClick={() => pick(null)} />}
             {!q && orgs.length > 0 && <div role="separator" className="my-1 h-px bg-border" />}
-            {q && shown.length === 0 && shownHidden.length === 0 && <div className="px-2 py-3 text-[13px] text-faint">No workspace matches “{query.trim()}”.</div>}
+            {q && shown.length === 0 && shownHidden.length === 0 && <div className="px-2 py-3 text-body-sm text-faint">No workspace matches “{query.trim()}”.</div>}
             {shown.map((o) => {
               const need = needFor(needByOrg, o.org);
               return (
@@ -640,7 +640,7 @@ function ScopeSwitcher({
             {shownHidden.length > 0 && (
               // Switched off in their settings, so not a choice; this is the way back to switching one on.
               <div role="group" aria-label="switched off" className="mt-1 border-t border-border pt-1">
-                <div aria-hidden="true" className="px-2 pb-0.5 pt-1 text-[11.5px] text-faint">Switched off · open settings to turn on</div>
+                <div aria-hidden="true" className="px-2 pb-0.5 pt-1 text-meta-lg text-faint">Switched off · open settings to turn on</div>
                 {shownHidden.map((o) => (
                   <button
                     key={o.org}
@@ -652,7 +652,7 @@ function ScopeSwitcher({
                     className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent px-2 py-1.5 text-left opacity-70 transition-colors hover:bg-panel-2 hover:opacity-100 focus-visible:bg-panel-2 focus-visible:outline-none"
                   >
                     <Avatar name={o.org} src={o.avatar ?? undefined} size={22} rounded="full" />
-                    <span className="min-w-0 flex-1 truncate text-[13px] text-muted">{o.org}</span>
+                    <span className="min-w-0 flex-1 truncate text-body-sm text-muted">{o.org}</span>
                     <Glyph name="settings" size={14} />
                   </button>
                 ))}
@@ -666,7 +666,7 @@ function ScopeSwitcher({
                   role="menuitem"
                   tabIndex={-1}
                   onClick={() => settings(settingsOrg)}
-                  className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-[13px] text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
+                  className="flex w-full cursor-pointer items-center gap-2.5 rounded-md border-0 bg-transparent p-2 text-left text-body-sm text-muted transition-colors hover:bg-panel-2 hover:text-text focus-visible:bg-panel-2 focus-visible:outline-none"
                 >
                   <Glyph name="settings" size={15} />
                   {current ? `${current.org} settings` : "Manage workspaces"}
@@ -702,10 +702,10 @@ function ScopeRow({ label, sub, note, urgent, active, icon, match = false, onCli
     >
       {icon}
       <span className="min-w-0">
-        <span className="block truncate text-[13.5px] text-text">{label}</span>
-        <span className="block truncate text-[11.5px] tabular-nums text-faint">{sub}</span>
+        <span className="block truncate text-body text-text">{label}</span>
+        <span className="block truncate text-meta-lg tabular-nums text-faint">{sub}</span>
       </span>
-      <span className={`text-[12px] tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{note}</span>
+      <span className={`text-small tabular-nums ${urgent ? "text-warn" : "text-faint"}`}>{note}</span>
       <span aria-hidden="true" className="text-accent">
         {active && (
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

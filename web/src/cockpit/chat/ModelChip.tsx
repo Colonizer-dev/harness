@@ -58,7 +58,7 @@ export function ModelPopoverList({
             trailing: (
               <span className="flex shrink-0 items-center gap-1.5">
                 {tags.map((t) => (
-                  <span key={t} className={cx("text-[10.5px] font-medium uppercase tracking-wide", TAG_TONE[t])}>
+                  <span key={t} className={cx("text-meta-sm font-medium uppercase tracking-wide", TAG_TONE[t])}>
                     {t}
                   </span>
                 ))}
@@ -81,7 +81,7 @@ export function ModelPopoverList({
       loading={!models}
       onPick={(i) => onPick(i.id)}
       footer={
-        <div className="border-t border-border px-3 py-2 text-[11px] leading-snug text-faint">
+        <div className="border-t border-border px-3 py-2 text-meta leading-snug text-faint">
           Claude models need an Anthropic API key or provider — never the subscription login colonies use.
         </div>
       }
@@ -123,7 +123,7 @@ export function ModelChip({
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
         className={cx(
-          "inline-flex min-w-0 max-w-[240px] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel-2/60 py-1 pl-1 pr-2 text-[12.5px] text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none",
+          "inline-flex min-w-0 max-w-[240px] cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel-2/60 py-1 pl-1 pr-2 text-small-lg text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none",
           compact && "max-w-[180px]",
         )}
       >

@@ -1,0 +1,1 @@
+/api/github/status                                   GET    unauth=401    token=owner            activity=-

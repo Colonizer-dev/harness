@@ -39,6 +39,7 @@ use crate::{
     activity::Entry,
     authority, client_error,
     github::{self, CiState, Mergeability},
+    merge_head::{self, Candidate, HeadOps, HeadReading, Outcome, Unmerged},
     merge_train::{self, CHECKS_FAILING, Decision, Guards, PrFacts, TrainState},
     plugins::parse_list,
     schedule::{Cadence, next_run_after},
@@ -58,8 +59,8 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     path::{Path, PathBuf},
     sync::{
-        LazyLock,
-        atomic::{AtomicBool, Ordering},
+        LazyLock, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -266,6 +267,9 @@ pub(crate) struct TrainMerge {
     pub title: String,
     /// The squash commit on the base; `None` when GitHub did not say.
     pub sha: Option<String>,
+    /// Issue #1075: the pull request's head commit the squash holds.
+    #[serde(default)]
+    pub head: Option<String>,
     pub at: DateTime<Utc>,
 }
 
@@ -398,6 +402,8 @@ pub(crate) struct RepoReport {
     pub ci_unavailable: Option<String>,
     /// Main's CI ran and passed this run: the reading that ends a CI-unavailable spell.
     pub ci_ran: bool,
+    /// Issue #1075: pull requests merged this run whose branch had commits after the merged head.
+    pub unmerged: Vec<Unmerged>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -480,6 +486,12 @@ pub(crate) fn lines(r: &Report) -> Vec<String> {
                 .unwrap_or_else(|| i.pr_url.clone());
             out.push(format!("  {pr} {}: {} — {}", i.title, i.action.word(r.dry_run), i.reason));
         }
+        for u in &repo.unmerged {
+            let pr = pr_number(&u.pr_url)
+                .map(|n| format!("#{n}"))
+                .unwrap_or_else(|| u.pr_url.clone());
+            out.push(format!("  {pr} needs attention: {}", u.sentence()));
+        }
     }
     out
 }
@@ -493,6 +505,9 @@ pub(crate) struct LoopState {
     pub repos: BTreeMap<String, RepoMemory>,
     /// Oldest first, at most [`HISTORY`].
     pub history: Vec<Report>,
+    /// Issue #1075: merged pull requests whose branch had commits after the merged head, by URL —
+    /// raised by the loop or the train's tick, shown in the decisions inbox until dismissed.
+    pub commits_not_merged: BTreeMap<String, Unmerged>,
 }
 
 fn file(dir: &Path) -> PathBuf {
@@ -516,7 +531,7 @@ pub(crate) async fn load(dir: &Path) -> LoopState {
 /// Serialises every read-modify-write of the file.
 static STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-async fn update<R>(dir: &Path, f: impl FnOnce(&mut LoopState) -> R) -> anyhow::Result<(LoopState, R)> {
+pub(crate) async fn update<R>(dir: &Path, f: impl FnOnce(&mut LoopState) -> R) -> anyhow::Result<(LoopState, R)> {
     let _guard = STATE_LOCK.lock().await;
     let mut state = load(dir).await;
     let r = f(&mut state);
@@ -693,7 +708,7 @@ fn run_id_from_url(url: &str) -> Option<u64> {
 }
 
 fn pr_number(url: &str) -> Option<u64> {
-    url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+    merge_head::pr_number(url)
 }
 
 fn is_flaky(name: &str, flaky: &[String]) -> bool {
@@ -729,7 +744,7 @@ pub(crate) fn is_throttle(error: &str) -> bool {
 }
 
 /// The colony whose redo, or whose newer pull request on the same issue, replaces this one.
-fn superseded_by<'a>(sessions: &'a [Session], s: &Session) -> Option<&'a str> {
+pub(crate) fn superseded_by<'a>(sessions: &'a [Session], s: &Session) -> Option<&'a str> {
     let redo = format!("{ORIGIN_REDO}{}", s.id);
     sessions
         .iter()
@@ -840,7 +855,7 @@ pub(crate) enum Dispatch {
 
 /// Everything the loop asks of GitHub and of the host, so the tests stand in for both. Module
 /// private, like `github.rs`' `PublishOps`: its futures stay concrete, so the real one is `Send`.
-trait Ops {
+trait Ops: HeadOps {
     fn now(&self) -> DateTime<Utc>;
     async fn sleep(&self, d: Duration);
     async fn guards(&self) -> Result<Guards, String>;
@@ -849,8 +864,10 @@ trait Ops {
     async fn read_pr(&self, s: &Session, base: &str) -> Result<Reading, String>;
     async fn update_branch(&self, s: &Session, head: &str) -> Result<(), String>;
     async fn rebase(&self, s: &Session) -> RebaseResult;
-    /// Squash-merges pinned to `head`; the squash commit's sha when GitHub says.
-    async fn merge(&self, s: &Session, head: &str, subject: &str, delete_branch: bool) -> Result<Option<String>, String>;
+    /// Issue #1075: the quiet period (`merge_train_quiet_minutes`) a head must have before it merges.
+    async fn quiet_minutes(&self) -> u64;
+    /// Says a merge in the colony's log and the activity feed; no GitHub call.
+    async fn merged(&self, s: &Session, head: &str);
     async fn rerun(&self, repo: &str, run_id: u64) -> Result<(), String>;
     async fn failure_log(&self, repo: &str, run_id: u64) -> Result<String, String>;
     async fn dispatch(&self, d: Dispatch) -> Result<String, String>;
@@ -921,6 +938,76 @@ struct Engine<'a, O: Ops> {
     guards: Guards,
     dry: bool,
     calls: u32,
+    /// Issue #1075: how long a head must have been unchanged before it merges.
+    quiet: Duration,
+}
+
+/// The pushback that stops a run.
+fn pushed_back(e: &str) -> String {
+    format!(
+        "GitHub pushed back ({}); the run stopped and does not retry",
+        truncate(e.trim(), 200)
+    )
+}
+
+fn budget_spent(max: u32) -> String {
+    format!("this run's GitHub budget ({max} calls) is spent; the rest waits for the next run")
+}
+
+/// The shared quiet-head merge (`merge_head.rs`) seen through the loop's pacing: every GitHub call
+/// it makes counts against the run's budget, keeps the minimum gap, and a push-back stops the run.
+struct Paced<'a, O: Ops> {
+    ops: &'a O,
+    cfg: &'a Settings,
+    calls: AtomicU32,
+    stop: StdMutex<Option<String>>,
+}
+
+impl<O: Ops> Paced<'_, O> {
+    async fn call<T>(&self, f: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+        let stopped = self.stop.lock().map(|g| g.clone()).unwrap_or_default();
+        if let Some(why) = stopped {
+            return Err(why);
+        }
+        let calls = self.calls.load(Ordering::SeqCst);
+        if calls >= self.cfg.max_api_calls {
+            let why = budget_spent(self.cfg.max_api_calls);
+            self.halt(why.clone());
+            return Err(why);
+        }
+        if calls > 0 && self.cfg.min_call_gap_ms > 0 {
+            self.ops.sleep(Duration::from_millis(self.cfg.min_call_gap_ms)).await;
+        }
+        self.calls.store(calls + 1, Ordering::SeqCst);
+        let result = f.await;
+        if let Err(e) = &result
+            && is_throttle(e)
+        {
+            self.halt(pushed_back(e));
+        }
+        result
+    }
+
+    fn halt(&self, why: String) {
+        if let Ok(mut g) = self.stop.lock() {
+            g.get_or_insert(why);
+        }
+    }
+}
+
+impl<O: Ops> HeadOps for Paced<'_, O> {
+    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String> {
+        self.call(self.ops.read_head(repo, sha)).await
+    }
+    async fn merge_pinned(&self, repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String> {
+        self.call(self.ops.merge_pinned(repo, number, head, title)).await
+    }
+    async fn branch_tip(&self, repo: &str, branch: &str) -> Result<Option<String>, String> {
+        self.call(self.ops.branch_tip(repo, branch)).await
+    }
+    async fn delete_branch(&self, repo: &str, branch: &str) -> Result<(), String> {
+        self.call(self.ops.delete_branch(repo, branch)).await
+    }
 }
 
 /// One paced GitHub call: counts against the budget, keeps the minimum gap, and turns a push-back
@@ -936,10 +1023,7 @@ macro_rules! gh {
 impl<'a, O: Ops> Engine<'a, O> {
     async fn pace(&mut self) -> Result<(), Stop> {
         if self.calls >= self.cfg.max_api_calls {
-            return Err(Stop(format!(
-                "this run's GitHub budget ({} calls) is spent; the rest waits for the next run",
-                self.cfg.max_api_calls
-            )));
+            return Err(Stop(budget_spent(self.cfg.max_api_calls)));
         }
         if self.calls > 0 && self.cfg.min_call_gap_ms > 0 {
             self.ops.sleep(Duration::from_millis(self.cfg.min_call_gap_ms)).await;
@@ -950,10 +1034,7 @@ impl<'a, O: Ops> Engine<'a, O> {
 
     fn vet<T>(&self, result: Result<T, String>) -> Result<Result<T, String>, Stop> {
         match result {
-            Err(e) if is_throttle(&e) => Err(Stop(format!(
-                "GitHub pushed back ({}); the run stopped and does not retry",
-                truncate(e.trim(), 200)
-            ))),
+            Err(e) if is_throttle(&e) => Err(Stop(pushed_back(&e))),
             other => Ok(other),
         }
     }
@@ -1036,6 +1117,8 @@ impl<'a, O: Ops> Engine<'a, O> {
         let mut updated_on: BTreeMap<String, String> = BTreeMap::new();
         let mut tip = String::new();
         let mut rounds = 0u32;
+        // Issue #1075: colonies whose quiet period this run already waited out once.
+        let mut quiet_waited: HashSet<String> = HashSet::new();
         loop {
             rounds += 1;
             if rounds > cap * 3 + 4 {
@@ -1245,19 +1328,67 @@ impl<'a, O: Ops> Engine<'a, O> {
                     let n = pr_number(s.pr_url.as_deref().unwrap_or_default()).unwrap_or_default();
                     let subject = format!("{title} (#{n})");
                     let keep = merge_train::has_stacked_child(self.sessions, s);
-                    match gh!(self, self.ops.merge(s, &head_oid, &subject, !keep)) {
-                        Ok(sha) => {
+                    // Issue #1075: the shared quiet-head merge — CI on this exact head, a head
+                    // unchanged for the quiet period, the merge pinned to it, the branch checked after.
+                    let branch = reading.facts.info.head_ref_name.clone().unwrap_or_else(|| s.branch.clone());
+                    let candidate = Candidate {
+                        repo: &s.repo,
+                        number: n,
+                        branch: &branch,
+                        head: &head_oid,
+                        title: &subject,
+                        delete_branch: !keep,
+                        require_ci: local_why.is_none(),
+                    };
+                    let paced = Paced {
+                        ops: self.ops,
+                        cfg: self.cfg,
+                        calls: AtomicU32::new(self.calls),
+                        stop: StdMutex::new(None),
+                    };
+                    let outcome = merge_head::merge_quiet_head(&paced, &candidate, self.ops.now(), self.quiet).await;
+                    self.calls = paced.calls.into_inner();
+                    let stopped = paced.stop.into_inner().ok().flatten();
+                    if !matches!(outcome, Outcome::Merged(_))
+                        && let Some(why) = stopped.clone()
+                    {
+                        return Err(Stop(why));
+                    }
+                    match outcome {
+                        Outcome::Merged(merged) => {
                             merges += 1;
                             let at = self.ops.now();
+                            let sha = merged.squash.clone();
                             tip = sha.clone().unwrap_or_else(|| format!("merge-{merges}"));
                             mem.last_merge_at = Some(at);
                             mem.last_train_merge = Some(TrainMerge {
                                 pr_url: s.pr_url.clone().unwrap_or_default(),
                                 title: title.clone(),
                                 sha,
+                                head: Some(merged.head.clone()),
                                 at,
                             });
-                            items.add(s, &title, Action::Merged, merged_reason);
+                            let mut reason = format!("{merged_reason}; merged head {}", merged.head);
+                            if let Some(note) = &merged.branch_note {
+                                reason.push_str(&format!("; {note}"));
+                            }
+                            if let Some(drift) = &merged.drift {
+                                out.unmerged.push(Unmerged {
+                                    pr_url: s.pr_url.clone().unwrap_or_default(),
+                                    repo: s.repo.clone(),
+                                    title: title.clone(),
+                                    colony: Some(s.id.clone()),
+                                    merged_head: merged.head.clone(),
+                                    tip: drift.clone(),
+                                    at: Some(at),
+                                    by: "merge-train loop".to_string(),
+                                });
+                            }
+                            self.ops.merged(s, &merged.head).await;
+                            items.add(s, &title, Action::Merged, reason);
+                            if let Some(why) = stopped {
+                                return Err(Stop(why));
+                            }
                             // Rule 3, and why the train does not leave the rest stale: a file this
                             // merge touched may be one another candidate of the run also touched, so
                             // its turn would find it behind — or in conflict — through no fault of
@@ -1308,7 +1439,26 @@ impl<'a, O: Ops> Engine<'a, O> {
                                 }
                             }
                         }
-                        Err(e) => {
+                        Outcome::NotYet { reason, retry_in } => {
+                            // Only time is missing, and no more than a CI wait: wait it out in this
+                            // run once, then read everything again. A merge on local checks is not
+                            // re-run for it.
+                            if let Some(d) = retry_in
+                                && local_why.is_none()
+                                && d <= Duration::from_secs(wait.saturating_mul(60))
+                                && quiet_waited.insert(s.id.clone())
+                            {
+                                self.ops.sleep(d).await;
+                                continue;
+                            }
+                            items.add(s, &title, Action::Waiting, reason);
+                            return Ok(None);
+                        }
+                        Outcome::HeadMoved(reason) => {
+                            items.add(s, &title, Action::Waiting, reason);
+                            return Ok(None);
+                        }
+                        Outcome::Failed(e) => {
                             items.add(s, &title, Action::Waiting, format!("the merge failed ({e})"));
                             return Ok(None);
                         }
@@ -1976,6 +2126,7 @@ async fn run_all<O: Ops>(
         guards: Guards::default(),
         dry,
         calls: 0,
+        quiet: merge_head::quiet_period(ops.quiet_minutes().await),
     };
     let mut guards_read: Option<Result<(), String>> = None;
     for (repo, group) in by_repo {
@@ -2098,6 +2249,23 @@ impl GhOps<'_> {
     }
 }
 
+impl HeadOps for GhOps<'_> {
+    async fn read_head(&self, repo: &str, sha: &str) -> Result<HeadReading, String> {
+        merge_head::GhHead { app: self.app }.read_head(repo, sha).await
+    }
+    async fn merge_pinned(&self, repo: &str, number: u64, head: &str, title: &str) -> Result<Option<String>, String> {
+        merge_head::GhHead { app: self.app }
+            .merge_pinned(repo, number, head, title)
+            .await
+    }
+    async fn branch_tip(&self, repo: &str, branch: &str) -> Result<Option<String>, String> {
+        merge_head::GhHead { app: self.app }.branch_tip(repo, branch).await
+    }
+    async fn delete_branch(&self, repo: &str, branch: &str) -> Result<(), String> {
+        merge_head::GhHead { app: self.app }.delete_branch(repo, branch).await
+    }
+}
+
 impl Ops for GhOps<'_> {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
@@ -2206,35 +2374,22 @@ impl Ops for GhOps<'_> {
         }
     }
 
-    async fn merge(&self, s: &Session, head: &str, subject: &str, delete_branch: bool) -> Result<Option<String>, String> {
-        if authority::external_writes_blocked() {
-            return Err(crate::publish::BLOCKED.to_string());
-        }
+    async fn quiet_minutes(&self) -> u64 {
+        merge_train::train_settings(self.app).await.quiet_minutes
+    }
+
+    async fn merged(&self, s: &Session, head: &str) {
         let url = s.pr_url.clone().unwrap_or_default();
-        let mut args = merge_train::merge_args(&url, head, delete_branch);
-        args.extend(["--subject".to_string(), subject.to_string()]);
-        self.gh(args).await?;
-        let sha = self
-            .gh(vec![
-                "pr".into(),
-                "view".into(),
-                url.clone(),
-                "--json".into(),
-                "mergeCommit".into(),
-                "--jq".into(),
-                ".mergeCommit.oid".into(),
-            ])
-            .await
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
         self.app
-            .session_log(&s.id, "info", format!("the merge-train loop squash-merged {url}"))
+            .session_log(
+                &s.id,
+                "info",
+                format!("the merge-train loop squash-merged {url} at head {head}"),
+            )
             .await;
         let mut entry = Entry::new("publish.merge_train", "colony").colony(s);
-        entry.detail = Some("squash-merged by the merge-train loop".to_string());
+        entry.detail = Some(format!("squash-merged by the merge-train loop at head {head}"));
         crate::activity::record(self.app, entry).await;
-        Ok(sha)
     }
 
     async fn rerun(&self, repo: &str, run_id: u64) -> Result<(), String> {
@@ -2348,7 +2503,7 @@ impl Ops for GhOps<'_> {
 }
 
 /// The launch body for a colony the loop sends: autopilot on, so it publishes its pull request.
-fn dispatch_body(d: &Dispatch) -> Value {
+pub(crate) fn dispatch_body(d: &Dispatch) -> Value {
     match d {
         Dispatch::Redo {
             session,
@@ -2477,6 +2632,9 @@ pub(crate) async fn execute(app: &Shared, dry_requested: bool) -> Result<Report,
             for (repo, mem) in memory {
                 s.repos.insert(repo, mem);
             }
+            for u in saved.repos.iter().flat_map(|r| r.unmerged.iter()) {
+                s.commits_not_merged.insert(u.pr_url.clone(), u.clone());
+            }
         }
         s.history.push(saved);
         let over = s.history.len().saturating_sub(HISTORY);
@@ -2523,6 +2681,16 @@ async fn record(app: &App, report: &Report, sessions: &[Session]) {
         if report.dry_run {
             continue;
         }
+        for u in &repo.unmerged {
+            if let Some(colony) = &u.colony {
+                app.session_log(colony, "warn", format!("{prefix}: {}", u.sentence())).await;
+            }
+            let mut entry = Entry::new("publish.merge_train", "colony");
+            entry.repo = Some(u.repo.clone());
+            entry.org = u.repo.split('/').next().map(str::to_string);
+            entry.detail = Some(format!("{prefix}: {} — {}", u.pr_url, u.sentence()));
+            crate::activity::record(app, entry).await;
+        }
         for item in &repo.items {
             if item.action == Action::Merged || !sessions.iter().any(|s| s.id == item.session) {
                 continue;
@@ -2546,7 +2714,8 @@ async fn record(app: &App, report: &Report, sessions: &[Session]) {
 async fn tick(app: &Shared) {
     let dir = app.cfg.config_dir.clone();
     let state = load(&dir).await;
-    if !state.settings.enabled || RUNNING.load(Ordering::SeqCst) {
+    // Issue #1074: no merges while GitHub refuses the account; the run waits for the breaker.
+    if !state.settings.enabled || RUNNING.load(Ordering::SeqCst) || crate::github_breaker::paused(app).is_some() {
         return;
     }
     let now = Utc::now();

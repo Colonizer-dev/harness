@@ -93,7 +93,7 @@ describe("KpiTile / KpiStrip", () => {
     expect(html).toContain("Merged PRs");
     expect(html).toContain("Lead time and CI pass rate are not measured yet — no data source.");
     expect(html).toContain("API error rate 1.00%");
-    expect(html.match(/text-\[28px\]/g)).toHaveLength(1);
+    expect(html.match(/text-display-lg\b/g)).toHaveLength(1);
   });
 });
 

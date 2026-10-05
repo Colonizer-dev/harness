@@ -10,6 +10,8 @@
 //   `gh issue create` a chat's "file an issue" runs), dropped into the list pre-selected, and, unless
 //   "dispatch right after creating" is off, dispatched at once. `/loop 1h <task>` makes a loop instead,
 //   and "Launch without an issue" starts an open colony on the text, both as the composer does.
+//   `/model` is the "Switch model…" command: it closes the pane and opens the header's model
+//   switcher (issue #1051).
 //
 // The badge on the buttons is GitHub's own open-issue count until the pane has loaded the filtered one.
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactElement, type ReactNode } from "react";
@@ -24,6 +26,7 @@ import { MicButton, appendHeard, useVoiceInput } from "./Composer";
 import { relative } from "./InboxView";
 import { Pagination, SearchBox } from "./ListControls";
 import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
+import { isModelCommand, openModelSwitcher } from "./ModelSwitcher";
 import { usePagedFilter } from "./paging";
 import { taskLine } from "../summary";
 
@@ -405,13 +408,13 @@ export function ColonizeButton(): ReactElement | null {
       onClick={colonize.open}
       className={cx(
         // The dashboard's primary action: solid accent, the one orange button on the page.
-        "ant-glyph-host inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 text-[13px] font-semibold text-on-accent shadow-[0_1px_0_rgb(0_0_0/0.15)] transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
+        "ant-glyph-host inline-flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 text-body-sm font-semibold text-on-accent shadow-[0_1px_0_rgb(0_0_0/0.15)] transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50",
         isOpen && "brightness-110",
       )}
     >
       <AntGlyph size={22} className="-mx-1" />
       <span>Colonize</span>
-      <span className="rounded-full bg-black/20 px-2 py-px text-[12px] tabular-nums">{count > 999 ? "999+" : count}</span>
+      <span className="rounded-full bg-black/20 px-2 py-px text-small tabular-nums">{count > 999 ? "999+" : count}</span>
     </button>
   );
 }
@@ -562,10 +565,18 @@ export function ColonizePane({
     toast({ title: `Dispatched: ${summarize(done)}`, kind: failed ? "error" : "success" });
   };
 
-  /** Enter in the box: a loop for `/loop …`, otherwise drafts for the confirm step. */
+  /** The "Switch model…" command: hand over to the header's model switcher. */
+  const switchModel = () => {
+    send({ type: "text", text: "" });
+    onClose();
+    openModelSwitcher();
+  };
+
+  /** Enter in the box: the model switcher for `/model`, a loop for `/loop …`, otherwise drafts for the confirm step. */
   const submit = async () => {
     const text = shown.trim();
     if (!text || busy || draft.stage.step !== "write") return;
+    if (isModelCommand(text)) return switchModel();
     if (voice.listening) voice.stop();
     const loop = parseLoopCommand(text);
     if (loop) {
@@ -665,8 +676,8 @@ export function ColonizePane({
             <AntGlyph size={24} />
           </span>
           <div className="min-w-0 flex-1">
-            <h2 className="text-[15px] font-semibold">Colonize</h2>
-            <p className="text-[12px] text-muted">Describe new work, or pick open issues. One colony per issue.</p>
+            <h2 className="text-lead font-semibold">Colonize</h2>
+            <p className="text-small text-muted">Describe new work, or pick open issues. One colony per issue.</p>
           </div>
           <button type="button" onClick={onClose} aria-label="close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
@@ -676,10 +687,10 @@ export function ColonizePane({
         </div>
 
         <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto">
-          {!githubConnected && <p className="m-0 border-b border-border px-4 py-3 text-[13px] text-warn">Connect GitHub in Settings to list, create and dispatch issues.</p>}
+          {!githubConnected && <p className="m-0 border-b border-border px-4 py-3 text-body-sm text-warn">Connect GitHub in Settings to list, create and dispatch issues.</p>}
 
           <div className="shrink-0 space-y-2 border-b border-border px-4 py-3">
-            <label className="block text-[11.5px] font-medium uppercase tracking-wide text-faint" htmlFor="colonize-repo">
+            <label className="block text-meta-lg font-medium uppercase tracking-wide text-faint" htmlFor="colonize-repo">
               Repository
             </label>
             <div className="flex gap-2">
@@ -688,13 +699,13 @@ export function ColonizePane({
                 onChange={(e) => setRepoQuery(e.target.value)}
                 placeholder="Find a repository…"
                 aria-label="find a repository"
-                className="min-w-0 flex-1 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-[13px] outline-none focus:border-border-strong"
+                className="min-w-0 flex-1 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-body-sm outline-none focus:border-border-strong"
               />
               <select
                 id="colonize-repo"
                 value={repo}
                 onChange={(e) => setRepo(e.target.value)}
-                className="min-w-0 max-w-[240px] flex-1 rounded-md border border-border bg-panel-2 px-2 py-1.5 text-[13px] outline-none focus:border-border-strong"
+                className="min-w-0 max-w-[240px] flex-1 rounded-md border border-border bg-panel-2 px-2 py-1.5 text-body-sm outline-none focus:border-border-strong"
               >
                 <option value="*">All repos in scope ({Math.min(ALL_REPOS_LIMIT, scope.filter((r) => r.open_issues_count > 0).length)})</option>
                 {repoChoices.map((r) => (
@@ -723,15 +734,27 @@ export function ColonizePane({
                   }}
                   placeholder={voice.listening ? (voice.recording ? "Recording — press the mic again to transcribe" : "Listening…") : "Describe what you want done. It becomes issues, then colonies…"}
                   aria-label="describe new work"
-                  className="bare-field block min-h-[44px] w-full resize-none border-0 bg-transparent px-1.5 py-1 text-[14px] leading-[1.55] text-text outline-none placeholder:text-faint focus-visible:outline-none"
+                  className="bare-field block min-h-[44px] w-full resize-none border-0 bg-transparent px-1.5 py-1 text-body-lg leading-[1.55] text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 />
+                {isModelCommand(shown) && (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected="true"
+                    onClick={switchModel}
+                    className="mb-1 flex w-full cursor-pointer items-center justify-between rounded-lg border border-accent bg-accent-soft px-2.5 py-1.5 text-left text-body-sm text-text"
+                  >
+                    <span>Switch model…</span>
+                    <span className="text-meta-lg text-muted">install-wide or per org · ↵</span>
+                  </button>
+                )}
                 {voice.transcribing && (
-                  <p role="status" className="m-0 flex items-center gap-2 px-1.5 text-[12px] text-muted">
+                  <p role="status" className="m-0 flex items-center gap-2 px-1.5 text-small text-muted">
                     <Spinner className="size-3" /> Transcribing with {voice.label}…
                   </p>
                 )}
-                {voice.left && <p className="m-0 px-1.5 text-[12px] text-warn">{voice.left} left</p>}
-                {voice.error && <p className="m-0 px-1.5 text-[12px] text-warn">{voice.error}</p>}
+                {voice.left && <p className="m-0 px-1.5 text-small text-warn">{voice.left} left</p>}
+                {voice.error && <p className="m-0 px-1.5 text-small text-warn">{voice.error}</p>}
                 <div className="mt-1 flex flex-wrap items-center justify-end gap-x-2 gap-y-1.5">
                   {voice.supported && <MicButton listening={voice.listening} busy={voice.transcribing} label={voice.label} onClick={() => (voice.listening ? voice.stop() : voice.start())} />}
                   <button
@@ -739,7 +762,7 @@ export function ColonizePane({
                     disabled={!githubConnected || busy || stage.step === "drafting" || !shown.trim()}
                     onClick={() => void launchOpen()}
                     title={target ? `Start an open colony on ${target} with this text as its instructions` : "Pick a repository above first"}
-                    className="cursor-pointer rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[12.5px] text-muted hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
+                    className="cursor-pointer rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-small-lg text-muted hover:border-border-strong hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Launch without an issue
                   </button>
@@ -747,7 +770,7 @@ export function ColonizePane({
                     type="button"
                     disabled={!githubConnected || busy || stage.step === "drafting" || !shown.trim()}
                     onClick={() => void submit()}
-                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border-0 bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border-0 bg-accent px-3 py-1.5 text-small-lg font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {(stage.step === "drafting" || busy) && <Spinner className="size-3" />}
                     {stage.step === "drafting" ? "Drafting…" : parseLoopCommand(shown) ? "Create loop" : "Draft issues"}
@@ -755,12 +778,12 @@ export function ColonizePane({
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
                   <DispatchAfter checked={dispatchAfter} onChange={setDispatchAfter} />
-                  <p className="m-0 text-[11.5px] text-faint">
-                    <kbd className="font-sans">↵</kbd> drafts · <kbd className="font-sans">⇧↵</kbd> new line · <span className="font-mono">/loop 1h &lt;task&gt;</span> repeats it
+                  <p className="m-0 text-meta-lg text-faint">
+                    <kbd className="font-sans">↵</kbd> drafts · <kbd className="font-sans">⇧↵</kbd> new line · <span className="font-mono">/loop 1h &lt;task&gt;</span> repeats it · <span className="font-mono">/model</span> switches models
                     {onOpenLaunch && (
                       <>
                         {" · "}
-                        <button type="button" onClick={onOpenLaunch} className="cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-muted underline underline-offset-2 hover:text-text">
+                        <button type="button" onClick={onOpenLaunch} className="cursor-pointer border-0 bg-transparent p-0 text-meta-lg text-muted underline underline-offset-2 hover:text-text">
                           launch form
                         </button>
                       </>
@@ -781,7 +804,7 @@ export function ColonizePane({
               />
             )}
             {draft.error && (
-              <p role="alert" className="m-0 mt-2 whitespace-pre-line text-[12.5px] text-err">
+              <p role="alert" className="m-0 mt-2 whitespace-pre-line text-small-lg text-err">
                 {draft.error}
               </p>
             )}
@@ -801,7 +824,7 @@ export function ColonizePane({
                         type="button"
                         aria-pressed={on}
                         onClick={() => list.setFilters({ labels: on ? list.filters.labels.filter((l) => l !== name) : [...list.filters.labels, name] })}
-                        className={cx("cursor-pointer rounded-full border px-2 py-0.5 text-[11.5px]", on ? "border-accent bg-accent-soft text-accent" : "border-border bg-transparent text-muted hover:text-text")}
+                        className={cx("cursor-pointer rounded-full border px-2 py-0.5 text-meta-lg", on ? "border-accent bg-accent-soft text-accent" : "border-border bg-transparent text-muted hover:text-text")}
                       >
                         {name} <span className="tabular-nums text-faint">{n}</span>
                       </button>
@@ -811,12 +834,12 @@ export function ColonizePane({
             )}
           </div>
 
-          <div className="flex shrink-0 items-center gap-2 px-4 py-2 text-[12px] text-muted">
+          <div className="flex shrink-0 items-center gap-2 px-4 py-2 text-small text-muted">
             <button
               type="button"
               disabled={pickable.length === 0}
               onClick={() => setSelected((s) => toggleAll(s, pickable))}
-              className="cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-[12px] text-text hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
+              className="cursor-pointer rounded-md border border-border bg-transparent px-2 py-1 text-small text-text hover:bg-panel-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {allOn ? "Select none" : `Select all ${pickable.length}`}
             </button>
@@ -832,11 +855,11 @@ export function ColonizePane({
 
           <ul aria-label="issues" className="m-0 list-none px-2 pb-1">
             {errors.map((e) => (
-              <li key={e} className="px-2 py-1.5 text-[12px] text-err">
+              <li key={e} className="px-2 py-1.5 text-small text-err">
                 {e}
               </li>
             ))}
-            {loadingCount === 0 && list.total === 0 && <li className="px-2 py-6 text-center text-[13px] text-faint">No open issues match.</li>}
+            {loadingCount === 0 && list.total === 0 && <li className="px-2 py-6 text-center text-body-sm text-faint">No open issues match.</li>}
             {list.rows.map((issue) => {
               const key = issueKey(issue.repo, issue.number);
               const held = heldByFor(sessions, issue.repo, issue.number);
@@ -863,8 +886,8 @@ export function ColonizePane({
                     className="mt-0.5 size-4 shrink-0 cursor-pointer accent-[var(--accent)] disabled:cursor-not-allowed"
                   />
                   <label htmlFor={id} className="min-w-0 flex-1 cursor-pointer">
-                    <span className="block text-[13px] leading-snug text-text">{issue.title}</span>
-                    <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-faint">
+                    <span className="block text-body-sm leading-snug text-text">{issue.title}</span>
+                    <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-meta-lg text-faint">
                       <span className="font-mono">
                         {issue.repo.split("/")[1]}#{issue.number}
                       </span>
@@ -882,7 +905,7 @@ export function ColonizePane({
                       ))}
                     </span>
                   </label>
-                  <span className="shrink-0 pt-0.5 text-[11.5px]">
+                  <span className="shrink-0 pt-0.5 text-meta-lg">
                     {/* What this pane just did wins over "held": the colony holding it is the one it started. */}
                     {result ? (
                       <ResultBadge result={result} onOpen={onOpenColony} />
@@ -911,10 +934,10 @@ export function ColonizePane({
             rows={2}
             placeholder="Optional instructions for every colony…"
             aria-label="shared instructions"
-            className="w-full resize-none rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-[13px] outline-none focus:border-border-strong"
+            className="w-full resize-none rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-body-sm outline-none focus:border-border-strong"
           />
           <div className="flex items-center gap-3">
-            <span className="flex items-center gap-2 text-[12.5px] text-muted">
+            <span className="flex items-center gap-2 text-small-lg text-muted">
               <Switch checked={autopilot} onChange={setAutopilot} label="autopilot" />
               Autopilot
             </span>
@@ -922,7 +945,7 @@ export function ColonizePane({
               type="button"
               disabled={chosen.length === 0 || running}
               onClick={() => void dispatch(chosen)}
-              className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-[13px] font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+              className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-body-sm font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {running ? <Spinner className="size-3.5" /> : <AntGlyph size={20} className="-mx-0.5" />}
               Dispatch {chosen.length} {chosen.length === 1 ? "colony" : "colonies"}
@@ -944,7 +967,7 @@ function matchIssue(issue: ScopedIssue, needle: string, filters: { labels: strin
 
 function DispatchAfter({ checked, onChange }: { checked: boolean; onChange: (on: boolean) => void }): ReactElement {
   return (
-    <label className="inline-flex cursor-pointer items-center gap-1.5 text-[12px] text-muted">
+    <label className="inline-flex cursor-pointer items-center gap-1.5 text-small text-muted">
       <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="size-3.5 cursor-pointer accent-[var(--accent)]" />
       Dispatch right after creating
     </label>
@@ -976,16 +999,16 @@ function ConfirmDrafts({
   return (
     <div role="group" aria-label="confirm drafted issues" className="space-y-2.5">
       <div className="flex items-center gap-2">
-        <h3 className="m-0 flex-1 text-[13px] font-semibold">
+        <h3 className="m-0 flex-1 text-body-sm font-semibold">
           {stage.drafts.length === 1 ? "One issue drafted" : `${stage.drafts.length} issues drafted`}
-          {stage.note && <span className="ml-2 font-normal text-[11.5px] text-faint">{stage.note}</span>}
+          {stage.note && <span className="ml-2 font-normal text-meta-lg text-faint">{stage.note}</span>}
         </h3>
-        <button type="button" disabled={creating} onClick={onBack} className="cursor-pointer border-0 bg-transparent p-0 text-[12px] text-muted underline underline-offset-2 hover:text-text disabled:opacity-50">
+        <button type="button" disabled={creating} onClick={onBack} className="cursor-pointer border-0 bg-transparent p-0 text-small text-muted underline underline-offset-2 hover:text-text disabled:opacity-50">
           Edit the text
         </button>
       </div>
       {stage.labels && stage.labels.length > 0 && (
-        <p data-source-labels className="m-0 flex flex-wrap items-center gap-1 text-[12px] text-muted" title="Settings → Source: added so the filtered issue list keeps offering the new issues">
+        <p data-source-labels className="m-0 flex flex-wrap items-center gap-1 text-small text-muted" title="Settings → Source: added so the filtered issue list keeps offering the new issues">
           <span>labels:</span>
           {stage.labels.map((l) => (
             <span key={l} className="rounded-full border border-border px-1.5 leading-4">
@@ -994,14 +1017,14 @@ function ConfirmDrafts({
           ))}
         </p>
       )}
-      <label className="flex items-center gap-2 text-[12.5px] text-muted">
+      <label className="flex items-center gap-2 text-small-lg text-muted">
         <span className="shrink-0">Create on</span>
         <select
           aria-label="repository for the new issues"
           value={stage.repo ?? ""}
           disabled={creating}
           onChange={(e) => onRepo(e.target.value || null)}
-          className={cx("min-w-0 flex-1 rounded-md border bg-panel-2 px-2 py-1 font-mono text-[12.5px] outline-none", stage.repo ? "border-border" : "border-accent")}
+          className={cx("min-w-0 flex-1 rounded-md border bg-panel-2 px-2 py-1 font-mono text-small-lg outline-none", stage.repo ? "border-border" : "border-accent")}
         >
           <option value="">Which repository?</option>
           {scope.map((r) => (
@@ -1030,7 +1053,7 @@ function ConfirmDrafts({
                 disabled={creating || !d.keep}
                 onChange={(e) => onEdit(d.id, { title: e.target.value.replace(/\n/g, " ") })}
                 aria-label={`title of draft ${i + 1}`}
-                className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[13.5px] font-medium text-text outline-none hover:border-border focus:border-border-strong"
+                className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-body font-medium text-text outline-none hover:border-border focus:border-border-strong"
               />
             </div>
             <textarea
@@ -1039,7 +1062,7 @@ function ConfirmDrafts({
               disabled={creating || !d.keep}
               onChange={(e) => onEdit(d.id, { body: e.target.value })}
               aria-label={`body of draft ${i + 1}`}
-              className="mt-1 w-full resize-y rounded-md border border-transparent bg-transparent px-1.5 py-1 font-mono text-[12px] leading-[1.5] text-muted outline-none hover:border-border focus:border-border-strong"
+              className="mt-1 w-full resize-y rounded-md border border-transparent bg-transparent px-1.5 py-1 font-mono text-small leading-[1.5] text-muted outline-none hover:border-border focus:border-border-strong"
             />
           </li>
         ))}
@@ -1050,7 +1073,7 @@ function ConfirmDrafts({
           type="button"
           disabled={creating || kept === 0 || !stage.repo}
           onClick={onCreate}
-          className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-[13px] font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+          className="ant-glyph-host ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border-0 bg-accent px-3.5 py-2 text-body-sm font-semibold text-on-accent hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {creating ? <Spinner className="size-3.5" /> : <AntGlyph size={20} className="-mx-0.5" />}
           {creating ? "Creating…" : dispatchAfter ? `Create ${kept} ${noun} and dispatch` : `Create ${kept} ${noun}`}

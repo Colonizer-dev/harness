@@ -3,9 +3,14 @@
 // scoped queue-paused banner while this one shows, so the pause banners exactly once. Resume-all
 // reuses the per-session resume endpoint over the parked colonies; there is no bulk endpoint.
 // Dismissal mirrors the storage alert's keyed pattern, so a new reset (or a new pause scope)
-// re-shows the banner. Rendered to static markup in the tests: no DOM.
+// re-shows the banner. It names the plan that ran out by its display name — "BytePlus plan limit
+// reached"; only the Claude account's own cap is ever called Claude — with the roles it affects, the
+// reset as a local time and a countdown, and Resume all only when a colony is actually parked.
+// Rendered to static markup in the tests: no DOM.
 import { useState, type ReactElement } from "react";
 
+import { PROVIDER_CATALOG } from "../providerCatalog";
+import { resetWords } from "../resetTime";
 import type { Session, StatusQuota } from "../types";
 
 /** Which scope a quota pause covers: the whole account, or named exhausted providers. */
@@ -74,20 +79,94 @@ export function resumeQuotaParkedSessions(
   return Promise.allSettled(quotaParkedSessions(sessions).map((session) => resume(session.id)));
 }
 
+/** One exhausted plan as the banner names it: display name and the roles routed to it. */
+export interface QuotaBannerPlan {
+  name: string;
+  usedBy: string[];
+}
+
+/**
+ * The plans the pause names. A current mothership sends `provider_details` (display names and the
+ * roles on each); an older one only ids, which are looked up in the provider catalog so the banner
+ * still says "BytePlus" rather than "byteplus". An account pause is the Claude account's own cap —
+ * the one case the banner says "Claude".
+ */
+export function quotaBannerPlans(quota: StatusQuota): QuotaBannerPlan[] {
+  const details = quota.provider_details ?? [];
+  if (quotaPauseKind(quota) === "account") {
+    const claude = details.find((detail) => detail.id === "anthropic");
+    return [{ name: "Claude", usedBy: claude?.used_by ?? [] }];
+  }
+  const ids = (quota.providers ?? []).filter((id) => id.length > 0);
+  const named = ids.length > 0 ? ids : details.map((detail) => detail.id);
+  return named.map((id) => {
+    const detail = details.find((d) => d.id === id);
+    const name = detail?.name.trim() || PROVIDER_CATALOG.find((entry) => entry.id === id)?.name || id;
+    return { name, usedBy: detail?.used_by ?? [] };
+  });
+}
+
+/** "a, b and c". */
+const listWords = (items: string[]): string =>
+  items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+
+/**
+ * The headline: "Claude session limit reached" for the account's own cap; "BytePlus plan limit
+ * reached" for a provider (a name that already says "plan", like "Baidu Qianfan Coding Plan", is not
+ * doubled); "BytePlus and MiniMax plan limits reached" for several.
+ */
+export function quotaBannerTitle(quota: StatusQuota): string {
+  if (quotaPauseKind(quota) === "account") return "Claude session limit reached";
+  const names = quotaBannerPlans(quota).map((plan) => plan.name);
+  if (names.length === 0) return "Provider plan limit reached";
+  if (names.length === 1) {
+    const [name] = names;
+    return /\bplan$/i.test(name) ? `${name} limit reached` : `${name} plan limit reached`;
+  }
+  return `${listWords(names)} plan limits reached`;
+}
+
+/** The banner's parts, each its own sentence; `quotaBannerText` joins them. */
+export interface QuotaBannerParts {
+  title: string;
+  /** "Used by subagents and background." — omitted when no role is known to route there. */
+  usedBy: string | null;
+  /** "resets at 19:51 · in 2 h 10 min". */
+  reset: string;
+  /** What the pause means for the fleet. */
+  effect: string;
+  /** "2 colonies paused." — null with none, so the banner never says "0 paused colonies". */
+  parked: string | null;
+}
+
 /**
  * The banner's own words, built from structured fields — never from the backend's `reason` string,
- * which carries the live waiting count and provider-specific phrasing. An account-level pause names
- * no providers; a provider-scoped pause names the exhausted ones from `providers`.
+ * which carries the live waiting count. It names the provider by its display name (never "Claude"
+ * unless the Claude account itself is out), says which roles it affects, gives the reset as a local
+ * time and a countdown, and counts parked colonies only when there are some.
  */
-export function quotaBannerText(quota: StatusQuota, parked: number): string {
-  const when = quota.reset_at ? `resets ${quota.reset_at}` : "resets soon";
-  const colonies = `${parked} paused ${parked === 1 ? "colony" : "colonies"}`;
-  if (quotaPauseKind(quota) === "provider") {
-    const names = (quota.providers ?? []).filter((provider) => provider.length > 0);
-    const where = names.length > 0 ? ` on ${names.join(", ")}` : "";
-    return `Claude session limit reached${where} — ${when}. ${colonies}.`;
-  }
-  return `Claude session limit reached — ${when}. ${colonies}.`;
+export function quotaBannerParts(quota: StatusQuota, parked: number, nowMs: number = Date.now(), timeZone?: string): QuotaBannerParts {
+  const plans = quotaBannerPlans(quota);
+  const roles: string[] = [];
+  for (const plan of plans) for (const role of plan.usedBy) if (!roles.includes(role)) roles.push(role);
+  const account = quotaPauseKind(quota) === "account";
+  const effect = account
+    ? "Colonies on other providers keep running; new colonies wait in the queue until it resets."
+    : `Colonies on other providers keep running; new colonies wait in the queue until ${plans.length > 1 ? "they reset" : "it resets"}.`;
+  const reset = resetWords(quota, nowMs, timeZone);
+  return {
+    title: quotaBannerTitle(quota),
+    usedBy: roles.length > 0 ? `Used by ${listWords(roles)}.` : null,
+    reset: `${reset.charAt(0).toUpperCase()}${reset.slice(1)}.`,
+    effect,
+    parked: parked > 0 ? `${parked} ${parked === 1 ? "colony" : "colonies"} paused.` : null,
+  };
+}
+
+/** The whole banner as one line of text (the tests' handle, and the banner's accessible label). */
+export function quotaBannerText(quota: StatusQuota, parked: number, nowMs: number = Date.now(), timeZone?: string): string {
+  const parts = quotaBannerParts(quota, parked, nowMs, timeZone);
+  return [`${parts.title}.`, parts.usedBy, parts.reset, parts.effect, parts.parked].filter(Boolean).join(" ");
 }
 
 export function QuotaBanner({
@@ -115,24 +194,39 @@ export function QuotaBanner({
       setBusy(false);
     }
   };
+  const parts = quotaBannerParts(quota, parked.length);
   return (
     <div className="px-6 pt-4">
-      <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn">
-        <span>{quotaBannerText(quota, parked.length)}</span>
-        <span className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void resumeAll()}
-            disabled={parked.length === 0 || busy}
-            title={parked.length === 0 ? "No quota-parked colonies to resume" : `Resume ${parked.length === 1 ? "the parked colony" : `all ${parked.length} parked colonies`}`}
-            className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-[12.5px] font-semibold hover:underline disabled:cursor-default disabled:opacity-50 disabled:hover:no-underline"
-          >
-            {busy ? "Resuming…" : parked.length > 0 ? `Resume all (${parked.length})` : "Resume all"}
-          </button>
+      <div
+        role="status"
+        aria-label={quotaBannerText(quota, parked.length)}
+        className="flex flex-wrap items-start gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-sm text-warn"
+      >
+        <span className="min-w-0 flex-1 basis-64">
+          <strong className="font-semibold">{parts.title}</strong>
+          <span className="text-small-lg">
+            {" · "}
+            {parts.reset}
+            {parts.usedBy ? ` ${parts.usedBy}` : ""} {parts.effect}
+            {parts.parked ? ` ${parts.parked}` : ""}
+          </span>
+        </span>
+        <span className="ml-auto flex shrink-0 items-center gap-2">
+          {parked.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => void resumeAll()}
+              disabled={busy}
+              title={`Resume ${parked.length === 1 ? "the parked colony" : `all ${parked.length} parked colonies`}`}
+              className="cursor-pointer rounded-md border border-warn px-2 py-0.5 text-small-lg font-semibold hover:underline disabled:cursor-default disabled:opacity-50 disabled:hover:no-underline"
+            >
+              {busy ? "Resuming…" : `Resume all (${parked.length})`}
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={onDismiss}
-            className="cursor-pointer text-[12.5px] font-semibold hover:underline"
+            className="cursor-pointer text-small-lg font-semibold hover:underline"
           >
             Dismiss
           </button>

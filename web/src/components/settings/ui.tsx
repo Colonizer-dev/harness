@@ -85,13 +85,13 @@ export function SectionNav({
     >
       {groups.map((group) => (
         <div key={group.label}>
-          <h3 className={cx("text-[11.5px] font-semibold uppercase tracking-wide text-faint", side ? "mb-1 px-2.5" : "mb-1")}>{group.label}</h3>
+          <h3 className={cx("text-meta-lg font-semibold uppercase tracking-wide text-faint", side ? "mb-1 px-2.5" : "mb-1")}>{group.label}</h3>
           {group.loading && (
-            <p className={cx("flex items-center gap-2 py-1.5 text-[12.5px] text-muted", side && "px-2.5")}>
+            <p className={cx("flex items-center gap-2 py-1.5 text-small-lg text-muted", side && "px-2.5")}>
               <Spinner className="size-3" /> Loading…
             </p>
           )}
-          {group.error && <p className={cx("py-1.5 text-[12.5px] text-err", side && "px-2.5")}>{group.error}</p>}
+          {group.error && <p className={cx("py-1.5 text-small-lg text-err", side && "px-2.5")}>{group.error}</p>}
           <ul className={side ? "space-y-0.5" : "divide-y divide-border overflow-hidden rounded-xl border border-border"}>
             {group.items.map((item) => {
               const current = item.id === active;
@@ -108,13 +108,13 @@ export function SectionNav({
                     className={cx(
                       "flex w-full cursor-pointer items-center gap-2 text-left",
                       side
-                        ? cx("rounded-lg px-2.5 py-1.5 text-[13px]", current ? "bg-panel-2 font-medium text-text" : "text-muted hover:bg-panel-2 hover:text-text")
-                        : "px-3.5 py-3 text-[13.5px] hover:bg-panel-2",
+                        ? cx("rounded-lg px-2.5 py-1.5 text-body-sm", current ? "bg-panel-2 font-medium text-text" : "text-muted hover:bg-panel-2 hover:text-text")
+                        : "px-3.5 py-3 text-body hover:bg-panel-2",
                     )}
                   >
                     <span className="min-w-0 flex-1">
                       <span className="block truncate">{item.label}</span>
-                      {!side && item.hint && <span className="block truncate text-[12px] text-muted">{item.hint}</span>}
+                      {!side && item.hint && <span className="block truncate text-small text-muted">{item.hint}</span>}
                     </span>
                     {item.dirty && (
                       <>
@@ -122,7 +122,7 @@ export function SectionNav({
                         <span className="sr-only">unsaved changes</span>
                       </>
                     )}
-                    {item.badge && <span className="shrink-0 text-[11.5px] text-faint">{item.badge}</span>}
+                    {item.badge && <span className="shrink-0 text-meta-lg text-faint">{item.badge}</span>}
                     {item.tone && (
                       <>
                         <span
@@ -190,12 +190,12 @@ export function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; activ
                 if (g.items[0] && !g.items.some((item) => item.id === active)) onSelect(g.items[0].id);
               }}
               className={cx(
-                "relative cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
+                "relative cursor-pointer rounded-md px-3 py-1.5 text-body-sm font-medium transition-colors",
                 current ? "text-text" : "text-muted hover:bg-panel-2 hover:text-text",
               )}
             >
               {g.label}
-              <span className="ml-1.5 text-[11.5px] font-normal tabular-nums text-faint">{g.items.length || ""}</span>
+              <span className="ml-1.5 text-meta-lg font-normal tabular-nums text-faint">{g.items.length || ""}</span>
               {current && <span aria-hidden="true" className="absolute inset-x-2 -bottom-[1px] h-0.5 rounded-full bg-accent" />}
             </button>
           );
@@ -203,11 +203,11 @@ export function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; activ
       </div>
       <div className="border-t border-border">
         {group?.loading && (
-          <p className="flex items-center gap-2 px-5 py-2.5 text-[12.5px] text-muted">
+          <p className="flex items-center gap-2 px-5 py-2.5 text-small-lg text-muted">
             <Spinner className="size-3" /> Loading…
           </p>
         )}
-        {group?.error && <p className="px-5 py-2.5 text-[12.5px] text-err">{group.error}</p>}
+        {group?.error && <p className="px-5 py-2.5 text-small-lg text-err">{group.error}</p>}
         <ul onKeyDown={onKeyDown} className="page-pad scroll-thin flex gap-1.5 overflow-x-auto px-4 py-2.5 [--pad-x:1rem]">
           {items.map((item) => {
             const current = item.id === active;
@@ -223,7 +223,7 @@ export function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; activ
                   title={item.hint}
                   onClick={() => onSelect(item.id)}
                   className={cx(
-                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-[13px] transition-colors",
+                    "flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-body-sm transition-colors",
                     current ? "border-border-strong bg-panel-2 font-medium text-text" : "border-transparent text-muted hover:bg-panel-2 hover:text-text",
                   )}
                 >
@@ -235,7 +235,7 @@ export function TopNav({ groups, active, onSelect }: { groups: NavGroup[]; activ
                       <span className="sr-only">unsaved changes</span>
                     </>
                   )}
-                  {item.badge && <span className="text-[11.5px] tabular-nums text-faint">{item.badge}</span>}
+                  {item.badge && <span className="text-meta-lg tabular-nums text-faint">{item.badge}</span>}
                   {item.tone && (
                     <>
                       <span
@@ -303,12 +303,12 @@ export function Pane({
             id={PANE_TITLE_ID}
             ref={titleRef}
             tabIndex={stacked ? -1 : undefined}
-            className="flex items-center gap-1 rounded text-[15px] font-semibold leading-8"
+            className="flex items-center gap-1 rounded text-lead font-semibold leading-8"
           >
             {title}
             {info && <InfoButton label={title}>{info}</InfoButton>}
           </h3>
-          {subtitle && <p className="-mt-1 text-[12.5px] text-muted">{subtitle}</p>}
+          {subtitle && <p className="-mt-1 text-small-lg text-muted">{subtitle}</p>}
         </div>
         {aside && <div className="flex shrink-0 items-center leading-8">{aside}</div>}
       </div>
@@ -340,7 +340,7 @@ export function Row({
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
       <div className="min-w-0 flex-1 basis-40">
         <div className="flex items-center gap-1">
-          <label id={id ? `${id}-label` : undefined} htmlFor={id} className="text-[13.5px] font-medium">
+          <label id={id ? `${id}-label` : undefined} htmlFor={id} className="text-body font-medium">
             {label}
           </label>
           {info && <InfoButton label={label}>{info}</InfoButton>}
@@ -352,7 +352,7 @@ export function Row({
 }
 
 export function Code({ children }: { children: ReactNode }) {
-  return <code className="rounded bg-panel-3 px-1 font-mono text-[11.5px]">{children}</code>;
+  return <code className="rounded bg-panel-3 px-1 font-mono text-meta-lg">{children}</code>;
 }
 
 // The account avatar beside the GitHub login row is the shared Avatar (`alt=""` — the login is
@@ -379,12 +379,12 @@ export function ConnectionCard({
     <div className="rounded-xl border border-border">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-4 py-3">
         {mark}
-        <span className="flex items-center gap-1 text-[14px] font-semibold">
+        <span className="flex items-center gap-1 text-body-lg font-semibold">
           {name}
           <InfoButton label={name}>{info}</InfoButton>
         </span>
         {connected != null && <Badge tone={connected ? "ok" : "err"}>{connected ? "Connected" : "Not connected"}</Badge>}
-        {detail && <span className={cx("text-[12.5px] [overflow-wrap:anywhere]", detailTone === "err" ? "text-err" : "text-muted")}>{detail}</span>}
+        {detail && <span className={cx("text-small-lg [overflow-wrap:anywhere]", detailTone === "err" ? "text-err" : "text-muted")}>{detail}</span>}
       </div>
       <div className="space-y-3 border-t border-border px-4 py-3">{children}</div>
     </div>

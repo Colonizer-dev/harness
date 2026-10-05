@@ -1,2 +1,6 @@
+/api/notify/dead-letters/replay                      POST   unauth=401    token=owner            activity=-
+/api/notify/dead-letters/{key}                       DELETE unauth=401    token=owner            activity=settings.remove
+/api/notify/dead-letters/{key}/replay                POST   unauth=401    token=owner            activity=-
+/api/notify/deliveries                               GET    unauth=401    token=owner            activity=-
 /api/notify/secret                                   GET    unauth=401    token=owner            activity=-
 /api/notify/secret                                   PUT    unauth=401    token=owner            activity=settings.save

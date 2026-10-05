@@ -123,7 +123,7 @@ function ActorChip({ item }: { item: HistoryItem }): ReactElement | null {
   return (
     <span
       title={item.actor === "api" ? "Done with the API token (the CLI or a script)" : "Done in the cockpit"}
-      className="inline-flex items-center rounded-full border border-border px-1.5 py-px text-[11px] leading-4 text-muted"
+      className="inline-flex items-center rounded-full border border-border px-1.5 py-px text-meta leading-4 text-muted"
     >
       {item.actor === "api" ? "API" : "you"}
     </span>
@@ -138,7 +138,7 @@ function PrLink({ url }: { url: string }): ReactElement {
       target="_blank"
       rel="noreferrer"
       onClick={(e) => e.stopPropagation()}
-      className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-px font-mono text-[11px] leading-4 text-muted no-underline hover:border-border-strong hover:text-text"
+      className="inline-flex items-center gap-1 rounded-md border border-border px-1.5 py-px font-mono text-meta leading-4 text-muted no-underline hover:border-border-strong hover:text-text"
     >
       {number ? `#${number}` : "PR"}
       <IconExternal size={10} />
@@ -150,9 +150,9 @@ function ItemRow({ item, target, onOpen, nested = false }: { item: HistoryItem; 
   const second = [item.title, item.colonyId ? item.colonyId.slice(0, 8) : null].filter(Boolean).join(" · ");
   const body = (
     <>
-      <span className={cx("block truncate", nested ? "text-[13px]" : "text-[13.5px]")}>{item.text}</span>
+      <span className={cx("block truncate", nested ? "text-body-sm" : "text-body")}>{item.text}</span>
       {(second || item.detail) && (
-        <span className="mt-0.5 block truncate text-[12px] text-faint">
+        <span className="mt-0.5 block truncate text-small text-faint">
           {second && <span>{second}</span>}
           {item.detail && <span className={cx(second && "before:content-['_·_']", item.tone === "failed" ? "text-err" : "text-muted")}>{item.detail}</span>}
         </span>
@@ -168,7 +168,7 @@ function ItemRow({ item, target, onOpen, nested = false }: { item: HistoryItem; 
       )}
     >
       <span
-        className="text-right font-mono text-[11.5px] tabular-nums text-faint"
+        className="text-right font-mono text-meta-lg tabular-nums text-faint"
         title={item.approximate ? "Approximate: this colony finished before the activity log existed, so the time is its last update" : new Date(item.at).toLocaleString()}
       >
         {item.approximate ? "~" : ""}
@@ -183,7 +183,7 @@ function ItemRow({ item, target, onOpen, nested = false }: { item: HistoryItem; 
         <span className="min-w-0">{body}</span>
       )}
       <span className="relative flex items-center gap-1.5">
-        {item.repo && !nested && <span className="hidden max-w-[220px] truncate font-mono text-[11px] text-faint sm:inline">{item.repo}</span>}
+        {item.repo && !nested && <span className="hidden max-w-[220px] truncate font-mono text-meta text-faint sm:inline">{item.repo}</span>}
         <ActorChip item={item} />
         {item.prUrl && <PrLink url={item.prUrl} />}
       </span>
@@ -195,10 +195,10 @@ function GroupRow({ row, open, onToggle, targetFor, onOpen }: { row: Extract<His
   return (
     <div>
       <div className="relative grid grid-cols-[52px_26px_minmax(0,1fr)_auto] items-center gap-3 rounded-lg py-2 pr-2 hover:bg-panel-2">
-        <span className="text-right font-mono text-[11.5px] tabular-nums text-faint">{clock(row.items[0].at)}</span>
+        <span className="text-right font-mono text-meta-lg tabular-nums text-faint">{clock(row.items[0].at)}</span>
         <span className="relative">
           <ToneIcon tone={row.tone} kind={row.kind} />
-          <span className="absolute -right-1.5 -top-1.5 z-[2] min-w-4 rounded-full bg-panel-3 px-1 text-center text-[10px] font-semibold leading-4 text-text tabular-nums">{row.items.length}</span>
+          <span className="absolute -right-1.5 -top-1.5 z-[2] min-w-4 rounded-full bg-panel-3 px-1 text-center text-micro-lg font-semibold leading-4 text-text tabular-nums">{row.items.length}</span>
         </span>
         <button
           type="button"
@@ -206,11 +206,11 @@ function GroupRow({ row, open, onToggle, targetFor, onOpen }: { row: Extract<His
           onClick={onToggle}
           className="min-w-0 cursor-pointer border-0 bg-transparent p-0 text-left text-text after:absolute after:inset-0 after:content-['']"
         >
-          <span className="flex items-center gap-1.5 text-[13.5px]">
+          <span className="flex items-center gap-1.5 text-body">
             <IconChevron size={12} className={cx("shrink-0 text-faint transition-transform", open && "rotate-90")} />
             <span className="truncate">{groupText(row)}</span>
           </span>
-          <span className="mt-0.5 block truncate pl-[18px] text-[12px] text-faint">
+          <span className="mt-0.5 block truncate pl-[18px] text-small text-faint">
             {groupSpan(row.items)} · {groupRepos(row.items)}
           </span>
         </button>
@@ -240,12 +240,12 @@ function Stat({ label, value, sub, tone, active, onClick }: { label: string; val
         active ? "bg-panel-2" : "bg-transparent hover:bg-panel-2",
       )}
     >
-      <span className="flex items-center gap-1.5 truncate text-[12.5px] text-muted">
+      <span className="flex items-center gap-1.5 truncate text-small-lg text-muted">
         <span aria-hidden="true" className="h-2 w-2 rounded-[2px]" style={{ background: tone }} />
         {label}
       </span>
-      <span className="text-[24px] font-semibold tabular-nums tracking-[-0.03em] text-text">{value}</span>
-      <span className="truncate text-[12px] text-faint">{sub}</span>
+      <span className="text-display font-semibold tabular-nums tracking-[-0.03em] text-text">{value}</span>
+      <span className="truncate text-small text-faint">{sub}</span>
     </button>
   );
 }
@@ -374,8 +374,8 @@ export function HistoryView({
     <Page frameClassName="flex flex-col gap-7">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">History</h1>
-          <div className="mt-2 text-[14px] text-muted">
+          <h1 className="m-0 text-display-xl font-semibold leading-[1.15] tracking-[-0.035em]">History</h1>
+          <div className="mt-2 text-body-lg text-muted">
             {org ?? "All workspaces"} · what your colonies did and what you changed
             {oldest && <span className="text-faint"> · since {new Date(oldest).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span>}
           </div>
@@ -411,7 +411,7 @@ export function HistoryView({
           </div>
         </div>
         {(filtered || log.error || log.skipped > 0 || approximate) && (
-          <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px] text-faint">
+          <div role="status" className="flex flex-wrap items-center gap-x-3 gap-y-1 text-small-lg text-faint">
             {filtered && (
               <span>
                 showing {list.total} of {items.length}
@@ -428,9 +428,9 @@ export function HistoryView({
       </div>
 
       {!log.loaded ? (
-        <div className="border-y border-border py-3.5 text-[13px] text-muted">Loading history…</div>
+        <div className="border-y border-border py-3.5 text-body-sm text-muted">Loading history…</div>
       ) : view.total === 0 ? (
-        <div className="border-y border-border py-6 text-center text-[13px] text-muted">
+        <div className="border-y border-border py-6 text-center text-body-sm text-muted">
           {filtered ? "Nothing matches these filters." : "Nothing has happened here yet. Launch a colony and its story starts here."}
         </div>
       ) : (
@@ -438,8 +438,8 @@ export function HistoryView({
           {days.map(({ day, rows: dayRows }) => (
             <section key={day} aria-label={day}>
               <div className="sticky top-0 z-10 -mx-2 flex items-baseline gap-2 bg-bg/90 px-2 pb-2 pt-3 backdrop-blur-sm">
-                <h2 className="m-0 text-[12px] font-semibold uppercase tracking-[0.08em] text-muted">{day}</h2>
-                <span className="text-[12px] text-faint">
+                <h2 className="m-0 text-small font-semibold uppercase tracking-[0.08em] text-muted">{day}</h2>
+                <span className="text-small text-faint">
                   {dayRows.reduce((n, r) => n + (r.type === "group" ? r.items.length : 1), 0)} events
                 </span>
                 <span aria-hidden="true" className="ml-2 h-px flex-1 self-center bg-border" />
@@ -463,7 +463,7 @@ export function HistoryView({
                 type="button"
                 disabled={log.loadingOlder}
                 onClick={() => void loadOlder()}
-                className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-[12.5px] text-muted hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50"
+                className="cursor-pointer rounded-md border border-border bg-transparent px-2.5 py-1 text-small-lg text-muted hover:border-border-strong hover:text-text disabled:cursor-default disabled:opacity-50"
               >
                 {log.loadingOlder ? "Loading…" : "Load older activity"}
               </button>

@@ -9,6 +9,7 @@ export type PushEventKind =
   | "needs_rebase"
   | "failed"
   | "attention"
+  | "provider_quota_exhausted"
   | "provider_degraded"
   | "digest";
 
@@ -87,6 +88,8 @@ export interface RemoteStatus {
   since: string | null;
   /** True when the relay closed the tunnel because a newer one took this link over; it stays that way until a re-enable or reset dials again. */
   replaced: boolean;
+  /** Whether the relay sends every browser through GitHub sign-in before anything reaches this cockpit (#534). Off — the default for a new link (#1086) — a device pairs with the one-time link and six digits alone. */
+  require_github: boolean;
 }
 
 /** One pairing code waiting at the relay (services/relay/src/worker.js `pairingView`). */
@@ -102,6 +105,29 @@ export interface RemotePairingRequest {
 export interface RemotePairing {
   owner: { github_login: string } | null;
   pending: RemotePairingRequest[];
+  /** The relay's own record of the GitHub gate; absent from a relay deployed before #1086. */
+  require_github?: boolean;
+}
+
+/** A browser signed in to the remote link with a link credential of its own (review finding R3). */
+export interface LinkDevice {
+  id: string;
+  label: string;
+  paired_at: string;
+}
+
+/** GET /api/remote/devices: the browsers signed in to the link, and those waiting for their code. */
+export interface LinkDevices {
+  devices: LinkDevice[];
+  pending: { id: string; label: string; expires_at: string }[];
+}
+
+/** POST /api/remote/devices/invites: the single-use link to open on the other device. Never a credential. */
+export interface LinkInvite {
+  url: string;
+  /** RFC3339: when the invite stops working. */
+  expires_at: string;
+  ttl_secs: number;
 }
 
 // ---------------------------------------------------------------------------

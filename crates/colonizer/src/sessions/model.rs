@@ -561,6 +561,11 @@ pub struct Session {
     /// issue hold. `None` for everything not launched against one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
+    /// Every package/advisory pair a supply-chain loop colony was dispatched to fix (issue #832): its
+    /// share of the same claim `supply_chain` makes, read by the one duplicate rule (duplicates.rs).
+    /// An advisory left empty claims every advisory of its package. Empty for everything else.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supply_chain_targets: Vec<crate::supersede::SupplyChainTarget>,
     /// Set when a same-repo colony's pull request merged over this colony's work (issue #673): what
     /// covered it, why, and whether the operator kept it running anyway. While it stands unkept the
     /// queue and the resume route leave the colony where it is. `None` for a colony no merge covered.
@@ -696,6 +701,7 @@ impl Default for Session {
             resume_note: None,
             prewarm: None,
             supply_chain: None,
+            supply_chain_targets: Vec::new(),
             superseded: None,
             was_suspended: false,
             last_activity_at: None,

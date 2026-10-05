@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { execPolicyProblem } from "../execPolicy";
 import { HIDE_EMPTY_ORGS_KEY, orgEnabled, parseHideEmptyOrgs, serializeHideEmptyOrgs } from "../orgs";
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
@@ -20,7 +21,6 @@ type FieldKey =
   | "budget_usd"
   | "host_disk"
   | "stack"
-  | "exec_policy"
   | "memory_enabled"
   | "memory_deja"
   | "watchdog_enabled"
@@ -32,7 +32,7 @@ interface FieldSpec {
   group: string;
   label: string;
   hint: string;
-  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos" | "json";
+  kind: "model" | "number" | "size" | "boolean" | "choice" | "repos";
   min?: number;
   max?: number;
   unit?: string;
@@ -46,7 +46,6 @@ const FIELDS: FieldSpec[] = [
   { key: "subagent_model", group: "Models", label: "Subagents", hint: "Agents the orchestrator starts for side tasks", kind: "model" },
   { key: "background_model", group: "Models", label: "Background", hint: "Small, fast work like summaries and titles", kind: "model" },
   { key: "stack", group: "Colonies", label: "Stack", hint: "The sandbox stack for this org's colonies; Automatic reads each repository's own", kind: "choice" },
-  { key: "exec_policy", group: "Colonies", label: "Exec policy", hint: "JSON rules this org's colonies narrow the install's exec policy with; a repository's own .colonizer/exec-policy.json narrows further", kind: "json" },
   { key: "max_parallel", group: "Colonies", label: "Parallel colonies", hint: "Live colonies in this org at once", kind: "number", min: 1, max: 64 },
   { key: "repo_max_parallel", group: "Colonies", label: "Per repository", hint: "Live colonies in any one of this org's repositories at once", kind: "number", min: 1, max: 32 },
   { key: "close_superseded_prs", group: "Colonies", label: "Close superseded PRs", hint: "Repositories like acme/api whose superseded colonies' pull requests Colonizer may close when another colony's merges over them; empty marks the colonies only", kind: "repos" },
@@ -83,8 +82,6 @@ function readSetting(settings: OrgSettings, key: FieldKey): Value {
       return settings.host_disk === "" ? "0" : settings.host_disk;
     case "stack":
       return settings.stack;
-    case "exec_policy":
-      return settings.exec_policy;
     case "memory_enabled":
       return settings.memory?.enabled;
     case "memory_deja":
@@ -129,9 +126,6 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
       return setting("sandbox", "host_disk");
     case "stack":
       return setting("sandbox", "preset");
-    case "exec_policy":
-      // The install agent module's own `exec_policy` setting, the layer an org narrows.
-      return setting("agent", "exec_policy");
     case "memory_enabled":
       return toggle("memory");
     case "memory_deja":
@@ -145,9 +139,6 @@ function globalValue(modules: ModuleInfo[] | null, key: FieldKey): Value {
 }
 
 function describe(spec: FieldSpec, value: Value, modules: ModuleInfo[] | null = null): string {
-  if (spec.key === "exec_policy")
-    // A policy is multi-line JSON, so name the layer it narrows instead of printing it.
-    return value ? "the install's policy" : "none";
   if (spec.key === "close_superseded_prs") {
     const list = typeof value === "string" ? parseRepoList(value) : [];
     return list.length ? list.join(", ") : "never closes";
@@ -185,10 +176,8 @@ function toDraft(settings: OrgSettings, modules: ModuleInfo[] | null): Draft {
   for (const spec of FIELDS) {
     const own = readSetting(settings, spec.key);
     const fallback = globalValue(modules, spec.key);
-    // A blank list or policy is no override, and a policy the server stores trimmed: a saved value
-    // that is only whitespace reads as inherit there, so it must read as inherit here too.
-    const blank = spec.kind === "repos" ? own === "" : spec.kind === "json" ? String(own ?? "").trim() === "" : false;
-    const override = own !== undefined && own !== null && !(spec.kind === "model" && own === "") && !blank;
+    const override =
+      own !== undefined && own !== null && !(spec.kind === "model" && own === "") && !(spec.kind === "repos" && own === "");
     const base = override ? own : fallback;
     draft[spec.key] = {
       override,
@@ -214,23 +203,7 @@ function parseSize(raw: string): string | null {
   return /^\d+[KkMmGgTt]?$/.test(text) ? text : null;
 }
 
-/** The server's rule, mirrored for instant feedback: a policy is a JSON object with a `rules` array,
- *  within the 64 KiB it measures in bytes. The runner's own cap counts UTF-16 units, so on a policy
- *  with non-ASCII in it the server's is the tighter of the two — measure bytes, as the server does,
- *  rather than `length`, so the two agree. */
-function isPolicyJson(raw: string): boolean {
-  const text = raw.trim();
-  if (text === "") return true; // an override left empty is no override at all
-  if (new TextEncoder().encode(text).length > 64 * 1024) return false;
-  try {
-    const parsed = JSON.parse(text);
-    return !!parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.rules);
-  } catch {
-    return false;
-  }
-}
-
-/** Inherited fields are sent as null; an empty model, size or policy override also means inherit. */
+/** Inherited fields are sent as null; an empty model or size override also means inherit. */
 function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null } {
   const pick = (key: FieldKey): string | number | boolean | null => {
     const field = draft[key];
@@ -243,7 +216,6 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       const text = parseSize(String(field.value));
       return text === "" ? null : text; // an override left empty is no override at all
     }
-    if (spec.kind === "json") return String(field.value).trim() || null;
     return parseNumber(spec, String(field.value));
   };
   const invalid = FIELDS.find(
@@ -251,8 +223,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
       draft[spec.key].override &&
       ((spec.kind === "number" && parseNumber(spec, String(draft[spec.key].value)) === null) ||
         (spec.kind === "size" && parseSize(String(draft[spec.key].value)) === null) ||
-        (spec.kind === "repos" && !isRepoList(String(draft[spec.key].value))) ||
-        (spec.kind === "json" && !isPolicyJson(String(draft[spec.key].value)))),
+        (spec.kind === "repos" && !isRepoList(String(draft[spec.key].value)))),
   );
   const settings: OrgSettings = {
     agent: {
@@ -268,7 +239,6 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
     budget_usd: pick("budget_usd") as number | null,
     host_disk: pick("host_disk") as string | null,
     stack: pick("stack") as string | null,
-    exec_policy: pick("exec_policy") as string | null,
     memory: { enabled: pick("memory_enabled") as boolean | null, deja: pick("memory_deja") as boolean | null },
     watchdog: {
       enabled: pick("watchdog_enabled") as boolean | null,
@@ -283,9 +253,7 @@ function fromDraft(draft: Draft): { settings: OrgSettings; error: string | null 
         ? `${invalid.label} must be a size like 512M or 16G, or 0 for unlimited`
         : invalid.kind === "repos"
           ? `${invalid.label} entries must be repositories like acme/api`
-          : invalid.kind === "json"
-            ? `${invalid.label} must be JSON with a "rules" array`
-            : numberError(invalid)
+          : numberError(invalid)
       : null,
   };
 }
@@ -317,6 +285,11 @@ function withSkillsets(settings: OrgSettings, skillsets: Record<string, boolean>
  */
 function withEnabled(settings: OrgSettings, enabled: boolean): OrgSettings {
   return { ...settings, enabled: enabled ? null : false };
+}
+
+/** The org's exec policy layer (issue #924) rides in the same payload; blank is sent as null, no layer. */
+function withExecPolicy(settings: OrgSettings, text: string): OrgSettings {
+  return { ...settings, exec_policy: text.trim() ? text : null };
 }
 
 /** The skillsets switched on in Settings → Modules, which every org inherits. */
@@ -395,11 +368,17 @@ export function OrgSettingsForm({
     setHideEmpty(hide);
     store(HIDE_EMPTY_ORGS_KEY, serializeHideEmptyOrgs(hide));
   };
+  const [execPolicy, setExecPolicy] = useState(() => info?.settings?.exec_policy ?? "");
+  // A refusal the server gave for the exec policy, shown under it until the text changes.
+  const [execPolicyRefusal, setExecPolicyRefusal] = useState<string | null>(null);
   const [initial, setInitial] = useState(() =>
     JSON.stringify(
-      withEnabled(
-        withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
-        orgEnabled(info?.settings),
+      withExecPolicy(
+        withEnabled(
+          withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
+          orgEnabled(info?.settings),
+        ),
+        info?.settings?.exec_policy ?? "",
       ),
     ),
   );
@@ -427,8 +406,10 @@ export function OrgSettingsForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
 
-  const { settings: fields, error } = fromDraft(draft);
-  const settings = withEnabled(withSkillsets(fields, skillsets), enabled);
+  const { settings: fields, error: fieldError } = fromDraft(draft);
+  const execPolicyError = execPolicyProblem(execPolicy) ?? execPolicyRefusal;
+  const error = fieldError ?? (execPolicyError ? "Exec policy: fix the JSON above" : null);
+  const settings = withExecPolicy(withEnabled(withSkillsets(fields, skillsets), enabled), execPolicy);
   const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length;
   const inheritedSkillsets = globalSkillsets(modules);
   // Every installed skillset, plus any this org still names that is no longer installed.
@@ -462,7 +443,9 @@ export function OrgSettingsForm({
       toast(`Saved ${org} workspace settings`);
       onClose();
     } catch (e) {
-      toast(errorMessage(e), "error");
+      const message = errorMessage(e);
+      if (/exec policy/.test(message)) setExecPolicyRefusal(message);
+      toast(message, "error");
     } finally {
       setSaving(false);
     }
@@ -475,10 +458,10 @@ export function OrgSettingsForm({
       <div className="page-pad flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
         <Avatar name={org} src={info?.avatar_url} size={36} rounded="xl" />
         <div className="min-w-0 flex-1">
-          <h2 id="org-settings-title" className="text-[16px] font-semibold [overflow-wrap:anywhere]">
+          <h2 id="org-settings-title" className="text-title-sm font-semibold [overflow-wrap:anywhere]">
             {org} workspace
           </h2>
-          <p className="mt-0.5 text-[12.5px] text-muted">
+          <p className="mt-0.5 text-small-lg text-muted">
             Colonies on {org} repositories use these settings. Inherit follows Settings → Modules.
           </p>
         </div>
@@ -496,31 +479,31 @@ export function OrgSettingsForm({
 
       <div className="page-pad scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-2">
         <section className="border-b border-border py-3">
-          <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Workspace</h3>
+          <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Workspace</h3>
           <div className="divide-y divide-border">
             <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
               <div className="min-w-0 flex-1 basis-44">
-                <div className="text-[13.5px] font-medium">Hide orgs with no colonies</div>
-                <div className="text-[12px] text-muted">
+                <div className="text-body font-medium">Hide orgs with no colonies</div>
+                <div className="text-small text-muted">
                   Orgs with nothing in the colony list stay out of the overview, the rail and the totals.
                 </div>
               </div>
               <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
                 <Switch checked={hideEmpty} onChange={setHideEmptyOrgs} label="Hide orgs with no colonies" />
-                <span className="text-[13px]">{hideEmpty ? "On" : "Off"}</span>
+                <span className="text-body-sm">{hideEmpty ? "On" : "Off"}</span>
               </div>
             </div>
             <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
               <div className="min-w-0 flex-1 basis-44">
-                <div className="text-[13.5px] font-medium">Include in the workspace list</div>
-                <div className="text-[12px] text-muted">
+                <div className="text-body font-medium">Include in the workspace list</div>
+                <div className="text-small text-muted">
                   Off hides {org} from the workspace list and stops new colonies starting there. Its existing colonies stay listed
                   and resumable, and you can switch it back on here at any time.
                 </div>
               </div>
               <div className="flex w-full min-w-0 items-center gap-2.5 sm:w-[270px]">
                 <Switch checked={enabled} onChange={setEnabled} label={`Include ${org} as a workspace`} />
-                <span className="text-[13px]">{enabled ? "On" : "Off"}</span>
+                <span className="text-body-sm">{enabled ? "On" : "Off"}</span>
               </div>
             </div>
           </div>
@@ -528,7 +511,7 @@ export function OrgSettingsForm({
         {groups.map((group) => (
           <Fragment key={group}>
             <section className="border-b border-border py-3 last:border-b-0">
-              <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">{group}</h3>
+              <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">{group}</h3>
               <div className="divide-y divide-border">
                 {FIELDS.filter((f) => f.group === group).map((spec) => (
                   <OverrideRow
@@ -566,7 +549,7 @@ export function OrgSettingsForm({
                             parseNumber(spec, String(draft[spec.key].value)) === null && "border-err focus:border-err",
                           )}
                         />
-                        {spec.unit && <span className="text-[13px] text-muted">{spec.unit}</span>}
+                        {spec.unit && <span className="text-body-sm text-muted">{spec.unit}</span>}
                       </div>
                     )}
                     {spec.kind === "size" && (
@@ -598,21 +581,6 @@ export function OrgSettingsForm({
                         )}
                       />
                     )}
-                    {spec.kind === "json" && (
-                      <textarea
-                        value={String(draft[spec.key].value)}
-                        onChange={(e) => set(spec.key, { value: e.target.value })}
-                        placeholder={'{\n  "rules": []\n}'}
-                        rows={4}
-                        spellCheck={false}
-                        aria-label={`${spec.label} JSON for ${org}`}
-                        aria-invalid={!isPolicyJson(String(draft[spec.key].value))}
-                        className={cx(
-                          "w-full resize-y rounded-lg border bg-panel px-2.5 py-2 font-mono text-[12.5px]",
-                          !isPolicyJson(String(draft[spec.key].value)) ? "border-err" : "border-border",
-                        )}
-                      />
-                    )}
                     {spec.kind === "choice" && (
                       <select
                         value={String(draft[spec.key].value)}
@@ -633,7 +601,7 @@ export function OrgSettingsForm({
                       </select>
                     )}
                     {spec.kind === "boolean" && (
-                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                      <label className="inline-flex h-9 items-center gap-2.5 text-body-sm">
                         <Switch
                           checked={Boolean(draft[spec.key].value)}
                           onChange={(value) => set(spec.key, { value })}
@@ -648,7 +616,7 @@ export function OrgSettingsForm({
             </section>
             {group === "Models" && skillsetRows.length > 0 && (
               <section className="border-b border-border py-3 last:border-b-0">
-                <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
+                <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Skillsets</h3>
                 <div className="divide-y divide-border">
                   {skillsetRows.map(({ name, hint }) => (
                     <OverrideRow
@@ -659,7 +627,7 @@ export function OrgSettingsForm({
                       inherited={inheritedSkillsets ? (inheritedSkillsets.includes(name) ? "on" : "off") : "global default"}
                       onOverride={(override) => overrideSkillset(name, override)}
                     >
-                      <label className="inline-flex h-9 items-center gap-2.5 text-[13px]">
+                      <label className="inline-flex h-9 items-center gap-2.5 text-body-sm">
                         <Switch
                           checked={skillsets[name] ?? false}
                           onChange={(on) => setSkillsets((current) => sortedSkillsets({ ...current, [name]: on }))}
@@ -674,10 +642,19 @@ export function OrgSettingsForm({
             )}
           </Fragment>
         ))}
+        <ExecPolicyEditor
+          org={org}
+          value={execPolicy}
+          error={execPolicyError}
+          onChange={(text) => {
+            setExecPolicy(text);
+            setExecPolicyRefusal(null);
+          }}
+        />
       </div>
 
       <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
-        <span className={cx("mr-auto text-[12.5px]", error ? "text-err" : "text-muted")}>
+        <span className={cx("mr-auto text-small-lg", error ? "text-err" : "text-muted")}>
           {error ?? (overrides === 0 ? "Everything inherits the global settings" : `${overrides} override${overrides === 1 ? "" : "s"}`)}
         </span>
         {overrides > 0 && (
@@ -700,6 +677,52 @@ export function OrgSettingsForm({
   );
 }
 
+/**
+ * The org layer of the exec policy (issue #924): one JSON text box, checked as it is typed with the
+ * server's own rules, the problem shown under it. Not an inherit/override field: the install's
+ * policy always applies too, and this one can only narrow it.
+ */
+export function ExecPolicyEditor({
+  org,
+  value,
+  error,
+  onChange,
+}: {
+  org: string;
+  value: string;
+  error: string | null;
+  onChange: (text: string) => void;
+}) {
+  return (
+    <section className="border-t border-border py-3">
+      <h3 className="text-meta-lg font-semibold uppercase tracking-wide text-faint">Exec policy</h3>
+      <div className="py-3">
+        <div className="text-small text-muted">
+          Rules for the commands {org} colonies run, as JSON: {'{"rules": [{"id", "decision": "deny" | "ask" | "allow", "reason", "command" | "script" | "touches" | "writes_outside"}]}'}.
+          Layered between the install's policy and a repository's own .colonizer/exec-policy.json; the strictest decision
+          wins, so it can only narrow. Agent modules that cannot apply it refuse to launch while it is set. Empty adds nothing.
+        </div>
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={6}
+          spellCheck={false}
+          placeholder={'{"rules": [{"id": "no-publish", "decision": "deny", "command": "npm publish"}]}'}
+          aria-label={`Exec policy for ${org}`}
+          aria-invalid={error !== null}
+          aria-describedby={error ? "org-exec-policy-error" : undefined}
+          className={cx(inputClass, "mt-2 h-auto w-full py-2 font-mono text-small-lg", error !== null && "border-err focus:border-err")}
+        />
+        {error && (
+          <div id="org-exec-policy-error" role="alert" className="mt-1 text-small text-err [overflow-wrap:anywhere]">
+            {error}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function OverrideRow({
   label,
   hint,
@@ -718,8 +741,8 @@ function OverrideRow({
   return (
     <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-3">
       <div className="min-w-0 flex-1 basis-44">
-        <div className="text-[13.5px] font-medium [overflow-wrap:anywhere]">{label}</div>
-        <div className="text-[12px] text-muted">{hint}</div>
+        <div className="text-body font-medium [overflow-wrap:anywhere]">{label}</div>
+        <div className="text-small text-muted">{hint}</div>
       </div>
       <div className="flex w-full min-w-0 flex-col gap-2 sm:w-[270px]">
         <div role="radiogroup" aria-label={`${label}: inherit or override`} className="inline-flex self-start rounded-lg bg-panel-2 p-0.5">
@@ -731,7 +754,7 @@ function OverrideRow({
               aria-checked={override === value}
               onClick={() => onOverride(value)}
               className={cx(
-                "cursor-pointer rounded-md px-2.5 py-1 text-[12.5px] font-medium transition-colors",
+                "cursor-pointer rounded-md px-2.5 py-1 text-small-lg font-medium transition-colors",
                 override === value
                   ? value
                     ? "bg-panel text-accent shadow-sm"
@@ -746,7 +769,7 @@ function OverrideRow({
         {override ? (
           children
         ) : (
-          <div className="flex h-9 items-center text-[12.5px] text-faint">
+          <div className="flex h-9 items-center text-small-lg text-faint">
             Global setting: <span className="ml-1 font-medium text-muted [overflow-wrap:anywhere]">{inherited}</span>
           </div>
         )}

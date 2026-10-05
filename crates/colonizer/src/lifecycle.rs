@@ -8,15 +8,12 @@
 //! The host's own limits are here as well — a spend budget and a host-disk quota — because
 //! passing one ends a colony exactly the way the max session length does.
 
+use crate::store::SessionStore;
 use crate::{
     ApiResult, App, Shared, archive, client_error,
     execution::ExecutionBackend,
     github, orgs, providers, spend,
-    util::{
-        dir_size,
-        faults::{self, Op},
-        format_disk_size,
-    },
+    util::{dir_size, format_disk_size},
 };
 use axum::{
     Json,
@@ -305,6 +302,12 @@ pub async fn recover(app: &Shared) {
                 "harness restarted: reconnecting to the running microVM".into(),
             )
             .await;
+            // Issue #1093: the restart dropped the colony's gateway socket, so a turn that ends on a
+            // gateway error in the replay or soon after is the restart's doing — continued once,
+            // straight away (events.rs `finish_turn`).
+            app.runtime(&fresh.id)
+                .await
+                .arm_restart_resume(Utc::now() + crate::events::RESTART_RESUME_WINDOW);
             start_link(app, &fresh.id).await;
         } else {
             // A snapshot already `Starting` is an orphaned boot — its owner died with the restart
@@ -909,30 +912,27 @@ pub(crate) fn suspended_waiting(s: &Session) -> bool {
 /// the microVM, so a resumed colony numbers from 1 regardless, and with the stale log still in
 /// place `Runtime::load` picks up the previous life's maximum and drops every new event until the
 /// colony has out-produced it.
-pub(crate) fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
-    let events = dir.join("events.jsonl");
-    if !events.exists() {
+pub(crate) async fn rotate_events(store: &dyn SessionStore, id: &str) -> std::io::Result<()> {
+    let files = store.list_files(id).await?;
+    if !files.iter().any(|f| f == "events.jsonl") {
         return Ok(());
     }
     for n in 1..1000 {
-        let target = dir.join(format!("events-{n}.jsonl"));
-        if !target.exists() {
+        let target = format!("events-{n}.jsonl");
+        if !files.contains(&target) {
             // The error goes back to the caller, which refuses the resume rather than carry on; a
             // rotation that silently failed would drop events instead of just replaying old ones.
-            faults::check(&events, Op::Rename)?;
-            return std::fs::rename(&events, &target);
+            return store.rename_file(id, "events.jsonl", &target).await;
         }
     }
     // Unreachable in practice — getting here means a colony has been resumed a thousand times
     // without one rotation being reported — but falling out silently would be a no-op that the
     // caller reads as success, and a stale log left in place drops the resumed colony's events.
-    // So this is an error like any other failed rotation, and names the directory that filled up.
+    // So this is an error like any other failed rotation, and names the colony that filled up.
     Err(std::io::Error::new(
         std::io::ErrorKind::AlreadyExists,
         format!(
-            "every archive slot in {} is taken (events-1.jsonl through events-999.jsonl), so {} has nowhere to go",
-            dir.display(),
-            events.display()
+            "every archive slot of colony {id} is taken (events-1.jsonl through events-999.jsonl), so its events.jsonl has nowhere to go"
         ),
     ))
 }
@@ -940,27 +940,11 @@ pub(crate) fn rotate_events(dir: &std::path::Path) -> std::io::Result<()> {
 /// The current run epoch of a colony's event log: 1 for a fresh colony, one past the highest
 /// archived `events-N.jsonl` after that. Each successful resume rotates `events.jsonl` aside into
 /// the next archive slot (see `rotate_events`), so the archive count is the resume count, and the
-/// epoch survives harness restarts with no migration. Read straight from the session directory so
-/// an events socket can learn it before any Runtime exists (runtimes are created lazily).
-pub(crate) fn run_epoch_for_dir(dir: &std::path::Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 1;
-    };
-    let mut max = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(rest) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("events-"))
-            .and_then(|n| n.strip_suffix(".jsonl"))
-        else {
-            continue;
-        };
-        if let Ok(n) = rest.parse::<u64>() {
-            max = max.max(n);
-        }
-    }
-    max + 1
+/// epoch survives harness restarts with no migration. Listed through the session store so an events
+/// socket can learn it before any Runtime exists (runtimes are created lazily).
+pub(crate) async fn run_epoch(store: &dyn SessionStore, id: &str) -> u64 {
+    let archives = crate::store::event_archives(store, id).await.unwrap_or_default();
+    archives.last().copied().unwrap_or(0) + 1
 }
 
 /// Which `since` cursor an events socket replays from, given the epoch the client last saw. A
@@ -1192,13 +1176,12 @@ pub async fn resume(
     // an in-flight append cannot straddle it and resurrect an `events.jsonl` holding the old life's
     // seq. Nothing under the guard may itself take `file_lock` (`session_log` does), so the failure
     // reporting stays outside it.
-    let dir = app.session_dir(&id);
     let rotated = {
         let _file_lock = match runtime.as_ref() {
             Some(rt) => Some(rt.file_lock.lock().await),
             None => None,
         };
-        rotate_events(&dir)
+        rotate_events(app.store(), &id).await
     };
     if let Err(e) = rotated {
         // The claim already moved this colony off its old status — and may have taken a parallel
@@ -1218,8 +1201,7 @@ pub async fn resume(
         }
         let e = anyhow::Error::from(e);
         let message = format!(
-            "could not move the old event log aside ({e}); the colony was not resumed — move {} aside yourself and try again",
-            dir.join("events.jsonl").display()
+            "could not move the old event log aside ({e}); the colony was not resumed — move colony {id}'s events.jsonl aside yourself and try again"
         );
         app.storage_failed("rotate the old event log", &e).await;
         app.session_log(&id, "error", message.clone()).await;
@@ -1730,11 +1712,10 @@ pub async fn delete(State(app): State<Shared>, Path(id): Path<String>, Query(q):
         .and_then(|v| v.as_str())
         .map(str::to_string);
     crate::snapshot::remove(&app, &id, snapshot_name.as_deref()).await;
-    let dir = app.session_dir(&id);
-    let leftover = match tokio::fs::remove_dir_all(&dir).await {
+    // Through the session store: the whole session, idempotently (an absent one is not an error).
+    let leftover = match app.store().remove_session(&id).await {
         Ok(()) => None,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => Some(format!("{}: {e}", dir.display())),
+        Err(e) => Some(format!("colony {id}'s session files: {e}")),
     };
     Ok(Json(json!(
         {"deleted": id, "leftover": leftover, "archived": archived, "purged_bundles": purged_bundles, "purge_error": purge_error}
@@ -1762,7 +1743,9 @@ pub(crate) fn start_tasks(app: &crate::Shared) {
         // Issue #321: with recovery settled, drop the claims this mothership still carries for
         // colonies it no longer holds — one that died while the harness was down never released
         // its own. Spawned: never on the boot path, and a no-op under the kill switch.
-        crate::claims::reconcile_orphaned_claims(recovery).await;
+        crate::claims::reconcile_orphaned_claims(recovery.clone()).await;
+        // Issue #919: then keep each claim comment's status current.
+        crate::claims::live::start(recovery);
     });
     let sandbox_watch = app.clone();
     tokio::spawn(async move { watch_sandboxes(sandbox_watch).await });
@@ -1786,6 +1769,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
 mod tests {
     use super::*;
     use crate::sessions::tests::{admit_resume, app_with_colony, colony, stopped_colony_with_worktree};
+    use crate::util::faults::{self, Op};
     use crate::util::short_id;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -2242,23 +2226,31 @@ mod tests {
         assert!(!over_host_disk(1 << 40, 0), "0 means no quota at all");
     }
 
-    #[test]
-    fn a_failed_event_log_rotation_is_reported_not_swallowed() {
-        let dir = std::env::temp_dir().join(format!("colonizer-rotate-{}", short_id()));
+    /// A throwaway local store with one session directory made: the store, the root to clean up,
+    /// and the session's directory.
+    fn local_session(tag: &str) -> (crate::store::LocalDirStore, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("colonizer-{tag}-{}", short_id()));
+        let dir = crate::store::local_session_dir(&root, "s1");
         std::fs::create_dir_all(&dir).unwrap();
+        (crate::store::LocalDirStore::new(&root), root, dir)
+    }
+
+    #[tokio::test]
+    async fn a_failed_event_log_rotation_is_reported_not_swallowed() {
+        let (store, root, dir) = local_session("rotate");
         std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
         let _guard = faults::inject("events.jsonl", Op::Rename, || std::io::Error::from_raw_os_error(5));
-        assert!(rotate_events(&dir).is_err());
+        assert!(rotate_events(&store, "s1").await.is_err());
         drop(_guard);
         assert_eq!(
             std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
             "{\"seq\":1}\n",
             "the log is untouched"
         );
-        rotate_events(&dir).unwrap();
+        rotate_events(&store, "s1").await.unwrap();
         assert!(!dir.join("events.jsonl").exists());
         assert_eq!(std::fs::read_to_string(dir.join("events-1.jsonl")).unwrap(), "{\"seq\":1}\n");
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -2293,46 +2285,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn a_rotation_with_every_archive_slot_taken_is_an_error_and_leaves_the_log_in_place() {
-        let dir = std::env::temp_dir().join(format!("colonizer-rotate-full-{}", short_id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    #[tokio::test]
+    async fn a_rotation_with_every_archive_slot_taken_is_an_error_and_leaves_the_log_in_place() {
+        let (store, root, dir) = local_session("rotate-full");
         std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
         for n in 1..1000 {
             std::fs::write(dir.join(format!("events-{n}.jsonl")), "").unwrap();
         }
-        let message = rotate_events(&dir).unwrap_err().to_string();
+        let message = rotate_events(&store, "s1").await.unwrap_err().to_string();
         assert!(message.contains("every archive slot"), "{message}");
         assert!(
-            message.contains(&dir.display().to_string()),
-            "the error names the directory that filled up: {message}"
+            message.contains("colony s1"),
+            "the error names the colony that filled up: {message}"
         );
         assert_eq!(
             std::fs::read_to_string(dir.join("events.jsonl")).unwrap(),
             "{\"seq\":1}\n",
             "the log is left in place, so the resume stays refused instead of dropping events"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn the_run_epoch_is_one_past_the_highest_archived_event_log() {
-        let dir = std::env::temp_dir().join(format!("colonizer-epoch-{}", short_id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(run_epoch_for_dir(&dir), 1, "a fresh colony is epoch 1");
+    #[tokio::test]
+    async fn the_run_epoch_is_one_past_the_highest_archived_event_log() {
+        let (store, root, dir) = local_session("epoch");
+        assert_eq!(run_epoch(&store, "s1").await, 1, "a fresh colony is epoch 1");
         std::fs::write(dir.join("events.jsonl"), "{\"seq\":1}\n").unwrap();
-        assert_eq!(run_epoch_for_dir(&dir), 1, "the live log is the current run, not an archive");
+        assert_eq!(
+            run_epoch(&store, "s1").await,
+            1,
+            "the live log is the current run, not an archive"
+        );
         std::fs::write(dir.join("events-1.jsonl"), "").unwrap();
         std::fs::write(dir.join("events-2.jsonl"), "").unwrap();
-        assert_eq!(run_epoch_for_dir(&dir), 3, "two resumes are epoch 3");
+        assert_eq!(run_epoch(&store, "s1").await, 3, "two resumes are epoch 3");
         std::fs::write(dir.join("events-9.jsonl"), "").unwrap();
-        assert_eq!(run_epoch_for_dir(&dir), 10, "only the highest archive counts, gaps aside");
         assert_eq!(
-            run_epoch_for_dir(&dir.join("missing")),
-            1,
-            "an unreadable directory reads as a fresh colony"
+            run_epoch(&store, "s1").await,
+            10,
+            "only the highest archive counts, gaps aside"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(
+            run_epoch(&store, "missing").await,
+            1,
+            "an unknown session reads as a fresh colony"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2360,7 +2358,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(app.session_dir("abc").join("events.jsonl"), "{\"seq\":7}\n").unwrap();
-        assert_eq!(run_epoch_for_dir(&app.session_dir("abc")), 1);
+        assert_eq!(run_epoch(app.store(), "abc").await, 1);
         // A runtime in the map, as a just-stopped colony still has while its link task drains.
         let rt_before = app.runtime("abc").await;
         // No free slot, so the resume queues instead of spawning a boot whose git and `msb` work
@@ -2368,11 +2366,7 @@ mod tests {
         fill_the_parallel_limit(&app).await;
         let _ = resume(State(app.clone()), Path("abc".to_string()), None).await.unwrap();
         assert!(app.session_dir("abc").join("events-1.jsonl").exists(), "the rotation landed");
-        assert_eq!(
-            run_epoch_for_dir(&app.session_dir("abc")),
-            2,
-            "one successful resume is epoch 2"
-        );
+        assert_eq!(run_epoch(app.store(), "abc").await, 2, "one successful resume is epoch 2");
         assert!(
             *rt_before.retired.borrow(),
             "the old runtime is retired, so its event sockets close and reconnect"

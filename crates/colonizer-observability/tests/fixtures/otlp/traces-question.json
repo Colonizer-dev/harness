@@ -1,0 +1,340 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeSpans": [
+        {
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          },
+          "spans": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244004000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "3fbaf9c2a17386f0",
+              "spanId": "9fc82f549360c0a2",
+              "startTimeUnixNano": "1790244002000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.kind",
+                  "value": {
+                    "stringValue": "exec_policy"
+                  }
+                },
+                {
+                  "key": "colonizer.question.blocking",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "autonomy"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244008000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "3fbaf9c2a17386f0",
+              "spanId": "5b0ad4c03498c5c5",
+              "startTimeUnixNano": "1790244007000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_mv"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                },
+                {
+                  "key": "colonizer.tool.output_bytes",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244009000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Bash",
+              "parentSpanId": "3fbaf9c2a17386f0",
+              "spanId": "b53da75c4052cf50",
+              "startTimeUnixNano": "1790244006000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "claude-sonnet-5"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "80"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "2000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.12
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244010000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "turn 1",
+              "parentSpanId": "aaa96ff4458d9a5e",
+              "spanId": "3fbaf9c2a17386f0",
+              "startTimeUnixNano": "1790244000000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "9e57c0de"
+                  }
+                },
+                {
+                  "key": "colonizer.outcome",
+                  "value": {
+                    "stringValue": "no_changes"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "300"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "80"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "2000"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "100"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.12
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude_code"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "claude-sonnet-5"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790244030000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "invoke_agent acme/widgets",
+              "parentSpanId": "",
+              "spanId": "aaa96ff4458d9a5e",
+              "startTimeUnixNano": "1790243970000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "cec8d3439520ecad3be23a5193a731e6",
+              "traceState": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

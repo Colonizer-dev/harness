@@ -2,7 +2,7 @@
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
 import type { QuotaActionReply, QuotaActionRequest, QuotaCard } from "../sessions/types";
-import type { DownloadableSkillset, ModelOption, ModelProvider, PluginListing, ProviderHealth, SaveProviderRequest } from "./types";
+import type { DownloadableSkillset, ModelOption, ModelProvider, PluginListing, ProviderHealth, ProviderTestResult, SaveProviderRequest } from "./types";
 
 export interface ProvidersApi {
   providers(): Promise<ModelProvider[]>;
@@ -10,6 +10,8 @@ export interface ProvidersApi {
   deleteProvider(id: string): Promise<unknown>;
   /** Probes the provider from the Mothership; can take ~5 s. */
   providerHealth(id: string): Promise<ProviderHealth>;
+  /** POST /api/providers/{id}/test: one token through the colony's own route; names the URL and status (issue #1018). */
+  testProvider(id: string): Promise<ProviderTestResult>;
   /** GET /api/attention: what needs the maintainer beyond a colony's own question — the provider-out-of-quota cards (issue #767). */
   attention(): Promise<{ quota_cards: QuotaCard[] }>;
   /** POST /api/providers/{id}/quota-action: answer a provider's out-of-quota card (switch, wait or stop). */
@@ -27,6 +29,7 @@ export const providersHttp: ProvidersApi = {
   saveProvider: (id, body) => put(`/api/providers/${enc(id)}`, body),
   deleteProvider: (id) => del(`/api/providers/${enc(id)}`),
   providerHealth: (id) => request(`/api/providers/${enc(id)}/health`),
+  testProvider: (id) => post(`/api/providers/${enc(id)}/test`),
   attention: () => request("/api/attention"),
   quotaAction: (provider, body) => post(`/api/providers/${enc(provider)}/quota-action`, body),
   models: () => request("/api/models"),

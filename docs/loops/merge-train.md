@@ -18,7 +18,11 @@ Each run follows the rules an operator would follow by hand:
    a wait too, never red. A main that is not green merges nothing.
 2. **Merge only on fresh CI.** A pull request merges only when it is behind its base by 0 and every
    check on that exact head is green. GitHub's CLEAN is not enough: it can reflect CI that ran on an
-   older base.
+   older base. The head must also have been quiet — unchanged for the publish module's
+   `merge_train_quiet_minutes` (default 10) — and the merge is pinned to it, so a commit pushed after
+   the first green run is never squashed away; a branch that still gets commits after the merged head
+   is kept and raised as "commits not merged" ([merge train](../architecture.md#merge-train), issue
+   #1075). A remaining quiet wait no longer than `ci_wait_minutes` is sat out once in the run.
 3. **One at a time.** After a merge, every candidate still waiting in the run that shares a file
    with the one merged is brought onto the new base at once (`update-branch`, or the host's
    mechanical rebase — or `needs_redo` — when it now conflicts), so a file the train just touched
@@ -52,9 +56,11 @@ Each run follows the rules an operator would follow by hand:
 7. **Red pull request CI** is re-run once when every failing check is on `flaky_checks` (a trailing
    `*` matches a prefix); otherwise it is left red and reported.
 8. **No attribution.** Merges are squashes titled `<pull request title> (#N)`, pinned to the head
-   that was read; a pull request whose commits carry AI attribution is refused.
-9. **A report every run** — merged, updated (CI running), red (why), redo dispatched, skipped (why),
-   plus what was done about a red main — kept in the loop's history (the last 20 runs), written to
+   that was read (the merge API's `sha`; a push during the merge makes GitHub refuse it, and the pull
+   request waits for checks on its new head); a pull request whose commits carry AI attribution is
+   refused.
+9. **A report every run** — merged (with the head it merged), updated (CI running), red (why), redo
+   dispatched, skipped (why), any "commits not merged", plus what was done about a red main — kept in the loop's history (the last 20 runs), written to
    the activity log (one `publish.merge_train` line per repository) and to each colony's own log.
    The card shows the last report.
 

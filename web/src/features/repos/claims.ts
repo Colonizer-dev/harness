@@ -1,5 +1,6 @@
 // Issue-claim helpers (issue #827): the client-side mirror of the mothership's issue-holding rules.
-import type { Session, SessionStatus } from "../sessions/types";
+import { ApiError } from "../../http";
+import type { DuplicateHolder, Session, SessionStatus } from "../sessions/types";
 import type { Issue } from "./types";
 
 /**
@@ -70,4 +71,16 @@ export function claimWaitPosition(sessions: Session[], session: Session): number
   if (!session.claim_wait || session.status !== "queued" || session.issue === null) return null;
   const at = claimWaitersFor(sessions, session.repo, session.issue).findIndex((s) => s.id === session.id);
   return at < 0 ? null : at + 1;
+}
+
+/**
+ * The holder a launch was refused for as a duplicate (issue #832): the 409 body's `duplicate`, or
+ * null for any other error — an older mothership's 409 carries the message alone.
+ */
+export function duplicateHolder(error: unknown): DuplicateHolder | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null;
+  const body = error.body;
+  if (!body || typeof body !== "object" || !("duplicate" in body)) return null;
+  const holder = (body as { duplicate: unknown }).duplicate;
+  return holder && typeof holder === "object" && "kind" in holder ? (holder as DuplicateHolder) : null;
 }

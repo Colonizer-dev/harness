@@ -1,0 +1,560 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "c542503439c45769f2d0eae42c858650"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "harness"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "operational"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "origin",
+                  "value": {
+                    "stringValue": "host"
+                  }
+                },
+                {
+                  "key": "level",
+                  "value": {
+                    "stringValue": "warn"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "quota paused for 60s"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.harness_log",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108000000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108000000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "1ded931bed388c2ac45346d07ae79427"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "events"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "type",
+                  "value": {
+                    "stringValue": "tool_call"
+                  }
+                },
+                {
+                  "key": "tool_call_id",
+                  "value": {
+                    "stringValue": "toolu_1"
+                  }
+                },
+                {
+                  "key": "name",
+                  "value": {
+                    "stringValue": "Bash"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "tool_call"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.agent_event",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108001250000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108001250000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "b5af3fa7b15442a0167f410338421a1a"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "events"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "type",
+                  "value": {
+                    "stringValue": "turn_end"
+                  }
+                },
+                {
+                  "key": "is_error",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "cost_usd",
+                  "value": {
+                    "doubleValue": 0.42
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "9100"
+                  }
+                },
+                {
+                  "key": "model_usage.claude-opus-4-5.input_tokens",
+                  "value": {
+                    "intValue": "1200"
+                  }
+                },
+                {
+                  "key": "model_usage.claude-opus-4-5.output_tokens",
+                  "value": {
+                    "intValue": "340"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "turn_end"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.agent_event",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108010000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108010000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "fbe916adb3718324f54565659949c3e5"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "gateway"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "operational"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "provider",
+                  "value": {
+                    "stringValue": "openrouter"
+                  }
+                },
+                {
+                  "key": "wire",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "qwen3-coder"
+                  }
+                },
+                {
+                  "key": "wire_model",
+                  "value": {
+                    "stringValue": "qwen/qwen3-coder"
+                  }
+                },
+                {
+                  "key": "status",
+                  "value": {
+                    "intValue": "429"
+                  }
+                },
+                {
+                  "key": "failure",
+                  "value": {
+                    "stringValue": "rate_limited"
+                  }
+                },
+                {
+                  "key": "fallback",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "queue_ms",
+                  "value": {
+                    "intValue": "30"
+                  }
+                },
+                {
+                  "key": "duration_ms",
+                  "value": {
+                    "intValue": "812"
+                  }
+                },
+                {
+                  "key": "request_bytes",
+                  "value": {
+                    "intValue": "2048"
+                  }
+                },
+                {
+                  "key": "response_bytes",
+                  "value": {
+                    "intValue": "120"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "gateway_request"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.gateway_request",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108002000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108002000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "1e9c03f93c2fbcf23ff85bede0b3e0d9"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "outcome.failed"
+                  }
+                },
+                {
+                  "key": "actor",
+                  "value": {
+                    "stringValue": "colony"
+                  }
+                },
+                {
+                  "key": "colony",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "outcome.failed"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.activity",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108003000000000",
+              "severityNumber": 13,
+              "severityText": "WARN",
+              "spanId": "",
+              "timeUnixNano": "1791108003000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "3743acc0d4f9fba25b8070b28dde4fdb"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "spend"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "turn"
+                  }
+                },
+                {
+                  "key": "org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "session",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "agent",
+                  "value": {
+                    "stringValue": "claude-code"
+                  }
+                },
+                {
+                  "key": "model",
+                  "value": {
+                    "stringValue": "claude-opus-4-5"
+                  }
+                },
+                {
+                  "key": "input_tokens",
+                  "value": {
+                    "intValue": "1200"
+                  }
+                },
+                {
+                  "key": "output_tokens",
+                  "value": {
+                    "intValue": "340"
+                  }
+                },
+                {
+                  "key": "cache_read_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "cache_write_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "cost_usd",
+                  "value": {
+                    "doubleValue": 0.42
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "spend"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.spend",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108004000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108004000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -192,25 +192,106 @@ fn is_binary_blob(map: &serde_json::Map<String, Value>) -> bool {
         })
 }
 
+/// The words that name an identifier or a digest field (`user_id`, `commitSha`, `etag`).
+const EXEMPT_WORDS: &[&str] = &[
+    "id",
+    "ids",
+    "uuid",
+    "guid",
+    "sha",
+    "hash",
+    "digest",
+    "checksum",
+    "integrity",
+    "signature",
+    "etag",
+    "fingerprint",
+    "commit",
+];
+
+/// Identifier words commonly written run together as one lower-case word (`commitsha`), which
+/// word splitting cannot take apart. A trailing digit run is dropped before the lookup, so `sha256`,
+/// `sha1` and `sha512` count as `sha` without being listed here.
+const EXEMPT_COMPOUNDS: &[&str] = &["commitsha", "commithash", "md5"];
+
+/// Words that say a field carries a credential. One anywhere in a key overrides the exemption, so
+/// `api_key_id` or `session_cookie_id` keeps the entropy layer.
+const SECRET_WORDS: &[&str] = &[
+    "secret",
+    "secrets",
+    "token",
+    "tokens",
+    "password",
+    "passwd",
+    "pwd",
+    "key",
+    "keys",
+    "apikey",
+    "auth",
+    "cookie",
+    "cookies",
+    "credential",
+    "credentials",
+    "private",
+    "session",
+    "bearer",
+    "jwt",
+];
+
+/// A key split into lower-case words at separators (`_`, `-`, `.`, anything not alphanumeric),
+/// camelCase and PascalCase humps (`commitSha`, `HTTPServerID` → `http`, `server`, `id`) and a digit
+/// run followed by a letter (`v2Hash` → `v2`, `hash`). A digit run stays on the word it ends, so
+/// `sha256` is one word.
+fn key_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for part in key.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let b = part.as_bytes();
+        let mut start = 0;
+        for i in 1..b.len() {
+            let (prev, cur) = (b[i - 1], b[i]);
+            let next_lower = b.get(i + 1).is_some_and(u8::is_ascii_lowercase);
+            let boundary = (prev.is_ascii_lowercase() && cur.is_ascii_uppercase())
+                || (prev.is_ascii_digit() && cur.is_ascii_alphabetic())
+                || (prev.is_ascii_uppercase() && cur.is_ascii_uppercase() && next_lower);
+            if boundary {
+                words.push(part[start..i].to_ascii_lowercase());
+                start = i;
+            }
+        }
+        if start < b.len() {
+            words.push(part[start..].to_ascii_lowercase());
+        }
+    }
+    words
+}
+
+fn is_secret_word(word: &str) -> bool {
+    SECRET_WORDS.contains(&word) || is_secret_key(word)
+}
+
 /// Fields that hold identifiers and digests by design, where a long random-looking value is the
 /// point and not a secret. Only the entropy layer is skipped; a known token shape is still caught.
+///
+/// The key's last word, or the whole key run together, must be an identifier word
+/// ([`EXEMPT_WORDS`], [`EXEMPT_COMPOUNDS`], with a trailing digit run ignored), so `user_id`,
+/// `toolUseId`, `commit_sha`, `sha256` and `etag` are exempt but `did`, `paid`, `valid` and
+/// `android` are not. A secret word anywhere in the key ([`SECRET_WORDS`], or a long one run into
+/// other letters) wins, so `api_key_id` and `session_cookie_id` are not exempt either.
 fn is_entropy_exempt_key(key: &str) -> bool {
-    let k = compact(key);
-    [
-        "id",
-        "uuid",
-        "sha",
-        "hash",
-        "digest",
-        "checksum",
-        "integrity",
-        "signature",
-        "etag",
-        "fingerprint",
-        "commit",
-    ]
-    .iter()
-    .any(|suffix| k.ends_with(suffix))
+    let words = key_words(key);
+    let Some(last) = words.last() else {
+        return false;
+    };
+    // A long secret word also counts run into its neighbours (`SECRETV2ID`, `xtokenid`); the short
+    // ones (`key`, `pwd`, `jwt`, `auth`) only as whole words, or `monkey_id` would lose its exemption.
+    let whole = compact(key);
+    if words.iter().any(|w| is_secret_word(w)) || SECRET_WORDS.iter().any(|s| s.len() >= 5 && whole.contains(s)) {
+        return false;
+    }
+    let identifier =
+        |w: &str| EXEMPT_COMPOUNDS.contains(&w) || EXEMPT_WORDS.contains(&w.trim_end_matches(|c: char| c.is_ascii_digit()));
+    // The whole key as one word too, for a mixed-case spelling the hump rule splits (`ETag`).
+    identifier(last) || identifier(&whole)
 }
 
 // ── Text ──
@@ -1220,6 +1301,140 @@ mod tests {
             !redact_value(&mut ids),
             "identifier and signature fields skip the entropy layer: {ids}"
         );
+    }
+
+    #[test]
+    fn the_entropy_exemption_matches_whole_words_only() {
+        let table = [
+            // Genuine identifiers and digests, in every key style.
+            ("id", true),
+            ("ID", true),
+            ("user_id", true),
+            ("userId", true),
+            ("UserID", true),
+            ("user-id", true),
+            ("colonizer.record.id", true),
+            ("gen_ai.tool.call.id", true),
+            ("tool_call_id", true),
+            ("toolUseIds", true),
+            ("uuid", true),
+            ("request_guid", true),
+            ("commit_sha", true),
+            ("commitSha", true),
+            ("commitsha", true),
+            ("head.commit", true),
+            ("sha256", true),
+            ("file_sha1", true),
+            ("blobSHA256", true),
+            ("content-hash", true),
+            ("md5", true),
+            ("etag", true),
+            ("ETag", true),
+            ("integrity", true),
+            ("signature", true),
+            ("cert.fingerprint", true),
+            ("payload_digest", true),
+            ("checksum", true),
+            // A word that merely ends in an identifier word is not one.
+            ("did", false),
+            ("paid", false),
+            ("valid", false),
+            ("android", false),
+            ("avoid", false),
+            ("rehash_count", false),
+            ("smash", false),
+            ("monkey_id", true),
+            ("keyboard.id", true),
+            ("user_id_note", false),
+            ("", false),
+            ("_", false),
+            // A secret word anywhere wins over an identifier ending.
+            ("api_key_id", false),
+            ("apiKeyId", false),
+            ("session_cookie_id", false),
+            ("session-id", false),
+            ("sessionId", false),
+            ("auth.token.sha", false),
+            ("private_key_fingerprint", false),
+            ("bearerHash", false),
+            ("jwt_signature", false),
+            ("password_hash", false),
+            ("PWD_DIGEST", false),
+            ("credentials.id", false),
+            ("secretKeyId", false),
+            ("access_token_id", false),
+        ];
+        for (key, exempt) in table {
+            assert_eq!(is_entropy_exempt_key(key), exempt, "{key:?} → {:?}", key_words(key));
+        }
+    }
+
+    #[test]
+    fn a_random_value_is_kept_only_under_an_identifier_key() {
+        let random = "Xk9pL2mQ8vR4tY7wZ1aB3cD5eF6gH0jKq7W2e9R4";
+        assert_eq!(random.len(), 40);
+        for key in ["did", "paid", "api_key_id", "session_cookie_id"] {
+            let mut field = json!({ key: random });
+            assert!(redact_value(&mut field), "{key} keeps a random value: {field}");
+            assert!(!field.to_string().contains(random), "{key}: {field}");
+        }
+        for key in ["id", "user_id", "commit_sha", "etag"] {
+            let mut field = json!({ key: random });
+            assert!(!redact_value(&mut field), "{key} redacts an identifier: {field}");
+            assert_eq!(field[key], random);
+        }
+    }
+
+    /// Every key built from identifier words and filler words, in every style, with a secret word
+    /// somewhere in it, keeps the entropy layer.
+    #[test]
+    fn no_key_with_a_secret_word_is_exempt() {
+        let fillers = ["", "user", "tool", "v2", "Request"];
+        let joins: [fn(&[&str]) -> String; 4] = [
+            |w| w.join("_"),
+            |w| w.join("-"),
+            |w| w.join("."),
+            |w| {
+                w.iter()
+                    .enumerate()
+                    .map(|(i, x)| {
+                        let mut c = x.chars();
+                        match (i, c.next()) {
+                            (0, Some(f)) => f.to_ascii_lowercase().to_string() + c.as_str(),
+                            (_, Some(f)) => f.to_ascii_uppercase().to_string() + c.as_str(),
+                            (_, None) => String::new(),
+                        }
+                    })
+                    .collect()
+            },
+        ];
+        let mut checked = 0;
+        for secret in SECRET_WORDS {
+            for filler in fillers {
+                for suffix in EXEMPT_WORDS.iter().chain(EXEMPT_COMPOUNDS) {
+                    for words in [
+                        vec![*secret, *suffix],
+                        vec![filler, secret, suffix],
+                        vec![secret, filler, suffix],
+                        vec![*secret],
+                    ] {
+                        let words: Vec<&str> = words.into_iter().filter(|w| !w.is_empty()).collect();
+                        for join in joins {
+                            let key = join(&words);
+                            assert!(!is_entropy_exempt_key(&key), "{key:?} is exempt");
+                            // SCREAMING_CASE, where a separator still marks the words (an
+                            // upper-cased camelCase key has no word boundaries left to find).
+                            if words.len() == 1 || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                                let upper = key.to_ascii_uppercase();
+                                assert!(!is_entropy_exempt_key(&upper), "{upper:?} is exempt");
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 1000);
     }
 
     #[test]

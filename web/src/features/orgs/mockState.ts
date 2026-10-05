@@ -22,8 +22,11 @@ export function installOrgsMockState(ms: MockState): void {
     },
     // Switched off (issue #176): out of the workspace choices, still reachable via the switcher's Hidden disclosure.
     globex: { enabled: false },
-    // Newly appeared and awaiting a decision, so the prompt card shows; it has no colonies yet.
+    // Newly appeared and awaiting an answer, so the "Added to …" notification shows; neither has
+    // colonies yet. Two of them, so the demo shows the grouped row first and a single row after one
+    // is answered. hooli has no avatar on purpose: its row falls back to the building chip.
     initech: {},
+    hooli: {},
   };
   // Org avatars, as GET /api/orgs reports them. octocat has none on purpose: an org that only
   // appears in the colony list has no avatar, so its row falls back to the initial.
@@ -32,8 +35,9 @@ export function installOrgsMockState(ms: MockState): void {
     globex: "https://avatars.githubusercontent.com/u/7654321?v=4&s=64",
     initech: "https://avatars.githubusercontent.com/u/7654322?v=4&s=64",
   };
-  // Any explicit save — the prompt card, or a workspace settings save — marks the org decided.
-  ms.awaitingDecision = new Set(["initech"]);
+  // Any explicit save — the notification's Add workspace / Not now, or a workspace settings save —
+  // marks the org decided.
+  ms.awaitingDecision = new Set(["initech", "hooli"]);
   ms.orgOfKey = (note: MemoryNote) => (note.scope === "org" ? note.key : note.scope === "repo" ? note.key.split("/")[0] : null);
 
 }

@@ -509,7 +509,7 @@ async fn storage_now(app: &Shared) -> Json<Value> {
         (
             dir_size(&data_dir.join("worktrees")),
             dir_size(&data_dir.join("repos")),
-            dir_size(&data_dir.join("sessions")),
+            dir_size(&crate::store::local_sessions_root(&data_dir)),
             dir_size(&archive_dir),
             sizes,
             msb_home.filter(|p| p.is_dir()).map(|p| dir_size(&p)),

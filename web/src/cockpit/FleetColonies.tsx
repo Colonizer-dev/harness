@@ -76,9 +76,9 @@ export function FleetColonies({ hosts, sessions }: { hosts: FleetHost[]; session
 /** One filter dropdown; the empty value is "all". */
 function Filter({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (v: string) => void }): ReactElement {
   return (
-    <label className="inline-flex items-center gap-1.5 text-[11.5px] text-faint">
+    <label className="inline-flex items-center gap-1.5 text-meta-lg text-faint">
       {label}
-      <select value={value} onChange={(e) => onChange(e.target.value)} className="max-w-[160px] cursor-pointer rounded-md border border-border bg-panel-2 px-1.5 py-1 text-[11.5px] text-text">
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="max-w-[160px] cursor-pointer rounded-md border border-border bg-panel-2 px-1.5 py-1 text-meta-lg text-text">
         <option value="">All</option>
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
@@ -90,9 +90,9 @@ function Filter({ label, value, options, onChange }: { label: string; value: str
 function Totals({ title, totals }: { title: string; totals: FleetTotal[] }): ReactElement {
   return (
     <div className="min-w-0">
-      <div className="mb-1 font-mono text-[10.5px] tracking-[0.12em] text-faint">{title.toUpperCase()}</div>
-      {totals.length === 0 ? <div className="text-[12px] text-faint">—</div> : totals.map((t) => (
-        <div key={t.key} className="flex items-baseline justify-between gap-2 text-[12px] tabular-nums">
+      <div className="mb-1 font-mono text-meta-sm tracking-[0.12em] text-faint">{title.toUpperCase()}</div>
+      {totals.length === 0 ? <div className="text-small text-faint">—</div> : totals.map((t) => (
+        <div key={t.key} className="flex items-baseline justify-between gap-2 text-small tabular-nums">
           <span className="truncate" title={t.key}>{t.key}</span>
           <span className="shrink-0 text-faint">{`${t.colonies} · ${formatCost(t.costUsd)}`}</span>
         </div>
@@ -105,12 +105,12 @@ function Totals({ title, totals }: { title: string; totals: FleetTotal[] }): Rea
 function ColonyRow({ c }: { c: FleetColony }): ReactElement {
   return (
     <tr className="border-t border-border">
-      <td className="px-3.5 py-2 font-mono text-[11px]">
+      <td className="px-3.5 py-2 font-mono text-meta">
         <span className="block max-w-[150px] truncate" title={c.host}>{c.host}</span>
       </td>
       <td className="px-3.5 py-2">
         <span className="block max-w-[380px] truncate" title={c.title}>{c.title}</span>
-        <span className="block truncate font-mono text-[11px] text-faint">{`${c.repo}${c.issue != null ? `#${c.issue}` : ""}`}</span>
+        <span className="block truncate font-mono text-meta text-faint">{`${c.repo}${c.issue != null ? `#${c.issue}` : ""}`}</span>
       </td>
       <td className="px-3.5 py-2 text-muted">{SESSION_STATUS[c.status]?.label ?? c.status}</td>
       <td className={`px-3.5 py-2 ${c.waitingOn ? "text-warn" : "text-faint"}`}>{c.waitingOn ? WAITING_LABEL[c.waitingOn] : "—"}</td>
@@ -142,14 +142,14 @@ export function FleetColoniesView({ colonies, hosts }: { colonies: FleetColony[]
 
   return (
     <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-panel">
-      <div className="border-b border-border px-3.5 py-2 font-mono text-[10.5px] tracking-[0.12em] text-faint">
+      <div className="border-b border-border px-3.5 py-2 font-mono text-meta-sm tracking-[0.12em] text-faint">
         FLEET COLONIES · {colonies.length}
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-3.5 py-2">
         <Filter label="Host" value={host} options={hostsOpts} onChange={setHost} />
         <Filter label="Org" value={org} options={orgOpts} onChange={setOrg} />
         <Filter label="Repo" value={repo} options={repoOpts} onChange={setRepo} />
-        <span className="ml-auto font-mono text-[11px] text-faint">{`${filtered.length} of ${colonies.length} · older history in Settings → Fleet history`}</span>
+        <span className="ml-auto font-mono text-meta text-faint">{`${filtered.length} of ${colonies.length} · older history in Settings → Fleet history`}</span>
       </div>
       <div className="grid gap-4 border-b border-border px-3.5 py-2.5 @min-[1100px]:grid-cols-3">
         <Totals title="By repo" totals={byRepo} />
@@ -157,12 +157,12 @@ export function FleetColoniesView({ colonies, hosts }: { colonies: FleetColony[]
         <Totals title="By day" totals={byDay} />
       </div>
       {filtered.length === 0 ? (
-        <div className="px-3.5 py-3.5 text-[12.5px] text-faint">No colonies match these filters.</div>
+        <div className="px-3.5 py-3.5 text-small-lg text-faint">No colonies match these filters.</div>
       ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[680px] border-collapse text-[12.5px]">
+          <table className="w-full min-w-[680px] border-collapse text-small-lg">
             <thead>
-              <tr className="border-b border-border text-left text-[11px] text-muted">
+              <tr className="border-b border-border text-left text-meta text-muted">
                 <th scope="col" className="px-3.5 pb-2 pt-2.5 font-normal">Host</th>
                 <th scope="col" className="px-3.5 pb-2 pt-2.5 font-normal">Colony</th>
                 <th scope="col" className="px-3.5 pb-2 pt-2.5 font-normal">Status</th>

@@ -625,3 +625,25 @@ fn a_secret_in_a_prefixed_key_drops_the_attribute() {
         }
     }
 }
+
+/// The exporter has no redactor of its own: every exported string goes through colonizer-redact,
+/// the crate the harness writes its logs with (#761), so a string leaves exactly as it would be
+/// written to disk — free text through `redact_text`, a field through `redact_value`'s key-aware path.
+#[test]
+fn the_exporter_redacts_with_the_shared_redactor() {
+    let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+    for text in [
+        format!("git push https://x-access-token:{token}@github.com/o/r"),
+        "postgres://app:hunter2pass@db.internal:5432/app".to_string(),
+        format!("export GH_TOKEN={token}"),
+        "nothing secret here".to_string(),
+    ] {
+        let (out, cut) = scrub_text(&text, None, 4096);
+        assert!(!cut);
+        assert_eq!(out, colonizer_redact::redact_text(&text), "{text}");
+        let (field, _) = scrub_text(&text, Some("password"), 4096);
+        let mut on_disk = json!({ "password": text });
+        colonizer_redact::redact_value(&mut on_disk);
+        assert_eq!(field, on_disk["password"].as_str().unwrap(), "{text}");
+    }
+}

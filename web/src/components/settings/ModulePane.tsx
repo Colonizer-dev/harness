@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { MergeTrainSection } from "../MergeTrain";
-import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField } from "../../types";
+import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField, WebhookDeliveries as Deliveries } from "../../types";
 import { type ImagePull } from "../../useImagePull";
 import { Button, Spinner, Switch, cx, inputClass, seconds } from "../ui";
 import { ModuleProviderMark, isAdvancedField } from "../settingsGuide";
 import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
+import { WebhookDeliveries } from "./WebhookDeliveries";
+import { ObservabilityRows } from "./ObservabilityRows";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
 // ---------------------------------------------------------------------------
@@ -42,7 +44,7 @@ export function riskConfirmation(provider: string, enabled: boolean, settings: R
  */
 export function FullAutonomyWarning() {
   return (
-    <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+    <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-small-lg text-err">
       <p className="font-medium">Full autonomy: a model answers every question, with no answer limit.</p>
       <p className="mt-1 [overflow-wrap:anywhere]">
         Every question a colony stops to ask, at or below the risk ceiling, is settled by the model you name — however many it
@@ -65,7 +67,7 @@ function ImagePullRow({ pull }: { pull: ImagePull }) {
   }, [status?.state]);
 
   const line = (tone: string, body: ReactNode, action?: ReactNode) => (
-    <div className={cx("flex flex-wrap items-center gap-2 rounded-xl border border-border px-3.5 py-2.5 text-[12.5px]", tone)}>
+    <div className={cx("flex flex-wrap items-center gap-2 rounded-xl border border-border px-3.5 py-2.5 text-small-lg", tone)}>
       <div className="min-w-0 flex-1">{body}</div>
       {action}
     </div>
@@ -85,7 +87,7 @@ function ImagePullRow({ pull }: { pull: ImagePull }) {
   }
   if (status.state === "pulling") {
     return (
-      <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-muted">
+      <div className="rounded-xl border border-border px-3.5 py-2.5 text-small-lg text-muted">
         <div className="mb-1.5 flex flex-wrap items-center gap-2">
           <Spinner />
           <span>
@@ -176,6 +178,44 @@ export function ModulePane({
     if (module.kind === "autonomy") void loadJudge();
   }, [module.kind, loadJudge]);
 
+  // The webhook's deliveries (issue #898): retries waiting and the dead letter, with Replay and
+  // Discard. Fetched when the notify pane opens; an older mothership has no route and shows nothing.
+  const [deliveries, setDeliveries] = useState<Deliveries | null>(null);
+  const [deliveryBusy, setDeliveryBusy] = useState<string | null>(null);
+  const loadDeliveries = useCallback(async () => {
+    try {
+      setDeliveries(await api.webhookDeliveries());
+    } catch {
+      /* no /api/notify/deliveries on an older mothership */
+    }
+  }, [api]);
+  useEffect(() => {
+    if (module.kind === "notify") void loadDeliveries();
+  }, [module.kind, loadDeliveries]);
+  const replayDeadLetter = (key: string) => {
+    setDeliveryBusy(key);
+    void api
+      .replayDeadLetter(key)
+      .then((answer) =>
+        answer.delivered ? toast("Delivered.", "success") : toast(`Still failing: ${answer.error ?? "the webhook did not take it"}`, "error"),
+      )
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => {
+        setDeliveryBusy(null);
+        void loadDeliveries();
+      });
+  };
+  const discardDeadLetter = (key: string) => {
+    setDeliveryBusy(key);
+    void api
+      .discardDeadLetter(key)
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => {
+        setDeliveryBusy(null);
+        void loadDeliveries();
+      });
+  };
+
   const save = async (anyway = false) => {
     // Autonomy above workspace_write asks the operator once before it runs (#776). Turning a save
     // into a no-op when they decline is the whole point: nothing is sent.
@@ -255,14 +295,14 @@ export function ModulePane({
       subtitle={info.description}
       back={back}
       aside={
-        <span className="flex items-center gap-2 text-[12.5px] text-muted">
+        <span className="flex items-center gap-2 text-small-lg text-muted">
           <span aria-hidden="true">{draft.enabled ? "On" : "Off"}</span>
           <Switch checked={draft.enabled} onChange={(enabled) => onDraft({ enabled })} label={`${info.title} module enabled`} />
         </span>
       }
       footer={
         <>
-          <span className="mr-auto text-[12.5px] text-muted">{dirty ? "Unsaved changes" : "Changes apply to new colonies"}</span>
+          <span className="mr-auto text-small-lg text-muted">{dirty ? "Unsaved changes" : "Changes apply to new colonies"}</span>
           {dirty && (
             <Button variant="ghost" onClick={onReset}>
               Reset
@@ -279,12 +319,17 @@ export function ModulePane({
           <ImagePullRow pull={pull} />
         </div>
       )}
+      {module.kind === "notify" && deliveries && (
+        <div className="mb-3">
+          <WebhookDeliveries status={deliveries} busy={deliveryBusy} onReplay={replayDeadLetter} onDiscard={discardDeadLetter} />
+        </div>
+      )}
       {module.kind === "autonomy" && (judge !== null || saveError !== null || draft.provider === "full_autonomy") && (
         <div className="mb-3 flex flex-col gap-2">
           {draft.provider === "full_autonomy" && <FullAutonomyWarning />}
           {judge && <AutonomyHealth status={judge} />}
           {saveError && (
-            <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-[12.5px] text-err">
+            <div role="alert" className="rounded-xl border border-err/30 bg-err-soft px-4 py-3 text-small-lg text-err">
               <p className="[overflow-wrap:anywhere]">{saveError}</p>
               <Button size="sm" className="mt-2" disabled={saving} onClick={() => void save(true)}>
                 {saving && <Spinner />} Save anyway
@@ -312,7 +357,7 @@ export function ModulePane({
         </Row>
 
         {draft.provider !== module.provider && fields.length > 0 && (
-          <p className="py-2.5 text-[12.5px] text-warn">These fields belong to the current provider. Save to switch.</p>
+          <p className="py-2.5 text-small-lg text-warn">These fields belong to the current provider. Save to switch.</p>
         )}
 
         {essentials.map(renderField)}
@@ -321,18 +366,19 @@ export function ModulePane({
 
         {module.kind === "voice" && draft.provider !== "browser" && <VoiceKeyRow provider={draft.provider} name={providerInfo?.name ?? draft.provider} />}
         {module.kind === "voice" && <VoiceTestRow unsaved={dirty} />}
+        {module.kind === "observability" && <ObservabilityRows unsaved={dirty} />}
 
-        {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-[13px] text-faint">Nothing to configure.</p>}
+        {fields.length === 0 && module.providers.length <= 1 && <p className="py-3 text-body-sm text-faint">Nothing to configure.</p>}
       </div>
       {advanced.length > 0 && (
         <details className="group mt-3 rounded-xl border border-border bg-panel-2/40 [&_summary::-webkit-details-marker]:hidden">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-2.5 text-[13px] font-medium text-muted hover:text-text">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-2.5 text-body-sm font-medium text-muted hover:text-text">
             <IconChevron size={14} className="transition-transform group-open:rotate-90" />
             Advanced
             <span className="font-normal text-faint">
               · {advanced.length} {advanced.length === 1 ? "setting" : "settings"}
             </span>
-            <span className="ml-auto text-[12px] font-normal text-faint">Ports, timers and paths — the defaults suit most setups</span>
+            <span className="ml-auto text-small font-normal text-faint">Ports, timers and paths — the defaults suit most setups</span>
           </summary>
           <div className="divide-y divide-border border-t border-border px-4">{advanced.map(renderField)}</div>
         </details>
@@ -396,10 +442,10 @@ function Mem0KeyRow() {
 
   return (
     <div className="space-y-2 py-2.5">
-      <label htmlFor={id} className="block text-[13px] font-medium">
+      <label htmlFor={id} className="block text-body-sm font-medium">
         mem0 API key
       </label>
-      <p className="text-[12.5px] text-muted">{state} It stays on the Mothership: colonies never see it.</p>
+      <p className="text-small-lg text-muted">{state} It stays on the Mothership: colonies never see it.</p>
       <form
         className="flex flex-wrap gap-2"
         onSubmit={(e) => {
@@ -429,7 +475,7 @@ function Mem0KeyRow() {
         </Button>
       </form>
       {check && (
-        <p role="status" className={cx("text-[12.5px]", check.ok ? "text-ok" : "text-err")}>
+        <p role="status" className={cx("text-small-lg", check.ok ? "text-ok" : "text-err")}>
           {check.ok ? "mem0 accepted the key." : check.error}
         </p>
       )}

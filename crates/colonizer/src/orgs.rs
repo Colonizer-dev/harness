@@ -124,6 +124,11 @@ pub struct OrgSettings {
     /// `Some(true)` follows the module settings, point by point.
     #[serde(default)]
     pub jev: Option<bool>,
+    /// Whether this org's claimed issues get the `colonizer:host:<host>` label and status edits to
+    /// the claim comment (issue #919). `None` or `Some(true)` means yes; `Some(false)` keeps the
+    /// claim to the label and one comment, which only a release edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_updates: Option<bool>,
     #[serde(default)]
     pub agent: Option<AgentOverrides>,
     #[serde(default)]
@@ -154,11 +159,6 @@ pub struct OrgSettings {
     /// choose. `None` inherits the sandbox module's `preset`.
     #[serde(default)]
     pub stack: Option<String>,
-    /// This org's layer of the exec policy, as the JSON a runner reads (issue #924): an object with
-    /// a `rules` array. It narrows the install module's `exec_policy` setting and is narrowed again
-    /// by a colony's own `.colonizer/exec-policy.json`; `None` adds no layer.
-    #[serde(default)]
-    pub exec_policy: Option<String>,
     /// The egress policy this org's colonies boot with (#303): mode and allow/block entries on top
     /// of the global sandbox module's, which always apply too. `None` inherits it whole.
     #[serde(default)]
@@ -168,6 +168,12 @@ pub struct OrgSettings {
     /// inherits whole; an org tightens, never loosens (docs/path-policy.md).
     #[serde(default)]
     pub path_policy: Option<PathPolicyOverrides>,
+    /// The org layer of the exec policy (issue #924): JSON text in the shape of the install's
+    /// `exec_policy` module setting and a repository's `.colonizer/exec-policy.json`. It reaches the
+    /// org's colonies as `COLONIZER_EXEC_POLICY_ORG`, between the install layer and the repo file;
+    /// layers only narrow (modules/agents/claude-code/README.md). `None` or blank adds no layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_policy: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
@@ -473,7 +479,46 @@ pub fn hold_timeout(modules: &ModulesConfig) -> chrono::Duration {
 /// absent value the minimum.
 pub(crate) fn provider_retry_max_attempts(modules: &ModulesConfig) -> u64 {
     let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
-    setting_u64(&modules.watchdog, &schema, "provider_retry_max_attempts").min(4)
+    setting_u64(&modules.watchdog, &schema, "provider_retry_max_attempts").min(PROVIDER_RETRY_MAX_ATTEMPTS)
+}
+
+/// The most automatic retries the watchdog setting may ask for (issue #1093).
+pub(crate) const PROVIDER_RETRY_MAX_ATTEMPTS: u64 = 10;
+
+/// The wait before each automatic retry when the setting is absent or unreadable (issue #1093): one
+/// minute, then five, then fifteen.
+pub(crate) const DEFAULT_PROVIDER_RETRY_SCHEDULE: [i64; 3] = [1, 5, 15];
+
+/// The wait, in minutes, before each automatic retry after a transient provider error (issues #980,
+/// #1093), from the watchdog module's `provider_retry_schedule_minutes`: a comma- or space-separated
+/// list such as "1, 5, 15", indexed by the attempt already spent. Retries past the end of the list
+/// wait its last entry. Each entry is clamped to 1..=1440 minutes and the list to
+/// [`PROVIDER_RETRY_MAX_ATTEMPTS`] entries; a value with no number in it reads as the default, so a
+/// hand-edited typo never turns the backoff into an immediate retry loop.
+pub(crate) fn provider_retry_schedule(modules: &ModulesConfig) -> Vec<i64> {
+    let schema = schema_for("watchdog", &modules.watchdog.provider, &[]);
+    parse_retry_schedule(&setting_str(&modules.watchdog, &schema, "provider_retry_schedule_minutes"))
+}
+
+fn parse_retry_schedule(raw: &str) -> Vec<i64> {
+    let schedule: Vec<i64> = raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter_map(|part| part.trim().parse::<i64>().ok())
+        .map(|minutes| minutes.clamp(1, 1440))
+        .take(PROVIDER_RETRY_MAX_ATTEMPTS as usize)
+        .collect();
+    if schedule.is_empty() {
+        DEFAULT_PROVIDER_RETRY_SCHEDULE.to_vec()
+    } else {
+        schedule
+    }
+}
+
+/// The wait before automatic retry number `attempt` (1-based) on `schedule`: its entry, or the last
+/// one once the attempts outrun the list. Never panics on an empty schedule.
+pub(crate) fn provider_retry_delay(schedule: &[i64], attempt: u32) -> chrono::Duration {
+    let idx = (attempt.saturating_sub(1) as usize).min(schedule.len().saturating_sub(1));
+    chrono::Duration::minutes(schedule.get(idx).copied().unwrap_or(DEFAULT_PROVIDER_RETRY_SCHEDULE[0]))
 }
 
 /// Whether colonies waiting on a user answer are suspended once the grace period below passes, from
@@ -516,6 +561,12 @@ pub fn discard_vm(modules: &ModulesConfig) -> bool {
 
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
+/// The org's exec policy layer (issue #924), when it names one. Blank reads as unset, like the
+/// install's `exec_policy` setting.
+pub fn org_exec_policy(org: &OrgSettings) -> Option<&str> {
+    org.exec_policy.as_deref().map(str::trim).filter(|policy| !policy.is_empty())
+}
+
 pub fn org_enabled(org: &OrgSettings) -> bool {
     org.enabled != Some(false)
 }
@@ -716,6 +767,10 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
         on_pull_request: overrides.on_pull_request.unwrap_or_else(|| flag("on_pull_request", true)),
         // A provider is not org-scoped, so this switch has no org override to resolve.
         on_provider: flag("on_provider", true),
+        // An out-of-quota card spans orgs (issue #767), so this one has no org override either.
+        on_quota: flag("on_quota", true),
+        // The lifecycle stream (issue #897) is the webhook's alone and has no org override.
+        on_lifecycle: flag("on_lifecycle", false),
         desktop: overrides.desktop.unwrap_or_else(|| flag("desktop", false)),
         webhook_url: overrides
             .webhook_url
@@ -724,26 +779,7 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
     }
 }
 
-/// A policy layer's cap, matching `EXEC_POLICY_MAX_BYTES` in the modules' `execpolicy.mjs`: a policy
-/// file is rules, not data, and more is a mistake. This is measured in bytes and the runner measures
-/// UTF-16 code units, so on a layer with non-ASCII in it this cap is the tighter of the two — a
-/// policy refused here would have been dropped at boot anyway.
-const EXEC_POLICY_MAX_BYTES: usize = 64 * 1024;
-
-/// An org's exec policy as a runner reads it: a JSON object with a `rules` array, within the cap.
-/// Blank and whitespace-only read as unset, like every other string setting — the resolver would
-/// drop the layer anyway, so refusing it here would reject a value the runner would have ignored.
-fn valid_exec_policy(policy: &str) -> Result<(), String> {
-    if policy.len() > EXEC_POLICY_MAX_BYTES {
-        return Err("the exec policy is over 64 KiB, the cap on a policy layer".into());
-    }
-    match serde_json::from_str::<Value>(policy) {
-        Ok(value) if value.is_object() && value.get("rules").is_some_and(Value::is_array) => Ok(()),
-        _ => Err(r#"the exec policy must be a JSON object with a "rules" array"#.into()),
-    }
-}
-
-fn validate(settings: &OrgSettings) -> Result<(), String> {
+pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
             .into_iter()
@@ -811,11 +847,6 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
     {
         return Err(format!("stack must be one of {}", crate::presets::ids().join(", ")));
     }
-    if let Some(policy) = settings.exec_policy.as_deref().map(str::trim).filter(|p| !p.is_empty())
-        && let Err(problem) = valid_exec_policy(policy)
-    {
-        return Err(problem);
-    }
     // A blank mode is inherit, like the stack; entries must each parse, with the parser's own
     // message, so a fence that would silently not hold is never saved.
     if let Some(egress) = &settings.egress {
@@ -831,6 +862,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
                 }
             }
         }
+    }
+    // An exec policy is refused unless the runner would keep every rule of it: a rule it dropped
+    // would be one the operator believes holds (exec_policy.rs). Blank is no org layer.
+    if let Some(policy) = org_exec_policy(settings) {
+        crate::exec_policy::validate(policy)?;
     }
     // Path entries are checked with the same gate the boot resolves through and the same
     // 500-character cap the global lists carry (modules.rs): a path the colony could not honour —
@@ -970,6 +1006,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("jev") {
         incoming.jev = saved.jev;
     }
+    if !named("claim_updates") {
+        incoming.claim_updates = saved.claim_updates;
+    }
     if !named("agent") {
         incoming.agent = saved.agent.clone();
     } else if let (Some(saved_agent), Some(agent)) = (saved.agent.as_ref(), incoming.agent.as_mut()) {
@@ -1001,9 +1040,6 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
     if !named("stack") {
         incoming.stack = saved.stack.clone();
     }
-    if !named("exec_policy") {
-        incoming.exec_policy = saved.exec_policy.clone();
-    }
     if !named("egress") {
         incoming.egress = saved.egress.clone();
     } else if let (Some(saved_egress), Some(egress)) = (saved.egress.as_ref(), incoming.egress.as_mut()) {
@@ -1028,6 +1064,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
         if unnamed_sub("path_policy", "protect_paths") {
             policy.protect_paths = saved_policy.protect_paths.clone();
         }
+    }
+    if !named("exec_policy") {
+        incoming.exec_policy = saved.exec_policy.clone();
     }
     if !named("memory") {
         incoming.memory = saved.memory.clone();
@@ -1123,6 +1162,10 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
         if agent.module.as_deref().is_some_and(|m| m.trim().is_empty()) {
             agent.module = None;
         }
+    }
+    // A blank exec policy is no org layer at all.
+    if req.settings.exec_policy.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        req.settings.exec_policy = None;
     }
     keep_unnamed_fields(
         &mut req.settings,
@@ -1506,12 +1549,12 @@ mod tests {
         assert_eq!(hold_timeout(&configured), chrono::Duration::minutes(1));
     }
 
-    /// Issue #980: the automatic-retry budget reads the watchdog setting, defaults to four, and a
-    /// hand-edited value never exceeds the schema's range.
+    /// Issue #980/#1093: the automatic-retry budget reads the watchdog setting, defaults to three,
+    /// and a hand-edited value never exceeds the schema's range.
     #[test]
-    fn the_provider_retry_budget_reads_the_watchdog_setting_with_a_default_of_four() {
+    fn the_provider_retry_budget_reads_the_watchdog_setting_with_a_default_of_three() {
         let modules = ModulesConfig::default();
-        assert_eq!(provider_retry_max_attempts(&modules), 4, "the schema default");
+        assert_eq!(provider_retry_max_attempts(&modules), 3, "the schema default");
         let mut configured = ModulesConfig::default();
         configured
             .watchdog
@@ -1527,7 +1570,46 @@ mod tests {
             .watchdog
             .settings
             .insert("provider_retry_max_attempts".into(), json!(99));
-        assert_eq!(provider_retry_max_attempts(&configured), 4, "clamped to the schema range");
+        assert_eq!(provider_retry_max_attempts(&configured), 10, "clamped to the schema range");
+    }
+
+    /// Issue #1093: the retry schedule is a watchdog setting — 1, 5, 15 minutes by default — read
+    /// leniently, clamped, and never empty; attempts past its end wait its last entry.
+    #[test]
+    fn the_provider_retry_schedule_reads_the_watchdog_setting() {
+        let modules = ModulesConfig::default();
+        assert_eq!(provider_retry_schedule(&modules), vec![1, 5, 15], "the schema default");
+        let mut configured = ModulesConfig::default();
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_schedule_minutes".into(), json!("2,10 30"));
+        assert_eq!(provider_retry_schedule(&configured), vec![2, 10, 30], "commas or spaces");
+        configured
+            .watchdog
+            .settings
+            .insert("provider_retry_schedule_minutes".into(), json!("0, 99999"));
+        assert_eq!(provider_retry_schedule(&configured), vec![1, 1440], "each entry clamped");
+        for broken in [json!("soon"), json!(""), json!(5)] {
+            configured
+                .watchdog
+                .settings
+                .insert("provider_retry_schedule_minutes".into(), broken.clone());
+            assert_eq!(
+                provider_retry_schedule(&configured),
+                vec![1, 5, 15],
+                "{broken} reads as the default"
+            );
+        }
+        let schedule = [1, 5, 15];
+        assert_eq!(provider_retry_delay(&schedule, 1), chrono::Duration::minutes(1));
+        assert_eq!(provider_retry_delay(&schedule, 3), chrono::Duration::minutes(15));
+        assert_eq!(
+            provider_retry_delay(&schedule, 7),
+            chrono::Duration::minutes(15),
+            "the last entry repeats"
+        );
+        assert_eq!(provider_retry_delay(&[], 1), chrono::Duration::minutes(1), "never panics");
     }
 
     /// Parking discards the microVM unless the operator said otherwise, and a value the schema
@@ -1728,37 +1810,11 @@ mod tests {
         );
         assert!(
             validate(&OrgSettings {
-                exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny"}]}"#.into()),
-                ..Default::default()
-            })
-            .is_ok(),
-            "a rules object is what a runner reads"
-        );
-        assert!(
-            validate(&OrgSettings {
                 exec_policy: Some("   ".into()),
                 ..Default::default()
             })
             .is_ok(),
             "a blank exec policy is not set, not an error"
-        );
-        for bad in [r#"{"rules": {}}"#, r#"["rules"]"#, "not json"] {
-            assert!(
-                validate(&OrgSettings {
-                    exec_policy: Some(bad.into()),
-                    ..Default::default()
-                })
-                .is_err(),
-                "{bad:?} is not a policy a runner would read"
-            );
-        }
-        assert!(
-            validate(&OrgSettings {
-                exec_policy: Some(format!(r#"{{"rules": [], "pad": "{}"}}"#, "x".repeat(70 * 1024))),
-                ..Default::default()
-            })
-            .is_err(),
-            "a policy over the 64 KiB cap is dropped at boot, so it is refused here"
         );
         let bad_model = OrgSettings {
             agent: Some(AgentOverrides {
@@ -1952,7 +2008,7 @@ mod tests {
             budget_usd: Some(20.0),
             host_disk: Some("16G".into()),
             stack: Some("go".into()),
-            exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny"}]}"#.into()),
+            exec_policy: Some(r#"{"rules": [{"id": "deny-rm", "decision": "deny", "command": "rm -rf"}]}"#.into()),
             watchdog: Some(WatchdogOverrides {
                 waiting_minutes: Some(45),
                 ..Default::default()
@@ -2009,7 +2065,7 @@ mod tests {
         );
         assert_eq!(
             incoming.exec_policy, saved.exec_policy,
-            "an org's exec policy a web build from before it survives the save"
+            "an org's exec policy survives a save from a web build that predates it"
         );
         assert_eq!(
             incoming.repo_max_parallel,
@@ -2642,6 +2698,43 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "unknown agent module \"codex\"; available: none");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #924: the org's exec policy is checked at the save with the runner's rules, kept
+    /// across a save that does not name it, and cleared by a blank one.
+    #[tokio::test]
+    async fn an_org_exec_policy_is_validated_on_save_and_kept_by_saves_that_do_not_name_it() {
+        let (app, root) = org_app();
+        let save = |settings: Value| put(State(app.clone()), Path("acme".into()), Json(json!({"settings": settings})));
+        for (policy, problem) in [
+            ("{not json", "the exec policy is not valid JSON"),
+            (
+                r#"{"rules": [{"id": "x", "decision": "deny"}]}"#,
+                "exec policy rule \"x\": a rule needs",
+            ),
+        ] {
+            let err = save(json!({"exec_policy": policy})).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().starts_with(problem), "{}", err.message());
+        }
+        assert!(!app.all_org_settings().contains_key("acme"), "a refused save stores nothing");
+
+        let policy = r#"{"rules": [{"id": "no-publish", "decision": "deny", "command": "npm publish"}]}"#;
+        let _ = save(json!({"exec_policy": policy}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(org_exec_policy(&app.org_settings("acme")), Some(policy));
+        // A save from a build that predates the field keeps it.
+        let _ = save(json!({"max_parallel": 2}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(org_exec_policy(&app.org_settings("acme")), Some(policy));
+        // Blank is no org layer at all.
+        let _ = save(json!({"max_parallel": 2, "exec_policy": "  "}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(app.org_settings("acme").exec_policy, None);
         let _ = std::fs::remove_dir_all(root);
     }
 

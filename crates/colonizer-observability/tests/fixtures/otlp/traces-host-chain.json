@@ -1,0 +1,928 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeSpans": [
+        {
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          },
+          "spans": [
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openrouter"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "qwen3-coder"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "qwen/qwen3-coder"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.wire",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.status",
+                  "value": {
+                    "intValue": "502"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.queue_ms",
+                  "value": {
+                    "intValue": "3"
+                  }
+                },
+                {
+                  "key": "colonizer.fallback",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "upstream_error"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247602200000000",
+              "events": [],
+              "flags": 0,
+              "kind": 3,
+              "links": [],
+              "name": "chat qwen/qwen3-coder",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "ff0aaf626706daaa",
+              "startTimeUnixNano": "1790247601000000000",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openrouter"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "qwen3-coder"
+                  }
+                },
+                {
+                  "key": "gen_ai.response.model",
+                  "value": {
+                    "stringValue": "qwen/qwen3-coder"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "1800"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "420"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.wire",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.status",
+                  "value": {
+                    "intValue": "200"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.queue_ms",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "colonizer.fallback",
+                  "value": {
+                    "boolValue": false
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247605400000000",
+              "events": [],
+              "flags": 0,
+              "kind": 3,
+              "links": [],
+              "name": "chat qwen/qwen3-coder",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "9c7718f7d0deac0a",
+              "startTimeUnixNano": "1790247603000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "chat"
+                  }
+                },
+                {
+                  "key": "gen_ai.provider.name",
+                  "value": {
+                    "stringValue": "openrouter"
+                  }
+                },
+                {
+                  "key": "gen_ai.request.model",
+                  "value": {
+                    "stringValue": "qwen3-coder"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.wire",
+                  "value": {
+                    "stringValue": "openai"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.status",
+                  "value": {
+                    "intValue": "503"
+                  }
+                },
+                {
+                  "key": "colonizer.gateway.queue_ms",
+                  "value": {
+                    "intValue": "30000"
+                  }
+                },
+                {
+                  "key": "colonizer.fallback",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "queue_full"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247636001000000",
+              "events": [],
+              "flags": 0,
+              "kind": 3,
+              "links": [],
+              "name": "chat qwen3-coder",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "ba1ae78382ba5fa8",
+              "startTimeUnixNano": "1790247606000000000",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "path_policy"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.access",
+                  "value": {
+                    "stringValue": "write"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.policy",
+                  "value": {
+                    "stringValue": "protected"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.tool",
+                  "value": {
+                    "stringValue": "Edit"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247602000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step path_policy",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "800ed42b7ddad4c3",
+              "startTimeUnixNano": "1790247602000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "boundary"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.kind",
+                  "value": {
+                    "stringValue": "path_policy_denied"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.control",
+                  "value": {
+                    "stringValue": "path_policy"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247603000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step boundary",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "20b81c96549dd67a",
+              "startTimeUnixNano": "1790247603000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "execute_tool"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.call.id",
+                  "value": {
+                    "stringValue": "toolu_edit"
+                  }
+                },
+                {
+                  "key": "gen_ai.tool.name",
+                  "value": {
+                    "stringValue": "Edit"
+                  }
+                },
+                {
+                  "key": "colonizer.tool.output_bytes",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "tool_error"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247604000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "execute_tool Edit",
+              "parentSpanId": "e1765f8154b46449",
+              "spanId": "9b769e1907e337a8",
+              "startTimeUnixNano": "1790247601000000000",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "jev_ladder"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.applied",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "colonizer.jev.pre_tokens",
+                  "value": {
+                    "intValue": "180000"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.post_tokens",
+                  "value": {
+                    "intValue": "90000"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.trigger",
+                  "value": {
+                    "stringValue": "auto"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.kept",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.dropped_results",
+                  "value": {
+                    "intValue": "1"
+                  }
+                },
+                {
+                  "key": "colonizer.jev.dropped_calls",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247605000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step jev_ladder",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "bdc6a0800fd251e6",
+              "startTimeUnixNano": "1790247605000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "500"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "90"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.2
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247606000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "turn 1",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "e1765f8154b46449",
+              "startTimeUnixNano": "1790247600000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "watchdog_turn_end"
+                  }
+                },
+                {
+                  "key": "colonizer.watchdog.after_secs",
+                  "value": {
+                    "intValue": "95"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247607000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step watchdog_turn_end",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "1848a0c848d92103",
+              "startTimeUnixNano": "1790247607000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "verification"
+                  }
+                },
+                {
+                  "key": "colonizer.verdict",
+                  "value": {
+                    "stringValue": "contradicted"
+                  }
+                },
+                {
+                  "key": "colonizer.verify.by_declaration",
+                  "value": {
+                    "boolValue": false
+                  }
+                },
+                {
+                  "key": "colonizer.verify.exit_code",
+                  "value": {
+                    "intValue": "101"
+                  }
+                },
+                {
+                  "key": "colonizer.verify.commits",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.verify.files_changed",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "error.type",
+                  "value": {
+                    "stringValue": "contradicted"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247608000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step verification",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "246f2b718e774894",
+              "startTimeUnixNano": "1790247602000000000",
+              "status": {
+                "code": 2,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "screening"
+                  }
+                },
+                {
+                  "key": "colonizer.screening.mode",
+                  "value": {
+                    "stringValue": "warn"
+                  }
+                },
+                {
+                  "key": "colonizer.screening.outcome",
+                  "value": {
+                    "stringValue": "warned"
+                  }
+                },
+                {
+                  "key": "colonizer.screening.findings",
+                  "value": {
+                    "intValue": "1"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247609000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step screening",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "be99ee920bcd0f02",
+              "startTimeUnixNano": "1790247609000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "validated"
+                  }
+                },
+                {
+                  "key": "colonizer.finding.severity",
+                  "value": {
+                    "stringValue": "high"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247610000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step validated",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "e56bf03089c7816c",
+              "startTimeUnixNano": "1790247610000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "rejected"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247611000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step rejected",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "7af80db4dca25166",
+              "startTimeUnixNano": "1790247611000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "fix_colony"
+                  }
+                },
+                {
+                  "key": "colonizer.fix.colony",
+                  "value": {
+                    "stringValue": "f1x0c0de"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247612000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step fix_colony",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "fbb5d4148980a9d4",
+              "startTimeUnixNano": "1790247612000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "review"
+                  }
+                },
+                {
+                  "key": "colonizer.review.verdict",
+                  "value": {
+                    "stringValue": "pass"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247613000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step review",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "44ef6eb6ba123f6a",
+              "startTimeUnixNano": "1790247613000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "merged"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247614000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step merged",
+              "parentSpanId": "b64e63eda1f59eab",
+              "spanId": "fe5269033c4d3517",
+              "startTimeUnixNano": "1790247614000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "gen_ai.operation.name",
+                  "value": {
+                    "stringValue": "invoke_agent"
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "6a7e3a11"
+                  }
+                },
+                {
+                  "key": "colonizer.outcome",
+                  "value": {
+                    "stringValue": "merged"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.input_tokens",
+                  "value": {
+                    "intValue": "500"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.output_tokens",
+                  "value": {
+                    "intValue": "90"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_read.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "gen_ai.usage.cache_creation.input_tokens",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "colonizer.cost_usd",
+                  "value": {
+                    "doubleValue": 0.2
+                  }
+                },
+                {
+                  "key": "gen_ai.agent.name",
+                  "value": {
+                    "stringValue": "claude_code"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.origin",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790247660000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "invoke_agent acme/widgets",
+              "parentSpanId": "",
+              "spanId": "b64e63eda1f59eab",
+              "startTimeUnixNano": "1790247540000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "611120bf7d1d1872add8bc59ec202b3a",
+              "traceState": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

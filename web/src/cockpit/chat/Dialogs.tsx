@@ -16,7 +16,7 @@ function Shell({ label, title, children, onClose, footer }: { label: string; tit
   return (
     <dialog ref={ref} onClose={onClose} aria-label={label} className="m-auto w-[min(720px,calc(100vw-24px))] rounded-2xl border border-border bg-panel p-0 text-text backdrop:bg-black/50">
       <div className="flex flex-col gap-3.5 p-5">
-        <h2 className="m-0 text-[16px] font-semibold">{title}</h2>
+        <h2 className="m-0 text-title-sm font-semibold">{title}</h2>
         {children}
         <div className="flex justify-end gap-2">{footer(close)}</div>
       </div>
@@ -26,7 +26,7 @@ function Shell({ label, title, children, onClose, footer }: { label: string; tit
 
 function Field({ label, children }: { label: string; children: ReactNode }): ReactElement {
   return (
-    <div className="flex flex-col gap-1 text-[12.5px] text-muted">
+    <div className="flex flex-col gap-1 text-small-lg text-muted">
       <span>{label}</span>
       {children}
     </div>
@@ -46,8 +46,8 @@ function useRepoItems(repos: readonly Repo[], org: string | null, avatarFor: (or
   );
 }
 
-const textareaClass = "scroll-thin rounded-lg border border-border bg-transparent px-2.5 py-1.5 font-mono text-[12.5px] text-text outline-none focus:border-accent";
-const inputClass = "rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none focus:border-accent";
+const textareaClass = "scroll-thin rounded-lg border border-border bg-transparent px-2.5 py-1.5 font-mono text-small-lg text-text outline-none focus:border-accent";
+const inputClass = "rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none focus:border-accent";
 
 /** The conversation as a colony: pick the repository, edit the prefilled instructions, launch. */
 export function HandoffDialog({
@@ -204,7 +204,7 @@ export function IssueDialog({
       onClose={onClose}
       footer={(close) => (
         <>
-          <span className="mr-auto self-center text-[12px] text-faint">{repo ? `Filed on ${repo} with the mothership's GitHub login.` : ""}</span>
+          <span className="mr-auto self-center text-small text-faint">{repo ? `Filed on ${repo} with the mothership's GitHub login.` : ""}</span>
           <Button onClick={close}>Cancel</Button>
           <Button
             variant="primary"
@@ -249,7 +249,7 @@ export function ImageLightbox({ src, label, width, height, onClose }: { src: str
       className="m-auto max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] cursor-zoom-out overflow-hidden rounded-xl border border-border bg-panel p-0 text-text backdrop:bg-black/75"
     >
       <img src={src} alt={label} className="block max-h-[calc(100vh-72px)] max-w-[calc(100vw-32px)] object-contain" />
-      <div className="flex items-center gap-2 px-3 py-1.5 text-[12px] text-muted">
+      <div className="flex items-center gap-2 px-3 py-1.5 text-small text-muted">
         <span className="min-w-0 flex-1 truncate">{label}</span>
         {width && height ? <span className="tabular-nums text-faint">{`${width}×${height}`}</span> : null}
         <a href={src} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()} className="text-accent hover:underline">

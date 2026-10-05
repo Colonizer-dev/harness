@@ -22,10 +22,12 @@ pub enum Source {
     JevLadder,
     JevFocus,
     Mothership,
+    /// The exporter's own `export_gap` record: a hole in what it could read (#843).
+    ExportGap,
 }
 
 impl Source {
-    pub const ALL: [Source; 11] = [
+    pub const ALL: [Source; 12] = [
         Source::Events,
         Source::Harness,
         Source::Gateway,
@@ -37,6 +39,7 @@ impl Source {
         Source::JevLadder,
         Source::JevFocus,
         Source::Mothership,
+        Source::ExportGap,
     ];
 
     /// The identifier record ids are computed over (`colonizer.rec.v1|…|<source>|…`).
@@ -53,6 +56,7 @@ impl Source {
             Source::JevLadder => "jev_ladder",
             Source::JevFocus => "jev_focus",
             Source::Mothership => "mothership",
+            Source::ExportGap => "export_gap",
         }
     }
 }
@@ -173,6 +177,10 @@ const RECORD_COMMON: &[Rule] = &[
     cd("colonizer.issue.title"),
     cd("colonizer.pr.title"),
     s(TRUNCATED),
+    // The exporter's own metric points (#853): a colony status bucket and a drop reason, both from
+    // fixed sets.
+    s("colonizer.colony.status"),
+    s("colonizer.drop.reason"),
 ];
 
 /// Every span may carry these. The `gen_ai.*` keys are the structural ones only — names, ids,
@@ -192,6 +200,20 @@ const SPAN_COMMON: &[Rule] = &[
     s("gen_ai.tool.name"),
     s("gen_ai.tool.call.id"),
     s("gen_ai.conversation.id"),
+    // The cache halves of a turn's token delta, under the semantic conventions' names.
+    s("gen_ai.usage.cache_read.input_tokens"),
+    s("gen_ai.usage.cache_creation.input_tokens"),
+    // A failure's class from a fixed set (`tool_error`, `turn_error`, `failed`), never its text.
+    s("error.type"),
+    // Who started a turn or launched the colony (`user`, `watchdog`, `autonomy`, `burn_down`, …).
+    s("colonizer.origin"),
+    s("colonizer.cost_usd"),
+    // A span closed without its end event (#846): a tool call with no result at its turn's end, a
+    // span evicted past the open-span cap.
+    s("colonizer.unmatched"),
+    s("colonizer.evicted"),
+    // What the trace budget left out under a turn or the root, by span kind (#847).
+    s("colonizer.spans_suppressed.*"),
 ];
 
 const EVENTS: &[Rule] = &[
@@ -250,8 +272,18 @@ const FINDINGS: &[Rule] = &[
 ];
 
 // `target` names the org for every `workspace.*` entry (crates/colonizer/src/activity.rs), so it is
-// hashed like one.
-const ACTIVITY: &[Rule] = &[s("kind"), s("actor"), s("colony"), h("repo"), h("target"), c("detail")];
+// hashed like one. `detail` is content, whatever the caller says; the kinds whose detail was
+// reviewed as harness-authored structure (`map::STRUCTURE_DETAIL_KINDS`) send it as `summary`.
+const ACTIVITY: &[Rule] = &[
+    s("kind"),
+    s("actor"),
+    s("via"),
+    s("colony"),
+    h("repo"),
+    h("target"),
+    c("detail"),
+    s("summary"),
+];
 
 const SPEND: &[Rule] = &[
     s("kind"),
@@ -267,8 +299,10 @@ const SPEND: &[Rule] = &[
     s("scoring_ms"),
 ];
 
-/// `decisions` and `routing` share a row shape. `options` is a count, never the options.
+/// `decisions.jsonl` (`decide::Row`). `options` is a count, never the options; `outcome.*` is a
+/// grade's scalars (`progressed`, `window_min`).
 const DECISIONS: &[Rule] = &[
+    s("kind"),
     s("point"),
     s("mode"),
     s("options"),
@@ -277,7 +311,27 @@ const DECISIONS: &[Rule] = &[
     s("latency_ms"),
     s("miss"),
     s("did"),
-    s("outcome"),
+    s("outcome.*"),
+];
+
+/// `routing.jsonl`: a `decision` row's routing record (boot.rs) as `decision.<key>`, and an
+/// `actual` row's cost. The rule's `reason` is free text, so content.
+const ROUTING: &[Rule] = &[
+    s("kind"),
+    s("actual_cost_usd"),
+    s("decision.point"),
+    s("decision.jev_mode"),
+    s("decision.jev_agrees"),
+    s("decision.floor"),
+    s("decision.tier"),
+    s("decision.rule"),
+    s("decision.source"),
+    s("decision.score"),
+    s("decision.model"),
+    s("decision.agent"),
+    s("decision.misroute"),
+    s("decision.sensitivity"),
+    c("decision.reason"),
 ];
 
 const JEV_LADDER: &[Rule] = &[
@@ -305,14 +359,21 @@ const JEV_FOCUS: &[Rule] = &[
     s("checks_run"),
 ];
 
+/// The exporter's `export_gap` record: why, how much, and where. `file` is a data-dir-relative
+/// ledger path (`sessions/<id>/events.jsonl`), never a repository path.
+const EXPORT_GAP: &[Rule] = &[s("reason"), s("file"), s("bytes"), s("lines"), s("archived")];
+
 /// `fields.*` stays off until #856 names the field keys it allows.
 const MOTHERSHIP: &[Rule] = &[s("level"), s("target")];
 
 const INVOKE_AGENT: &[Rule] = &[
     s("colonizer.colony.id"),
     h("colonizer.repo"),
+    h("colonizer.org"),
+    d("colonizer.pr.url"),
     s("colonizer.outcome"),
     s("colonizer.trace.dropped_spans"),
+    s("colonizer.trace_budget_exhausted"),
 ];
 const TURN: &[Rule] = &[s("cost_usd"), s("is_error")];
 /// The description is content, and content is never a span attribute (P5): always dropped here.
@@ -321,17 +382,62 @@ const EXECUTE_TOOL: &[Rule] = &[
     s("tool.name"),
     s("is_error"),
     s("denial.class"),
+    s("colonizer.denial.class"),
     s("colonizer.tool.output_bytes"),
 ];
 const CHAT: &[Rule] = &[
+    s("colonizer.gateway.wire"),
+    s("colonizer.gateway.status"),
+    s("colonizer.gateway.queue_ms"),
+    s("colonizer.fallback"),
     s("input_tokens"),
     s("output_tokens"),
     s("status"),
     s("failure"),
     s("fallback"),
 ];
-const QUESTION: &[Rule] = &[s("risk"), s("kind"), s("blocking")];
-const HOST_STEP: &[Rule] = &[s("kind"), s("actor")];
+/// A question's class and shape, and who answered it; never its text or the answer (P5).
+const QUESTION: &[Rule] = &[
+    s("risk"),
+    s("kind"),
+    s("blocking"),
+    s("colonizer.question.risk"),
+    s("colonizer.question.kind"),
+    s("colonizer.question.blocking"),
+    s("colonizer.question.options"),
+    s("colonizer.answered_by"),
+    s("colonizer.unanswered"),
+];
+/// A host-chain step's verdict and counts; never a path, a command, a title or a reason.
+const HOST_STEP: &[Rule] = &[
+    s("kind"),
+    s("actor"),
+    s("colonizer.step"),
+    s("colonizer.verdict"),
+    s("colonizer.verify.by_declaration"),
+    s("colonizer.verify.exit_code"),
+    s("colonizer.verify.commits"),
+    s("colonizer.verify.files_changed"),
+    s("colonizer.screening.mode"),
+    s("colonizer.screening.outcome"),
+    s("colonizer.screening.findings"),
+    s("colonizer.finding.severity"),
+    s("colonizer.review.verdict"),
+    s("colonizer.fix.colony"),
+    s("colonizer.watchdog.after_secs"),
+    s("colonizer.boundary.kind"),
+    s("colonizer.boundary.control"),
+    s("colonizer.path_policy.access"),
+    s("colonizer.path_policy.policy"),
+    s("colonizer.path_policy.tool"),
+    s("colonizer.jev.applied"),
+    s("colonizer.jev.pre_tokens"),
+    s("colonizer.jev.post_tokens"),
+    s("colonizer.jev.trigger"),
+    s("colonizer.jev.kept"),
+    s("colonizer.jev.dropped_results"),
+    s("colonizer.jev.dropped_calls"),
+];
 
 /// The tables a source's log records and metric points are checked against.
 pub(crate) fn for_source(source: Source) -> [&'static [Rule]; 2] {
@@ -342,10 +448,12 @@ pub(crate) fn for_source(source: Source) -> [&'static [Rule]; 2] {
         Source::Findings => FINDINGS,
         Source::Activity => ACTIVITY,
         Source::Spend => SPEND,
-        Source::Decisions | Source::Routing => DECISIONS,
+        Source::Decisions => DECISIONS,
+        Source::Routing => ROUTING,
         Source::JevLadder => JEV_LADDER,
         Source::JevFocus => JEV_FOCUS,
         Source::Mothership => MOTHERSHIP,
+        Source::ExportGap => EXPORT_GAP,
     };
     [RECORD_COMMON, own]
 }

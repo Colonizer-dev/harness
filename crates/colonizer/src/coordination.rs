@@ -5,8 +5,8 @@
 //! request conflicts the other. A colony claims the paths it is about to change, sees which live
 //! same-repo colonies already hold or touch them, and can message them to agree who goes first.
 
-use crate::gateway::{bearer_token, write_json_atomic};
-use crate::{ApiResult, App, AppError, Shared, client_error, sessions::Session, util::append_line};
+use crate::gateway::bearer_token;
+use crate::{ApiResult, App, AppError, Shared, client_error, sessions::Session};
 use axum::{
     Json,
     extract::State,
@@ -15,7 +15,6 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::Path;
 
 /// How many paths one colony may hold claimed at once.
 pub const MAX_CLAIMS: usize = 200;
@@ -106,16 +105,27 @@ fn siblings<'a>(all: &'a [Session], caller: &Session) -> Vec<&'a Session> {
 
 /// Reads a colony's claims ledger, tolerating a missing or torn file. The ledger is written
 /// atomically under the colony's file lock, so a reader sees one whole version, never a half-write.
-fn read_claims(dir: &Path) -> Vec<Claim> {
-    std::fs::read_to_string(dir.join("claims.json"))
+async fn read_claims(app: &App, id: &str) -> Vec<Claim> {
+    app.store()
+        .read_file(id, CLAIMS_FILE)
+        .await
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
 }
 
+/// A colony's held-path claims, in the session store.
+const CLAIMS_FILE: &str = "claims.json";
+/// The messages a colony has received.
+const INBOX_FILE: &str = "inbox.jsonl";
+/// The messages a colony has sent, for the hourly rate limit.
+const SENT_FILE: &str = "sent.jsonl";
+
 /// The paths one colony holds: its non-expired claims, then its pull-request file list.
-fn held_paths(dir: &Path, s: &Session, now: DateTime<Utc>) -> Vec<Claim> {
-    let mut out: Vec<Claim> = read_claims(dir)
+async fn held_paths(app: &App, s: &Session, now: DateTime<Utc>) -> Vec<Claim> {
+    let mut out: Vec<Claim> = read_claims(app, &s.id)
+        .await
         .into_iter()
         .filter(|c| !c.path.is_empty() && !expired(c.at, now))
         .collect();
@@ -136,12 +146,16 @@ fn held_paths(dir: &Path, s: &Session, now: DateTime<Utc>) -> Vec<Claim> {
 
 /// Every live same-repo colony, the caller's own included when `include_self`, with the paths it
 /// holds.
-fn holdings<'a>(app: &App, all: &'a [Session], caller: &Session, include_self: bool) -> Vec<(&'a Session, Vec<Claim>)> {
+async fn holdings<'a>(app: &App, all: &'a [Session], caller: &Session, include_self: bool) -> Vec<(&'a Session, Vec<Claim>)> {
     let now = Utc::now();
-    all.iter()
+    let mut out = Vec::new();
+    for s in all
+        .iter()
         .filter(|s| s.repo == caller.repo && s.status.is_live() && (include_self || s.id != caller.id))
-        .map(|s| (s, held_paths(&app.session_dir(&s.id), s, now)))
-        .collect()
+    {
+        out.push((s, held_paths(app, s, now).await));
+    }
+    out
 }
 
 /// The conflicts between `mine` and the peers' held paths: one entry per peer. Pure, so the rule is
@@ -188,15 +202,15 @@ fn recipient<'a>(peers: &[&'a Session], to: &str, repo: &str) -> Result<&'a Sess
 }
 
 /// How many messages a colony sent in the hour ending at `now`, read from its `sent.jsonl`.
-fn sends_last_hour(path: &Path, now: DateTime<Utc>) -> usize {
-    std::fs::read_to_string(path)
-        .map(|text| {
-            text.lines()
-                .filter_map(|l| serde_json::from_str::<Message>(l).ok())
-                .filter(|m| now.signed_duration_since(m.at) <= Duration::hours(1))
-                .count()
-        })
-        .unwrap_or(0)
+async fn sends_last_hour(app: &App, id: &str, now: DateTime<Utc>) -> usize {
+    let Ok(Some(bytes)) = app.store().read_file(id, SENT_FILE).await else {
+        return 0;
+    };
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Message>(l).ok())
+        .filter(|m| now.signed_duration_since(m.at) <= Duration::hours(1))
+        .count()
 }
 
 // ── The gateway handler ──
@@ -259,12 +273,11 @@ async fn claim(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
     // earlier ones, are dropped first, then the newest within the cap kept, so the file cannot grow
     // without bound. The write is atomic, so a peer reading it never sees a truncated or empty list.
     let now = Utc::now();
-    let dir = app.session_dir(&caller.id);
-    let _ = std::fs::create_dir_all(&dir);
     let rt = app.runtime(&caller.id).await;
     let claims = {
         let _guard = rt.file_lock.lock().await;
-        let mut claims: Vec<Claim> = read_claims(&dir)
+        let mut claims: Vec<Claim> = read_claims(app, &caller.id)
+            .await
             .into_iter()
             .filter(|c| !c.path.is_empty() && !expired(c.at, now) && !claimed.contains(&c.path))
             .collect();
@@ -277,14 +290,18 @@ async fn claim(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
         if claims.len() > MAX_CLAIMS {
             claims.drain(0..claims.len() - MAX_CLAIMS);
         }
-        write_json_atomic(&dir.join("claims.json"), &claims);
+        // Best effort, as before: a claim that cannot be saved is still echoed, and the next one
+        // rewrites the whole list.
+        if let Ok(bytes) = serde_json::to_vec_pretty(&claims) {
+            let _ = app.store().write_file(&caller.id, CLAIMS_FILE, &bytes).await;
+        }
         claims
     };
     // Echo only the paths the ledger kept, so one the cap pushed out is not reported as claimed.
     claimed.retain(|p| claims.iter().any(|c| c.path == *p));
 
     let all = app.sessions.read().await.clone();
-    let held = holdings(app, &all, caller, false);
+    let held = holdings(app, &all, caller, false).await;
     let found = conflicts(&claimed, &held);
 
     // Both sides learn about a collision: the caller why it should hold off, the other colony that a
@@ -326,6 +343,7 @@ async fn claim(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
 async fn claims(app: &App, caller: &Session) -> ApiResult<Value> {
     let all = app.sessions.read().await.clone();
     let colonies: Vec<Value> = holdings(app, &all, caller, true)
+        .await
         .into_iter()
         .map(|(s, paths)| json!({"colony": s.id, "issue": s.issue, "self": s.id == caller.id, "paths": paths}))
         .collect();
@@ -349,10 +367,7 @@ async fn send(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
     let text = crate::util::truncate(&text, MAX_MESSAGE);
 
     let now = Utc::now();
-    let sender_dir = app.session_dir(&caller.id);
-    let _ = tokio::fs::create_dir_all(&sender_dir).await;
-    let sent = sender_dir.join("sent.jsonl");
-    let recent = sends_last_hour(&sent, now);
+    let recent = sends_last_hour(app, &caller.id, now).await;
     if recent >= SEND_MAX_PER_HOUR {
         return Err(client_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -364,30 +379,24 @@ async fn send(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
     let peers = siblings(&all, caller);
     let peer = recipient(&peers, to, &caller.repo)?.clone();
 
-    let inbox = app.session_dir(&peer.id).join("inbox.jsonl");
-    if let Some(dir) = inbox.parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
-    }
     let delivered = Message {
         from: caller.id.clone(),
         from_issue: caller.issue,
         text: text.clone(),
         at: now,
     };
-    append_line(
-        &inbox,
-        &crate::redact::redact_line(&serde_json::to_string(&delivered).unwrap_or_default()),
-    )
-    .await
-    .map_err(|e| {
+    let line = crate::redact::redact_line(&serde_json::to_string(&delivered).unwrap_or_default()).into_owned();
+    app.store().append(&peer.id, INBOX_FILE, line.as_bytes()).await.map_err(|e| {
         client_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("could not deliver the message: {e:#}"),
         )
     })?;
     let recorded = json!({"to": peer.id, "to_issue": peer.issue, "text": text, "at": now});
-    if let Err(e) = append_line(&sent, &crate::redact::redact_line(&recorded.to_string())).await {
-        app.storage_failed("append to the sent-messages log", &e).await;
+    let line = crate::redact::redact_line(&recorded.to_string()).into_owned();
+    if let Err(e) = app.store().append(&caller.id, SENT_FILE, line.as_bytes()).await {
+        app.storage_failed("append to the sent-messages log", &anyhow::Error::from(e))
+            .await;
     }
 
     app.session_log(
@@ -414,10 +423,13 @@ async fn send(app: &App, caller: &Session, body: &Value) -> ApiResult<Value> {
 
 /// `inbox`: the caller's messages, newest first.
 async fn inbox(app: &App, caller: &Session) -> ApiResult<Value> {
-    let path = app.session_dir(&caller.id).join("inbox.jsonl");
-    let mut messages: Vec<Message> = std::fs::read_to_string(&path)
-        .map(|text| text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
-        .unwrap_or_default();
+    let mut messages: Vec<Message> = match app.store().read_file(&caller.id, INBOX_FILE).await {
+        Ok(Some(bytes)) => String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect(),
+        _ => Vec::new(),
+    };
     messages.sort_by_key(|m| std::cmp::Reverse(m.at));
     messages.truncate(INBOX_CAP);
     Ok(Json(

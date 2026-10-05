@@ -5,8 +5,10 @@
 // response bodies live only in memory, never in state.storage.
 
 import { b64decode, b64encode, randomToken, verifyEd25519 } from './crypto.js';
-import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, helloMessage, pathTemplate, stripHopByHop } from './protocol.js';
+import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, WS_MSG_MAX, helloMessage, pathTemplate, responseHeaders, stripHopByHop } from './protocol.js';
 import { offlinePage } from './pages.js';
+import { REJECTED_CLOSE } from './passthrough.js';
+import { count } from './throttle.js';
 import { runtime } from './runtime.js';
 
 const DEFAULTS = {
@@ -48,8 +50,17 @@ export class InstallTunnel {
   }
 
   async fetch(request) {
-    if (request.headers.get('x-relay-kind') === 'tunnel') return this.#dial(request);
+    const kind = request.headers.get('x-relay-kind');
+    if (kind === 'tunnel') return this.#dial(request);
+    if (kind === 'retire') return this.#retire();
     return this.#proxy(request);
+  }
+
+  // The install was retired (worker.js `retire`): the live tunnel and everything riding on it end now,
+  // with 4404 so the mothership knows the install is gone. Its redial then meets the worker's 404.
+  #retire() {
+    if (this.tunnel) this.#killTunnel(this.tunnel, 4404, 'install retired');
+    return new Response(null, { status: 204 });
   }
 
   // ---- mothership side ------------------------------------------------------------------
@@ -124,7 +135,8 @@ export class InstallTunnel {
     this.onEstablish?.(ws, installId);
   }
 
-  // Drop the tunnel and everything riding on it. code 4000 = replaced, 1006 = socket closed, 1000 = idle.
+  // Drop the tunnel and everything riding on it. code 4000 = replaced, 4404 = retired, 1006 = socket closed,
+  // 1000 = idle.
   #killTunnel(tunnel, code, reason) {
     clearInterval(this.pingTimer);
     clearTimeout(this.idleTimer);
@@ -160,7 +172,7 @@ export class InstallTunnel {
     if (!Number.isInteger(status) || status < 200 || status > 599) return this.#failPending(s, 502);
     let headers;
     try {
-      headers = stripHopByHop(frame.headers);
+      headers = responseHeaders(frame.headers);
     } catch {
       // A malformed header list must fail the request, not throw past the message handler and hang it.
       return this.#failPending(s, 502);
@@ -216,6 +228,7 @@ export class InstallTunnel {
     if (frame.t === 'ws_close') {
       // workerd throws on 1005, 1006 and out-of-range codes, which would leave the browser socket open.
       const code = frame.code;
+      if (code === REJECTED_CLOSE) this.#countRejected(s);
       this.#close(s.server, code === 1000 || (code >= 3000 && code <= 4999) ? code : 1000, '');
       return this.#releaseWs(s);
     }
@@ -236,6 +249,15 @@ export class InstallTunnel {
     if (typeof frame.data !== 'string') return this.#closeWsPassthrough(s);
     s.bytesOut += byteLength(frame.data);
     this.#trySendRaw(s.server, frame.data);
+  }
+
+  // A tunnelled websocket the mothership closed because its credential did not authenticate (#1086):
+  // the worker never sees how a passthrough ends, so the DO counts it toward the same throttle the
+  // worker counts rejected HTTP requests in. Only for a pass-through socket (one the worker tagged with
+  // a client key) and only where D1 is bound; a failure to count never disturbs the socket.
+  #countRejected(s) {
+    if (!s.client || !s.installId || !this.env?.DB) return;
+    count(this.env, 'fail', s.installId, s.client, Math.floor(Date.now() / 1000)).catch(() => {});
   }
 
   #closeWsPassthrough(s) {
@@ -314,15 +336,27 @@ export class InstallTunnel {
       start: Date.now(),
       done: false,
       server,
+      // Only for the throttle (#countRejected): the install, and the worker's HMAC key for the client.
+      installId: request.headers.get('x-relay-install-id'),
+      client: request.headers.get('x-relay-client'),
     };
     this.sockets.set(id, s);
     this.#send({ t: 'ws_open', id, path, headers: stripHopByHop(request.headers, { ws: true }) });
     server.addEventListener('message', (ev) => {
+      if (s.done) return;
       const binary = typeof ev.data !== 'string';
-      s.bytesIn += byteLength(ev.data);
+      const size = byteLength(ev.data);
+      if (size > WS_MSG_MAX) {
+        // Too big for the tunnel: end this passthrough on both sides rather than ship it.
+        this.#send({ t: 'ws_close', id, code: 1009 });
+        this.#releaseWs(s);
+        return this.#close(server, 1009, 'ws message too big');
+      }
+      s.bytesIn += size;
       this.#send({ t: 'ws_msg', id, data: binary ? b64encode(new Uint8Array(ev.data)) : ev.data, binary });
     });
     server.addEventListener('close', (ev) => {
+      if (s.done) return; // already ended, and the mothership already told
       this.#send({ t: 'ws_close', id, code: typeof ev.code === 'number' ? ev.code : 1005 });
       this.#releaseWs(s);
     });

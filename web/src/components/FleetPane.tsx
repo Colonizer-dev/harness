@@ -68,7 +68,7 @@ const JOIN_NOTE: Record<Exclude<FleetJoinStatus, "joined">, string> = {
 };
 
 function Code({ children }: { children: ReactNode }) {
-  return <code className="rounded bg-panel-3 px-1 font-mono text-[11.5px]">{children}</code>;
+  return <code className="rounded bg-panel-3 px-1 font-mono text-meta-lg">{children}</code>;
 }
 
 /** One row of a fleet list: the info block, and the row's action(s) on the right. */
@@ -85,7 +85,7 @@ function Row({ children, actions }: { children: ReactNode; actions: ReactNode })
 function Confirm({ question, busy, onConfirm, onCancel }: { question: string; busy: boolean; onConfirm: () => void; onCancel: () => void }): ReactElement {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-2">
-      <span className="text-[12.5px] text-muted">{question}</span>
+      <span className="text-small-lg text-muted">{question}</span>
       <Button size="sm" variant="danger" disabled={busy} onClick={onConfirm}>{busy && <Spinner className="size-3" />}Confirm</Button>
       <Button size="sm" disabled={busy} onClick={onCancel}>Cancel</Button>
     </div>
@@ -97,11 +97,11 @@ function Section({ title, hint, empty, extra, children }: { title: string; hint?
   return (
     <div className="border-t border-border pt-4">
       <div className={cx("flex items-center justify-between gap-2", extra ? "mb-1.5" : "mb-1")}>
-        <h4 className="text-[12.5px] font-semibold">{title}</h4>
+        <h4 className="text-small-lg font-semibold">{title}</h4>
         {extra}
       </div>
-      {hint && <p className="mb-1.5 text-[11.5px] text-faint">{hint}</p>}
-      {children && children !== true ? children : empty !== undefined && <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">{empty}</p>}
+      {hint && <p className="mb-1.5 text-meta-lg text-faint">{hint}</p>}
+      {children && children !== true ? children : empty !== undefined && <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">{empty}</p>}
     </div>
   );
 }
@@ -110,9 +110,9 @@ function Section({ title, hint, empty, extra, children }: { title: string; hint?
 function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactElement<any> }) {
   return (
     <div className="space-y-1">
-      <label htmlFor={id} className="text-[12.5px] font-medium">{label}</label>
+      <label htmlFor={id} className="text-small-lg font-medium">{label}</label>
       {cloneElement(children, { id, "aria-describedby": hint ? `${id}-hint` : undefined })}
-      {hint && <p className="text-[11.5px] text-faint" id={`${id}-hint`}>{hint}</p>}
+      {hint && <p className="text-meta-lg text-faint" id={`${id}-hint`}>{hint}</p>}
     </div>
   );
 }
@@ -121,11 +121,11 @@ function Field({ id, label, hint, children }: { id: string; label: string; hint?
 export function InviteReveal({ invite, onDone }: { invite: CreatedFleetInvite; onDone: () => void }): ReactElement {
   return (
     <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
-      <p className="text-[13px] font-semibold">Invite created</p>
-      <code className="block w-full break-all rounded-lg border border-border bg-panel px-3 py-2 font-mono text-[13px] select-all" aria-label="The invite code">
+      <p className="text-body-sm font-semibold">Invite created</p>
+      <code className="block w-full break-all rounded-lg border border-border bg-panel px-3 py-2 font-mono text-body-sm select-all" aria-label="The invite code">
         {invite.code}
       </code>
-      <p className="text-[12.5px] text-warn">
+      <p className="text-small-lg text-warn">
         Shown only now — give it to the joining machine's operator together with this cockpit's URL. It works once, and {expiresText(invite.expires_at)}.
       </p>
       <Button size="sm" variant="primary" onClick={onDone}>Done</Button>
@@ -138,13 +138,13 @@ export function PendingRow({ request, actions }: { request: FleetPending; action
   return (
     <Row actions={actions}>
       <div className="flex items-center gap-2">
-        <span className="truncate text-[13px] font-medium">{request.name}</span>
-        {request.url && <span className="truncate font-mono text-[11.5px] text-faint">{request.url}</span>}
+        <span className="truncate text-body-sm font-medium">{request.name}</span>
+        {request.url && <span className="truncate font-mono text-meta-lg text-faint">{request.url}</span>}
       </div>
-      <div className="font-mono text-[15px] font-semibold tabular-nums tracking-widest" aria-label="The confirmation code to compare">
+      <div className="font-mono text-lead font-semibold tabular-nums tracking-widest" aria-label="The confirmation code to compare">
         {spacedCode(request.confirm_code)}
       </div>
-      <div className="truncate text-[11.5px] text-faint">{expiresText(request.expires_at)}</div>
+      <div className="truncate text-meta-lg text-faint">{expiresText(request.expires_at)}</div>
     </Row>
   );
 }
@@ -162,21 +162,21 @@ export function HistorySync({ on, preview, previewError, busy, onToggle }: {
 }): ReactElement {
   return (
     <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
-      <p className="flex items-center gap-2 text-[13px] font-semibold">
+      <p className="flex items-center gap-2 text-body-sm font-semibold">
         History sync <Badge tone={on ? "ok" : "neutral"}>{on ? "On" : "Off"}</Badge>
       </p>
       {preview ? (
-        <p className="text-[12.5px] text-muted">
+        <p className="text-small-lg text-muted">
           {preview.colonies} finished {preview.colonies === 1 ? "colony" : "colonies"} and {preview.payloads} log {preview.payloads === 1 ? "file" : "files"},{" "}
           {formatBytes(preview.total_bytes)} in all{on ? "" : " would go"} to the owner · {preview.pending_colonies} not yet sent ({formatBytes(preview.pending_bytes)}).
         </p>
       ) : previewError ? (
-        <p className="text-[12.5px] text-warn">Couldn’t read what would be sent: {previewError}</p>
+        <p className="text-small-lg text-warn">Couldn’t read what would be sent: {previewError}</p>
       ) : (
-        <p className="flex items-center gap-2 text-[12.5px] text-muted"><Spinner className="size-3" /> Reading what would be sent…</p>
+        <p className="flex items-center gap-2 text-small-lg text-muted"><Spinner className="size-3" /> Reading what would be sent…</p>
       )}
-      {preview && <p className="text-[11.5px] text-faint">Never sent: {preview.excludes}.</p>}
-      {!on && <p className="text-[11.5px] text-faint">Joining a fleet sends nothing until you turn this on; leaving and re-joining turns it off again.</p>}
+      {preview && <p className="text-meta-lg text-faint">Never sent: {preview.excludes}.</p>}
+      {!on && <p className="text-meta-lg text-faint">Joining a fleet sends nothing until you turn this on; leaving and re-joining turns it off again.</p>}
       <Button size="sm" variant={on ? "secondary" : "primary"} disabled={busy || (!on && !preview)} onClick={() => onToggle(!on)}>
         {busy && <Spinner className="size-3" />}
         {on ? "Stop sending history" : "Send history to the owner"}
@@ -315,11 +315,11 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
       back={back}
     >
       <div className="space-y-4">
-        {!fleet && !error && <p className="flex items-center gap-2 text-[13px] text-muted"><Spinner /> Loading…</p>}
-        {error && <p className="text-[12.5px] text-warn">Couldn’t read the fleet: {error}</p>}
+        {!fleet && !error && <p className="flex items-center gap-2 text-body-sm text-muted"><Spinner /> Loading…</p>}
+        {error && <p className="text-small-lg text-warn">Couldn’t read the fleet: {error}</p>}
         {fleet && role && (
           <>
-            <p className="flex items-center gap-2 text-[12.5px] text-muted">This mothership is <Badge tone={ROLE_TONE[role]}>{ROLE_LABEL[role]}</Badge></p>
+            <p className="flex items-center gap-2 text-small-lg text-muted">This mothership is <Badge tone={ROLE_TONE[role]}>{ROLE_LABEL[role]}</Badge></p>
 
             {created && <InviteReveal invite={created} onDone={() => setCreated(null)} />}
 
@@ -342,7 +342,7 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                     <div className="overflow-hidden rounded-xl border border-border">
                       {fleet.invites.map((invite) => (
                         <Row key={invite.id} actions={ask(invite.id, "Revoke", "Revoke this invite?", () => api.deleteFleetInvite(invite.id))}>
-                          <p className="truncate text-[12.5px] text-muted">Invite <Code>{invite.id}</Code> · {expiresText(invite.expires_at)}</p>
+                          <p className="truncate text-small-lg text-muted">Invite <Code>{invite.id}</Code> · {expiresText(invite.expires_at)}</p>
                         </Row>
                       ))}
                     </div>
@@ -384,14 +384,14 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                           actions={ask(member.id, "Remove", `Remove ${member.name}?`, () => api.removeFleetMember(member.id))}
                         >
                           <div className="flex min-w-0 items-center gap-2">
-                            <span className="truncate text-[13px] font-medium">{member.name}</span>
+                            <span className="truncate text-body-sm font-medium">{member.name}</span>
                             <MemberHealthBadge health={member.health} />
                           </div>
-                          <div className="truncate text-[11.5px] text-faint">{member.url ? `${member.url} · ` : ""}joined {joinedDay(member.joined_at)}</div>
+                          <div className="truncate text-meta-lg text-faint">{member.url ? `${member.url} · ` : ""}joined {joinedDay(member.joined_at)}</div>
                           {member.health?.hint && member.health.state !== "ok" && (
-                            <div className="truncate text-[11.5px] text-muted">{member.health.hint}</div>
+                            <div className="truncate text-meta-lg text-muted">{member.health.hint}</div>
                           )}
-                          {member.health?.note && <div className="truncate text-[11.5px] text-faint">{member.health.note}</div>}
+                          {member.health?.note && <div className="truncate text-meta-lg text-faint">{member.health.note}</div>}
                         </Row>
                       ))}
                     </div>
@@ -408,15 +408,15 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
             {role === "none" &&
               (fleet.joining ? (
                 <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
-                  <p className="text-[13px] font-semibold">Joining <Code>{fleet.joining.owner_url}</Code></p>
-                  <div className="font-mono text-[22px] font-semibold tabular-nums tracking-[0.3em]" aria-label="The confirmation code">
+                  <p className="text-body-sm font-semibold">Joining <Code>{fleet.joining.owner_url}</Code></p>
+                  <div className="font-mono text-display-sm font-semibold tabular-nums tracking-[0.3em]" aria-label="The confirmation code">
                     {spacedCode(fleet.joining.confirm_code)}
                   </div>
-                  <p className="text-[12.5px] text-muted">
+                  <p className="text-small-lg text-muted">
                     Show this to the owner. Press <strong>Codes match</strong> only when their screen shows the same six digits.
                   </p>
-                  {joinNote && <p role="status" className="text-[12.5px] text-warn">{joinNote}</p>}
-                  {joinError && <p role="alert" className="text-[12.5px] text-err">{joinError}</p>}
+                  {joinNote && <p role="status" className="text-small-lg text-warn">{joinNote}</p>}
+                  {joinError && <p role="alert" className="text-small-lg text-err">{joinError}</p>}
                   <div className="flex gap-2">
                     <Button size="sm" variant="primary" disabled={joinBusy} onClick={() => void confirmJoin()}>{joinBusy && <Spinner className="size-3" />}Codes match</Button>
                     <Button size="sm" disabled={joinBusy} onClick={() => void act("join-cancel", () => api.cancelFleetJoin())}>Cancel</Button>
@@ -424,8 +424,8 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                 </div>
               ) : (
                 <form className="space-y-3 border-t border-border pt-4" onSubmit={(event) => void join(event)}>
-                  <h4 className="text-[12.5px] font-semibold">Join a fleet</h4>
-                  <p className="text-[11.5px] text-faint">Ask the owner for their cockpit's URL and an invite code; both screens will then show a matching code.</p>
+                  <h4 className="text-small-lg font-semibold">Join a fleet</h4>
+                  <p className="text-meta-lg text-faint">Ask the owner for their cockpit's URL and an invite code; both screens will then show a matching code.</p>
                   <div className="grid gap-3 sm:grid-cols-2">
                     <Field id="fleet-owner-url" label="Owner's URL">
                       <input className={inputClass} value={form.ownerUrl} placeholder="http://10.0.0.5:7878" onChange={(e) => setForm({ ...form, ownerUrl: e.target.value })} />
@@ -440,7 +440,7 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
                       <input className={inputClass} value={form.url} placeholder="http://10.0.0.6:7878" onChange={(e) => setForm({ ...form, url: e.target.value })} />
                     </Field>
                   </div>
-                  {joinError && <p role="alert" className="text-[12.5px] text-err">{joinError}</p>}
+                  {joinError && <p role="alert" className="text-small-lg text-err">{joinError}</p>}
                   <Button type="submit" variant="primary" disabled={joinBusy || form.ownerUrl.trim() === "" || form.code.trim() === ""}>
                     {joinBusy && <Spinner />}
                     Join fleet
@@ -451,8 +451,8 @@ export function FleetPane({ back, initial }: { back?: () => void; /** Pre-seeded
             {role === "member" && fleet.membership && (
               <Section title="Membership">
                 <div className="space-y-2">
-                  <p className="text-[12.5px] text-muted">Member of the fleet at <Code>{fleet.membership.owner_url}</Code> since {joinedDay(fleet.membership.joined_at)} ({timeAgo(fleet.membership.joined_at)}).</p>
-                  <p className="text-[11.5px] text-faint">Leaving revokes this machine's fleet token and updates the mesh; every local colony and setting stays.</p>
+                  <p className="text-small-lg text-muted">Member of the fleet at <Code>{fleet.membership.owner_url}</Code> since {joinedDay(fleet.membership.joined_at)} ({timeAgo(fleet.membership.joined_at)}).</p>
+                  <p className="text-meta-lg text-faint">Leaving revokes this machine's fleet token and updates the mesh; every local colony and setting stays.</p>
                   {ask("leave", "Leave fleet", "Leave the fleet?", () => api.leaveFleet())}
                   <HistorySync
                     on={fleet.membership.history_sync}

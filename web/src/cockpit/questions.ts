@@ -5,9 +5,10 @@
 // needs-you lists and the nest can say what is being asked instead of only that something is.
 import { useContext, useEffect, useMemo, useState } from "react";
 
+import { attentionText } from "../components/ui";
 import { ApiContext } from "../context";
 import { needsYou } from "../notifications";
-import type { Diagnosis, Session } from "../types";
+import type { Attention, Diagnosis, Session } from "../types";
 
 const PREFIX = /^waiting for an answer:\s*/i;
 
@@ -19,11 +20,60 @@ export function questionOf(diagnosis: Diagnosis | null | undefined): string | nu
   return text || null;
 }
 
-/** Whether a colony's attention flag is the watchdog's own (a stall), not just its open question. */
+/** The attention reasons the watchdog itself raises: a stall, a stall it ran out of nudges on, a control defeat. */
+const WATCHDOG_REASONS: ReadonlySet<string> = new Set(["stalled", "nudges_exhausted", "control_defeat"]);
+
+/** Whether a colony's attention flag is the watchdog's own (a stall), not its open question or an autopilot hold. */
 export function watchdogFlagged(session: Session): boolean {
   const reason = (session.attention as { reason?: string } | null | undefined)?.reason;
-  return Boolean(session.attention) && reason !== "waiting_for_answer";
+  return reason != null && WATCHDOG_REASONS.has(reason);
 }
+
+/** Whether the colony is, or may be, waiting on an answer: only then may a card ask for one (issue #1093). */
+export function expectsAnswer(session: Session): boolean {
+  return session.status === "waiting_for_answer" || session.attention?.reason === "waiting_for_answer" || Boolean(session.prewarm);
+}
+
+/**
+ * What a colony that needs you needs, in one line, for when its question text is not (or not yet)
+ * known. Names the real cause (issue #1093): the watchdog only when the watchdog flagged it, a
+ * question only when one is expected, and otherwise the attention's own words — "Stopped on repeated
+ * gateway errors (502, connection to Anthropic)" rather than "the watchdog flagged this colony".
+ */
+export function needsYouLine(session: Session, asked = "the colony asked you a question"): string {
+  if (watchdogFlagged(session)) return "the watchdog flagged this colony";
+  if (expectsAnswer(session)) return asked;
+  if (session.attention) return attentionText(session.attention);
+  if (session.status === "failed") return "the colony failed";
+  return asked;
+}
+
+/** Whether the colony is parked while an automatic retry of a provider error backs off (issues #980, #1093). */
+export function autoRetrying(session: Session): boolean {
+  return session.status === "parked" && session.attention?.reason === "provider_retry";
+}
+
+/** Whether autopilot holds the colony because its gateway retries ran out (issue #1093): Retry is the way on. */
+export function gatewayHeld(session: Session): boolean {
+  return session.attention?.reason === "autopilot_held" && session.attention.cause === "gateway_error";
+}
+
+/**
+ * The pending retry, as the card says it: "Stopped on a model gateway error (502, connection to
+ * Anthropic): retrying in 4 min". A missing or unreadable `retry_at` (an older mothership) still
+ * says the retry is automatic.
+ */
+export function retryLine(attention: Attention, now: number = Date.now()): string {
+  const summary = attention.summary?.trim() || "Stopped on a model gateway error";
+  const at = attention.retry_at ? Date.parse(attention.retry_at) : Number.NaN;
+  if (Number.isNaN(at)) return `${summary}: retrying automatically`;
+  const minutes = Math.ceil((at - now) / 60_000);
+  return minutes <= 0 ? `${summary}: retrying now` : `${summary}: retrying in ${minutes} min`;
+}
+
+/** The message Retry sends a colony held on gateway errors: the work is fine, the request is what failed. */
+export const GATEWAY_RETRY_MESSAGE =
+  "Your last turn stopped on a model gateway error. Nothing was wrong with your work: continue where you left off.";
 
 /** The key a colony's question is refetched on: it only changes when the colony moves. */
 const keyOf = (s: Session) => `${s.id}:${s.status}:${s.last_activity_at ?? s.updated_at}`;

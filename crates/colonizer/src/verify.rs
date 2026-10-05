@@ -1388,6 +1388,18 @@ pub(crate) async fn after_turn(app: Shared, id: String, gate_publish: bool) {
         Autopilot::Publish => {
             if crate::authority::external_writes_blocked() {
                 app.session_log(&id, "warn", crate::events::AUTOPILOT_BLOCKED.into()).await;
+            } else if let Some(open) = crate::github_breaker::hold_publish(&app, &id) {
+                // Issue #1074: GitHub refuses the account, so the publish waits, like the kill-switch
+                // holds it, and goes out by itself once the breaker's probe finds GitHub working.
+                app.session_log(
+                    &id,
+                    "warn",
+                    format!(
+                        "autopilot: not publishing yet, {}; the publish is held and goes out once GitHub works again",
+                        crate::github_breaker::pause_message(&open)
+                    ),
+                )
+                .await;
             } else if let Some(s) = app.session(&id).await.filter(|s| s.status.is_live()) {
                 // Issue #98: the confirmed verdict is the approval. The host verifier mints the
                 // publish grant — reviewer is the verifier, builder the colony's agent — bound to
@@ -2242,6 +2254,37 @@ pub(crate) mod tests {
         assert_eq!(
             v.contradictions,
             vec!["`bun install --frozen-lockfile && bun run test` exited 1 in a fresh checkout".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The same fallback for pnpm (#589): the stock node image carries neither bun nor pnpm, so a
+    /// pnpm repository verified there is named unverifiable, never contradicted by a failed install.
+    #[tokio::test]
+    async fn a_pnpm_repository_without_pnpm_in_the_image_is_unverifiable_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let repo = worktree_fixture(&app, None, "did the work", false).await;
+        std::fs::write(
+            repo.join("package.json"),
+            r#"{"name": "web", "scripts": {"test": "vitest run"}}"#,
+        )
+        .unwrap();
+        std::fs::write(repo.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "a pnpm repository");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/fix.ts"), "export const fixed = true;\n").unwrap();
+
+        let v = verify(&app, &missing_tool_runner(PNPM.check)).await;
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.command_source.as_deref(), Some("pnpm-lock.yaml"));
+        assert_eq!(v.exit_code, Some(127));
+        assert_eq!(
+            v.summary,
+            "`pnpm` (picked from `pnpm-lock.yaml`) is not in the colony image, so \
+             `pnpm install --frozen-lockfile && pnpm test` could not run (exit 127)"
         );
         let _ = std::fs::remove_dir_all(root);
     }

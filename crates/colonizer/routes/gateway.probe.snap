@@ -1,1 +1,2 @@
 /api/providers/{id}/health                           GET    unauth=401    token=owner            activity=-
+/api/providers/{id}/test                             POST   unauth=401    token=owner            activity=-

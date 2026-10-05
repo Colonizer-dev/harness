@@ -1,5 +1,5 @@
 import type { QuotaCard, SessionStatus, StallInfo } from "../sessions/types";
-import type { AccountAlert, ModelProviderStatus, StatusQuota } from "../providers/types";
+import type { AccountAlert, GitHubPause, ModelProviderStatus, StatusQuota } from "../providers/types";
 
 export interface HarnessStatus {
   github: { connected: boolean; login?: string; name?: string | null; avatar_url?: string | null; source?: string; error?: string };
@@ -52,6 +52,8 @@ export interface HarnessStatus {
   quota_cards?: QuotaCard[];
   /** Claude accounts that need the owner (issue #984): a rejected sign-in or an exhausted plan, with the colonies waiting on each. Empty when everything is fine; older mothership builds omit it. */
   account_alerts?: AccountAlert[];
+  /** The GitHub account's circuit breaker (issue #1074): paused while GitHub refuses the account, with the cause and the next step. Older mothership builds omit it. */
+  github_pause?: GitHubPause;
   /**
    * A drain is holding the queue while an update or a restart waits for the colonies still booting
    * or publishing (issue #880): no new boot starts, and a launch or a resume asked for now waits.
@@ -315,6 +317,41 @@ export interface UpdateStatus {
     colonies: { id: string; repo: string; outcome: string }[];
     backup: string | null;
   };
+  /** Issue #1097: what the releases newer than this build say about themselves; absent on an older mothership. */
+  notices?: UpdateNotice[];
+  /** Colonies whose microVM still runs on a previous app slot's components; absent on an older mothership. */
+  behind?: BehindColony[];
+  /** The restarts onto the new version asked for through POST /api/update/restart. */
+  restarts?: { restarting: string[]; failed: Record<string, string> };
+  /** Why this build cannot update in place, and the command that switches it to releases; null for a release install. */
+  switch_to_releases?: { reason: string; command: string; then: string } | null;
+}
+
+/** POST /api/update/restart's answer: the colonies whose restart started, and the ones skipped with why. */
+export interface RestartOnNewVersion {
+  restarting: string[];
+  skipped: { id: string; reason: string }[];
+}
+
+/** One `critical` or `fixes-running` line a release carries (changelog.d/README.md). */
+export interface UpdateNotice {
+  version: string;
+  severity: "critical" | "fixes-running";
+  line: string;
+  probe?: string;
+  issue?: number;
+  /** The colonies the notice's probe matched on this machine; null when there is no probe, or this build lacks it. */
+  affected: { count: number; colonies: string[] } | null;
+}
+
+/** A colony still running on the components of the app slot it booted from. */
+export interface BehindColony {
+  id: string;
+  repo: string;
+  status: SessionStatus;
+  slot: string | null;
+  /** The notice lines whose probe matched this colony: the fixes it needs the restart for. */
+  affected_by: string[];
 }
 
 /** GET /api/telemetry: the live map on colonizer.dev (docs/telemetry.md). */

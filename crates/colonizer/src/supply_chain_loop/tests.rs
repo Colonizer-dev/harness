@@ -2,6 +2,7 @@
 //! from the fake below: no test runs a scanner, reads a mirror or reaches an advisory database.
 
 use super::*;
+use crate::sessions::SessionStatus;
 use crate::sessions::tests::colony;
 use chrono::TimeZone;
 
@@ -710,4 +711,151 @@ async fn the_schedule_fires_only_when_switched_on_opted_in_and_due() {
     let st = app.supply_chain.snapshot().await;
     assert!(st.next_run_at.unwrap() > later, "the next slot is booked");
     let _ = std::fs::remove_dir_all(root);
+}
+
+// --- issue #821: one answer whichever path launches the same fix --------------------------------
+
+/// The holder a launch was refused for, or a panic naming what happened instead.
+fn refused_holder(result: Result<Json<Session>, crate::AppError>, path: &str) -> String {
+    let err = match result {
+        Ok(Json(s)) => panic!("{path}: a duplicate launch was admitted as {}", s.id),
+        Err(e) => e,
+    };
+    assert_eq!(err.status(), StatusCode::CONFLICT, "{path}: {}", err.message());
+    let refusal = err
+        .1
+        .downcast_ref::<crate::duplicates::Refusal>()
+        .unwrap_or_else(|| panic!("{path}: the 409 names no holder: {}", err.message()));
+    refusal.holder.colony.clone().expect("a local holder has an id")
+}
+
+/// The `colonizer launch` body for the hyper advisory the fixtures report, as the server reads it.
+fn cli_request(allow_duplicate: bool) -> NewSession {
+    let body = crate::cli::launch_body(
+        "acme/app",
+        None,
+        Some("bump hyper".into()),
+        None,
+        None,
+        None,
+        allow_duplicate,
+        false,
+        false,
+        Some(("hyper".into(), "RUSTSEC-2026-0012".into())),
+    );
+    serde_json::from_value(body).expect("the CLI body is a NewSession")
+}
+
+/// The cockpit's Packages hand-off (the API body) for the same advisory.
+fn api_request(allow_duplicate: bool) -> NewSession {
+    serde_json::from_value(json!({
+        "repo": "acme/app",
+        "title": "Supply chain: hyper",
+        "supply_chain": {"package": "hyper", "advisory": "RUSTSEC-2026-0012"},
+        "allow_duplicate": allow_duplicate,
+    }))
+    .unwrap()
+}
+
+/// Issue #821: the loop's dedupe and the launch refusal are one rule (duplicates.rs). Whichever
+/// path started the fix first — the loop, or a person through the API — the loop, the API and
+/// `colonizer launch` all refuse the same finding again, naming the same colony, and
+/// `allow_duplicate` lets the API and the CLI through.
+#[tokio::test]
+async fn the_loop_the_api_and_the_cli_give_the_same_answer_for_one_finding() {
+    let cargo = group("acme/app", &fixture_findings(), Severity::Moderate)
+        .into_iter()
+        .find(|t| t.ecosystem == "cargo")
+        .unwrap();
+    assert!(
+        cargo
+            .claims()
+            .contains(&crate::supersede::SupplyChainTarget::new("hyper", "rustsec-2026-0012"))
+    );
+
+    // The loop first.
+    let dir = root("821-loop");
+    let app = app_at(&dir);
+    // Draining: every colony queues and none boots, so the holders hold for the whole test.
+    app.drain.enter();
+    opt_in(&app, "acme").await;
+    let report = run_once(&app, &fake(), &RunRequest::default(), "manual", utc(29, 9)).await;
+    let holder = report.dispatched[0]
+        .session
+        .clone()
+        .expect("the loop started the cargo colony");
+    let records = app.supply_chain.snapshot().await.targets;
+    let sessions = app.sessions.read().await.clone();
+    assert_eq!(
+        duplicate_of(&cargo, &records, &sessions).as_deref(),
+        Some(holder.as_str()),
+        "the loop"
+    );
+    assert_eq!(
+        refused_holder(
+            sessions::create(State(app.clone()), None, Json(api_request(false))).await,
+            "the API"
+        ),
+        holder
+    );
+    assert_eq!(
+        refused_holder(
+            sessions::create(State(app.clone()), None, Json(cli_request(false))).await,
+            "the CLI"
+        ),
+        holder
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A person first, through the API.
+    let dir = root("821-api");
+    let app = app_at(&dir);
+    app.drain.enter();
+    opt_in(&app, "acme").await;
+    let Json(hand) = sessions::create(State(app.clone()), None, Json(api_request(false)))
+        .await
+        .unwrap();
+    let sessions_now = app.sessions.read().await.clone();
+    assert_eq!(
+        duplicate_of(&cargo, &[], &sessions_now).as_deref(),
+        Some(hand.id.as_str()),
+        "the loop"
+    );
+    let report = run_once(&app, &fake(), &RunRequest::default(), "manual", utc(29, 9)).await;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|k| k.ecosystem.as_deref() == Some("cargo") && k.reason.contains(&format!("colony {} already targets", hand.id))),
+        "{:#?}",
+        report.skipped
+    );
+    assert!(
+        report.dispatched.iter().all(|d| d.ecosystem != "cargo"),
+        "the loop started no second cargo colony"
+    );
+    assert_eq!(
+        refused_holder(
+            sessions::create(State(app.clone()), None, Json(api_request(false))).await,
+            "the API"
+        ),
+        hand.id
+    );
+    assert_eq!(
+        refused_holder(
+            sessions::create(State(app.clone()), None, Json(cli_request(false))).await,
+            "the CLI"
+        ),
+        hand.id
+    );
+    // The way out is the same everywhere a person launches.
+    let Json(again) = sessions::create(State(app.clone()), None, Json(api_request(true)))
+        .await
+        .unwrap_or_else(|e| panic!("allow_duplicate through the API: {}", e.message()));
+    assert_ne!(again.id, hand.id, "a second colony through the API");
+    let Json(again) = sessions::create(State(app.clone()), None, Json(cli_request(true)))
+        .await
+        .unwrap_or_else(|e| panic!("allow_duplicate through the CLI: {}", e.message()));
+    assert_ne!(again.id, hand.id, "a second colony through the CLI");
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,14 +1,15 @@
 // Settings → Remote access (issue #535): the switch behind the relay tunnel of remote.rs
 // (docs/protocol.md §6.10), the link and its QR code, the live link status, the pairing codes
 // waiting to be confirmed or rejected and the bound owner to unbind (#599, all local-only at the
-// mothership), and the reset that retires a leaked link. The switch state itself is
+// mothership), whether the relay asks for GitHub sign-in before the pair code (#1086, local-only
+// too), and the reset that retires a leaked link. The switch state itself is
 // owned by App — the top bar's badge reads the same view — so every answer is folded back up
 // through `onChanged`.
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { encode } from "uqr";
 
 import { errorMessage, useApi, useToast } from "../context";
-import type { RemotePairing, RemoteStatus } from "../types";
+import type { LinkDevices, LinkInvite, RemotePairing, RemoteStatus } from "../types";
 import { Pane, Row } from "./SettingsDialog";
 import { Button, Spinner, Switch, cx } from "./ui";
 
@@ -64,11 +65,125 @@ export function QrCode({ text, size = 168 }: { text: string; size?: number }): R
   );
 }
 
+/** Settings → Remote access → Sign in on another device (review finding R3). This machine's own
+ * access token is never accepted through the link, so a browser elsewhere signs in the way a phone
+ * pairs: a single-use link opened there shows six digits, typed here, and that browser gets a link
+ * credential of its own — listed here, revocable one by one, and all rotated by Reset link. */
+export function LinkDevicesBlock({ initialDevices }: { initialDevices?: LinkDevices | null }): ReactElement {
+  const api = useApi();
+  const toast = useToast();
+  const [devices, setDevices] = useState<LinkDevices | null>(initialDevices ?? null);
+  const [invite, setInvite] = useState<LinkInvite | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setDevices(await api.linkDevices());
+    } catch {
+      /* keep what is on screen */
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
+
+  const run = async (key: string, action: () => Promise<void>) => {
+    setBusy(key);
+    try {
+      await action();
+    } catch (e) {
+      toast(errorMessage(e), "error");
+    } finally {
+      setBusy(null);
+      void refresh();
+    }
+  };
+
+  const start = () =>
+    run("invite", async () => {
+      setInvite(await api.linkInvite());
+      setCode("");
+    });
+  const confirm = () =>
+    run("confirm", async () => {
+      const { label } = await api.confirmLinkDevice(code);
+      setInvite(null);
+      setCode("");
+      toast(`Signed in: ${label}`);
+    });
+  const revoke = (id: string) =>
+    run(`revoke:${id}`, async () => {
+      await api.revokeLinkDevice(id);
+      toast("Signed out of the link");
+    });
+
+  return (
+    <div>
+      <h4 className="mb-1.5 text-small-lg font-semibold">Sign in on another device</h4>
+      <p className="mb-2 text-small-lg text-muted">
+        This machine’s access token never works through the link. To use the cockpit from another computer or phone, open a
+        one-time link there and type the six digits it shows here. That browser gets a sign-in of its own; Reset link signs every
+        one of them out.
+      </p>
+      {invite ? (
+        <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
+          <p className="text-small-lg text-muted">Open this on the other device (it works once, for five minutes):</p>
+          <code className="block break-all font-mono text-small select-all" aria-label="One-time sign-in link">
+            {invite.url}
+          </code>
+          <QrCode text={invite.url} size={140} />
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              aria-label="Code shown on the other device"
+              inputMode="numeric"
+              placeholder="123 456"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              className="w-28 rounded-lg border border-border bg-panel px-2.5 py-1.5 font-mono text-body-sm tracking-widest"
+            />
+            <Button size="sm" variant="primary" disabled={busy !== null || code.replace(/\D/g, "").length !== 6} onClick={() => void confirm()}>
+              {busy === "confirm" && <Spinner className="size-3" />}
+              Confirm
+            </Button>
+            <Button size="sm" disabled={busy !== null} onClick={() => setInvite(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button size="sm" disabled={busy !== null} onClick={() => void start()}>
+          {busy === "invite" && <Spinner className="size-3" />}
+          Sign in on another device
+        </Button>
+      )}
+      {devices && devices.devices.length > 0 && (
+        <div className="mt-3 overflow-hidden rounded-xl border border-border">
+          {devices.devices.map((device) => (
+            <div key={device.id} className="flex items-center gap-3 border-b border-border px-3.5 py-2 last:border-b-0">
+              <div className="min-w-0 flex-1 truncate text-small-lg">
+                {device.label}
+                <span className="text-faint"> · signed in {new Date(device.paired_at).toLocaleDateString()}</span>
+              </div>
+              <Button size="sm" disabled={busy !== null} onClick={() => void revoke(device.id)}>
+                {busy === `revoke:${device.id}` && <Spinner className="size-3" />}
+                Sign out
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RemoteAccessPane({
   remote,
   onChanged,
   back,
   initialPairing,
+  initialDevices,
 }: {
   /** The view App holds; null until the first GET /api/remote has answered. */
   remote: RemoteStatus | null;
@@ -77,6 +192,8 @@ export function RemoteAccessPane({
   back?: () => void;
   /** Seeds the pairing block before the pane's own first fetch; static tests render with it. */
   initialPairing?: RemotePairing | null;
+  /** Seeds the signed-in devices block, for static tests. */
+  initialDevices?: LinkDevices | null;
 }): ReactElement {
   const api = useApi();
   const toast = useToast();
@@ -139,6 +256,19 @@ export function RemoteAccessPane({
     } catch (e) {
       // The server's own message says which failure it was: a 502 is the relay refusing or
       // missing, and the switch stays off because nothing was persisted.
+      toast(errorMessage(e), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleGithub = async (requireGithub: boolean) => {
+    setSaving(true);
+    try {
+      onChanged(await api.setRemoteRequireGithub(requireGithub));
+      toast(requireGithub ? "The link asks for GitHub sign-in first" : "Devices pair with the link by code alone");
+    } catch (e) {
+      // A 502 says the relay refused or predates the setting; nothing changed then.
       toast(errorMessage(e), "error");
     } finally {
       setSaving(false);
@@ -210,7 +340,7 @@ export function RemoteAccessPane({
   return (
     <Pane title="Remote access" subtitle="Open this cockpit from your phone or another computer" back={back}>
       {!remote ? (
-        <p className="flex items-center gap-2 text-[13px] text-muted">
+        <p className="flex items-center gap-2 text-body-sm text-muted">
           <Spinner /> Loading…
         </p>
       ) : (
@@ -225,31 +355,50 @@ export function RemoteAccessPane({
               onChange={(checked) => void toggle(checked)}
             />
           </Row>
-          <div className="space-y-2 text-[12.5px] text-muted">
+          <div className="space-y-2 text-small-lg text-muted">
             <p>
               While on, this machine dials out an encrypted tunnel to the Colonizer relay and serves this cockpit on a link of its
               own. Nothing listens on a public port here, and switching off drops the tunnel and every request in flight at once.
             </p>
             <p>
-              The link only works for you: it asks for a GitHub sign-in, and the first one waits for a six-digit code that you
-              confirm here; the cockpit behind it then asks for its own access token, as it would for any new browser. What it
+              The link only works for devices you pair here: a one-time link opened on the device shows six digits, and nothing
+              reaches this cockpit until you type them here.
+              {remote.require_github
+                ? " Before that, the relay also asks for a GitHub sign-in, and the first one waits for a code you confirm here."
+                : " The relay lets nothing else through: a browser that is not paired gets a page telling it how to pair."}{" "}
+              This machine’s own access token is never accepted through the link. What it
               exposes is this cockpit — everything you can see and do here, colony terminals included — and nothing else on this
               machine: no other port or service, and no file or shell access beyond what the cockpit itself offers. The relay
               routes the traffic and stores no request data — only this install’s public key and the pairing.
             </p>
           </div>
 
+          <Row id="remote-github" label="Ask for GitHub sign-in first" inline>
+            <Switch
+              id="remote-github"
+              labelledBy="remote-github-label"
+              label="Ask for GitHub sign-in first"
+              checked={remote.require_github}
+              disabled={saving}
+              onChange={(checked) => void toggleGithub(checked)}
+            />
+          </Row>
+          <p className="text-small-lg text-muted">
+            Optional. On, the relay sends every device through GitHub sign-in as the link’s owner before the pair code; off, the
+            pair code alone is enough. The relay limits how often a device or the link may try, either way.
+          </p>
+
           {remote.enabled && (
             <div className="space-y-4 border-t border-border pt-4">
               <div>
-                <h4 className="mb-1.5 text-[12.5px] font-semibold">Your link</h4>
+                <h4 className="mb-1.5 text-small-lg font-semibold">Your link</h4>
                 {link ? (
                   // At phone width the link takes the whole row and the buttons sit under it. The
                   // display gets a <wbr> after every dot, so it wraps on the dots and only breaks
                   // mid-segment if one is longer than a line; Copy and the QR keep the plain link.
                   <div className="flex flex-wrap items-center gap-2">
                     <code
-                      className="w-full min-w-0 break-words rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-[12.5px] select-all text-text sm:w-auto sm:flex-1"
+                      className="w-full min-w-0 break-words rounded-lg border border-border bg-panel-2 px-3 py-2 font-mono text-small-lg select-all text-text sm:w-auto sm:flex-1"
                       aria-label="Remote access link"
                     >
                       {link.split(".").flatMap((part, i) => (i === 0 ? [part] : [".", <wbr key={i} />, part]))}
@@ -262,15 +411,15 @@ export function RemoteAccessPane({
                     </Button>
                   </div>
                 ) : (
-                  <p className="text-[12.5px] text-muted">The link appears once the relay has answered the registration.</p>
+                  <p className="text-small-lg text-muted">The link appears once the relay has answered the registration.</p>
                 )}
                 {showQr && link && (
                   <div className="mt-3">
                     <QrCode text={link} />
-                    <p className="mt-1.5 text-[12px] text-faint">Point a phone camera here to open the link.</p>
+                    <p className="mt-1.5 text-small text-faint">Point a phone camera here to open the link.</p>
                   </div>
                 )}
-                <p role="status" className={cx("mt-2 flex items-center gap-1.5 text-[12.5px]", remote.connected ? "text-ok" : "text-warn")}>
+                <p role="status" className={cx("mt-2 flex items-center gap-1.5 text-small-lg", remote.connected ? "text-ok" : "text-warn")}>
                   <span aria-hidden="true" className={cx("size-1.5 shrink-0 rounded-full", remote.connected ? "bg-ok" : "bg-warn")} />
                   {connectionText(remote)}
                 </p>
@@ -278,22 +427,27 @@ export function RemoteAccessPane({
 
               {!pairing && pairingError && (
                 <div>
-                  <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
-                  <p className="text-[12.5px] text-warn">Couldn’t read the pairing from the relay: {pairingError}</p>
+                  <h4 className="mb-1.5 text-small-lg font-semibold">Pairing</h4>
+                  <p className="text-small-lg text-warn">Couldn’t read the pairing from the relay: {pairingError}</p>
                 </div>
               )}
 
-              {pairing && (
+              {/* The GitHub owner binding (#534) matters only behind the GitHub gate; without it the block
+                  stays while there is still an owner to unbind or a sign-in waiting. */}
+              {pairing && (remote.require_github || pairing.owner || pairing.pending.length > 0) && (
                 <div>
-                  <h4 className="mb-1.5 text-[12.5px] font-semibold">Pairing</h4>
+                  <h4 className="mb-1.5 text-small-lg font-semibold">Pairing</h4>
                   {pairing.owner ? (
                     <div className="space-y-2">
-                      <p className="text-[12.5px] text-muted">
-                        Paired with @{pairing.owner.github_login} — only that GitHub account can sign in to the link.
+                      <p className="text-small-lg text-muted">
+                        Paired with @{pairing.owner.github_login} —{" "}
+                        {remote.require_github
+                          ? "only that GitHub account can sign in to the link."
+                          : "GitHub sign-in is off, so this only matters if you switch it back on."}
                       </p>
                       {askUnbind ? (
                         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">
-                          <p className="min-w-0 flex-1 text-[12.5px] text-muted">
+                          <p className="min-w-0 flex-1 text-small-lg text-muted">
                             Unbind @{pairing.owner.github_login}? Their sign-in stops working at once.
                           </p>
                           <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void unbind()}>
@@ -311,12 +465,12 @@ export function RemoteAccessPane({
                       )}
                     </div>
                   ) : pairing.pending.length === 0 ? (
-                    <p className="text-[12.5px] text-muted">
+                    <p className="text-small-lg text-muted">
                       No pending requests. The first sign-in to the link shows a code that appears here to confirm.
                     </p>
                   ) : (
                     <>
-                      <p className="mb-1.5 text-[12.5px] text-muted">
+                      <p className="mb-1.5 text-small-lg text-muted">
                         A sign-in to the link is waiting. Confirm only if your phone shows the same code; reject it if you
                         did not just sign in.
                       </p>
@@ -326,8 +480,8 @@ export function RemoteAccessPane({
                           // meta line stays one line of its own instead of orphan-wrapping.
                           <div key={request.code} className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
                             <div className="min-w-0 flex-1">
-                              <div className="font-mono text-[15px] font-semibold tabular-nums tracking-widest">{formatPairingCode(request.code)}</div>
-                              <div className="truncate text-[12px] text-faint">
+                              <div className="font-mono text-lead font-semibold tabular-nums tracking-widest">{formatPairingCode(request.code)}</div>
+                              <div className="truncate text-small text-faint">
                                 @{request.github_login} · {expiryText(request.expires_at)}
                               </div>
                             </div>
@@ -348,9 +502,13 @@ export function RemoteAccessPane({
               )}
 
               <div className="border-t border-border pt-4">
+                <LinkDevicesBlock initialDevices={initialDevices} />
+              </div>
+
+              <div className="border-t border-border pt-4">
                 {askReset ? (
                   <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel-2 px-3.5 py-2.5">
-                    <p className="min-w-0 flex-1 text-[12.5px] text-muted">Really reset? The old link stops working.</p>
+                    <p className="min-w-0 flex-1 text-small-lg text-muted">Really reset? The old link stops working.</p>
                     <Button size="sm" variant="danger" disabled={saving} onClick={() => void resetLink()}>
                       {saving && <Spinner className="size-3" />}
                       Confirm
@@ -364,8 +522,9 @@ export function RemoteAccessPane({
                     <Button size="sm" variant="danger" disabled={saving} onClick={() => setAskReset(true)}>
                       Reset link
                     </Button>
-                    <span className="text-[12.5px] text-muted">
-                      A fresh identity and link; the old link stops working and its owner is unbound. The way out of a leaked one.
+                    <span className="text-small-lg text-muted">
+                      A fresh identity and link; the old link is retired at the relay, its owner unbound, and every browser signed in to it
+                      signed out. The way out of a leaked one.
                     </span>
                   </div>
                 )}

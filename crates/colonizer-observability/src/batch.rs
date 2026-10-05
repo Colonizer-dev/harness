@@ -436,6 +436,7 @@ impl Signal for Metric {
         match self.data.as_mut()? {
             metric::Data::Gauge(g) => g.data_points.first_mut().map(|p| &mut p.attributes),
             metric::Data::Sum(s) => s.data_points.first_mut().map(|p| &mut p.attributes),
+            metric::Data::Histogram(h) => h.data_points.first_mut().map(|p| &mut p.attributes),
             _ => None,
         }
     }

@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { fillTemplate } from "../../providerCatalog";
+import { providerTestToast } from "../../providerHealth";
 import type { ModelProvider, ProviderAuth, ProviderPricing, ProviderPreset } from "../../types";
 import { useModels } from "../../useModels";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass } from "../ui";
@@ -64,13 +65,13 @@ function FormField({
   return (
     <div className={cx("min-w-0 space-y-1", className)}>
       <div className="flex items-center gap-1">
-        <label htmlFor={id} className="text-[12.5px] font-medium text-muted">
+        <label htmlFor={id} className="text-small-lg font-medium text-muted">
           {label}
         </label>
         {info && <InfoButton label={label}>{info}</InfoButton>}
       </div>
       {children}
-      {error ? <span className="block text-[12px] text-err">{error}</span> : hint ? <span className="block text-[12px] text-faint">{hint}</span> : null}
+      {error ? <span className="block text-small text-err">{error}</span> : hint ? <span className="block text-small text-faint">{hint}</span> : null}
     </div>
   );
 }
@@ -278,6 +279,15 @@ export function ProviderForm({
         }),
       );
       toast(`${saved.name} saved`);
+      // A new provider, or one whose route or key changed, gets a one-token test through the colony's
+      // own route, and the toast names the URL and status it got: a wrong base path shows here, at
+      // setup, instead of in a run of failed colony turns (issue #1018).
+      if (isNew || url !== initial?.base_url || wire !== initial?.wire || api_key !== undefined) {
+        api
+          .testProvider(saved.id)
+          .then((result) => toast(providerTestToast(saved.name, result)))
+          .catch((e) => toast({ title: `${saved.name}: test request failed`, body: errorMessage(e), kind: "warn" }));
+      }
       onSaved(saved);
     } catch (e) {
       toast(errorMessage(e), "error");
@@ -301,7 +311,7 @@ export function ProviderForm({
   return (
     <form onSubmit={save} className="space-y-3 rounded-xl border border-accent/40 bg-panel p-3.5">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13.5px] font-semibold">{isNew ? `New ${presetLabel(preset)} provider` : `Edit ${initial.name}`}</span>
+        <span className="text-body font-semibold">{isNew ? `New ${presetLabel(preset)} provider` : `Edit ${initial.name}`}</span>
         {!isNew && <KeyBadge provider={initial} />}
         {wire === "openai" && (
           <Badge tone="info" title="Speaks the OpenAI protocol; the Mothership gateway translates">
@@ -309,7 +319,7 @@ export function ProviderForm({
           </Badge>
         )}
       </div>
-      {isNew && PRESET_HINT[preset] && <p className="text-[12.5px] text-muted">{PRESET_HINT[preset]}</p>}
+      {isNew && PRESET_HINT[preset] && <p className="text-small-lg text-muted">{PRESET_HINT[preset]}</p>}
       <div className="grid gap-3 sm:grid-cols-2">
         <FormField
           id={ids.id}
@@ -326,7 +336,7 @@ export function ProviderForm({
             placeholder="my-provider"
             spellCheck={false}
             aria-invalid={Boolean(idError && id)}
-            className={cx(inputClass, "font-mono text-[13px] disabled:opacity-60")}
+            className={cx(inputClass, "font-mono text-body-sm disabled:opacity-60")}
           />
         </FormField>
         <FormField id={ids.name} label="Name">
@@ -345,7 +355,7 @@ export function ProviderForm({
               onChange={(e) => setVars((v) => ({ ...v, [variable.name]: e.target.value }))}
               placeholder={variable.placeholder}
               spellCheck={false}
-              className={cx(inputClass, "font-mono text-[13px]")}
+              className={cx(inputClass, "font-mono text-body-sm")}
             />
           </FormField>
         ))}
@@ -370,7 +380,7 @@ export function ProviderForm({
             placeholder={wire === "openai" ? "https://api.openai.com" : "https://api.example.com/anthropic"}
             spellCheck={false}
             aria-invalid={Boolean(originKeyError || (urlError && baseUrl && !unfilled.length))}
-            className={cx(inputClass, "font-mono text-[13px]", template.length > 0 && "text-muted")}
+            className={cx(inputClass, "font-mono text-body-sm", template.length > 0 && "text-muted")}
           />
         </FormField>
         <FormField id={ids.auth} label="Authentication">
@@ -384,12 +394,12 @@ export function ProviderForm({
         </FormField>
         <FormField id={ids.key} label={auth === "bearer" ? "Token" : "API key"} error={keyError}>
           {auth === "none" ? (
-            <p id={ids.key} className="flex h-9 items-center text-[13px] text-faint">
+            <p id={ids.key} className="flex h-9 items-center text-body-sm text-faint">
               Not needed
             </p>
           ) : keyMode === "keep" ? (
             <div id={ids.key} className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex h-9 items-center gap-1.5 text-[13px] text-ok">
+              <span className="inline-flex h-9 items-center gap-1.5 text-body-sm text-ok">
                 <IconCheck size={14} /> Saved
               </span>
               <Button size="sm" onClick={() => setKeyMode("replace")}>
@@ -401,7 +411,7 @@ export function ProviderForm({
             </div>
           ) : keyMode === "remove" ? (
             <div id={ids.key} className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex h-9 items-center text-[13px] text-warn">Removed on save</span>
+              <span className="inline-flex h-9 items-center text-body-sm text-warn">Removed on save</span>
               <Button size="sm" variant="ghost" onClick={() => setKeyMode("keep")}>
                 Undo
               </Button>
@@ -416,7 +426,7 @@ export function ProviderForm({
                 onChange={(e) => setKey(e.target.value)}
                 placeholder={initial?.has_key ? "New key" : "sk-…"}
                 aria-invalid={Boolean(keyError)}
-                className={cx(inputClass, "font-mono text-[13px]")}
+                className={cx(inputClass, "font-mono text-body-sm")}
               />
               {initial?.has_key && (
                 <Button
@@ -446,10 +456,10 @@ export function ProviderForm({
           onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
           className="group min-w-0 rounded-lg border border-border sm:col-span-2"
         >
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
             <span className="font-medium">Advanced</span>
-            <span className={cx("min-w-0 flex-1 truncate text-[12px]", limitsInvalid ? "text-err" : "text-faint")}>
+            <span className={cx("min-w-0 flex-1 truncate text-small", limitsInvalid ? "text-err" : "text-faint")}>
               {limitsInvalid
                 ? "Some values are out of range"
                 : advancedSummary.length
@@ -520,10 +530,10 @@ export function ProviderForm({
           </div>
         </details>
         <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
             <span className="font-medium">Connection policy</span>
-            <span className="min-w-0 flex-1 truncate text-[12px] text-faint">{policySummary}</span>
+            <span className="min-w-0 flex-1 truncate text-small text-faint">{policySummary}</span>
           </summary>
           <div className="space-y-3 border-t border-border px-3 pb-3 pt-3">
             <Row
@@ -541,7 +551,7 @@ export function ProviderForm({
             </Row>
             <div className="min-w-0 space-y-1.5">
               <div className="flex items-center gap-1">
-                <span className="text-[12.5px] font-medium text-muted">Model map</span>
+                <span className="text-small-lg font-medium text-muted">Model map</span>
                 <InfoButton label="Model map">
                   <p>
                     Canonical model name → the name sent on the wire. A <Code>provider/model</Code> picked anywhere goes
@@ -550,7 +560,7 @@ export function ProviderForm({
                   </p>
                 </InfoButton>
               </div>
-              {modelMapRows.length === 0 && <p className="text-[12px] text-faint">No mappings — every model name goes out as it is.</p>}
+              {modelMapRows.length === 0 && <p className="text-small text-faint">No mappings — every model name goes out as it is.</p>}
               {modelMapRows.map((row, index) => (
                 <div key={index} className="flex items-center gap-2">
                   <input
@@ -560,7 +570,7 @@ export function ProviderForm({
                     spellCheck={false}
                     autoComplete="off"
                     aria-label={`Canonical model name, row ${index + 1}`}
-                    className={cx(inputClass, "font-mono text-[13px]")}
+                    className={cx(inputClass, "font-mono text-body-sm")}
                   />
                   <span aria-hidden="true" className="shrink-0 text-faint">
                     →
@@ -572,7 +582,7 @@ export function ProviderForm({
                     spellCheck={false}
                     autoComplete="off"
                     aria-label={`Wire model name, row ${index + 1}`}
-                    className={cx(inputClass, "font-mono text-[13px]")}
+                    className={cx(inputClass, "font-mono text-body-sm")}
                   />
                   <button
                     type="button"
@@ -587,7 +597,7 @@ export function ProviderForm({
               <Button size="sm" variant="ghost" onClick={addModelMapRow}>
                 Add mapping
               </Button>
-              {mapError && <span className="block text-[12px] text-err">{mapError}</span>}
+              {mapError && <span className="block text-small text-err">{mapError}</span>}
             </div>
             <FormField
               id={ids.disabledTools}
@@ -605,10 +615,10 @@ export function ProviderForm({
           </div>
         </details>
         <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
             <span className="font-medium">Pricing</span>
-            <span className={cx("min-w-0 flex-1 truncate text-[12px]", pricingInvalid ? "text-err" : "text-faint")}>
+            <span className={cx("min-w-0 flex-1 truncate text-small", pricingInvalid ? "text-err" : "text-faint")}>
               {pricingInvalid
                 ? "Some values are out of range"
                 : pricingSummary.length
@@ -645,7 +655,7 @@ export function ProviderForm({
               error={pricing.cache_write_per_mtok.error}
               help="What a million tokens written to the provider's prompt cache cost."
             />
-            <p className="text-[12px] leading-snug text-faint sm:col-span-2">
+            <p className="text-small leading-snug text-faint sm:col-span-2">
               Rates are dollars per million tokens, as the provider bills them, so a colony's spend budget sees this
               provider's traffic. A provider with no rates set still counts its routed tokens but adds $0 to the
               spend — the budget then only sees Claude's cost.
@@ -653,10 +663,10 @@ export function ProviderForm({
           </div>
         </details>
         <details className="group min-w-0 rounded-lg border border-border sm:col-span-2">
-          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-[13px] hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 text-body-sm hover:bg-panel-2 [&::-webkit-details-marker]:hidden">
             <IconChevron size={14} className="shrink-0 text-muted transition-transform group-open:rotate-90" />
             <span className="font-medium">Plan balance</span>
-            <span className="min-w-0 flex-1 truncate text-[12px] text-faint">
+            <span className="min-w-0 flex-1 truncate text-small text-faint">
               {quotaUrl.trim() ? `Probe ${quotaUrl.trim()}` : "Optional — read what is left in a prepaid plan"}
             </span>
           </summary>
@@ -669,7 +679,7 @@ export function ProviderForm({
                 placeholder="https://api.example.com/plan"
                 spellCheck={false}
                 autoComplete="off"
-                className={cx(inputClass, "font-mono text-[13px]")}
+                className={cx(inputClass, "font-mono text-body-sm")}
               />
             </FormField>
             <FormField id={ids.quotaPointer} label="Quota JSON pointer" hint="RFC 6901, like /data/remaining_tokens">
@@ -680,10 +690,10 @@ export function ProviderForm({
                 placeholder="/data/remaining_tokens"
                 spellCheck={false}
                 autoComplete="off"
-                className={cx(inputClass, "font-mono text-[13px]")}
+                className={cx(inputClass, "font-mono text-body-sm")}
               />
             </FormField>
-            <p className="text-[12px] leading-snug text-faint sm:col-span-2">
+            <p className="text-small leading-snug text-faint sm:col-span-2">
               The provider's own credential is sent to that URL, so it must be on the same origin as the base URL —
               scheme, host and port; the Mothership refuses anything else. The pointer picks the remaining-token number
               out of the answer, shown on the health line, and must start with /.
@@ -735,7 +745,7 @@ function LimitField({
         spellCheck={false}
         autoComplete="off"
         aria-invalid={Boolean(error)}
-        className={cx(inputClass, "font-mono text-[13px]", error && "border-err")}
+        className={cx(inputClass, "font-mono text-body-sm", error && "border-err")}
       />
     </FormField>
   );
@@ -767,7 +777,7 @@ function PriceField({
         spellCheck={false}
         autoComplete="off"
         aria-invalid={Boolean(error)}
-        className={cx(inputClass, "font-mono text-[13px]", error && "border-err")}
+        className={cx(inputClass, "font-mono text-body-sm", error && "border-err")}
       />
     </FormField>
   );
@@ -804,7 +814,7 @@ export function ChipsInput({
   return (
     <div className="flex min-h-9 w-full min-w-0 flex-wrap items-center gap-1.5 rounded-lg border border-border bg-panel px-2 py-1.5 focus-within:border-accent focus-within:ring-2 focus-within:ring-[var(--accent-ring)]">
       {values.map((value) => (
-        <span key={value} className="inline-flex max-w-full items-center gap-1 rounded-md bg-panel-2 py-0.5 pl-2 pr-1 font-mono text-[12px]">
+        <span key={value} className="inline-flex max-w-full items-center gap-1 rounded-md bg-panel-2 py-0.5 pl-2 pr-1 font-mono text-small">
           <span className="truncate">{value}</span>
           <button
             type="button"
@@ -824,7 +834,7 @@ export function ChipsInput({
         onBlur={() => draft.trim() && commit(draft)}
         placeholder={placeholder}
         spellCheck={false}
-        className="min-w-24 flex-1 bg-transparent px-1 font-mono text-[13px] text-text outline-none placeholder:text-faint"
+        className="min-w-24 flex-1 bg-transparent px-1 font-mono text-body-sm text-text outline-none placeholder:text-faint"
       />
     </div>
   );
