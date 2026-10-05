@@ -2,6 +2,7 @@
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, query, request, wsUrl } from "../../http";
 import type { SocketLike } from "../../http";
+import { outboxId } from "../../outbox";
 import type { BurnDownStatus, CommitLink, FindingRecord, NewSessionRequest, Session, SessionDiff } from "./types";
 
 /** GET /api/sessions/{id}/behind: how far the colony branch lags origin/{base} (issue #173). */
@@ -37,6 +38,12 @@ export interface SessionsApi {
   createSession(body: NewSessionRequest): Promise<Session>;
   publishSession(id: string): Promise<Session>;
   resumeSession(id: string): Promise<Session>;
+  /**
+   * POST /api/sessions/{id}/messages: send the colony's agent a message over HTTP, deduped on a fresh
+   * client id. The cockpit uses it where no chat stream is open — Retry on a colony held on gateway
+   * errors (issue #1093). 409 when the colony cannot take a message.
+   */
+  messageSession(id: string, text: string): Promise<{ id: string; duplicate: boolean }>;
   stopSession(id: string): Promise<StopReply>;
   /** POST /api/sessions/{id}/prewarm (issue #701): boot a suspended colony's question ahead of its answer. Answers 202 when requested, 204 when it is a no-op. */
   prewarmSession(id: string): Promise<unknown>;
@@ -73,6 +80,7 @@ export const sessionsHttp: SessionsApi = {
   createSession: (body) => post("/api/sessions", body),
   publishSession: (id) => post(`/api/sessions/${enc(id)}/publish`),
   resumeSession: (id) => post(`/api/sessions/${enc(id)}/resume`),
+  messageSession: (id, text) => post(`/api/sessions/${enc(id)}/messages`, { id: outboxId(), text }),
   stopSession: (id) => post(`/api/sessions/${enc(id)}/stop`),
   prewarmSession: (id) => post(`/api/sessions/${enc(id)}/prewarm`),
   keepSession: (id) => post(`/api/sessions/${enc(id)}/keep`),

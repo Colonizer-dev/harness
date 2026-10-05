@@ -302,6 +302,12 @@ pub async fn recover(app: &Shared) {
                 "harness restarted: reconnecting to the running microVM".into(),
             )
             .await;
+            // Issue #1093: the restart dropped the colony's gateway socket, so a turn that ends on a
+            // gateway error in the replay or soon after is the restart's doing — continued once,
+            // straight away (events.rs `finish_turn`).
+            app.runtime(&fresh.id)
+                .await
+                .arm_restart_resume(Utc::now() + crate::events::RESTART_RESUME_WINDOW);
             start_link(app, &fresh.id).await;
         } else {
             // A snapshot already `Starting` is an orphaned boot — its owner died with the restart

@@ -6,7 +6,7 @@
 //! apart from the stream it acts on.
 
 use crate::{Shared, findings, github, memory, orgs, provider_quota, spend};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
@@ -46,6 +46,90 @@ fn runner_start_failure_attention(error: Option<&str>) -> Option<Value> {
     error
         .filter(|e| e.contains(RUNNER_START_FAILURE))
         .map(|_| json!({"reason": AGENT_FAILED, "since": Utc::now(), "nudges": 0}))
+}
+
+/// How long after a mothership restart reconnects to a running colony a turn that ends on a model
+/// gateway error is read as the restart's doing and continued once, straight away (issue #1093).
+pub(crate) const RESTART_RESUME_WINDOW: chrono::Duration = chrono::Duration::minutes(15);
+
+/// The message that continues a colony whose turn the restart cut off (issue #1093).
+const RESTART_RESUME_MESSAGE: &str = "Your last turn stopped on a model gateway error while the mothership restarted. \
+     Nothing was wrong with your work: continue where you left off.";
+
+/// The `attention.cause` of a colony stopped on a transient model gateway error (issue #1093): the
+/// cockpit names the error and offers Retry instead of asking for an answer nobody is waiting on.
+pub(crate) const GATEWAY_ERROR_CAUSE: &str = "gateway_error";
+
+/// The `attention.cause` of a colony held because its turn ended on an error that is not transient.
+pub(crate) const TURN_ERROR_CAUSE: &str = "turn_error";
+
+/// "a model gateway error (502, connection to Anthropic)", or without the parentheses when the
+/// error named neither a status nor a failure.
+fn gateway_error_phrase(cause: &str) -> String {
+    if cause.is_empty() {
+        "a model gateway error".into()
+    } else {
+        format!("a model gateway error ({cause})")
+    }
+}
+
+/// The attention a colony parks with while it waits out an automatic retry (issue #1093): the
+/// reason stays `provider_retry` — nobody has to act — and `cause`, `summary` (what stopped it),
+/// `detail` (that, with the attempt) and `retry_at` let the card say what stopped it and when it
+/// goes again.
+pub(crate) fn gateway_retry_attention(cause: &str, attempt: u32, max_attempts: u64, retry_at: DateTime<Utc>) -> Value {
+    json!({
+        "reason": PROVIDER_RETRY_REASON,
+        "since": Utc::now(),
+        "nudges": 0,
+        "cause": GATEWAY_ERROR_CAUSE,
+        "summary": format!("Stopped on {}", gateway_error_phrase(cause)),
+        "detail": format!(
+            "Stopped on {}: retrying automatically (attempt {attempt} of {max_attempts})",
+            gateway_error_phrase(cause)
+        ),
+        "retry_at": retry_at,
+        "attempt": attempt,
+        "max_attempts": max_attempts,
+    })
+}
+
+/// The hold once the automatic retries are spent, or when they are off (issue #1093).
+pub(crate) fn gateway_held_attention(cause: &str, max_attempts: u64) -> Value {
+    let detail = match max_attempts {
+        0 => format!("Stopped on {}; automatic retry is off", gateway_error_phrase(cause)),
+        1 => format!(
+            "Stopped on repeated gateway errors{}; the automatic retry did not get through",
+            if cause.is_empty() {
+                String::new()
+            } else {
+                format!(" ({cause})")
+            }
+        ),
+        n => format!(
+            "Stopped on repeated gateway errors{}; {n} automatic retries did not get through",
+            if cause.is_empty() {
+                String::new()
+            } else {
+                format!(" ({cause})")
+            }
+        ),
+    };
+    json!({"reason": AUTOPILOT_HELD_REASON, "since": Utc::now(), "nudges": 0, "cause": GATEWAY_ERROR_CAUSE, "detail": detail})
+}
+
+/// The hold for a turn that ended on an error a retry cannot fix (issue #1093): the detail is the
+/// error's first line, so the card says what happened instead of that the watchdog flagged it.
+pub(crate) fn turn_error_held_attention(error: Option<&str>) -> Value {
+    let first = error.and_then(|e| e.lines().map(str::trim).find(|l| !l.is_empty()));
+    let detail = match first {
+        Some(line) if line.chars().count() > 200 => {
+            format!("Stopped on an error: {}…", line.chars().take(200).collect::<String>())
+        }
+        Some(line) => format!("Stopped on an error: {line}"),
+        None => "The agent's turn ended with an error".into(),
+    };
+    json!({"reason": AUTOPILOT_HELD_REASON, "since": Utc::now(), "nudges": 0, "cause": TURN_ERROR_CAUSE, "detail": detail})
 }
 
 /// What autopilot does when a turn ends; writing `pr.md` during the turn is the agent's signal that it's done.
@@ -714,6 +798,9 @@ pub(crate) async fn finish_turn(
         };
         let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
         let errored = is_error;
+        // Issue #1093: every turn end spends the restart resume, so it only ever covers the first
+        // turn to end after the restart reconnected to this colony.
+        let restart_resume = rt.take_restart_resume(Utc::now());
         // Issue #984: a turn that died because the colony's Claude account is unusable — the account
         // is already marked, or the result names a 401/403 sign-in failure — waits on the account
         // instead of being held or retried. The slot is released and no `provider_retries` are spent;
@@ -729,9 +816,28 @@ pub(crate) async fn finish_turn(
         // automatically rather than held. Anything else keeps the old hold. The turn's own free-text
         // result carries the provider's message ("API Error: 502 model router: ...").
         let transient = errored
-            && result
-                .as_deref()
-                .is_some_and(|r| matches!(crate::retry::classify(r), crate::retry::FailureClass::TransientInfra));
+            && result.as_deref().is_some_and(|r| {
+                matches!(
+                    crate::retry::classify_turn_error(r),
+                    crate::retry::FailureClass::TransientInfra
+                )
+            });
+        // Issue #1093: a turn the mothership's own restart cut off — its gateway socket dropped —
+        // is continued once, straight away, without parking the colony or spending a retry.
+        if transient && restart_resume && s.status.is_live() && !interrupted {
+            let error_text = result.clone().unwrap_or_default();
+            app.session_log(
+                id,
+                "warn",
+                format!(
+                    "the turn stopped on {} while the mothership restarted; continuing once automatically",
+                    gateway_error_phrase(&crate::retry::turn_error_cause(&error_text))
+                ),
+            )
+            .await;
+            crate::recovery::send_user_message(rt, "recovery", RESTART_RESUME_MESSAGE);
+            return;
+        }
         // A turn that ends cleanly clears any backoff from an earlier error, so a later unrelated
         // one starts its own sequence instead of inheriting spent attempts.
         if !errored && s.provider_retries != 0 {
@@ -788,11 +894,13 @@ pub(crate) async fn finish_turn(
                 Autopilot::Retry(reason) => {
                     let modules = app.modules.read().await.clone();
                     let max_attempts = crate::orgs::provider_retry_max_attempts(&modules);
+                    let schedule = crate::orgs::provider_retry_schedule(&modules);
                     let error_text = result.clone().unwrap_or_default();
+                    let cause = crate::retry::turn_error_cause(&error_text);
                     if (s.provider_retries as u64) < max_attempts {
                         let attempt = s.provider_retries + 1;
-                        let idx = (s.provider_retries as usize).min(PROVIDER_RETRY_SCHEDULE_MINUTES.len() - 1);
-                        let delay_minutes = PROVIDER_RETRY_SCHEDULE_MINUTES[idx];
+                        let delay = crate::orgs::provider_retry_delay(&schedule, attempt);
+                        let delay_minutes = delay.num_minutes();
                         app.session_log(
                             id,
                             "warn",
@@ -802,7 +910,7 @@ pub(crate) async fn finish_turn(
                         )
                         .await;
                         app.update_session(id, |x| x.provider_retries = attempt).await;
-                        crate::lifecycle::park_colony(
+                        let parked = crate::lifecycle::park_colony(
                             app,
                             &s,
                             PROVIDER_RETRY_REASON,
@@ -811,6 +919,17 @@ pub(crate) async fn finish_turn(
                             format!("provider error, retrying in {delay_minutes} min (attempt {attempt}/{max_attempts})"),
                         )
                         .await;
+                        // Issue #1093: the park's bare attention gains what the card needs to name the
+                        // error and the next attempt — only while the park is still the retry's.
+                        if parked {
+                            let retry_at = Utc::now() + delay;
+                            app.update_session(id, |x| {
+                                if x.parked.as_ref().is_some_and(|p| p.reason == PROVIDER_RETRY_REASON) {
+                                    x.attention = Some(gateway_retry_attention(&cause, attempt, max_attempts, retry_at));
+                                }
+                            })
+                            .await;
+                        }
                     } else {
                         app.session_log(
                             id,
@@ -821,7 +940,7 @@ pub(crate) async fn finish_turn(
                         )
                         .await;
                         app.update_session(id, |x| {
-                            x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            x.attention = Some(gateway_held_attention(&cause, max_attempts));
                             x.provider_retries = 0;
                         })
                         .await;
@@ -860,7 +979,7 @@ pub(crate) async fn finish_turn(
                         )
                         .await;
                         app.update_session(id, |x| {
-                            x.attention = Some(json!({"reason": "autopilot_held", "since": Utc::now(), "nudges": 0}));
+                            x.attention = Some(turn_error_held_attention(result.as_deref()));
                         })
                         .await;
                     }

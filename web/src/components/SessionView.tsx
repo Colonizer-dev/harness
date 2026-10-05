@@ -426,7 +426,13 @@ export function SessionView({
                 ))}
               </div>
             )}
-            {attention.reason === "autopilot_held" && (
+            {attention.reason === "autopilot_held" && attention.cause === "gateway_error" && (
+              <span className="opacity-80">The automatic retries are spent; message the agent to try again, or stop the colony.</span>
+            )}
+            {attention.reason === "autopilot_held" && attention.cause === "turn_error" && (
+              <span className="opacity-80">Check the chat, then message the agent or press {finishing ? "Finish PR" : "Create PR"}.</span>
+            )}
+            {attention.reason === "autopilot_held" && !attention.cause && (
               <span className="opacity-80">
                 {attention.detail
                   ? `Press ${finishing ? "Finish PR" : "Create PR"} to publish anyway, or message the agent.`

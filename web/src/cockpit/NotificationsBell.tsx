@@ -8,7 +8,7 @@ import { needsYou } from "../notifications";
 import type { Session } from "../types";
 import { feedEntries } from "./feed";
 import { KIND_DOT, READ_AT, relative } from "./InboxView";
-import { useOpenQuestions, watchdogFlagged } from "./questions";
+import { expectsAnswer, needsYouLine, useOpenQuestions } from "./questions";
 import { taskLine, taskTooltip } from "../summary";
 
 /** How many notification lines the panel lists before "Open inbox" takes over. */
@@ -186,11 +186,11 @@ function InboxPanel({
                     onClick={() => onOpenColony(session.id)}
                     className="ml-auto shrink-0 cursor-pointer rounded-md border-0 bg-text px-2.5 py-1 font-sans text-[12.5px] font-medium text-bg hover:opacity-85"
                   >
-                    Answer
+                    {questions[session.id] || expectsAnswer(session) ? "Answer" : "Open"}
                   </button>
                 </div>
                 <div className="mt-1.5 text-[13.5px] font-semibold [text-wrap:pretty]">
-                  {questions[session.id] ?? (watchdogFlagged(session) ? "the watchdog flagged this colony" : "the colony asked you a question")}
+                  {questions[session.id] ?? needsYouLine(session)}
                 </div>
                 <div className="mt-0.5 truncate text-[12.5px] text-muted" title={taskTooltip(session)}>{taskLine(session, "no title yet")}</div>
               </div>

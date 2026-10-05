@@ -23,6 +23,7 @@ import type { CommitLink, FindingRecord, HarnessStatus, Question, Session, Sessi
 import { bootMedians, bootView } from "./bootTiming";
 import { CommitLinks } from "./CommitLinks";
 import { chains, type FindingChain } from "./findings";
+import { autoRetrying, expectsAnswer, gatewayHeld, needsYouLine, retryLine } from "./questions";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -277,6 +278,7 @@ export function Inspector({
   onOpenColony,
   onStop,
   onResume,
+  onRetry,
   onLaunch,
   onOpenSettings,
 }: {
@@ -304,6 +306,12 @@ export function Inspector({
   onOpenColony: (id: string) => void;
   onStop: (id: string) => void;
   onResume: (id: string) => void;
+  /**
+   * Retry a colony stopped on a model gateway error (issue #1093): resume it now when an automatic
+   * retry is backing off, or send it on again once the retries are spent. Without it the pane falls
+   * back to `onResume`, which covers the backing-off case.
+   */
+  onRetry?: (id: string) => void;
   onLaunch: () => void;
   onOpenSettings: (section: SectionId) => void;
 }): ReactElement {
@@ -550,11 +558,41 @@ export function Inspector({
                 <span className="tracking-normal text-faint">· {timeAgo(session.created_at)}</span>
               </div>
 
+              {autoRetrying(session) && session.attention && (
+                // An automatic retry is still pending (issue #1093): nothing waits on you, so this is
+                // no "Waiting on you" card — it names the error and offers to go now instead.
+                <div className="border-y border-border border-l-2 border-l-accent bg-panel-2 px-3.5 py-3">
+                  <div className="text-[12.5px] font-medium text-muted">Retrying automatically</div>
+                  <div className="mt-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere]">{retryLine(session.attention)}</div>
+                  {session.attention.attempt != null && session.attention.max_attempts != null && (
+                    <div className="mt-1 text-[12px] text-muted">
+                      attempt {session.attention.attempt} of {session.attention.max_attempts}
+                    </div>
+                  )}
+                  <div className="mt-2.5 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => (onRetry ?? onResume)(session.id)}
+                      className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+                    >
+                      Retry now
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(session.id)}
+                      className="flex-1 cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] font-medium hover:bg-bg"
+                    >
+                      Open colony
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {needsYou(session) && (
                 <div className="border-y border-border border-l-2 border-l-warn bg-panel-2 px-3.5 py-3">
                   <div className="text-[12.5px] font-medium text-warn">Waiting on you</div>
-                  <div className="mt-1.5 text-[13.5px] font-semibold">
-                    {session.attention ? "the watchdog flagged this colony" : "the colony is waiting on your answer"}
+                  <div className="mt-1.5 text-[13.5px] font-semibold [overflow-wrap:anywhere]">
+                    {needsYouLine(session, "the colony is waiting on your answer")}
                   </div>
 
                   {/* The question itself, answered from the pane. The frame's `ts` is when it was asked;
@@ -582,20 +620,41 @@ export function Inspector({
 
                   {/* The list says this colony needs you but the stream has not shown the question yet (or
                       anymore): name what is happening instead of leaving the box blank. */}
-                  {pendingQuestions.length === 0 && (
+                  {/* Only where a question is expected: a colony held on an error has none, and saying
+                      so beside "answer" contradicts itself (issue #1093). */}
+                  {pendingQuestions.length === 0 && expectsAnswer(session) && (
                     <div className="mt-3 rounded-md border border-border bg-bg px-3 py-2.5 text-[12.5px] text-muted">
                       {questionActions.blockedBy === "disconnected" ? "loading the question…" : "this colony has no pending question"}
                     </div>
                   )}
 
-                  {/* The full chat is still the deeper answer: the card is the quick one. */}
-                  <button
-                    type="button"
-                    onClick={() => onOpenColony(session.id)}
-                    className="mt-2.5 w-full cursor-pointer rounded-md bg-text px-3 py-2 text-left text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
-                  >
-                    open the colony and answer →
-                  </button>
+                  {gatewayHeld(session) ? (
+                    <div className="mt-2.5 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => (onRetry ?? onResume)(session.id)}
+                        className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenColony(session.id)}
+                        className="flex-1 cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] font-medium hover:bg-bg"
+                      >
+                        Open colony
+                      </button>
+                    </div>
+                  ) : (
+                    // The full chat is still the deeper answer: the card is the quick one.
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(session.id)}
+                      className="mt-2.5 w-full cursor-pointer rounded-md bg-text px-3 py-2 text-left text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+                    >
+                      {pendingQuestions.length > 0 || expectsAnswer(session) ? "open the colony and answer →" : "open the colony →"}
+                    </button>
+                  )}
                 </div>
               )}
 

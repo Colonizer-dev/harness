@@ -67,6 +67,11 @@ pub struct Runtime {
     /// is one log line per question, not one every thirty-second tick. In memory, like the other
     /// cursors: a restart repeating it once is a minor repeat.
     pub(crate) judge_skip_logged: Mutex<Option<String>>,
+    /// Until when a turn that ends on a model gateway error is read as the mothership restart's doing
+    /// (issue #1093): armed by `lifecycle::recover` when it reconnects to a colony that kept running
+    /// through the restart, spent by the first turn end after that, whatever it was. In memory only,
+    /// by design — it describes this process's own start.
+    pub(crate) restart_resume_until: std::sync::Mutex<Option<DateTime<Utc>>>,
     pub(crate) stop: watch::Sender<bool>,
     /// Set once, by `resume` on the retired run's Runtime only: pre-existing event sockets hold
     /// that Runtime and can never see the new run's events, so they close and reconnect into the
@@ -285,6 +290,7 @@ impl Runtime {
             final_text_logged: Mutex::new(None),
             suspend_skip_logged: std::sync::atomic::AtomicBool::new(false),
             judge_skip_logged: Mutex::new(None),
+            restart_resume_until: std::sync::Mutex::new(None),
             stop: watch::channel(false).0,
             retired: watch::channel(false).0,
             file_lock: Mutex::new(()),
@@ -334,6 +340,22 @@ impl Runtime {
     /// Queues a command for the agent (sent once the agent link is connected).
     pub fn send_command(&self, command: Value) {
         let _ = self.commands.send(command);
+    }
+
+    /// Arms the one automatic resume a colony gets when its turn fails on the gateway around a
+    /// mothership restart (issue #1093), good until `until`.
+    pub(crate) fn arm_restart_resume(&self, until: DateTime<Utc>) {
+        *self.restart_resume_until.lock().unwrap_or_else(|p| p.into_inner()) = Some(until);
+    }
+
+    /// Spends the restart resume: whether it was armed and still inside its window at `now`. Every
+    /// turn end spends it, so it covers only the first turn to end after the reconnect.
+    pub(crate) fn take_restart_resume(&self, now: DateTime<Utc>) -> bool {
+        self.restart_resume_until
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .is_some_and(|until| now <= until)
     }
 }
 

@@ -91,12 +91,21 @@ export function sessionsMock(ms: MockState): SessionsApi {
     resumeSession: async (id) => {
       await sleep(250);
       const s = ms.find(id);
-      if (s.session.status !== "stopped" && s.session.status !== "failed") {
+      if (s.session.status !== "stopped" && s.session.status !== "failed" && s.session.status !== "parked") {
     throw new ApiError("this colony can't be resumed", 409);
       }
       s.patch({ status: "starting", error: null });
       ms.colonyActivity("colony.resume", s.session);
       return clone(s.session);
+    },
+    messageSession: async (id, text) => {
+      await sleep(120);
+      const s = ms.find(id);
+      if (!isLive(s.session.status)) throw new ApiError(`the colony is ${s.session.status} and cannot take a message; resume it first`, 409);
+      s.log(`message: ${text}`);
+      // The next agent event clears a hold, as on the mothership.
+      s.patch({ status: "running", attention: null });
+      return { id: `m${Date.now().toString(36)}`, duplicate: false };
     },
     prewarmSession: async () => {},
     publishSession: async (id) => {
