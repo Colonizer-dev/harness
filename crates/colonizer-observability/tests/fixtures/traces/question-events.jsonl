@@ -1,0 +1,11 @@
+{"type":"user_message","id":"initial","text":"Rename the module","origin":"user","seq":1,"ts":"2026-09-24T10:00:00.000Z"}
+{"type":"model_changed","model":"claude-sonnet-5","previous":null,"origin":"agent","seq":2,"ts":"2026-09-24T10:00:01.000Z"}
+{"type":"question","question_id":"q_name","message_id":"m1","risk":"workspace_write","questions":[{"question":"Which name?","header":"Name","multi_select":false,"options":[{"label":"store","description":"Short"},{"label":"storage","description":"Long"}]}],"origin":"agent","seq":3,"ts":"2026-09-24T10:00:02.000Z"}
+{"type":"status","state":"waiting_for_answer","origin":"agent","seq":4,"ts":"2026-09-24T10:00:03.000Z"}
+{"type":"question_answered","question_id":"q_name","answers":{"Which name?":"store"},"response":null,"origin":"user","seq":5,"ts":"2026-09-24T10:00:04.000Z"}
+{"type":"status","state":"working","origin":"agent","seq":6,"ts":"2026-09-24T10:00:05.000Z"}
+{"type":"tool_call","message_id":"m2","tool_call_id":"toolu_mv","name":"Bash","input":{"command":"git mv src/a.rs src/store.rs"},"origin":"agent","seq":7,"ts":"2026-09-24T10:00:06.000Z"}
+{"type":"question","question_id":"q_exec","message_id":null,"risk":"workspace_write","kind":"exec_policy","blocking":true,"questions":[{"question":"Allow `git mv src/a.rs src/store.rs`?","header":"Exec","multi_select":false,"options":[{"label":"Allow","description":"Once"},{"label":"Deny","description":"No"}]}],"origin":"agent","seq":8,"ts":"2026-09-24T10:00:07.000Z"}
+{"type":"question_answered","question_id":"q_exec","answers":{"Allow `git mv src/a.rs src/store.rs`?":"Allow"},"response":null,"origin":"autonomy","seq":9,"ts":"2026-09-24T10:00:08.000Z"}
+{"type":"tool_result","tool_call_id":"toolu_mv","output":"","is_error":false,"origin":"agent","seq":10,"ts":"2026-09-24T10:00:09.000Z"}
+{"type":"turn_end","is_error":false,"result":"Renamed","cost_usd":0.12,"duration_ms":9000,"model_usage":{"claude-sonnet-5":{"input_tokens":300,"output_tokens":80,"cache_read_tokens":2000,"cache_write_tokens":100}},"origin":"agent","seq":11,"ts":"2026-09-24T10:00:10.000Z"}

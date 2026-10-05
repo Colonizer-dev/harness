@@ -511,6 +511,24 @@ impl SpanBuilder<'_> {
         self
     }
 
+    /// The span's kind; [`span::SpanKind::Internal`] unless set.
+    pub fn kind(mut self, kind: span::SpanKind) -> Self {
+        self.span.kind = kind as i32;
+        self
+    }
+
+    /// A span event: a name from a fixed set (`colonizer.suspended`) at a time, with no attributes.
+    /// Like a span's name it is structure, so it is still redacted and capped.
+    pub fn event(mut self, name: &str, unix_nanos: u64) -> Self {
+        let name = self.fields.text(name, None, self.fields.policy.config.max_attribute_bytes);
+        self.span.events.push(span::Event {
+            time_unix_nano: unix_nanos,
+            name,
+            ..span::Event::default()
+        });
+        self
+    }
+
     pub fn finish(mut self) -> Item {
         self.span.attributes = self.fields.finish();
         Item(Record::Span(self.span))

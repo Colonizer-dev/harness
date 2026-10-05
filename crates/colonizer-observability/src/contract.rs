@@ -38,10 +38,11 @@ pub struct Contract {
 #[serde(default)]
 pub struct Settings {
     pub provider: String,
-    /// The base OTLP/HTTP endpoint; `/v1/logs` and `/v1/metrics` are appended to it.
+    /// The base OTLP/HTTP endpoint; `/v1/logs`, `/v1/traces` and `/v1/metrics` are appended to it.
     pub endpoint: String,
     /// Per-signal endpoints (`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, …), used as they are.
     pub logs_endpoint: Option<String>,
+    pub traces_endpoint: Option<String>,
     pub metrics_endpoint: Option<String>,
     pub protocol: String,
     pub compression: String,
@@ -55,6 +56,8 @@ pub struct Settings {
     pub stream_metrics: bool,
     pub max_attribute_bytes: u64,
     pub max_content_bytes: u64,
+    /// The share of colonies whose trace is exported, 0 to 1, decided per colony by its trace id.
+    pub trace_sample_ratio: f64,
     pub repo_names: String,
     pub max_backlog_days: u64,
     pub max_read_mib_per_sec: u64,
@@ -72,6 +75,7 @@ impl Default for Settings {
             provider: "otlp".into(),
             endpoint: String::new(),
             logs_endpoint: None,
+            traces_endpoint: None,
             metrics_endpoint: None,
             protocol: "http/protobuf".into(),
             compression: "gzip".into(),
@@ -84,6 +88,7 @@ impl Default for Settings {
             stream_metrics: true,
             max_attribute_bytes: 1024,
             max_content_bytes: 32_768,
+            trace_sample_ratio: 1.0,
             repo_names: "plain".into(),
             max_backlog_days: 7,
             max_read_mib_per_sec: 8,
@@ -98,6 +103,7 @@ impl Settings {
     pub fn url(&self, path: &str) -> String {
         let own = match path {
             "/v1/logs" => self.logs_endpoint.as_deref(),
+            "/v1/traces" => self.traces_endpoint.as_deref(),
             "/v1/metrics" => self.metrics_endpoint.as_deref(),
             _ => None,
         };
@@ -121,6 +127,14 @@ pub struct ColonyPolicy {
     pub thinking: bool,
     /// The colony's status, for the colonies-by-status metric.
     pub status: Option<String>,
+    /// The agent module the colony runs (`claude_code`): its trace's `gen_ai.agent.name`.
+    pub agent: String,
+    /// When the colony was created (RFC 3339): its root span's start.
+    pub created_at: Option<String>,
+    /// What launched it (`burn_down`, `redteam`, …), when not a person.
+    pub origin: Option<String>,
+    /// Its pull request, once it has one.
+    pub pr_url: Option<String>,
 }
 
 /// `<data>/observability/exporter.json`.

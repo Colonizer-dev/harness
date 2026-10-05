@@ -41,11 +41,11 @@ Both providers share the second table.
 | :--- | :--- | :--- |
 | Operational logs | on | Boots, parks, quota pauses, watchdog nudges. |
 | Colony activity | on | Stages, tool use and status changes. |
-| Traces | on | One trace per colony turn. |
+| Traces | on | One trace per colony: its turns, tool calls and subagents as spans ([Traces](traces.md)). |
 | Metrics | on | Counters and durations. |
 | Conversation content | off | The words you and the agent exchanged. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Agent thinking | off | The agent's reasoning. Turning it on needs the same save to carry `"confirm_content": true`. |
-| Trace sample ratio | `1` | 0 to 1; the share of turns traced. |
+| Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |
 | Max attribute size (bytes) | `1024` | 128 to 8192. |
 | Max content size (bytes) | `32768` | 1024 to 196608. |
 | Max trace size (bytes) | `4194304` | A trace longer than this is truncated. |

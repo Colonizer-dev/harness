@@ -40,7 +40,7 @@ fn shared_properties() -> Map<String, Value> {
     );
     m.insert(
         "stream_traces".into(),
-        json!({"type": "boolean", "title": "Traces", "description": "One trace per colony turn, so a slow step can be seen in context.", "default": true}),
+        json!({"type": "boolean", "title": "Traces", "description": "One trace per colony, its turns, tool calls and subagents as spans, so a slow step can be seen in context.", "default": true}),
     );
     m.insert(
         "stream_metrics".into(),
@@ -56,7 +56,7 @@ fn shared_properties() -> Map<String, Value> {
     );
     m.insert(
         "trace_sample_ratio".into(),
-        json!({"type": "number", "title": "Trace sample ratio", "description": "The share of turns traced, 0 to 1. 1 traces every turn.", "minimum": 0, "maximum": 1, "default": 1}),
+        json!({"type": "number", "title": "Trace sample ratio", "description": "The share of colonies traced, 0 to 1, chosen per colony so a trace is always whole. 1 traces every colony. Logs and metrics are never sampled.", "minimum": 0, "maximum": 1, "default": 1}),
     );
     m.insert(
         "max_attribute_bytes".into(),

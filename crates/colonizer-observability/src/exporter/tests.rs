@@ -72,6 +72,7 @@ impl Collector {
         };
         let app = axum::Router::new()
             .route("/v1/logs", axum::routing::post(handler("/v1/logs")))
+            .route("/v1/traces", axum::routing::post(handler("/v1/traces")))
             .route("/v1/metrics", axum::routing::post(handler("/v1/metrics")));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -740,4 +741,184 @@ async fn an_existing_install_keeps_its_read_positions_when_start_from_arrives() 
     let mut y = Exporter::new(&path, Vec::new()).unwrap();
     y.tick().await;
     assert_eq!(collector.bodies(), ["read before", "unread at upgrade"]);
+}
+
+/// Every span the collector answered 2xx to, in order.
+fn accepted_spans(collector: &Collector) -> Vec<crate::proto::trace::v1::Span> {
+    collector
+        .seen("/v1/traces")
+        .into_iter()
+        .filter(|s| (200..300).contains(&s.status))
+        .filter_map(|s| crate::proto::collector::trace::v1::ExportTraceServiceRequest::decode(s.body.as_slice()).ok())
+        .flat_map(|r| r.resource_spans)
+        .flat_map(|r| r.scope_spans)
+        .flat_map(|s| s.spans)
+        .collect()
+}
+
+/// The subagent fixture as colony `c0ffee12`'s events.
+fn colony_events() -> Vec<serde_json::Value> {
+    crate::traces::tests::fixture("subagents-events.jsonl")
+}
+
+fn write_events(root: &Root, lines: &[serde_json::Value]) {
+    for line in lines {
+        append(&root.0.join("sessions/c0ffee12/events.jsonl"), line);
+    }
+}
+
+fn merged(root: &Root) {
+    append(
+        &root.0.join("activity.jsonl"),
+        &crate::traces::tests::outcome("c0ffee12", "merged", "2026-09-24T10:01:00Z"),
+    );
+}
+
+/// Traces only, with the fixture's September timestamps inside the backlog window.
+fn traces_only(s: &mut Settings) {
+    s.stream_operational = false;
+    s.stream_activity = false;
+    s.max_backlog_days = 0;
+}
+
+#[tokio::test]
+async fn a_long_colony_crossing_export_ticks_sends_each_span_once_and_the_root_last() {
+    let root = root("traces-long");
+    let collector = Collector::start(ok()).await;
+    let events = colony_events();
+    write_events(&root, &events[..10]);
+    let path = contract(&root, &collector.url, traces_only);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK);
+    let first = accepted_spans(&collector);
+    let names: Vec<&str> = first.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "execute_tool Read",
+            "execute_tool Grep",
+            "execute_tool Task",
+            "subagent Explore"
+        ],
+        "closed spans leave at once; the open turn waits"
+    );
+    assert!(collector.seen("/v1/logs").is_empty(), "the log streams are off");
+
+    // The next export interval, after a restart mid-turn: the open turn resumes from state.json.
+    x.shutdown();
+    drop(x);
+    write_events(&root, &events[10..]);
+    merged(&root);
+    let mut y = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(y.tick().await, TICK);
+    y.tick().await;
+    let all = accepted_spans(&collector);
+    let roots: Vec<_> = all.iter().filter(|s| s.parent_span_id.is_empty()).collect();
+    assert_eq!(roots.len(), 1, "the root goes out once, last");
+    assert!(all.last().unwrap().parent_span_id.is_empty());
+    let ids: std::collections::BTreeSet<_> = all.iter().map(|s| s.span_id.clone()).collect();
+    assert_eq!(ids.len(), all.len(), "no span sent twice");
+
+    // One pass over the same lines, by the same builder, gives the same spans, ids and all.
+    let colonies = BTreeMap::from([(
+        "c0ffee12".to_string(),
+        ColonyPolicy {
+            org: "acme".into(),
+            repo: "acme/widgets".into(),
+            status: Some("running".into()),
+            ..ColonyPolicy::default()
+        },
+    )]);
+    let run = crate::traces::tests::Run {
+        colonies: &colonies,
+        policy: policy_for(&contract::load(&path).unwrap()),
+        ratio: 1.0,
+    };
+    let builder = run.builder();
+    let mut state = crate::traces::Traces::default();
+    let mut once = Vec::new();
+    for line in &events {
+        builder.feed(&mut state, crate::policy::Source::Events, Some("c0ffee12"), line, &mut once);
+    }
+    let merged_line = crate::traces::tests::outcome("c0ffee12", "merged", "2026-09-24T10:01:00Z");
+    builder.feed(&mut state, crate::policy::Source::Activity, None, &merged_line, &mut once);
+    builder.settle(&mut state, &|_| true, &[], now_nanos(), &mut once);
+    assert_eq!(all, crate::traces::tests::spans(&once));
+    assert_eq!(y.status.signals["traces"].state, "ok");
+
+    // A third process replays nothing.
+    y.shutdown();
+    let mut z = Exporter::new(&path, Vec::new()).unwrap();
+    z.tick().await;
+    assert_eq!(accepted_spans(&collector).len(), all.len());
+}
+
+#[tokio::test]
+async fn a_zero_sample_ratio_drops_every_span_and_no_log_record() {
+    let root = root("traces-sampled");
+    let collector = Collector::start(ok()).await;
+    write_events(&root, &colony_events());
+    merged(&root);
+    harness(&root, "still logged");
+    let path = contract(&root, &collector.url, |s| {
+        s.trace_sample_ratio = 0.0;
+        s.max_backlog_days = 0;
+    });
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    assert!(collector.seen("/v1/traces").is_empty(), "no span of an unsampled colony");
+    let bodies = collector.bodies();
+    assert!(bodies.contains(&"still logged".to_string()), "{bodies:?}");
+    assert!(
+        bodies.contains(&"turn_end".to_string()),
+        "events are still logged: {bodies:?}"
+    );
+
+    let all = root_with_ratio("traces-all", 1.0).await;
+    assert_eq!(all, 11, "ratio 1 keeps every span");
+}
+
+async fn root_with_ratio(tag: &str, ratio: f64) -> usize {
+    let root = root(tag);
+    let collector = Collector::start(ok()).await;
+    write_events(&root, &colony_events());
+    merged(&root);
+    let path = contract(&root, &collector.url, |s| {
+        traces_only(s);
+        s.trace_sample_ratio = ratio;
+    });
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    x.tick().await;
+    accepted_spans(&collector).len()
+}
+
+#[tokio::test]
+async fn a_refused_trace_credential_holds_the_spans_and_their_state() {
+    let root = root("traces-401");
+    let open: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let collector = guarded(401, open.clone()).await;
+    write_events(&root, &colony_events());
+    merged(&root);
+    let path = contract(&root, &collector.url, traces_only);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    assert_eq!(x.status.state, "auth_failed");
+    assert_eq!(x.status.signals["traces"].state, "auth_failed");
+    assert!(
+        x.traces.colonies.is_empty(),
+        "the open-span state is not committed before the ack"
+    );
+    assert!(
+        crate::traces::Traces::load(&State::load(&root.0).0.extra, &x.destination)
+            .colonies
+            .is_empty()
+    );
+
+    open.store(true, std::sync::atomic::Ordering::SeqCst);
+    skip_backoff(&mut x);
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(accepted_spans(&collector).len(), 11, "every span, once the key works");
+    let committed = crate::traces::Traces::load(&State::load(&root.0).0.extra, &x.destination);
+    assert!(committed.colonies["c0ffee12"].root.emitted);
 }

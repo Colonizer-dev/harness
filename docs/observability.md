@@ -1,6 +1,6 @@
 # Observability
 
-Send the harness's logs and metrics to a backend you run or subscribe to (Grafana Cloud, Datadog,
+Send the harness's logs, traces and metrics to a backend you run or subscribe to (Grafana Cloud, Datadog,
 Honeycomb, a local OpenTelemetry Collector, or any other OTLP receiver), over OpenTelemetry's OTLP/HTTP
 protocol. It is **off until you configure it**: with no saved and enabled `observability` module, and
 no `COLONIZER_OBSERVABILITY=on`, nothing is written and nothing leaves the machine. The header a
@@ -13,6 +13,7 @@ colonizer.dev. Observability goes only to the endpoint you name.
 - [Export policy and OTLP encoding](observability/export-policy.md): how every exported string is
   allowlisted, gated, redacted again, capped and hashed, and how requests are batched and encoded.
 - [The tailer](observability/tailer.md): how the exporter reads the ledgers and survives rotation.
+- [Traces](observability/traces.md): one trace per colony, its span names, attributes and ids.
 - [Architecture](design/observability.md): the design decisions behind it (issue
   [#839](https://github.com/Colonizer-dev/harness/issues/839)).
 
@@ -69,7 +70,7 @@ The add-on writes `<data>/observability/status.json` at most once a second, and
 It also carries `endpoint`, `last_error` (redacted, header values cut out), `last_success_unix`,
 `consecutive_failures`, `exported`, `bytes_sent` (since the add-on started), `backlog_bytes` (ledger
 bytes behind the committed offsets), `dropped` by reason, `export_failures`,
-`last_partial_success`, and `signals`: per signal (`logs`, `metrics`) its `state` (`ok`,
+`last_partial_success`, and `signals`: per signal (`logs`, `traces`, `metrics`) its `state` (`ok`,
 `backing_off`, `auth_failed`, `off`), `endpoint`, `consecutive_failures`, `last_error`,
 `last_success_unix`, `records_sent` and `bytes_sent`.
 
@@ -97,8 +98,8 @@ overrides its one field of the saved module; it never turns export on by itself,
 | :--- | :--- |
 | `COLONIZER_OBSERVABILITY=on` | Turns export on without a saved module (every other field at its default). The only switch besides the module. |
 | `OTEL_SDK_DISABLED=true` | Turns export off, whatever else says. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | The base URL; `/v1/logs` and `/v1/metrics` are appended. |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | A full URL for one signal, used as is. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | The base URL; `/v1/logs`, `/v1/traces` and `/v1/metrics` are appended. |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | A full URL for one signal, used as is. |
 | `OTEL_EXPORTER_OTLP_HEADERS` | `k=v,k2=v2`, values percent-encoded. Overrides the **Observability headers** secret. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` (default) or `http/json`. gRPC is not built. |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` | `gzip` (default) or `none`. |
@@ -181,10 +182,12 @@ committed with the read offsets that produced them.
 
 ### Traces
 
-Not exported yet. One trace per colony (launch to outcome, with child spans per turn, tool call and
-gateway request) is designed in [the architecture](design/observability.md#spans-reconstructing-a-trace-from-files)
-and tracked in [#846](https://github.com/Colonizer-dev/harness/issues/846) and
-[#847](https://github.com/Colonizer-dev/harness/issues/847).
+One trace per colony while **Traces** is on: the root `invoke_agent <repo>` span from launch to
+outcome, a `turn <n>` span per turn, an `execute_tool <tool>` span per tool call, and a
+`subagent <type>` span under the Task call that started it. Ids are derived from the install's
+host id, the colony id and the turn number or tool call id, so a replay sends the same spans. A
+span goes out when it ends; the root goes out once, at the colony's outcome. Structure only, never
+content. [Traces](observability/traces.md) has the span names, attributes, ids and sampling.
 
 ## Examples
 
@@ -223,7 +226,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 ```
 
 To send without an Agent, take the per-signal intake URLs Datadog documents for your site, set
-`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to them, and put
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` to them, and put
 `dd-api-key=<API key>` in the headers.
 
 ## Turning it off
