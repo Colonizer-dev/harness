@@ -1,7 +1,7 @@
 // Remote access, phones, push & API tokens API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
-import type { ApiTokenMeta, CreatedApiToken, NewApiToken, PhoneInvite, Phones, PushPresenceBody, PushSubscribeBody, PushSubscriptionPatch, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "./types";
+import type { ApiTokenMeta, CreatedApiToken, LinkDevices, LinkInvite, NewApiToken, PhoneInvite, Phones, PushPresenceBody, PushSubscribeBody, PushSubscriptionPatch, PushSubscriptionSummary, RemotePairing, RemoteStatus } from "./types";
 
 export interface RemoteApi {
   /** GET /api/push/key: the VAPID public key the browser subscribes with (issue #516). */
@@ -32,6 +32,14 @@ export interface RemoteApi {
   rejectRemotePairing(code: string): Promise<{ github_login: string }>;
   /** DELETE /api/remote/owner: unbinds the owner and clears pending codes; the owner's relay sessions stop working. Local-only. */
   unbindRemoteOwner(): Promise<void>;
+  /** GET /api/remote/devices: the browsers signed in to the remote link (review finding R3) and those waiting for their code. */
+  linkDevices(): Promise<LinkDevices>;
+  /** POST /api/remote/devices/invites: a single-use, five-minute link to open on the other device; it opens only through the relay. 409 while remote access is off. */
+  linkInvite(): Promise<LinkInvite>;
+  /** POST /api/remote/devices/confirm: approve the browser showing this code. Local-only; 404 for a wrong, expired or used code. */
+  confirmLinkDevice(code: string): Promise<{ label: string }>;
+  /** DELETE /api/remote/devices/{id}: signs that one browser out of the link, at once. */
+  revokeLinkDevice(id: string): Promise<void>;
   /** GET /api/phone (issue #746): the paired phones and the ones waiting for their code to be confirmed. */
   phones(): Promise<Phones>;
   /** POST /api/phone/invites: a single-use, five-minute invite for a phone to scan, and the origins it might open it on. Never a credential. */
@@ -65,6 +73,10 @@ export const remoteHttp: RemoteApi = {
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
   rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),
   unbindRemoteOwner: () => del("/api/remote/owner"),
+  linkDevices: () => request("/api/remote/devices"),
+  linkInvite: () => post("/api/remote/devices/invites"),
+  confirmLinkDevice: (code) => post("/api/remote/devices/confirm", { code }),
+  revokeLinkDevice: (id) => del(`/api/remote/devices/${enc(id)}`),
   phones: () => request("/api/phone"),
   phoneInvite: () => post("/api/phone/invites"),
   confirmPhone: (code) => post("/api/phone/pairings/confirm", { code }),

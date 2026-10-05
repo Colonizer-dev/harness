@@ -104,6 +104,27 @@ export interface RemotePairing {
   pending: RemotePairingRequest[];
 }
 
+/** A browser signed in to the remote link with a link credential of its own (review finding R3). */
+export interface LinkDevice {
+  id: string;
+  label: string;
+  paired_at: string;
+}
+
+/** GET /api/remote/devices: the browsers signed in to the link, and those waiting for their code. */
+export interface LinkDevices {
+  devices: LinkDevice[];
+  pending: { id: string; label: string; expires_at: string }[];
+}
+
+/** POST /api/remote/devices/invites: the single-use link to open on the other device. Never a credential. */
+export interface LinkInvite {
+  url: string;
+  /** RFC3339: when the invite stops working. */
+  expires_at: string;
+  ttl_secs: number;
+}
+
 // ---------------------------------------------------------------------------
 // Add your phone (issue #746): /api/phone — a single-use invite a phone scans,
 // a code confirmed in the local cockpit, and a revocable credential per phone

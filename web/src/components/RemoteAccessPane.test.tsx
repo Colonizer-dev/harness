@@ -30,7 +30,7 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain("Allow remote access"); // the switch row, distinct from the pane title
     expect(html).toContain("dials out an encrypted tunnel");
     expect(html).toContain("nothing else on this machine");
-    expect(html).toContain("access token"); // the cockpit's own sign-in still applies behind the link
+    expect(html).toContain("access token is never accepted through the link"); // R3: link sign-in, not the install token
     expect(html).toContain("public key"); // what the relay does store
     expect(html).toContain('aria-checked="false"');
     expect(html).not.toContain("https://");
@@ -115,5 +115,21 @@ describe("remote helpers", () => {
     expect(expiryText(Math.floor(now / 1000) + 7 * 60, now)).toBe("expires in 7 min");
     expect(expiryText(Math.floor(now / 1000) + 90 * 60, now)).toMatch(/^expires at /);
     expect(expiryText(Math.floor(now / 1000) - 60, now)).toBe("expires now");
+  });
+
+  it("offers to sign in another device while on, and lists the browsers signed in to the link", () => {
+    const html = wrap(
+      <RemoteAccessPane
+        remote={onConnected}
+        onChanged={() => {}}
+        initialPairing={pendingPairing}
+        initialDevices={{ devices: [{ id: "lnk_1", label: "Browser", paired_at: "2026-10-05T10:00:00Z" }], pending: [] }}
+      />,
+    );
+    expect(html).toContain(">Sign in on another device</button>");
+    expect(html).toContain("Browser");
+    expect(html).toContain(">Sign out</button>");
+    expect(html).toContain("Reset link signs every");
+    expect(pane(off)).not.toContain("Sign in on another device</button>");
   });
 });
