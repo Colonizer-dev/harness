@@ -202,7 +202,8 @@ fn launch_origin(launch: Option<&str>) -> Origin {
 /// watchdog nudge, a judge answer — would let a colony stall-proof itself by talking to itself.
 /// Everything else — the agent working, its person stepping in — is.
 fn is_watchdog_progress(origin: Origin, kind: &str) -> bool {
-    !matches!(kind, "status" | "model_changed") && !matches!(origin, Origin::Watchdog | Origin::Autonomy)
+    // A `boundary` event is a control refusing something (issue #609), never work.
+    !matches!(kind, "status" | "model_changed" | "boundary") && !matches!(origin, Origin::Watchdog | Origin::Autonomy)
 }
 
 /// Tracks the shape of the turn the runner is in, for the watchdog's turn-end recovery (issue #878):
@@ -239,7 +240,7 @@ async fn note_turn_shape(rt: &Runtime, event: &Value) {
         // `turn_end` on purpose and writes only a `log` line and a status, so a `log` must not clear
         // it while a `status: working` must (below). The rest are the runner's forwarding-only
         // telemetry: the session id, the model change, the path-policy report, the Jev ladder.
-        "log" | "model_changed" | "path_policy" | "agent_session" | "jev_ladder" => {}
+        "log" | "model_changed" | "path_policy" | "boundary" | "agent_session" | "jev_ladder" => {}
         // A status other than `working` is lifecycle, not work: idle before the next message, an
         // exit the status path already handles.
         "status" if event["state"].as_str() != Some("working") => {}
@@ -434,7 +435,16 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             }
             !denied && !looping
         };
-        if progress && app.session(id).await.is_some_and(|s| s.attention.is_some()) {
+        // A control-defeat flag (issue #609) is not lifted by the colony carrying on: only a
+        // person's own message, which says someone has looked, clears it.
+        let person_spoke = origin == Origin::User && event["type"] == "user_message";
+        let clears = |attention: &Value| attention["reason"] != crate::watchdog::CONTROL_DEFEAT_REASON || person_spoke;
+        if progress
+            && app
+                .session(id)
+                .await
+                .is_some_and(|s| s.attention.as_ref().is_some_and(clears))
+        {
             app.update_session(id, |x| x.attention = None).await;
         }
     }
@@ -450,6 +460,11 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // a `Skill` call naming a watched pack, marks the item used. Shadow measurement only, and a
     // no-op unless the boot picker armed a watch.
     crate::brief_pick::note_event(app, id, rt, &event).await;
+    // The control-defeat watch (issue #609): a tool call naming a target a control refused is
+    // held, and a successful result for it is the deny-then-reach signature.
+    if matches!(event["type"].as_str(), Some("tool_call" | "tool_result")) {
+        crate::boundary::observe_tool(app, id, rt, &event).await;
+    }
     // The shape of the turn, read off the raw line for the watchdog's turn-end recovery (issue
     // #878): a tool call in flight, or a final answer whose turn_end never came.
     note_turn_shape(rt, &event).await;
@@ -625,6 +640,13 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
             tool,
         } => {
             crate::path_policy::on_attempt(app, id, rt, &access, &policy, &path, &tool).await;
+        }
+        // A control refused something (issue #609): the runner's or agentd's boundary record, cleaned
+        // on this side and folded into the watchdog's control-defeat signature.
+        AgentEvent::Boundary { .. } => {
+            if let Some(boundary) = crate::boundary::Boundary::from_event(&event) {
+                crate::boundary::observe(app, id, boundary).await;
+            }
         }
         // Shadow measurement (#475): the pass's decisions are logged to the jev_ladder ledger and
         // arm the reread watch, and nothing else changes. Pure telemetry — never read as acted on.
@@ -1255,11 +1277,12 @@ pub(crate) async fn file_finding(app: Shared, id: String, rt: Arc<Runtime>, even
     // its duplicate is the one appended under the lock; a GitHub error should not use one up.
     if !entry.is_null() {
         // Through the store, so the ledger line lands in `sessions/<id>/findings.jsonl` by the same
-        // name a remote backend would answer by; the store adds the newline, as `append_line` did.
+        // name a remote backend would answer by; the store adds the newline, as `append_line` did,
+        // and redacts the line (#761, `store::ledger_line`).
         let text = entry.to_string();
         let recorded = app
             .store()
-            .append(&id, "findings.jsonl", crate::redact::redact_line(&text).as_bytes())
+            .append(&id, "findings.jsonl", text.as_bytes())
             .await
             .map_err(anyhow::Error::from);
         if let Err(e) = recorded {

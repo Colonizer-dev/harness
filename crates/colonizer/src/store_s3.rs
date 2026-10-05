@@ -587,7 +587,9 @@ impl SessionStore for S3Store {
     fn append<'a>(&'a self, id: &'a str, name: &'a str, line: &'a [u8]) -> StoreFuture<'a, ()> {
         Box::pin(async move {
             let key = self.file_key(id, name)?;
-            std::str::from_utf8(line)
+            // #761: every backend stores an appended line redacted (`store::ledger_line`).
+            let line = crate::store::ledger_line(line);
+            std::str::from_utf8(&line)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("an appended line must be UTF-8: {key}")))?;
             // Read-modify-write under a conditional put: the put lands only if the object is still
             // the one read, so a second writer cannot silently drop this line or have it drop theirs.
@@ -597,7 +599,7 @@ impl SessionStore for S3Store {
                     Some((bytes, None)) => (bytes, Condition::None),
                     None => (Vec::new(), Condition::Absent),
                 };
-                bytes.extend_from_slice(line);
+                bytes.extend_from_slice(&line);
                 bytes.push(b'\n');
                 match self.put(&key, &bytes, condition).await {
                     Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,

@@ -1,7 +1,7 @@
 //! The state file's tests: missing, corrupt and unknown-version files, and the atomic write.
 
-use crate::observability::cursor::{Cursor, FileId, GapReason};
-use crate::observability::state::{CursorKey, DIR, Signal, State, VERSION, state_file};
+use crate::cursor::{Cursor, FileId, GapReason};
+use crate::state::{CursorKey, DIR, Signal, State, VERSION, state_file};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -14,7 +14,7 @@ impl Drop for TempRoot {
 }
 
 fn temp(tag: &str) -> TempRoot {
-    let dir = std::env::temp_dir().join(format!("colonizer-state-{tag}-{}", crate::util::short_id()));
+    let dir = std::env::temp_dir().join(format!("colonizer-state-{tag}-{}", crate::testkit::unique()));
     std::fs::create_dir_all(&dir).unwrap();
     TempRoot(dir)
 }
@@ -56,8 +56,8 @@ fn an_unknown_version_resets_with_one_gap() {
     assert!(state.cursors.is_empty());
 }
 
-#[tokio::test]
-async fn the_first_commit_after_load_writes_without_force() {
+#[test]
+fn the_first_commit_after_load_writes_without_force() {
     let root = temp("first-commit");
     let (mut state, gap) = State::load(&root.0);
     assert!(gap.is_none());
@@ -70,19 +70,13 @@ async fn the_first_commit_after_load_writes_without_force() {
         },
     );
 
-    assert!(
-        state.commit(&root.0, false).await.unwrap(),
-        "the first commit after load writes"
-    );
-    assert!(
-        !state.commit(&root.0, false).await.unwrap(),
-        "a second within a second is skipped"
-    );
-    assert!(state.commit(&root.0, true).await.unwrap(), "a forced commit writes again");
+    assert!(state.commit(&root.0, false).unwrap(), "the first commit after load writes");
+    assert!(!state.commit(&root.0, false).unwrap(), "a second within a second is skipped");
+    assert!(state.commit(&root.0, true).unwrap(), "a forced commit writes again");
 }
 
-#[tokio::test]
-async fn commit_writes_once_a_second_and_round_trips_every_signal() {
+#[test]
+fn commit_writes_once_a_second_and_round_trips_every_signal() {
     let root = temp("commit");
     let mut state = State::default();
     let signals = [Signal::Logs, Signal::Traces, Signal::Metrics];
@@ -100,12 +94,9 @@ async fn commit_writes_once_a_second_and_round_trips_every_signal() {
     }
     state.extra.insert("span".to_string(), json!({"id": "a"}));
 
-    assert!(state.commit(&root.0, true).await.unwrap(), "the first commit writes");
-    assert!(
-        !state.commit(&root.0, false).await.unwrap(),
-        "a second within a second is skipped"
-    );
-    assert!(state.commit(&root.0, true).await.unwrap(), "a forced commit writes again");
+    assert!(state.commit(&root.0, true).unwrap(), "the first commit writes");
+    assert!(!state.commit(&root.0, false).unwrap(), "a second within a second is skipped");
+    assert!(state.commit(&root.0, true).unwrap(), "a forced commit writes again");
 
     // The cursors are an array (JSON object keys must be strings) and everything round-trips.
     let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(state_file(&root.0)).unwrap()).unwrap();

@@ -163,6 +163,12 @@ pub struct OrgSettings {
     /// inherits whole; an org tightens, never loosens (docs/path-policy.md).
     #[serde(default)]
     pub path_policy: Option<PathPolicyOverrides>,
+    /// The org layer of the exec policy (issue #924): JSON text in the shape of the install's
+    /// `exec_policy` module setting and a repository's `.colonizer/exec-policy.json`. It reaches the
+    /// org's colonies as `COLONIZER_EXEC_POLICY_ORG`, between the install layer and the repo file;
+    /// layers only narrow (modules/agents/claude-code/README.md). `None` or blank adds no layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_policy: Option<String>,
     #[serde(default)]
     pub memory: Option<MemoryOverrides>,
     #[serde(default)]
@@ -511,6 +517,12 @@ pub fn discard_vm(modules: &ModulesConfig) -> bool {
 
 /// Whether this org is offered as a workspace: on unless the operator switched it off. `None` means
 /// yes, so an `orgs.json` written before the switch existed reads as every org still on.
+/// The org's exec policy layer (issue #924), when it names one. Blank reads as unset, like the
+/// install's `exec_policy` setting.
+pub fn org_exec_policy(org: &OrgSettings) -> Option<&str> {
+    org.exec_policy.as_deref().map(str::trim).filter(|policy| !policy.is_empty())
+}
+
 pub fn org_enabled(org: &OrgSettings) -> bool {
     org.enabled != Some(false)
 }
@@ -711,6 +723,10 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
         on_pull_request: overrides.on_pull_request.unwrap_or_else(|| flag("on_pull_request", true)),
         // A provider is not org-scoped, so this switch has no org override to resolve.
         on_provider: flag("on_provider", true),
+        // An out-of-quota card spans orgs (issue #767), so this one has no org override either.
+        on_quota: flag("on_quota", true),
+        // The lifecycle stream (issue #897) is the webhook's alone and has no org override.
+        on_lifecycle: flag("on_lifecycle", false),
         desktop: overrides.desktop.unwrap_or_else(|| flag("desktop", false)),
         webhook_url: overrides
             .webhook_url
@@ -802,6 +818,11 @@ fn validate(settings: &OrgSettings) -> Result<(), String> {
                 }
             }
         }
+    }
+    // An exec policy is refused unless the runner would keep every rule of it: a rule it dropped
+    // would be one the operator believes holds (exec_policy.rs). Blank is no org layer.
+    if let Some(policy) = org_exec_policy(settings) {
+        crate::exec_policy::validate(policy)?;
     }
     // Path entries are checked with the same gate the boot resolves through and the same
     // 500-character cap the global lists carry (modules.rs): a path the colony could not honour —
@@ -997,6 +1018,9 @@ fn keep_unnamed_fields(incoming: &mut OrgSettings, saved: &OrgSettings, raw: Opt
             policy.protect_paths = saved_policy.protect_paths.clone();
         }
     }
+    if !named("exec_policy") {
+        incoming.exec_policy = saved.exec_policy.clone();
+    }
     if !named("memory") {
         incoming.memory = saved.memory.clone();
     }
@@ -1091,6 +1115,10 @@ pub async fn put(State(app): State<Shared>, Path(org): Path<String>, Json(body):
         if agent.module.as_deref().is_some_and(|m| m.trim().is_empty()) {
             agent.module = None;
         }
+    }
+    // A blank exec policy is no org layer at all.
+    if req.settings.exec_policy.as_deref().is_some_and(|p| p.trim().is_empty()) {
+        req.settings.exec_policy = None;
     }
     keep_unnamed_fields(
         &mut req.settings,
@@ -2571,6 +2599,43 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
         assert_eq!(err.message(), "unknown agent module \"codex\"; available: none");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Issue #924: the org's exec policy is checked at the save with the runner's rules, kept
+    /// across a save that does not name it, and cleared by a blank one.
+    #[tokio::test]
+    async fn an_org_exec_policy_is_validated_on_save_and_kept_by_saves_that_do_not_name_it() {
+        let (app, root) = org_app();
+        let save = |settings: Value| put(State(app.clone()), Path("acme".into()), Json(json!({"settings": settings})));
+        for (policy, problem) in [
+            ("{not json", "the exec policy is not valid JSON"),
+            (
+                r#"{"rules": [{"id": "x", "decision": "deny"}]}"#,
+                "exec policy rule \"x\": a rule needs",
+            ),
+        ] {
+            let err = save(json!({"exec_policy": policy})).await.unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+            assert!(err.message().starts_with(problem), "{}", err.message());
+        }
+        assert!(!app.all_org_settings().contains_key("acme"), "a refused save stores nothing");
+
+        let policy = r#"{"rules": [{"id": "no-publish", "decision": "deny", "command": "npm publish"}]}"#;
+        let _ = save(json!({"exec_policy": policy}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(org_exec_policy(&app.org_settings("acme")), Some(policy));
+        // A save from a build that predates the field keeps it.
+        let _ = save(json!({"max_parallel": 2}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(org_exec_policy(&app.org_settings("acme")), Some(policy));
+        // Blank is no org layer at all.
+        let _ = save(json!({"max_parallel": 2, "exec_policy": "  "}))
+            .await
+            .unwrap_or_else(|e| panic!("put refused: {:#}", e.1));
+        assert_eq!(app.org_settings("acme").exec_policy, None);
         let _ = std::fs::remove_dir_all(root);
     }
 

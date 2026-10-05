@@ -26,6 +26,131 @@ fn upstream_urls_keep_the_base_path_and_reject_traversal() {
     assert!(upstream_url("http://h", "v1/messages", None).is_none());
 }
 
+/// Issue #1018: a base whose path ends in any `/v<digits>` is the provider's documented API root,
+/// so the guest path's `/v1` is dropped once; any other base keeps the full path appended.
+#[test]
+fn upstream_urls_respect_a_versioned_base_path() {
+    let cases: &[(&str, &str, &str)] = &[
+        // BytePlus ModelArk Coding Plan and Volcengine Ark: openai wire, version other than v1.
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+            "/v1/chat/completions",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/",
+            "/v1/chat/completions",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/chat/completions",
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        ),
+        (
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/models",
+            "https://ark.cn-beijing.volces.com/api/v3/models",
+        ),
+        (
+            "https://example.com/v4//",
+            "/v1/responses",
+            "https://example.com/v4/responses",
+        ),
+        // OpenAI and others documenting a /v1 root.
+        (
+            "https://api.openai.com/v1",
+            "/v1/responses",
+            "https://api.openai.com/v1/responses",
+        ),
+        (
+            "https://api.openai.com/v1/",
+            "/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://openrouter.ai/api/v1",
+            "/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ),
+        (
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ),
+        // Z.AI documents /api/paas/v4 for its OpenAI-compatible API.
+        (
+            "https://api.z.ai/api/paas/v4",
+            "/v1/chat/completions",
+            "https://api.z.ai/api/paas/v4/chat/completions",
+        ),
+        // Unversioned bases keep today's behaviour: the full request path is appended.
+        (
+            "https://api.deepseek.com",
+            "/v1/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+        ),
+        (
+            "https://api.deepseek.com/",
+            "/v1/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+        ),
+        (
+            "https://api.deepseek.com/anthropic",
+            "/v1/messages",
+            "https://api.deepseek.com/anthropic/v1/messages",
+        ),
+        (
+            "https://api.z.ai/api/anthropic",
+            "/v1/messages",
+            "https://api.z.ai/api/anthropic/v1/messages",
+        ),
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding",
+            "/v1/messages",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v1/messages",
+        ),
+        (
+            "http://192.168.1.20:11434",
+            "/v1/chat/completions",
+            "http://192.168.1.20:11434/v1/chat/completions",
+        ),
+        ("http://localhost:8000/", "/v1/models", "http://localhost:8000/v1/models"),
+        // Only the path counts: a host named v1, or a segment that merely starts with v, is no version.
+        ("http://v1", "/v1/models", "http://v1/v1/models"),
+        ("http://v1:8080", "/v1/models", "http://v1:8080/v1/models"),
+        (
+            "https://example.com/v1beta",
+            "/v1/models",
+            "https://example.com/v1beta/v1/models",
+        ),
+        ("https://example.com/dev", "/v1/models", "https://example.com/dev/v1/models"),
+        ("https://example.com/v", "/v1/models", "https://example.com/v/v1/models"),
+    ];
+    for (base, rest, want) in cases {
+        assert_eq!(upstream_url(base, rest, None).as_deref(), Some(*want), "base {base} + {rest}");
+    }
+    // A path that does not start with /v1/ is appended as is, even to a versioned base.
+    assert_eq!(
+        upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1", None).as_deref(),
+        Some("https://ark.cn-beijing.volces.com/api/v3/v1")
+    );
+}
+
+#[test]
+fn upstream_urls_reject_traversal_after_a_versioned_base() {
+    assert!(upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1/../admin", None).is_none());
+    assert!(upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1/%2e%2e/admin", None).is_none());
+    assert!(
+        upstream_url(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/chat/completions",
+            Some("a b")
+        )
+        .is_none()
+    );
+}
+
 #[test]
 fn anthropic_bodies_are_normalized_only_for_providers_with_quirks() {
     let meta = ProviderQuirks {
@@ -3388,4 +3513,132 @@ async fn a_provider_silent_past_the_overall_timeout_still_errors_despite_pings()
         }
     }
     assert!(pings >= 3, "expected pings while waiting, got {pings}");
+}
+
+/// Issue #1018: the URL a 404 names is the one the request hit, minus anything secret.
+#[test]
+fn redacted_urls_keep_the_path_and_drop_credentials_and_query() {
+    let url = reqwest::Url::parse("https://user:secret@ark.example.com:8443/api/coding/v3/chat/completions?key=abc#f").unwrap();
+    assert_eq!(
+        redacted_url(&url),
+        "https://ark.example.com:8443/api/coding/v3/chat/completions"
+    );
+    assert_eq!(
+        wrong_route_hint(404, "https://h/v3/v1/chat/completions").as_deref(),
+        Some("upstream answered 404 at https://h/v3/v1/chat/completions; check the provider's base URL")
+    );
+    assert!(wrong_route_hint(405, "u").is_some());
+    assert!(wrong_route_hint(500, "u").is_none());
+    assert!(wrong_route_hint(401, "u").is_none());
+}
+
+/// Issue #1018: a translated route's upstream 404 reaches the colony as a 404 that names the URL
+/// and the base URL as the likely cause, not as a generic error.
+#[tokio::test]
+async fn an_openai_404_names_the_url_and_the_base_url() {
+    let dir = std::env::temp_dir().join(format!("colonizer-usage-{}", uuid::Uuid::new_v4()));
+    let gateway = usage_gateway(&dir);
+    let ark = provider("ark", None);
+    let info = openai::RequestInfo {
+        model: "m".into(),
+        stream: false,
+    };
+    let response = openai_response(
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(404)
+                .body(reqwest::Body::from("404 page not found"))
+                .unwrap(),
+        ),
+        guards(),
+        Arc::new(UsageCounters::default()),
+        Box::new(|_| {}),
+        Duration::from_secs(30),
+        &info,
+        &gateway,
+        &ark,
+        false,
+        "ark",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_slice(&axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["error"]["type"], "not_found_error");
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("upstream answered 404 at "), "got: {message}");
+    assert!(message.contains("check the provider's base URL"), "got: {message}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Issue #1018: the save-time test sends one token through the colony's own route and reports the
+/// URL it hit and the status, so a wrong base path is caught at setup.
+#[tokio::test]
+async fn the_save_test_reports_the_url_and_status_it_hit() {
+    let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let record = seen.clone();
+    let router = Router::new()
+        .route(
+            "/api/coding/v3/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let record = record.clone();
+                async move {
+                    record.lock().unwrap().push(body);
+                    axum::Json(json!({
+                        "id": "x", "object": "chat.completion", "model": "ark-code",
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": "p"}, "finish_reason": "length"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/anthropic/v1/messages",
+            axum::routing::post(|| async { axum::Json(json!({"type": "message", "content": []})) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let root = std::env::temp_dir().join(format!("colonizer-gateway-test-{}", uuid::Uuid::new_v4()));
+    let app = crate::tests::test_app(&root);
+    let openai_at = |base: String| Provider {
+        base_url: base,
+        wire: crate::providers::Wire::Openai,
+        models: vec!["ark-code".into()],
+        ..provider("ark", None)
+    };
+
+    let good = test_request(&app, &openai_at(format!("http://{addr}/api/coding/v3/"))).await;
+    assert_eq!(good["ok"], true, "got: {good}");
+    assert_eq!(good["status"], 200);
+    assert_eq!(good["url"], format!("http://{addr}/api/coding/v3/chat/completions"));
+    assert_eq!(good["model"], "ark-code");
+    let sent = seen.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["model"], "ark-code");
+
+    // A base missing the provider's path: the test names the URL it hit and the likely cause.
+    let wrong = test_request(&app, &openai_at(format!("http://{addr}/api/coding"))).await;
+    assert_eq!(wrong["ok"], false);
+    assert_eq!(wrong["status"], 404);
+    assert_eq!(wrong["url"], format!("http://{addr}/api/coding/v1/chat/completions"));
+    assert!(
+        wrong["error"].as_str().unwrap().contains("check the provider's base URL"),
+        "got: {wrong}"
+    );
+
+    let anthropic = Provider {
+        base_url: format!("http://{addr}/anthropic"),
+        models: vec!["m".into()],
+        ..provider("a", None)
+    };
+    let answered = test_request(&app, &anthropic).await;
+    assert_eq!(answered["ok"], true, "got: {answered}");
+    assert_eq!(answered["url"], format!("http://{addr}/anthropic/v1/messages"));
+
+    let unlisted = test_request(&app, &provider("none", None)).await;
+    assert_eq!(unlisted["ok"], false);
+    assert_eq!(unlisted["error"], "list at least one model to test with");
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -806,6 +806,10 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         .context("agent module is not installed")?;
 
     let dir = app.session_dir(id);
+    // A hand-off colony (issue #738) keeps the base its launch recorded rather than starting from the
+    // repository default — its branch already sits on that base. The seed file written at launch is
+    // the marker, and only a *fresh* boot reads it: a resume carries the work forward instead.
+    let handoff = !resume && crate::handoff::seeded(&dir);
     let bare = app.bare_repo(&s.repo);
     // A fresh colony reads its issue from GitHub, riding out blips on the boot retry budget; a
     // resumed one already has it — stored at its first boot, or recovered from its first brief —
@@ -842,7 +846,7 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     };
     let mut stacked_on: Option<String> = None;
     let base = match stack::boot_base(
-        s.base.clone().filter(|_| resume),
+        s.base.clone().filter(|_| resume || handoff),
         s.parent.as_deref(),
         parent.as_ref(),
         s.stack,
@@ -906,6 +910,16 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         }
         log.info(format!("creating worktree on branch {} from origin/{base}", s.branch))
             .await;
+        // A hand-off names the branch the local session ran on; the worktree is cut from origin, so a
+        // branch never pushed cannot be branched from. Said in the operator's terms, before git's raw
+        // error, and after the sync above so `origin/<base>` is as fresh as it can be.
+        if handoff && github::fork_sha(app, &bare, &base).await.is_err() {
+            bail!(
+                "the hand-off branch `{base}` is not on origin in {}, so there is nothing to start from; \
+                 push it first (`git push -u origin {base}`)",
+                s.repo
+            );
+        }
         github::with_boot_retry(
             &format!("creating the worktree for branch {}", s.branch),
             Some(&log),
@@ -977,6 +991,12 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
         stacked_on.as_deref(),
         external_token.as_deref(),
     );
+    // A hand-off's conversation, fenced with a disclaimer, is read once into the first prompt (issue
+    // #738); every later prompt of the colony carries none. Untrusted like issue text, so the closing
+    // tag is neutralised and the block says what it is.
+    if handoff {
+        prompt.push_str(&crate::handoff::prompt_block(&dir));
+    }
     // Colony secrets in scope: named in the prompt (never their values) and handed to msb below,
     // which substitutes each one only on TLS to its hosts.
     let colony_secrets = crate::colony_secrets::for_colony(&app.cfg.config_dir, &s.repo);
@@ -1019,7 +1039,9 @@ async fn boot_inner(app: &Shared, id: &str, resume: bool) -> Result<()> {
     let mut runner_env = agent_env(&agent, &agent_choice);
     // The exec policy is the operator's rule about commands, not a model setting: it follows the
     // colony to this module pick, or the boot refuses when the pick cannot apply it.
-    apply_exec_policy(&agent, &modules.agent, &app.agents, &wt, &mut runner_env)?;
+    // The org's own layer (issue #924) rides beside the install's as COLONIZER_EXEC_POLICY_ORG.
+    let org_policy = orgs::org_exec_policy(&org_settings).map(|policy| (s.org.as_str(), policy));
+    apply_exec_policy(&agent, &modules.agent, org_policy, &app.agents, &wt, &mut runner_env)?;
     // Per-task model routing (routing.rs): the tier comes from the issue in front of the colony
     // unless the operator named one at launch, and the tier's model replaces the module's own when
     // that tier has one. Read off the effective settings, so an org override is honoured.

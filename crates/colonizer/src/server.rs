@@ -66,14 +66,38 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     // a missing `Origin` is rejected rather than trusted (see #375), and only an authenticated
     // request passes at all.
     let upgrade = req.headers().contains_key(header::UPGRADE);
-    let bearer_ok = auth::bearer_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
+    // The install token never authenticates a request that came through the tunnel (review finding
+    // R3): it would cross the relay in cleartext and outlive every reset. Through the tunnel the
+    // owner signs in with a link credential instead (remote.rs), which Reset link rotates; a link
+    // credential, in turn, authenticates nothing that did not come through the tunnel.
+    let bearer = auth::bearer_token(req.headers());
     let cookie = auth::cookie_token(req.headers());
-    let cookie_ok = cookie
+    let install_bearer = bearer
         .as_deref()
         .is_some_and(|token| auth::tokens_match(token, &app.api_token));
+    let install_cookie = cookie
+        .as_deref()
+        .is_some_and(|token| auth::tokens_match(token, &app.api_token));
+    if tunnelled && (install_bearer || install_cookie) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "this machine's API token is not accepted through the remote link; sign this browser in from Settings → Remote access",
+        )
+            .into_response();
+    }
+    let bearer_ok = install_bearer;
+    let cookie_ok = install_cookie;
+    let (link, link_bearer) = if tunnelled {
+        match bearer.as_deref().and_then(|token| app.remote.authenticate_link(token)) {
+            Some(link) => (Some(link), true),
+            None => (cookie.as_deref().and_then(|token| app.remote.authenticate_link(token)), false),
+        }
+    } else {
+        (None, false)
+    };
     // A paired phone's own cookie (phone.rs, issue #746): the cockpit like the owner's cookie, minus
     // the routes that mint, approve or revoke access. Revoking the phone ends it on the next request.
-    let phone = match (bearer_ok || cookie_ok, cookie.as_deref()) {
+    let phone = match (bearer_ok || cookie_ok || link.is_some(), cookie.as_deref()) {
         (false, Some(token)) => app.phones.authenticate(token),
         _ => None,
     };
@@ -84,10 +108,11 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         )
             .into_response();
     }
-    if bearer_ok || cookie_ok || phone.is_some() {
+    if bearer_ok || cookie_ok || link.is_some() || phone.is_some() {
         // Cookie-authenticated writes and upgrades keep the same-origin requirement; header
         // authentication already proves a non-browser caller.
-        if !bearer_ok && (req.method() != Method::GET || upgrade) {
+        let header_auth = bearer_ok || link_bearer;
+        if !header_auth && (req.method() != Method::GET || upgrade) {
             let same_origin = if tunnelled {
                 // Through the tunnel the cockpit is served from https://<host>, and nothing else.
                 req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) == Some(format!("https://{host}").as_str())
@@ -104,7 +129,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         req.extensions_mut().insert(auth::Authenticated(true));
         // Who the activity log says acted: the browser (cookie) or a token holder (the CLI, a script).
         req.extensions_mut()
-            .insert(if bearer_ok { auth::Via::Api } else { auth::Via::Cockpit });
+            .insert(if header_auth { auth::Via::Api } else { auth::Via::Cockpit });
+        if let Some(link) = link {
+            // The owner, through the link: revocable as one device, and all at once by a reset.
+            let key = link.revocation_key();
+            req.extensions_mut().insert(link);
+            return run_revocable(&key, req, next).await;
+        }
         if let Some(phone) = phone {
             let key = phone.revocation_key();
             req.extensions_mut().insert(phone);
@@ -151,10 +182,15 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
-        // The fleet pairing's two open doors (fleet_members.rs): their whole authentication is
+        // The fleet pairing's three open doors (fleet_members.rs): their whole authentication is
         // what the body carries — a single-use invite code, a pairing id plus the nonce only its
-        // joiner holds — so a request with no token is admitted to exactly those two.
-        if req.method() == Method::POST && (path == "/api/fleet/peer/redeem" || path.starts_with("/api/fleet/peer/pairings/")) {
+        // joiner holds, a member id plus the refresh credential approval minted (#762) — so a
+        // request with no token is admitted to exactly those three.
+        if req.method() == Method::POST
+            && (path == "/api/fleet/peer/redeem"
+                || path == "/api/fleet/peer/refresh"
+                || path.starts_with("/api/fleet/peer/pairings/"))
+        {
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
@@ -187,6 +223,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         return next.run(req).await;
     }
     if req.method() == Method::GET
+        && !tunnelled
         && let Some(token) = auth::query_token(req.uri().query())
         && auth::tokens_match(&token, &app.api_token)
     {
@@ -213,7 +250,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
-        match app.phones.open(&code, user_agent) {
+        match app.phones.open(&code, user_agent, tunnelled) {
             Ok(Some(opened)) => return crate::phone::pairing_response(&opened),
             Ok(None) => {}
             Err(crate::phone::Limited) => {
@@ -362,6 +399,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::merge_train::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
+        .merge(crate::observability::routes())
         .merge(crate::orgs::routes())
         .merge(crate::packages::routes())
         .merge(crate::phone::routes())
@@ -430,6 +468,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::merge_train::start_tasks(app);
     crate::mesh::start_tasks(app).await;
     crate::notify::start_tasks(app);
+    crate::observability::start_tasks(app);
     crate::publish::start_tasks(app);
     crate::queue::start_tasks(app);
     crate::reclaim::start_tasks(app);
@@ -1201,6 +1240,7 @@ mod tests {
                 owner_url: "http://owner.example:7878".into(),
                 member_id: "mem_1".into(),
                 token: "col_secret_member_token".into(),
+                refresh: None,
             }))
             .await;
         let member = auth_router(&app)

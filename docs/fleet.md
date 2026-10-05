@@ -125,7 +125,8 @@ every local colony, secret and setting. A removal also leaves a **tombstone** on
 removed member's id and its token's SHA-256, the same hash the token registry kept (the most
 recent 256) — so the removed machine's next call answers **403** `removed from the fleet` instead
 of the **401** an unknown or invalid token gets, and the member can tell it was removed. A member
-that leaves by itself leaves no tombstone. Leaving is behind a confirmation, since it costs the fleet
+that leaves by itself leaves no tombstone. Neither can refresh its token: the owner answers a
+removed or departed member's refresh with **403**. Leaving is behind a confirmation, since it costs the fleet
 view and takes a new invite to undo.
 
 ## History push
@@ -176,8 +177,8 @@ shows where it stands.
 
 | The owner answers | The member |
 | :--- | :--- |
-| **401** | stops, and flags `unauthorized` for attention: the owner does not know the token. Pairing has no token refresh, so a person checks the owner or joins again |
-| **403** | stops syncing: `removed` — the owner removed this machine (below). Nothing local is deleted |
+| **401** | refreshes the fleet token once per drain with the refresh credential the pairing handed over, keeps the new token and retries. A second 401, or a refresh the owner refuses, stops and flags `unauthorized` for attention: a person checks the owner or joins again. A membership from before refresh has no credential and stops at the first 401 |
+| **403** | stops syncing: `removed` — the owner removed this machine (below). It never refreshes, and the owner refuses a removed machine's refresh anyway. Nothing local is deleted |
 | **429** / **503** | waits out `Retry-After` — inline up to a minute, otherwise `backoff` until then |
 | anything else, or no answer | `error`; the next tick tries again |
 
@@ -202,8 +203,10 @@ scoped token, a member's `fleet` token included, reads **403**.
   "(removed)", under the name it had: the owner writes it to `member.json` beside the rows. When
   the last member is removed the section still shows while any history remains.
 - **Redaction.** Logs are served exactly as the member sent them. Redacting secrets before they
-  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)); the
-  owner runs no redaction pass of its own on this history.
+  leave is the member's job ([#761](https://github.com/Colonizer-dev/harness/issues/761)): the
+  member runs every log through the shared redactor before hashing and uploading it, so a log
+  written before redaction existed arrives redacted too, and its file on the member is left as it
+  is. The owner runs no redaction pass of its own on this history.
 - **Retention.** The owner keeps a synced row for `COLONIZER_FLEET_INGEST_RETENTION_DAYS` days after
   it arrives (default `90`; `0` keeps everything). The reclaim tick, every five minutes, drops older
   rows and then every payload no remaining row references that is itself older than the window —

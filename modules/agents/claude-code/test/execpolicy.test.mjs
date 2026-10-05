@@ -198,6 +198,49 @@ test('a later layer can narrow but never widen', () => {
   }
 });
 
+test('an org layer narrows the install layer: an org deny overrides an install allow (#924)', () => {
+  const dir = workspace();
+  try {
+    const policy = policyIn(dir, {
+      COLONIZER_EXEC_POLICY: JSON.stringify({ rules: [{ id: 'allow-publish', decision: 'allow', command: 'npm publish' }] }),
+      COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules: [{ id: 'org-no-publish', decision: 'deny', reason: 'acme publishes from CI', command: 'npm publish' }] }),
+    });
+    assert.deepEqual(policy.layers.map((layer) => layer.name), ['default', 'install', 'org']);
+    const hit = decide(policy, 'npm publish', dir);
+    assert.deepEqual({ decision: hit.decision, rule: hit.rule, layer: hit.layer }, { decision: 'deny', rule: 'org-no-publish', layer: 'org' });
+    // And an org allow cannot widen the install's deny.
+    const widen = policyIn(dir, {
+      COLONIZER_EXEC_POLICY: JSON.stringify({ rules: [{ id: 'no-publish', decision: 'deny', command: 'npm publish' }] }),
+      COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules: [{ id: 'org-publish', decision: 'allow', command: 'npm publish' }] }),
+    });
+    assert.deepEqual(decide(widen, 'npm publish', dir).layer, 'install');
+    assert.equal(decide(widen, 'npm publish', dir).decision, 'deny');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The mothership refuses to save an exec policy unless this parser keeps it whole (issue #924); the
+// same fixture drives the Rust port (crates/colonizer/src/exec_policy.rs) in crates/repo-contracts.
+const validFixture = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-valid.json', import.meta.url), 'utf8'));
+
+/** Whether parsePolicy keeps a policy whole: the layer, every rule, every predicate a rule names. */
+function keptWhole(text) {
+  const policy = parsePolicy(text);
+  if (!policy) return false;
+  const raw = JSON.parse(text).rules;
+  if (policy.rules.length !== raw.length) return false;
+  const named = (rule) =>
+    ['command', 'script', 'touches'].filter((key) => key in rule).length +
+    (rule.writes_outside !== undefined && rule.writes_outside !== false ? 1 : 0);
+  return policy.rules.every((rule, i) => rule.predicates.length === named(raw[i]));
+}
+
+test('the save-time validity fixture matches what parsePolicy keeps whole (#924)', () => {
+  assert.ok(validFixture.cases.length > 10);
+  for (const { policy, valid } of validFixture.cases) assert.equal(keptWhole(policy), valid, policy);
+});
+
 test('a malformed layer is ignored with a warning; the default keeps enforcing', () => {
   for (const broken of ['{not json', '{"rules": "nope"}', '[]']) {
     const policy = loadExecPolicy({ COLONIZER_EXEC_POLICY: broken });
@@ -273,7 +316,8 @@ test('the installed hook denies with the rule named, and logs every decision', a
     const policy = policyIn(dir, {
       COLONIZER_EXEC_POLICY: JSON.stringify({ rules: [{ id: 'allow-build', decision: 'allow', command: 'build' }] }),
     });
-    const { options } = buildOptionsOff({}, { execPolicy: policy });
+    const boundaries = [];
+    const { options } = buildOptionsOff({}, { execPolicy: policy, onBoundary: (event) => boundaries.push(event) });
     const hook = bashHook(options);
 
     const denied = await hook({ tool_name: 'Bash', tool_input: { command: 'cat ~/.ssh/id_rsa' }, hook_event_name: 'PreToolUse' });
@@ -288,6 +332,17 @@ test('the installed hook denies with the rule named, and logs every decision', a
     assert.equal(written.length, 2, 'one log line per non-null decision');
     assert.match(written[0], /^exec policy: deny rule=secret-paths layer=default command=cat ~\/.ssh\/id_rsa\n$/);
     assert.match(written[1], /^exec policy: allow rule=allow-build layer=install command=bash build\.sh\n$/);
+    // The deny, and only the deny, is a boundary event for the control-defeat signature (#609).
+    assert.equal(boundaries.length, 1);
+    const { at, ...body } = boundaries[0];
+    assert.ok(!Number.isNaN(Date.parse(at)));
+    assert.deepEqual(body, {
+      type: 'boundary',
+      kind: 'exec_policy_deny',
+      control: 'exec_policy:secret-paths',
+      detail: 'deny (default): cat ~/.ssh/id_rsa',
+      target: '~/.ssh/id_rsa',
+    });
   } finally {
     process.stderr.write = originalWrite;
     rmSync(dir, { recursive: true, force: true });
@@ -338,6 +393,64 @@ test('an ask reaches the operator as a colony question, and the answer decides',
     const events2 = await runCase('Deny');
     assert.ok(events2.find((event) => event.type === 'question'), 'the ask still became a question');
     assert.ok(events2.find((event) => event.type === 'turn_end')?.result.includes('decision:deny'));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refused ask is a boundary event, and the same rule asking again is a bypass attempt (#609)', async () => {
+  const dir = workspace();
+  try {
+    const policy = policyIn(dir);
+    const calls = [
+      ['toolu_first', 'echo x > /etc/foo'],
+      ['toolu_again', 'printf x | tee /etc/foo'],
+    ];
+    const turn = async function* (options) {
+      yield { type: 'system', subtype: 'init', session_id: 's1', model: 'fake-model' };
+      for (const [id, command] of calls) {
+        await options.canUseTool('Bash', { command }, { signal: new AbortController().signal, toolUseID: id });
+      }
+      yield { type: 'result', subtype: 'success', is_error: false, result: 'done', duration_ms: 1 };
+    };
+    const events = [];
+    const commands = new AsyncQueue();
+    const at = new Date('2026-01-01T00:00:00.000Z');
+    const run = runAgent({
+      query: fakeQuery(turn),
+      commands,
+      emit: (event) => events.push(event),
+      options: { model: 'fake' },
+      execPolicy: policy,
+      graceMs: 100,
+      now: () => at,
+    });
+    commands.push({ type: 'user_message', id: 'u1', text: 'go' });
+    const answered = new Set();
+    for (let i = 0; !events.some((event) => event.type === 'turn_end') && i < 400; i++) {
+      for (const question of events.filter((event) => event.type === 'question' && !answered.has(event.question_id))) {
+        answered.add(question.question_id);
+        commands.push({ type: 'answer', question_id: question.question_id, answers: { 'Exec policy': 'Deny' } });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    commands.close();
+    await run;
+
+    const boundaries = events.filter((event) => event.type === 'boundary');
+    assert.deepEqual(
+      boundaries.map((event) => [event.kind, event.control, event.target]),
+      [
+        ['exec_policy_deny', 'exec_policy:writes-outside-repo', '/etc/foo'],
+        ['exec_policy_ask_bypass_attempt', 'exec_policy:writes-outside-repo', '/etc/foo'],
+        ['exec_policy_deny', 'exec_policy:writes-outside-repo', '/etc/foo'],
+      ],
+    );
+    assert.match(boundaries[0].detail, /^ask refused \(default\): echo x > \/etc\/foo$/);
+    assert.match(boundaries[1].detail, /refused earlier: echo x > \/etc\/foo/);
+    assert.ok(boundaries.every((event) => event.at === at.toISOString()));
+    const second = events.findIndex((event) => event.type === 'question' && event.question_id === 'toolu_again');
+    assert.ok(events.indexOf(boundaries[1]) < second, 'the attempt is reported before it is asked again');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

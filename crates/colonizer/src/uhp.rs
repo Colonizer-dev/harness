@@ -3,8 +3,8 @@
 //! with, and the read-side core routes that belong to no other feature (issue #650) — discovery,
 //! harnesses, models and the single colony. The routes that do belong to a feature live with it
 //! (`sessions/files.rs` has the §7.2 session page and the §7.5 artifacts) and share the layer and
-//! the refusals kept here. Creating and continuing responses, SSE streaming and cancellation are
-//! the follow-up; the discovery document says so in its capabilities rather than pretending.
+//! the refusals kept here. Creating and continuing responses, SSE streaming and cancellation live
+//! in `uhp_responses.rs`, merged into the same layer.
 
 use axum::{
     Json,
@@ -53,7 +53,7 @@ fn envelope(status: StatusCode, code: &str, message: String, detail: Value) -> R
 
 /// The envelope with its `type` named by the caller: the credential refusals are
 /// `authentication_error` and `permission_error` rather than a request error (§7.7).
-fn typed_envelope(status: StatusCode, kind: &str, code: &str, message: String, detail: Value) -> Response {
+pub(crate) fn typed_envelope(status: StatusCode, kind: &str, code: &str, message: String, detail: Value) -> Response {
     (
         status,
         Json(json!({
@@ -137,6 +137,7 @@ pub(crate) fn routes() -> axum::Router<Shared> {
         .route("/uhp/v1/harnesses/{harness_id}", get(harness).fallback(method_not_allowed))
         .route("/uhp/v1/models", get(models).fallback(method_not_allowed))
         .route("/uhp/v1/sessions/{id}", get(session).fallback(method_not_allowed))
+        .merge(crate::uhp_responses::routes())
         .route_layer(middleware::from_fn(negotiate))
 }
 
@@ -163,14 +164,14 @@ pub(crate) async fn negotiate(req: Request, next: Next) -> Response {
     stamped(next.run(req).await)
 }
 
-/// The 405 a served `/uhp` route answers a method it does not have — every one is `GET`, so this
-/// is what a `POST /uhp/v1/harnesses` reads (the suite's F-02): the envelope, not axum's empty
-/// answer. axum appends the `Allow` header, and [`negotiate`] the version.
+/// The 405 a served `/uhp` route answers a method it does not have — what a `POST
+/// /uhp/v1/harnesses` reads (the suite's F-02): the envelope, not axum's empty answer. axum appends
+/// the `Allow` header naming the methods the route does serve, and [`negotiate`] the version.
 pub(crate) async fn method_not_allowed() -> Response {
     uhp_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        "this UHP route serves GET only",
+        "this UHP route does not serve that method",
         None,
     )
 }
@@ -199,13 +200,14 @@ pub(crate) fn denied(deny: api_tokens::Deny) -> Response {
             Value::Null,
         ),
         api_tokens::Deny::NoSession => uhp_error(StatusCode::NOT_FOUND, "session_not_found", "no such session", None),
+        api_tokens::Deny::NoResponse => uhp_error(StatusCode::NOT_FOUND, "response_not_found", "no such response", None),
         api_tokens::Deny::NoMap => uhp_error(StatusCode::NOT_FOUND, "not_found", "no such UHP route", None),
     })
 }
 
 /// The JSON 404 every `/uhp` path no route claims answers with (`#641`'s answer, carried over to
-/// the protocol's paths): a miss must read as an error, never as the cockpit's page. No response
-/// can exist yet — `POST /uhp/v1/responses` is the follow-up — so a miss under `/responses` names
+/// the protocol's paths): a miss must read as an error, never as the cockpit's page. A miss under
+/// `/responses` (a path no response route serves, `uhp_responses.rs`) names
 /// the response, one under `/containers` (§7.5's artifact reads) the file, and anything else the
 /// route. The prefixes match on segment boundaries (`/uhp/v1/responsesX` is a route miss), and the
 /// path itself is never echoed: a probe may carry traversal segments.
@@ -231,8 +233,8 @@ fn under(path: &str, prefix: &str) -> bool {
 
 /// `GET /uhp/v1/uhp` — the discovery document, served without credentials (the suite's D-02
 /// checks exactly that). The capabilities are the honest list of what the surface serves today:
-/// the session page and the artifact reads are on the wire (§7.2, §7.5), while streaming,
-/// cancellation and input files arrive with the follow-up (§7.4–§7.6) — a false capability reads
+/// the session page, the artifact reads, streaming and cancellation are on the wire (§7.2–§7.6),
+/// while input files are not (§7.5) — a false capability reads
 /// as "not served", which is true here.
 async fn discovery() -> Json<Value> {
     Json(json!({
@@ -244,8 +246,8 @@ async fn discovery() -> Json<Value> {
         "capabilities": {
             "sessions": true,
             "session_listing": true,
-            "streaming": false,
-            "cancellation": false,
+            "streaming": true,
+            "cancellation": true,
             "files_input": false,
             "files_output": true,
             "harness_management": false,
@@ -448,13 +450,13 @@ mod tests {
         assert_eq!(body["default_version"], VERSION);
         assert_eq!(body["conformance_class"], "core");
         assert_eq!(body["implementation"]["name"], "colonizer");
-        // What is served, not what is planned: the §7.5 artifact reads are on the wire, the
-        // task-bearing halves of the core class are the follow-up.
+        // What is served, not what is planned: the artifact reads, streaming and cancellation
+        // are on the wire, input files are not.
         for (cap, want) in [
             ("sessions", true),
             ("session_listing", true),
-            ("streaming", false),
-            ("cancellation", false),
+            ("streaming", true),
+            ("cancellation", true),
             ("files_input", false),
             ("files_output", true),
             ("harness_management", false),
@@ -652,7 +654,7 @@ mod tests {
         let router = router(&app);
         for (probe, code) in [
             ("/uhp/v1/responses/resp_nosuch", "response_not_found"),
-            ("/uhp/v1/responses", "response_not_found"),
+            ("/uhp/v1/responses/resp_nosuch/nosuch", "response_not_found"),
             ("/uhp/v1/responsesX", "not_found"),
             ("/uhp/v1/containers", "file_not_found"),
             ("/uhp/v1/containersX", "not_found"),

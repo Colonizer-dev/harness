@@ -96,7 +96,7 @@ read tools and, in a loop colony, the loop tools exist (above): `memory_propose`
 and `wait` do not. Briefs that name
 them ask for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
 not applied either: the harness refuses to launch a Pi colony while one is set (the install's
-`exec_policy` setting, or a repo `.colonizer/exec-policy.json`).
+`exec_policy` setting, the org's exec policy, or a repo `.colonizer/exec-policy.json`).
 
 ## Develop
 

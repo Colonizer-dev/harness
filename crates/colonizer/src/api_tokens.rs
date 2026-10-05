@@ -440,6 +440,9 @@ pub(crate) enum Need<'a> {
     /// A colony-scoped route: the scope first, then the colony's org/repo against the token's
     /// limits — outside them reads as an unknown id (404), never as a 403.
     Session { id: &'a str, at_least: Scope },
+    /// A UHP response route (§7.3): the colony its id names, held like [`Need::Session`], except
+    /// that an unknown or out-of-limits one reads as an unknown response.
+    Response { id: &'a str, at_least: Scope },
     /// A map route for one repository: read scope, then the repository against the token's
     /// limits — outside them the map reads as unknown (404), like an out-of-limits colony.
     Map { owner: &'a str, name: &'a str },
@@ -550,6 +553,24 @@ fn classify<'a>(method: &Method, path: &'a str) -> Need<'a> {
             id: cid.strip_prefix("cntr_").unwrap_or(cid),
             at_least: Scope::Read,
         },
+        // The task-bearing core (§7.3, §7.4, §7.6, issue #650). Creating a response starts a colony
+        // or continues one, so it needs launch, as `POST /api/sessions` does; the handler holds a
+        // continuation to the token's org/repo limits. Reading or streaming a response is a watch
+        // of its colony, and cancelling one — or the whole session — drives the colony like Stop:
+        // operate. A response id that does not parse names no colony, so it reads as unknown.
+        ["uhp", "v1", "responses"] if post => Need::Launch,
+        ["uhp", "v1", "responses", rid] if get && !rid.is_empty() => Need::Response {
+            id: rid,
+            at_least: Scope::Read,
+        },
+        ["uhp", "v1", "responses", rid, "cancel"] if post && !rid.is_empty() => Need::Response {
+            id: rid,
+            at_least: Scope::Operate,
+        },
+        ["uhp", "v1", "sessions", id, "cancel"] if post && !id.is_empty() => Need::Session {
+            id,
+            at_least: Scope::Operate,
+        },
         // Launching: start a colony.
         ["api", "sessions"] if post => Need::Launch,
         // The built-in TypeScript any loop's settings, last report and trend: a watch. Changing its
@@ -604,6 +625,7 @@ pub(crate) fn describe_need(method: &Method, path: &str) -> String {
     match classify(method, path) {
         Need::Bare(scope) => scope.as_str().to_string(),
         Need::Session { at_least, .. } => format!("session>={}", at_least.as_str()),
+        Need::Response { at_least, .. } => format!("response>={}", at_least.as_str()),
         Need::Map { .. } => "map".to_string(),
         Need::Launch => "launch".to_string(),
         Need::Fleet => "fleet".to_string(),
@@ -618,6 +640,9 @@ pub(crate) enum Deny {
     /// A colony-scoped route whose colony is unknown or outside the token's org/repo limits:
     /// 404, worded exactly like the handlers' own unknown-id answer.
     NoSession,
+    /// A response route whose response's colony is unknown or outside the limits: 404 like
+    /// [`Deny::NoSession`], worded for the response.
+    NoResponse,
     /// A map route whose repository is outside the token's org/repo limits: 404, the same
     /// nothing-to-see an out-of-limits colony gets.
     NoMap,
@@ -637,6 +662,7 @@ impl Deny {
         match self {
             Deny::Forbidden(message) => (StatusCode::FORBIDDEN, message).into_response(),
             Deny::NoSession => (StatusCode::NOT_FOUND, "no such session").into_response(),
+            Deny::NoResponse => (StatusCode::NOT_FOUND, "no such response").into_response(),
             Deny::NoMap => (StatusCode::NOT_FOUND, "no such map").into_response(),
         }
     }
@@ -647,7 +673,7 @@ impl Deny {
 /// limits into 404s here rather than leaking them as 403s.
 pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, path: &str) -> Result<(), Deny> {
     match classify(method, path) {
-        Need::Bare(at_least) | Need::Session { at_least, .. } if token.scope < at_least => {
+        Need::Bare(at_least) | Need::Session { at_least, .. } | Need::Response { at_least, .. } if token.scope < at_least => {
             Err(Deny::forbidden(token, method, path))
         }
         Need::Bare(_) => Ok(()),
@@ -661,6 +687,15 @@ pub(crate) async fn authorize(app: &App, token: &ScopedToken, method: &Method, p
                 Ok(())
             } else {
                 Err(Deny::NoSession)
+            }
+        }
+        Need::Response { id, .. } => {
+            let Some(session) = crate::uhp_responses::session_of(id) else {
+                return Err(Deny::NoResponse);
+            };
+            match app.session(&session).await {
+                Some(s) if token.covers(&s.org, &s.repo) => Ok(()),
+                _ => Err(Deny::NoResponse),
             }
         }
         Need::Map { owner, name } => {

@@ -18,6 +18,7 @@
 {"type":"finding","title":"hello.txt is written outside /harness/out","body":"The turn writes `hello.txt` into the worktree root, where it would land in the pull request.","evidence":"This turn: the Bash call above runs `echo hi > hello.txt` and the file appears in the worktree."}
 {"type":"tool_call","message_id":"msg_3","tool_call_id":"toolu_fetch","name":"Bash","input":{"command":"git fetch origin"}}
 {"type":"tool_result","tool_call_id":"toolu_fetch","output":"fatal: unable to access 'https://github.com/anthropics/colonizer/': Could not resolve host","is_error":true,"denial":{"class":"egress","hint":"Network access to that host is refused in this colony (egress is limited to the agent's declared hosts and the task's providers). Don't retry; use what is installed or vendored, and mention the missing access in your report."}}
+{"type":"boundary","kind":"egress_denied","control":"egress","detail":"fatal: unable to access 'https://github.com/anthropics/colonizer/': Could not resolve host","at":"2026-01-01T00:00:00.000Z","target":"github.com"}
 {"type":"tool_call","message_id":"msg_4","tool_call_id":"toolu_read","name":"Read","input":{"file_path":".env"}}
 {"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}
 {"type":"tool_result","tool_call_id":"toolu_read","output":"","is_error":false}

@@ -113,6 +113,8 @@ colonizer pr abc123                                    # the pull request URL an
 colonizer pr abc123 --wait --timeout 30m               # wait for the checks to settle; exit 7 on failure
 colonizer map owner/repo                               # the repository's architecture map, as a text outline
 colonizer map owner/repo --find login                  # only the components a query matches
+colonizer handoff sess-1 --repo owner/repo             # a session you ran here continues in a colony
+colonizer handoff ./session.json --repo owner/repo     # from a txcript document you exported yourself
 ```
 
 `launch` takes the repository as `owner/repo`, an optional task as the last argument, and
@@ -127,13 +129,25 @@ launch guard: `--allow-duplicate` starts a second colony on an issue another col
 `--queue-behind-holder` waits behind the holder instead (the colony comes back `queued` and starts
 when the issue is its own), and `--allow-epic` starts one on an epic (an issue with sub-issues).
 Without them, an issue another colony holds or an epic is refused with a 409 (exit 5) that names
-the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `list` filters
+the flag ([colonies.md](colonies.md#claims-one-colony-per-issue)). `--package P --advisory A` (always
+together) launches a supply-chain fix: a second live colony on the same package and advisory — one
+the Packages tab or the supply-chain loop started included — is refused the same way. `list` filters
 client-side: `--org` by repository owner, `--status` by the API's state names, case-insensitively.
 `answer` matches its argument against the pending question: a 1-based option number wins, then a
 whole-label match case-insensitively, and anything else goes to the agent as a free-text note —
 but a bare number that names no option is refused, never silently read as text, and with several
 questions pending only a number or label of the first is accepted (`colonizer ask <id>` shows the
 rest). An empty `list` or `token list` prints a note to stderr; `--json` prints `[]`.
+
+`handoff` continues a session you ran on this machine in a colony: the argument is either a txcript
+session id — read here with `txcript export <id> --out <file>` — or a file you exported yourself,
+and `--repo` names where the colony works. The document is uploaded, rendered to text and fenced
+into the colony's first prompt, and the colony starts from the branch the session recorded unless
+`--branch` overrides it and `--title` names it. `txcript` must be on `PATH` (a session id without
+it exits 4 with an install hint); a document over 2 MiB is refused before anything is sent. The
+answers and limits are the API's ([protocol/sessions.md](protocol/sessions.md#post-apihandoff)).
+To go the other way, a colony's conversation is `GET /api/sessions/{id}/handoff`, which writes the
+same document for `txcript continue`.
 
 `diff` prints the colony's whole diff: everything it changed against the merge-base with its
 base branch — committed and uncommitted tracked edits, plus untracked new files. The colony
@@ -350,8 +364,8 @@ The scopes are ordered, `read` < `operate` < `launch`, each adding to the last:
 | Scope | What it may call |
 | :--- | :--- |
 | `read` | Watch: `GET /api/status`, `/api/version`, `/api/sessions`, `/api/sessions/{id}` and its `/question`, `/diff`, `/commits`, `/transcript` and `/files` (listing, archive, content) reads, `POST /api/sessions/{id}/seen`, `GET /api/loops` and `/api/loops/{id}/runs`, the built-in loops' `GET /api/merge-train`, `/api/merge-train/loop`, `/api/supply-chain-loop` and `/api/ts-any-loop`, the events WebSocket, the `/api/maps/…` reads, the `/uhp/v1/…` reads, and `GET /api/tokens/self` |
-| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm` |
-| `launch` | Start colonies: `POST /api/sessions`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
+| `operate` | Drive colonies that exist: `POST /api/sessions/{id}/answer`, `/messages`, `/stop`, `/resume`, `/keep`, `/prewarm`, and the UHP cancels `POST /uhp/v1/sessions/{id}/cancel` and `/uhp/v1/responses/{id}/cancel`; and manage its own webhook subscriptions, `GET/POST /api/webhooks` and `DELETE /api/webhooks/{id}`, which receive only events about colonies within its limits ([webhooks](protocol/webhooks.md#subscriptions)) |
+| `launch` | Start colonies: `POST /api/sessions` and `POST /uhp/v1/responses`, and create, edit, delete and run its own loops (`POST /api/loops`, `PUT/DELETE /api/loops/{id}`, `POST /api/loops/{id}/run-now`) |
 
 A fourth scope, `fleet`, sits outside that ladder and is not creatable here: fleet pairing mints it
 for a member ([fleet.md](fleet.md)), and it reaches only `GET /api/hosts`,

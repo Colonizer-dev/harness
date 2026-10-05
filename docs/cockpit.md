@@ -251,6 +251,26 @@ The Launch view is the full launcher: pick a repository, select one or many issu
 checks for duplicates and queues past the parallel limit. Reach it from Colonize's **launch form**
 link, the Nest's **DIG** chamber, or **More → Launch** on a phone.
 
+### Hand-off with a local session
+
+Two flows move a conversation between a developer's machine and a colony.
+
+**Continue in a colony** (Launch view): upload a txcript **Simple JSON** export of a local Claude
+Code, Codex or OpenCode session — a JSON object with a `messages` array, 2 MiB at most — name the
+repository as `owner/name`, and the form prefills the branch and title the file carries. The colony
+starts from that branch and continues where the local session stopped.
+
+**Continue locally** (a colony's header): **Continue locally** downloads the colony's conversation
+as `colony.json` and shows the two commands to run at a checkout of the repository:
+
+```sh
+git fetch origin <colony branch> && git switch <colony branch>
+txcript continue ./colony.json --with claude_code
+```
+
+The `--with` value is `codex` (or `opencode`) when the colony's agent, or the exported transcript's
+tool names, say so.
+
 ## Chat
 
 **Sidebar: Chat.**
@@ -357,6 +377,52 @@ colony's chat, so you answer there.
 
 How you get told when the tab is not in front is set in Settings, Notifications
 ([Notifications and Web Push](#notifications-and-web-push)).
+
+### Decisions
+
+Some things only a person can settle: a product question on an issue, a pull request that needs a
+review, a conflict the merge train cannot redo by itself. They show in the Inbox under their own
+**Decisions** header, below the colonies that wait on you, and count in the same "need you" number
+as the badge on the rail, the phone tab and the bell. They are not colony questions; nothing here
+reaches a colony.
+
+**Repo decisions.** An open issue labelled `needs-decision`, or whose body or latest comment has a
+line starting `Open decision:` or `Decision needed:`, gets a card in the same style as a colony's
+question. The options are the list under an `Options:` line, if the issue has one:
+
+```markdown
+Open decision: Should saved carts live in the session store or in Postgres?
+
+Options:
+- Session store
+- Postgres
+```
+
+Without options the card takes free text. Pick an option (or **Other…**), add a note if you like and
+press **Post decision**: the mothership posts one comment, `Decision (maintainer): <your choice>`
+with the note under it, and removes the `needs-decision` label. Nothing is posted until you press
+the button.
+
+**Pull requests that need you.** Each card says why and links to the pull request:
+
+- **Held by policy**: the watchdog flagged a control-defeat signature, the autopilot is holding the
+  publish because a secret was redacted from the description, or the publish was refused. **Open
+  colony** takes you to it.
+- **Needs a redo** and **Conflicted**: the merge train's mechanical rebase conflicted, its resolve
+  colony gave up, or the auto-rebase could not finish. **Dispatch redo colony** sends the merge
+  train's own redo colony, once per pull request.
+- **CI red**: a check failed and it is not a known flake the merge-train loop is already re-running.
+  **Re-run failed jobs** re-runs the failed jobs on GitHub.
+- **Review requested**: someone asked you for a review.
+- **Waiting for a merge**: CI is green, and the merge train does not drive the repository.
+
+**Open on GitHub** is on every card that has a pull request.
+
+**Which orgs.** An org is in when it is switched on as a workspace and already has colonies; switch
+an org in or out with `PUT /api/decisions/orgs/{org}` ([protocol](protocol/decisions.md)). GitHub is
+read gently: one search per org at most every five minutes, conditional requests, and a pause of 15
+minutes and more whenever GitHub pushes back. With `COLONIZER_NO_EXTERNAL_EFFECTS` set the cards
+still show, but answering and the actions are off and say why.
 
 ## Packages
 
@@ -643,21 +709,24 @@ notification on other devices — until its question is answered.
 **Web Push** reaches a device even when Colonizer is closed. Press **Subscribe** under "Push to this
 device" to enrol the current browser. Each enrolled device is listed with its name (rename it in
 place), when it was last seen, **Send test**, **Prefs** and **Revoke**. Tapping a notification opens
-the colony it names. Notifications are grouped one per colony — a colony's next push replaces its
+the colony it names; a **Provider out of quota** push opens the Inbox, where that provider's card
+is. That push is one per provider — "Z.AI is out of quota: 3 colonies are waiting; resets Oct 6,
+04:00 UTC" — never one per blocked colony. Notifications are grouped one per colony — a colony's next push replaces its
 last instead of stacking up — and when two or more colonies need you, a "N colonies need you"
 summary stands in for the pile and opens the front page; it closes again once fewer than two remain.
 
 Every device has preferences of its own, kept on the mothership and checked before it sends:
 
-- **Events**: Questions, Pull request opened, Needs rebase, Failed and Needs attention are on by
-  default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
+- **Events**: Questions, Pull request opened, Needs rebase, Failed, Needs attention and Provider out
+  of quota are on by default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
   preferences existed keep working on these defaults — so Provider degraded and the digest now start
   off for them.
 - **Play a sound for questions.** A question is the only push that may sound; everything else
   arrives silent. **Answer buttons on questions** and the **Needs-you count on the app icon** can
   be switched off per device too.
 - **Repositories**: empty hears about every colony; entries name an `org` or an `org/repo`, and only
-  narrow the events tied to a colony.
+  narrow the events tied to a colony. A Provider out of quota push reaches the device when at least
+  one colony on the card is in its repositories.
 - **Quiet hours** hold everything back through the device's own night, with an optional break-through
   for questions. The time zone is stamped when the preferences are saved from that device, and the
   cockpit keeps it fresh while it is open.

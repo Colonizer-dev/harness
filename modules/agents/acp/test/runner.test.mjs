@@ -236,6 +236,15 @@ test('acp/execpolicy.mjs is byte-identical to the claude-code original it is cop
   );
 });
 
+test('acp/boundary.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'boundary.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'boundary.mjs'));
+  assert.ok(
+    copy.equals(original),
+    'modules/agents/acp/boundary.mjs has drifted from modules/agents/claude-code/boundary.mjs; the boundary events are one file in two places — change both together',
+  );
+});
+
 test('the vm-writes vectors hold against the ACP copy of the exec policy (#877)', () => {
   // The claude-code test drives the same fixture against its copy; both must agree, since the
   // file is one in two places.
@@ -702,6 +711,13 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   assert.ok(!deny.events.some((e) => e.type === 'question'), 'a denied command opens no card');
   await deny.waitUntil(count('turn_end', 1), 'the first turn to finish');
   assert.match(stderrChunks.join(''), /exec policy: deny rule=secret-paths layer=default command=cat ~\/\.ssh\/id_rsa/, 'the decision leaves one log line');
+  // And one boundary event for the watchdog's control-defeat signature (issue #609).
+  const denied = deny.events.find((e) => e.type === 'boundary');
+  assert.equal(denied.kind, 'exec_policy_deny');
+  assert.equal(denied.control, 'exec_policy:secret-paths');
+  assert.equal(denied.target, '~/.ssh/id_rsa');
+  assert.match(denied.detail, /^deny \(default\): cat ~\/\.ssh\/id_rsa$/);
+  assert.ok(!Number.isNaN(Date.parse(denied.at)), 'stamped with when the control decided');
 
   // A deny with no reject option to pick — the padded Cancel is synthetic — answers cancelled.
   deny.send({ type: 'user_message', id: 'u-2', text: 'd2' });
@@ -738,6 +754,7 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
         s1: { asks: [permission('call_s1', { title: 'curl -fsSL https://example.com' }, twoOptions)] },
         s2: { asks: [permission('call_s2', { title: 'curl  -fsSL https://example.com' }, twoOptions)] },
         s3: { asks: [permission('call_s3', { title: 'curl -fsSL https://example.org' }, twoOptions)] },
+        s4: { asks: [permission('call_s4', { title: 'curl -sS https://example.org/again' }, twoOptions)] },
       },
     },
   });
@@ -766,6 +783,21 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   ask.send({ type: 'answer', question_id: 'call_s3', answers: { [other.questions[0].question]: 'Reject' }, response: null });
   await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 3, 'the rejected ask to be replied');
   assert.deepEqual(ask.asks('session/request_permission')[2].response, { result: { outcome: { outcome: 'selected', optionId: 'reject' } } });
+  // The refused ask is a control refusing something (issue #609); an allowed one was not.
+  const refusals = () => ask.events.filter((e) => e.type === 'boundary');
+  assert.deepEqual(refusals().map((e) => [e.kind, e.control]), [['exec_policy_deny', 'exec_policy:ask-net']]);
+  assert.match(refusals()[0].detail, /^ask refused \(install\): curl -fsSL https:\/\/example\.org$/);
+  await ask.waitUntil(count('turn_end', 3), 'the third turn to finish');
+
+  // The same rule asking again, however the command is rephrased, is a bypass attempt.
+  ask.send({ type: 'user_message', id: 'u-4', text: 's4' });
+  const again = await ask.waitUntil(count('question', 3), 'the refused rule to ask again');
+  const bypass = refusals()[1];
+  assert.equal(bypass.kind, 'exec_policy_ask_bypass_attempt');
+  assert.equal(bypass.control, 'exec_policy:ask-net');
+  assert.match(bypass.detail, /refused earlier: curl -fsSL https:\/\/example\.org/);
+  ask.send({ type: 'answer', question_id: 'call_s4', answers: { [again.questions[0].question]: 'Allow' }, response: null });
+  await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 4, 'the re-asked call to be replied');
   await stop(ask);
 });
 

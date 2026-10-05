@@ -347,3 +347,46 @@ test('a proxied request carries the relay headers, loses the relay cookie and ke
   assert.equal(sent.get('cookie'), 'cockpit_login=pilot'); // relay session stripped, cockpit cookie kept
   assert.equal(forwarded[0].request.url, `https://${install.host}/cockpit/tasks`);
 });
+
+test('retiring an install deletes it, its owner and its pairings, signed by its own key, and tells its tunnel (R2)', async () => {
+  const { env, db, forwarded } = setup();
+  const key = await ed25519Key();
+  const { install } = await register(env, key.publicKey);
+  const other = await register(env); // a sibling install, untouched throughout
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare('UPDATE installs SET owner_github_id = ?, owner_github_login = ? WHERE id = ?').bind(4242, 'owner', install.install_id).run();
+  await db.prepare('INSERT INTO pairings (install_id, code, github_id, github_login, expires_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(install.install_id, '123456', 5555, 'someone', now + 60)
+    .run();
+  const session = await sealSession(install.install_id, 4242, env.SESSION_SECRET);
+  const path = `/api/installs/${install.install_id}`;
+  const retire = (headers) => worker.fetch(new Request(`https://${DOMAIN}${path}`, { method: 'DELETE', headers }), env, NO_CTX);
+
+  // Unsigned, or signed by any other key: refused, and nothing changes.
+  const stranger = await ed25519Key();
+  for (const headers of [{}, await sigHeaders(stranger, 'DELETE', path, now), await sigHeaders(key, 'DELETE', `${path}/owner`, now)]) {
+    assert.equal((await retire(headers)).status, 401);
+  }
+  assert.ok(await db.prepare('SELECT id FROM installs WHERE id = ?').bind(install.install_id).first());
+
+  const response = await retire(await sigHeaders(key, 'DELETE', path, now));
+  assert.equal(response.status, 204);
+  assert.equal(await db.prepare('SELECT id FROM installs WHERE id = ?').bind(install.install_id).first(), null);
+  assert.equal(await db.prepare('SELECT code FROM pairings WHERE install_id = ?').bind(install.install_id).first(), null);
+  assert.ok(await db.prepare('SELECT id FROM installs WHERE id = ?').bind(other.install.install_id).first());
+  // The install's tunnel object was told, with the worker's own (unforgeable) kind.
+  const told = forwarded.find((f) => f.install === install.install_id);
+  assert.equal(told.request.headers.get('x-relay-kind'), 'retire');
+
+  // From now on the install is unknown everywhere: the key signs nothing, the dial is 404, and the
+  // owner's still-sealed session gets the unknown-install page instead of the cockpit.
+  assert.equal((await retire(await sigHeaders(key, 'DELETE', path, now))).status, 404);
+  const pairing = `${path}/pairing`;
+  assert.equal((await worker.fetch(new Request(`https://${DOMAIN}${pairing}`, { headers: await sigHeaders(key, 'GET', pairing, now) }), env, NO_CTX)).status, 404);
+  const dial = await worker.fetch(new Request(`https://${DOMAIN}/tunnel/${install.install_id}`, { headers: { upgrade: 'websocket' } }), env, NO_CTX);
+  assert.equal(dial.status, 404);
+  const before = forwarded.length;
+  const browser = await worker.fetch(new Request(`https://${install.host}/`, { headers: { cookie: `__Host-colonizer_session=${session}` } }), env, NO_CTX);
+  assert.equal(browser.status, 404);
+  assert.equal(forwarded.length, before, 'nothing reached a tunnel');
+});

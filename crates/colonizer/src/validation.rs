@@ -302,11 +302,11 @@ pub(crate) async fn record(app: &Shared, session_id: &str, line: &Value) {
     let rt = app.runtime(session_id).await;
     let appended = {
         let _guard = rt.findings_lock.lock().await;
-        // #761: a finding's title or reason can quote what the agent saw, secrets included.
+        // #761: a finding's title or reason can quote what the agent saw, secrets included; the
+        // store redacts every appended line (`store::ledger_line`).
         let entry = line.to_string();
-        let text = crate::redact::redact_line(&entry);
         app.store()
-            .append(session_id, crate::findings::LEDGER_FILE, text.as_bytes())
+            .append(session_id, crate::findings::LEDGER_FILE, entry.as_bytes())
             .await
             .map_err(anyhow::Error::from)
     };
@@ -368,6 +368,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             allow_epic: false,
             queue_behind_holder: false,
             supply_chain: None,
+            supply_chain_targets: Vec::new(),
             model_tier: None,
             model_override: None,
             subagent_model_override: None,
@@ -377,6 +378,7 @@ async fn spawn_fix_colony_inner(app: Shared, hunter: Session, finding: Finding, 
             origin: None,
             host: None,
             serialize: None,
+            handoff: None,
         }),
     )
     .await

@@ -309,7 +309,7 @@ What the mothership keeps in the config directory:
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
 | `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
-| `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
+| `voice-keys/`, `memory-keys/`, `notify-secret`, `webhook-subscriptions.json`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, webhook subscriptions and their secrets, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
 | `api-token`, `api-tokens.json` | The owner token behind the sign-in link, and scoped API tokens ([docs/cli.md](cli.md#scoped-api-tokens)) |
 | `telemetry.json`, `usage.json`, `usage-last.json`, `usage-sent.json` | The [live map](telemetry.md) and [usage data](usage-data.md) answers, the last usage batch built, and when the last one was sent |
@@ -329,7 +329,8 @@ What it keeps in the data directory: `sessions.json` (the colony list, read back
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
 `archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
 `colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
-`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
+`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`),
+`notify-webhook-outbox.json` (webhook deliveries waiting for a retry, and the dead letter), and
 `mothership.out` when the mothership is started at login.
 
 ## Settings
@@ -376,7 +377,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `CI` | – | Exactly `true` keeps [usage data](usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 | `COLONIZER_TELEMETRY_ENDPOINT` | – (nothing is sent) | The collector URL usage data is posted to, at most once a day. No default: unset, no [usage data](usage-data.md) is ever sent, whatever the switch says |
-| `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
+| `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)). Must be `wss://`; plaintext `ws://` is accepted only for a relay on loopback (a local test relay) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
 
 ### Upgrading across the microsandbox 0.7 pin

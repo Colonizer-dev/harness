@@ -1,8 +1,7 @@
 //! The durable half of the tailer (#842): where each stream's cursor lives, and the one atomic
 //! write that commits a batch. The file is `<data_dir>/observability/state.json`.
 
-use super::cursor::{Cursor, Gap, GapReason};
-use crate::util;
+use crate::cursor::{Cursor, Gap, GapReason};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -86,7 +85,7 @@ impl State {
     }
 
     /// Writes the state atomically, at most once a second unless `force`. Returns whether it wrote.
-    pub(crate) async fn commit(&mut self, data_dir: &Path, force: bool) -> anyhow::Result<bool> {
+    pub(crate) fn commit(&mut self, data_dir: &Path, force: bool) -> std::io::Result<bool> {
         let now = Instant::now();
         if !force
             && let Some(last) = self.last_write
@@ -94,8 +93,8 @@ impl State {
         {
             return Ok(false);
         }
-        tokio::fs::create_dir_all(data_dir.join(DIR)).await?;
-        util::write_atomic(&state_file(data_dir), &serde_json::to_vec(&*self)?).await?;
+        std::fs::create_dir_all(data_dir.join(DIR))?;
+        crate::write_atomic(&state_file(data_dir), &serde_json::to_vec(&*self)?)?;
         self.last_write = Some(now);
         Ok(true)
     }

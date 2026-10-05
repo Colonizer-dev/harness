@@ -20,7 +20,7 @@ works):
 | `list_sessions` | Every id with a session, sorted. |
 | `read_file` | One per-session file's bytes, `None` if absent. Same visibility rules as the index. |
 | `write_file` | Creates or replaces one file whole; the index's guarantees per file. |
-| `append` | Adds one line (newline included, like `util::append_line`), creating the file if needed. At least once per writer; readers replay with the `seq` rule below. |
+| `append` | Adds one line (newline included, like `util::append_line`), creating the file if needed. At least once per writer; readers replay with the `seq` rule below. Every backend stores the line redacted by the shared secret redactor (`store::ledger_line`, [audit.md](audit.md), #761); a clean line is stored byte for byte. |
 | `list_files` | A session's files, relative and `/`-separated (`vm/token`), sorted, recursive. |
 | `remove_session` | Removes a session and everything in it; idempotent. |
 | `quarantine_index` | Moves an unusable index aside to `sessions.json.corrupt-<unix-ts>` and returns the name; `None` when there is no index. The stamp has one-second resolution, so an aside from an earlier second is never overwritten. |

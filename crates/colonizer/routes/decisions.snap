@@ -1,0 +1,4 @@
+/api/decisions                                       GET    unauth=401    token=owner            activity=-
+/api/decisions/answer                                POST   unauth=401    token=owner            activity=decision.answer
+/api/decisions/orgs/{org}                            PUT    unauth=401    token=owner            activity=settings.save
+/api/decisions/pr-action                             POST   unauth=401    token=owner            activity=decision.pr_action

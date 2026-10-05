@@ -238,6 +238,48 @@ pub(crate) async fn cards(app: &Shared) -> Vec<Value> {
     )
 }
 
+/// Each exhausted provider's card as the notify loop needs it (issue #767): the provider, its name,
+/// when it resets and the colonies blocked on it — the same derivation as [`build_cards`], without
+/// the picker, so the push names exactly the card the Inbox shows.
+pub(crate) async fn notify_cards(app: &Shared) -> Vec<crate::notify::QuotaCard> {
+    let exhausted: Vec<_> = app
+        .gateway
+        .quota_exhausted()
+        .into_iter()
+        .filter(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID)
+        .collect();
+    if exhausted.is_empty() {
+        return Vec::new();
+    }
+    let providers = app.providers();
+    let sessions = app.sessions.read().await.clone();
+    quota_notify_cards(&exhausted, &providers, &sessions, &app.gateway.colony_quota_all())
+}
+
+/// The pure half of [`notify_cards`]: one entry per exhausted provider with at least one affected
+/// colony, in the gateway's order.
+pub(crate) fn quota_notify_cards(
+    exhausted: &[(String, Option<String>, Option<i64>)],
+    providers: &[Provider],
+    sessions: &[Session],
+    hits: &HashMap<String, ColonyQuotaHit>,
+) -> Vec<crate::notify::QuotaCard> {
+    let provider_ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
+    exhausted
+        .iter()
+        .filter_map(|(id, reset_at, _)| {
+            let provider = providers.iter().find(|p| &p.id == id)?;
+            let colonies: Vec<Session> = affected(id, sessions, hits, &provider_ids).into_iter().cloned().collect();
+            (!colonies.is_empty()).then(|| crate::notify::QuotaCard {
+                provider: id.clone(),
+                name: provider.name.clone(),
+                reset_at: reset_at.clone(),
+                colonies,
+            })
+        })
+        .collect()
+}
+
 /// `GET /api/attention`: what needs the maintainer beyond a colony's own question. Today that is
 /// the provider-out-of-quota cards (issue #767).
 pub async fn list(State(app): State<Shared>) -> Json<Value> {

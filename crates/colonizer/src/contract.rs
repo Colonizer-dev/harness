@@ -23,6 +23,23 @@ pub fn applies_exec_policy(schema: &serde_json::Value) -> bool {
     crate::sessions::applies_exec_policy(schema)
 }
 
+/// Whether the mothership accepts an exec policy's JSON text at a save (`exec_policy::validate`,
+/// issue #924), for the shared-fixture check against the runner's `parsePolicy`. Wrapped because
+/// the item is `pub(crate)`.
+pub fn validate_exec_policy(text: &str) -> Result<(), String> {
+    crate::exec_policy::validate(text)
+}
+
+/// The boundary kinds the harness reads (`boundary::KINDS`), for the check against the schema's
+/// `boundary.kind` enum. Copied rather than re-exported because the item is `pub(crate)`.
+pub const BOUNDARY_KINDS: [&str; 7] = crate::boundary::KINDS;
+
+/// The event a boundary the mothership observed writes (`Boundary::new(..).to_event()`), for the
+/// check that it carries every field the schema requires. Wrapped because `new` is `pub(crate)`.
+pub fn boundary_event(kind: &str, control: &str, detail: &str, target: Option<&str>) -> serde_json::Value {
+    crate::boundary::Boundary::new(kind, control, detail, target).to_event()
+}
+
 /// One line of the runner contract fixture reduced to the primitives the repository-level check
 /// reads. [`crate::protocol::AgentEvent`] stays crate-private — raising it would drag its whole
 /// field-type graph (`AgentState`, `QuestionRisk`, `JevDecision`, …) public — so this mirrors the
@@ -67,6 +84,11 @@ pub enum EventShape {
         policy: String,
         path: String,
         tool: String,
+    },
+    Boundary {
+        kind: String,
+        control: String,
+        target: Option<String>,
     },
     Other,
 }
@@ -118,6 +140,9 @@ pub fn event_shape(line: &str) -> EventShape {
             path,
             tool,
         },
+        AgentEvent::Boundary {
+            kind, control, target, ..
+        } => EventShape::Boundary { kind, control, target },
         _ => EventShape::Other,
     }
 }

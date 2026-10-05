@@ -18,6 +18,7 @@ Part of the [Colonizer protocol](../protocol.md).
 | `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
+| `POST /api/providers/{id}/test` | Sends a one-token request through the colony's route; answers `{ok, url, status, model, latency_ms, error}` (§6.5, Test request) |
 | `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
@@ -224,9 +225,12 @@ enabled, a colony that is `waiting_for_answer` with no question actually pending
 held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
 (Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
-provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
-watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
-it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
+provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, a
+`boundary` event, or a watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
+it sets itself. The exception is `control_defeat` (issue #609, docs/boundaries.md "Watchdog
+signatures"): set when the colony's `boundary` events complete a control-defeat signature, it carries
+`signature`, `detail` and the events as `evidence`, the watchdog's tick neither nudges over it nor
+replaces it, and only a person's own `user_message` (or the colony stopping) clears it. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
 announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
@@ -249,7 +253,7 @@ not finish the turn, and leaves the colony to the stall handling above rather th
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
-`desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+`on_quota` = true, `on_lifecycle` = false, `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
 announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
 mothership diffs the session list against what it last saw, seeding new colonies without firing so a
 restart does not replay a backlog, and announces the edges once each: `status` became
@@ -281,13 +285,22 @@ has no colony and no org, so its settings are the notify module's own global one
 not reach it, and `on_provider` has no per-org override — and the announcement carries no repository
 at all: only the id and name the operator chose, plus the counters behind the rate.
 
+A provider that runs out of quota while colonies are blocked on it opens one out-of-quota card
+(§6.5, issue #767), and the same loop announces the card once as the `provider_quota_exhausted` event
+under `on_quota` — `Z.AI is out of quota: 3 colonies are waiting; resets Oct 6, 04:00 UTC` — one line
+per provider, never one per colony. It stays quiet while the card stays open and re-arms when the
+card closes (the plan reset, or every colony moved on). Like a provider crossing, it has no per-org
+override, and it carries only the provider's id and name, its reset time and how many colonies wait.
+A colony's own `provider_quota_exhausted` attention flag is never an event of its own.
+
 The desktop channel runs `osascript -e 'display notification …'` on macOS or `notify-send` on Linux
 under a graphical session, with the text passed as an argument and escaped for AppleScript. Over SSH
 or headless it does nothing, logging the reason once rather than a line a tick. A non-empty
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|digest", "at": "2026-09-18T00:00:00+00:00",
+{"version": 1, "id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
+ "event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
  "pr_url": null,
@@ -298,18 +311,32 @@ The note carries no repository content — no issue title, no question text, no 
 `pr_url` is the colony's pull request address only on the `pull_request` and `needs_rebase` events, `null` otherwise.
 `provider` is `null` on every colony event; on `provider_degraded` it is the reverse — `colony` and
 `pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests, failure}`
-(`failure` is the code of its most recent failure, or `null`) — so
-a receiver reads one six-key shape either way.
+(`failure` is the code of its most recent failure, or `null`); on `provider_quota_exhausted`
+`provider` is `{id, name, reset_at, colonies}` (`colonies` is a count) — so
+a receiver reads one eight-key shape either way.
+`on_lifecycle` adds the whole colony lifecycle to the webhook — one event per status transition
+(`queued`, `started`, `running`, `idle`, `answered`, `publishing`, `merged`, `closed`,
+`no_changes`, `parked`, `resumed`, `stopped`, plus `cleaned`), webhook only and outside the rate
+limiter (issue #897); every payload also carries `version` (`1`). The full event list and the
+schema are in [Webhooks](webhooks.md).
+`id` is the event's stable id (issue #896): the same event always carries the same one, so a
+receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
+derived, and how to verify a request, is in [Webhooks](webhooks.md).
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
 `X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
-and without one it is sent unsigned. Transport errors and non-2xx answers are logged, never
-retried.
+and without one it is sent unsigned. Transport errors and non-2xx answers are logged and retried
+with exponential backoff and jitter, at most 6 attempts in all, then kept in a persistent dead
+letter the owner can list, replay or discard (issue #898; [Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)).
 
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/notify/secret` | `{has_secret, source}`: whether a webhook signing secret is set (`file` or `env` for `COLONIZER_NOTIFY_SECRET`). Never the secret |
 | `PUT /api/notify/secret` | `{secret}`: save it on the mothership; `null` or an empty string removes it. **400** over 512 characters or with non-printable characters |
+| `GET /api/notify/deliveries` | Webhook deliveries waiting for a retry, the dead letter and the last success ([Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)) |
+| `POST /api/notify/dead-letters/{key}/replay` | Replays one dead letter now: `{delivered, error}`; **404** for an unknown key |
+| `POST /api/notify/dead-letters/replay` | Replays every dead letter once: `{delivered, failed}` |
+| `DELETE /api/notify/dead-letters/{key}` | Discards one dead letter; **404** for an unknown key |
 
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn

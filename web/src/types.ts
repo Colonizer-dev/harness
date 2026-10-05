@@ -15,3 +15,5 @@ export * from "./features/loops/types";
 export * from "./features/remote/types";
 export * from "./features/chat/types";
 export * from "./features/history/types";
+export * from "./features/handoff/types";
+export * from "./features/decisions/types";

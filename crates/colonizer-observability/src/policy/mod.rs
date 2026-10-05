@@ -23,7 +23,9 @@ use crate::batch::{ExportResource, Item, Record};
 use crate::hashing::HashKey;
 use crate::proto::common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList, any_value};
 use crate::proto::logs::v1::{LogRecord, SeverityNumber};
-use crate::proto::metrics::v1::{AggregationTemporality, Gauge, Metric, NumberDataPoint, Sum, metric, number_data_point};
+use crate::proto::metrics::v1::{
+    AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint, Sum, metric, number_data_point,
+};
 use crate::proto::resource::v1::Resource;
 use crate::proto::trace::v1::{Span, Status, span, status};
 use allowlist::{Naming, Rule};
@@ -207,6 +209,7 @@ impl Policy {
             name,
             unit,
             sum: None,
+            histogram: None,
             point: NumberDataPoint::default(),
         }
     }
@@ -520,6 +523,7 @@ pub struct MetricBuilder<'p> {
     name: &'static str,
     unit: &'static str,
     sum: Option<bool>,
+    histogram: Option<HistogramDataPoint>,
     point: NumberDataPoint,
 }
 
@@ -547,6 +551,20 @@ impl MetricBuilder<'_> {
         self
     }
 
+    /// A cumulative explicit-bucket histogram instead of a number: `counts` has one more entry than
+    /// `bounds` (the last bucket is everything above the last bound), and `sum` is the sum of every
+    /// observation. A non-finite `sum` is left out, as [`MetricBuilder::double`] leaves one out.
+    pub fn histogram(mut self, bounds: &[f64], counts: &[u64], sum: f64) -> Self {
+        self.histogram = Some(HistogramDataPoint {
+            count: counts.iter().sum(),
+            sum: sum.is_finite().then_some(sum),
+            bucket_counts: counts.to_vec(),
+            explicit_bounds: bounds.to_vec(),
+            ..HistogramDataPoint::default()
+        });
+        self
+    }
+
     /// A point attribute: structure only, like a span's.
     pub fn attr(mut self, key: &str, value: impl Into<AttrValue>, tier: Tier) -> Self {
         self.fields.attr(key, value.into(), tier);
@@ -554,7 +572,22 @@ impl MetricBuilder<'_> {
     }
 
     pub fn finish(mut self) -> Item {
-        self.point.attributes = self.fields.finish();
+        let attributes = self.fields.finish();
+        if let Some(mut point) = self.histogram {
+            point.attributes = attributes;
+            point.start_time_unix_nano = self.point.start_time_unix_nano;
+            point.time_unix_nano = self.point.time_unix_nano;
+            return Item(Record::Metric(Metric {
+                name: self.name.to_string(),
+                unit: self.unit.to_string(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points: vec![point],
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                })),
+                ..Metric::default()
+            }));
+        }
+        self.point.attributes = attributes;
         let data_points = vec![self.point];
         let data = match self.sum {
             None => metric::Data::Gauge(Gauge { data_points }),

@@ -15,14 +15,16 @@ import { chatHttp, type ChatApi } from "./features/chat/api";
 import { loopsHttp, type LoopsApi } from "./features/loops/api";
 import { eventsHttp, type EventsApi } from "./features/events/api";
 import { historyHttp, type HistoryApi } from "./features/history/api";
+import { handoffHttp, type HandoffApi } from "./features/handoff/api";
+import { decisionsHttp, type DecisionsApi } from "./features/decisions/api";
 
 export { ApiError, SOCKET_OPEN, splitNdjson } from "./http";
 export type { SocketLike } from "./http";
-export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor, claimWaitPosition } from "./features/repos/claims";
+export { holdsIssue, heldByFor, isEpic, epicMarker, heldInBatch, claimWaitersFor, claimWaitPosition, duplicateHolder } from "./features/repos/claims";
 export type { SaveModuleRequest } from "./features/modules/api";
 export type { BehindInfo, CatchUpResult, StopReply } from "./features/sessions/api";
 
-export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, EventsApi, HistoryApi {
+export interface Api extends HostApi, FleetApi, ModulesApi, ProvidersApi, RemoteApi, ReposApi, SessionsApi, OrgsApi, MemoryApi, ChatApi, LoopsApi, EventsApi, HistoryApi, HandoffApi, DecisionsApi {
   readonly mock: boolean;
 }
 
@@ -41,6 +43,8 @@ export const httpApi: Api = {
   ...loopsHttp,
   ...eventsHttp,
   ...historyHttp,
+  ...handoffHttp,
+  ...decisionsHttp,
 };
 
 /** `?mock=1` swaps in an in-browser backend so the UI can be exercised without a harness; the demo build forces it on. */

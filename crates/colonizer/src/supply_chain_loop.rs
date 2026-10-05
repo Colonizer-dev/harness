@@ -31,7 +31,7 @@ use crate::{
     activity::Entry,
     authority, client_error,
     schedule::{Cadence, next_run_after},
-    sessions::{self, NewSession, Session, SessionStatus},
+    sessions::{self, NewSession, Session},
     util::{short_id, valid_repo, write_atomic},
 };
 use anyhow::{Context, Result, bail};
@@ -52,8 +52,8 @@ pub const NAME: &str = "Dependencies & supply chain";
 /// The origin tag a supply-chain target colony carries: `supply-chain:<ecosystem>`.
 pub const ORIGIN_PREFIX: &str = "supply-chain:";
 /// The title prefix the Packages view's hand-off gives a colony it starts on one risk; a live one
-/// counts as already working on that package.
-const HAND_OFF_PREFIX: &str = "Supply chain: ";
+/// counts as already working on that package (duplicates.rs).
+use crate::duplicates::HAND_OFF_PREFIX;
 const FILE: &str = "supply-chain-loop.json";
 /// Runs kept in the loop's history.
 const HISTORY: usize = 30;
@@ -918,6 +918,29 @@ impl Target {
         format!("{ORIGIN_PREFIX}{}", self.ecosystem)
     }
 
+    /// The package/advisory pairs this target's colony claims (issue #832): one per finding, the
+    /// advisory empty where the finding names none.
+    pub fn claims(&self) -> Vec<crate::supersede::SupplyChainTarget> {
+        let mut out: Vec<crate::supersede::SupplyChainTarget> = Vec::new();
+        for f in &self.findings {
+            let t = crate::supersede::SupplyChainTarget::new(&f.package, f.id.as_deref().unwrap_or(""));
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    /// The work this target's colony would be on, as the shared duplicates service reads it.
+    pub fn work(&self) -> crate::duplicates::Work {
+        crate::duplicates::Work {
+            repo: self.repo.clone(),
+            issue: None,
+            supply_chain: self.claims(),
+            origin: Some(self.origin()),
+        }
+    }
+
     pub fn title(&self) -> String {
         let n = self.findings.len();
         format!(
@@ -972,38 +995,47 @@ pub struct TargetRecord {
 }
 
 /// Whether a colony is still working on its target: live, queued, parked, publishing, or its pull
-/// request is open.
+/// request is open — the shared supply-chain hold (duplicates.rs).
 fn still_open(s: &Session) -> bool {
-    s.status == SessionStatus::Queued
-        || s.status == SessionStatus::Parked
-        || s.status == SessionStatus::PrOpened
-        || s.status.busy()
+    crate::duplicates::holds_supply_chain(s)
 }
 
-/// The duplicate-supply-chain-target refusal: the colony that already targets any of these findings
-/// — a supply-chain target colony on the same repository and ecosystem whose findings overlap (one
-/// with no record counts as overlapping), or a Packages-view hand-off on one of these packages —
-/// while it is live or its pull request is open.
-pub fn duplicate_of(target: &Target, records: &[TargetRecord], sessions: &[Session]) -> Option<String> {
-    let keys: BTreeSet<String> = target.keys().into_iter().collect();
-    let packages: BTreeSet<&str> = target.findings.iter().map(|f| f.package.as_str()).collect();
-    let origin = target.origin();
-    sessions
+/// The package/advisory pair a record's finding key (`eco:package@version:kind:id`) names.
+fn key_target(key: &str) -> Option<crate::supersede::SupplyChainTarget> {
+    let (_eco, rest) = key.split_once(':')?;
+    let (rest, id) = rest.rsplit_once(':')?;
+    let (versioned, _kind) = rest.rsplit_once(':')?;
+    let (package, _version) = versioned.rsplit_once('@')?;
+    (!package.is_empty()).then(|| crate::supersede::SupplyChainTarget::new(package, id))
+}
+
+/// The loop's records as the duplicates service reads them: what each loop colony was dispatched
+/// with, for the colonies from before the targets rode on the session.
+pub fn recorded_claims(records: &[TargetRecord]) -> Vec<crate::duplicates::Recorded> {
+    records
         .iter()
-        .filter(|s| s.repo.eq_ignore_ascii_case(&target.repo) && still_open(s))
-        .find(|s| {
-            if s.origin.as_deref() == Some(origin.as_str()) {
-                return match records.iter().find(|r| r.session == s.id) {
-                    Some(r) => r.keys.iter().any(|k| keys.contains(k)),
-                    None => true,
-                };
-            }
-            s.origin.is_none()
-                && s.issue_title
-                    .strip_prefix(HAND_OFF_PREFIX)
-                    .is_some_and(|name| packages.contains(name.trim()))
+        .map(|r| crate::duplicates::Recorded {
+            session: r.session.clone(),
+            targets: r.keys.iter().filter_map(|k| key_target(k)).collect(),
         })
-        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// [`recorded_claims`] of the loop's stored records.
+pub async fn recorded(app: &Shared) -> Vec<crate::duplicates::Recorded> {
+    recorded_claims(&app.supply_chain.state.read().await.targets)
+}
+
+/// The duplicate-supply-chain-target refusal, asked of the shared duplicates service (issue #832)
+/// exactly as a launch is: the colony already on any of these findings — a supply-chain colony of
+/// the same repository sharing a package and advisory (a loop colony with no record of its
+/// findings counts as on all of its ecosystem's), or a Packages-view hand-off on one of these
+/// packages — while it holds its claim.
+pub fn duplicate_of(target: &Target, records: &[TargetRecord], sessions: &[Session]) -> Option<String> {
+    match crate::duplicates::check(sessions, &recorded_claims(records), &target.work(), false, false) {
+        crate::duplicates::Verdict::Refuse(refusal) => refusal.holder.colony,
+        _ => None,
+    }
 }
 
 /// A target the run did not dispatch, and why.
@@ -1735,6 +1767,8 @@ async fn dispatch(app: &Shared, t: &Target, autopilot: bool) -> Result<Session, 
         "instructions": brief(t),
         "autopilot": autopilot,
         "origin": t.origin(),
+        // The findings ride on the colony, so every later launch reads its claim (issue #832).
+        "supply_chain_targets": t.claims(),
     });
     let req: NewSession =
         serde_json::from_value(body).map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;

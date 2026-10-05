@@ -150,16 +150,22 @@ pub(crate) fn is_credential_file(rel: &str) -> bool {
             .any(|part| part.starts_with("secrets") || part.starts_with("colony-secrets"))
 }
 
-/// A session file's bytes as they may leave the session directory: a log (`*.jsonl`, `*.log`,
-/// rotated `events-N.jsonl` included) goes through the #761 redactor, so one written before
-/// redaction existed is scrubbed on its way out; anything else is kept as it is.
+/// A session file's bytes as they may leave the session directory, through the shared #761
+/// redactor: a log (`*.jsonl`, `*.log`, rotated `events-N.jsonl` included) line by line, so one
+/// written before redaction existed is scrubbed on its way out and JSON lines stay JSON; any other
+/// UTF-8 file as one text, which covers what the agent wrote raw (`out/pr.md`, `review.md`, a
+/// staged vault note) and keeps a multi-line PEM block whole for its detector. A binary file is
+/// kept as it is.
 pub(crate) fn redact_for_bundle(rel: &str, bytes: Vec<u8>) -> Vec<u8> {
-    if !(rel.ends_with(".jsonl") || rel.ends_with(".log")) {
-        return bytes;
+    if rel.ends_with(".jsonl") || rel.ends_with(".log") {
+        return match crate::redact::redact_jsonl(&bytes) {
+            std::borrow::Cow::Owned(redacted) => redacted,
+            std::borrow::Cow::Borrowed(_) => bytes,
+        };
     }
-    match crate::redact::redact_jsonl(&bytes) {
-        std::borrow::Cow::Owned(redacted) => redacted,
-        std::borrow::Cow::Borrowed(_) => bytes,
+    match std::str::from_utf8(&bytes).map(crate::redact::redact_text) {
+        Ok(std::borrow::Cow::Owned(redacted)) => redacted.into_bytes(),
+        _ => bytes,
     }
 }
 
@@ -843,7 +849,10 @@ mod tests {
             ("events-1.jsonl", format!("{{\"text\":\"key {aws}\"}}\n")),
             ("findings.jsonl", format!("{{\"title\":\"leak {aws}\"}}\n")),
             ("transcripts/a.jsonl", format!("{{\"said\":\"{aws}\"}}\n")),
-            ("out/pr.md", "the pull request\n".to_string()),
+            // What the agent wrote raw, and the vault notes staged for it: text, not logs.
+            ("out/pr.md", format!("# Rotate the key\n\nThe old one was {aws}.\n")),
+            ("review.md", format!("the fixture hard-codes {aws}\n")),
+            ("vm/vault/ops.md", format!("deploy key {aws}\n")),
         ];
         for (name, text) in &logs {
             let path = dir.join(name);
@@ -901,6 +910,26 @@ mod tests {
         assert!(names.contains(&"logs/abc/events.jsonl"), "the archive fallback: {names:?}");
         no_credentials("export from the archive", &exported);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #761: every text file is redacted on its way into a bundle (a log line by line, anything
+    /// else as one text), a clean file is kept byte for byte, and a binary file is never touched.
+    #[test]
+    fn bundled_text_is_redacted_and_binary_files_are_kept() {
+        let token = "ghp_aB3dE5gH7jK9mN1pQ3sT5vX7zA9cE1gH3jK5";
+        let pr = redact_for_bundle("out/pr.md", format!("# Rotate\n\nold: {token}\n").into_bytes());
+        assert_eq!(String::from_utf8(pr).unwrap(), "# Rotate\n\nold: [REDACTED:github_token]\n");
+        let log = redact_for_bundle("events-2.jsonl", format!("{{\"text\":\"{token}\"}}\n").into_bytes());
+        assert_eq!(String::from_utf8(log).unwrap(), "{\"text\":\"[REDACTED:github_token]\"}\n");
+        let clean = b"# Render PDFs\n\nCloses #14.\n".to_vec();
+        assert_eq!(redact_for_bundle("out/pr.md", clean.clone()), clean);
+        let mut png = vec![0x89, b'P', b'N', b'G', 0xff, 0xfe];
+        png.extend_from_slice(token.as_bytes());
+        assert_eq!(
+            redact_for_bundle("out/shot.png", png.clone()),
+            png,
+            "not UTF-8: kept as it is"
+        );
     }
 
     #[test]

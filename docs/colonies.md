@@ -135,6 +135,11 @@ On GitHub a launch marks the issue with the `colonizer:claimed` label and a clai
 label comes off when the colony releases the issue. When a mothership starts, it removes marks it
 left behind for colonies that are gone.
 
+One rule decides every duplicate, whoever launches: the cockpit, `colonizer launch`, the API, MCP,
+the loops, burn-down, the red team or a redo. The same answer comes back every way, and a refused
+launch in the cockpit shows who holds the work, with a link to that colony or its pull request
+(or the host, for another mothership's claim) and the **Allow duplicate** option.
+
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
 seen only through the GitHub label and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
@@ -161,7 +166,9 @@ open for you — and the publish module's merge train skips it until you keep it
 In the cockpit a superseded colony wears a "Superseded by #N" badge, and while it is held a banner
 offers **Keep** (run it anyway), with **Stop** beside it for a live or queued colony. Launching a
 second colony for a supply-chain target one already holds is refused, not queued behind the holder,
-unless the launch passes `allow_duplicate`.
+unless the launch passes `allow_duplicate`. A target is a package and an advisory; a fix the
+supply-chain loop started holds every finding it was given, so the Packages tab, `colonizer launch
+--package P --advisory A` and the loop refuse the same finding in the same words.
 
 **Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
 at 500 paths. The API shapes are in
@@ -205,6 +212,33 @@ let through. Nobody else can, and there is no request flag for it.
 a maintainer's wishes. It is not an access control. Like the epic guard, it is best effort: a
 missing file or label is simply no signal, and only a config file that exists but cannot be read is
 logged and ignored.
+
+## Exec policy: install, org and repo
+
+The exec policy is rules about the shell commands a colony's agent runs: deny, ask you, or allow
+(the format and the built-in rules are in
+[`modules/agents/claude-code/README.md`](../modules/agents/claude-code/README.md#exec-policy)). A
+colony layers up to three policies over the built-in one, in this order:
+
+1. **install** — the agent module's `exec_policy` setting in Settings → Modules;
+2. **org** — the Exec policy box in the org's workspace settings (issue #924), stored as
+   `exec_policy` in `orgs.json` and handed to the org's colonies as `COLONIZER_EXEC_POLICY_ORG`;
+3. **repo** — the repository's own `.colonizer/exec-policy.json`.
+
+Across layers the strictest decision wins, so each layer can only narrow the ones before it: an org
+`deny` beats an install `allow` of the same command, and an org `allow` cannot undo an install
+`deny`.
+
+Only the owner can change an org's policy. The save is refused, with the reason under the box, unless
+the runner would keep every rule of it: valid JSON of at most 64 KiB, an object with a `rules` array,
+and every rule a `deny`, `ask` or `allow` decision with at least one usable `command`, `script`,
+`touches` or `writes_outside`. Leave the box empty for no org layer.
+
+**Limits.** Claude Code and ACP apply the policy; Codex, Grok Build, Hermes, OpenCode and Pi do not.
+While any layer is set, a colony on one of those refuses to launch and names where the policy came
+from — the org by name — rather than run without it. The org's policy reaches colonies launched
+after the save; a running colony keeps the policy it booted with. A pattern's regex syntax is checked
+only by the runner, which drops a rule it cannot compile.
 
 ## Questions, and who answers them
 

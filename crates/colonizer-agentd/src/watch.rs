@@ -17,7 +17,7 @@
 
 use std::{path::Path, path::PathBuf, sync::Arc};
 
-use crate::store::{EventStore, log_event};
+use crate::store::{EventStore, boundary_event, log_event};
 #[cfg(target_os = "linux")]
 use std::{
     collections::HashMap,
@@ -81,6 +81,18 @@ impl Pattern {
             Kind::Protect => "protected",
         }
     }
+}
+
+/// The boundary event that goes with a path-policy warn (issue #609): the bind for `rel` could not
+/// be applied, so the control is down on that path. The watchdog does not flag one alone — off
+/// Linux it is every nested checkout — but its target joins the deny-then-reach watch.
+fn unbound(verb: &str, rel: &str, message: &str) -> crate::store::Event {
+    boundary_event(
+        "path_policy_unbound",
+        &format!("path_policy:{verb}"),
+        message,
+        Some(rel.to_string()),
+    )
 }
 
 /// The policy file's actions, in order, plus the two protected `.git` entries the boot never
@@ -311,7 +323,9 @@ impl Poller {
                 relative(&self.workspace, &target),
                 relative(&self.workspace, root)
             );
-            self.store.append(log_event("warn", say));
+            self.store.append(log_event("warn", say.clone()));
+            self.store
+                .append(unbound(pattern.verb(), &relative(&self.workspace, &target), &say));
             self.reported.insert(target);
         }
     }
@@ -559,7 +573,8 @@ impl Watcher {
                     } else {
                         format!("path policy: cannot pin `{}`: {e}", self.relative(&target))
                     };
-                    self.once(format!("pin {}", target.display()), say);
+                    let rel = self.relative(&target);
+                    self.once_unbound(format!("pin {}", target.display()), say, pattern.verb(), &rel);
                     continue;
                 }
                 Ok(fd) => fd,
@@ -573,7 +588,7 @@ impl Watcher {
             let name = self.relative(&target);
             if let Err(e) = apply_mount(pattern.kind, fd.as_raw_fd()) {
                 let say = format!("path policy: cannot apply {} `{}`: {e}", pattern.verb(), name);
-                self.once(format!("bind {}", target.display()), say);
+                self.once_unbound(format!("bind {}", target.display()), say, pattern.verb(), &name);
                 continue;
             }
             mounts.insert(target.clone()); // this batch's own binds count as taken, like any other
@@ -596,9 +611,11 @@ impl Watcher {
             }
             if !verified {
                 // A bind that lost its read-only remount is half a protection.
-                self.once(
+                self.once_unbound(
                     format!("ro {}", target.display()),
                     format!("path policy: `{name}` is bound but not read-only"),
+                    pattern.verb(),
+                    &name,
                 );
                 continue;
             }
@@ -620,10 +637,19 @@ impl Watcher {
     }
 
     /// Appends one warn event per distinct key, so rescans and repeats stay one line each — no
-    /// more than [`QUIET`] keys, so no tree can grow the set without end.
-    fn once(&mut self, key: String, message: String) {
+    /// more than [`QUIET`] keys, so no tree can grow the set without end. Returns whether it did.
+    fn once(&mut self, key: String, message: String) -> bool {
         if (self.quiet.len() < QUIET || self.quiet.contains(&key)) && self.quiet.insert(key) {
             self.store.append(log_event("warn", message));
+            return true;
+        }
+        false
+    }
+
+    /// [`Self::once`] for a bind that could not be laid, with its `boundary` event (issue #609).
+    fn once_unbound(&mut self, key: String, message: String, verb: &str, rel: &str) {
+        if self.once(key, message.clone()) {
+            self.store.append(unbound(verb, rel, &message));
         }
     }
 }
@@ -759,6 +785,54 @@ mod tests {
         // carry for nested checkouts, appended once.
         assert_eq!(ps[4], Pattern::new(Kind::Protect, ".git/config"));
         assert_eq!(ps.last().map(|p| p.rel.as_str()), Some(".git/hooks/"));
+    }
+
+    /// Issue #609: a bind that could not be applied is a boundary event as well as a warn line,
+    /// naming the control and the workspace-relative path it left uncovered.
+    #[test]
+    fn an_unapplied_bind_is_a_boundary_event() {
+        let event = unbound(
+            "masked",
+            "vendor/lib/.env",
+            "path policy: cannot apply masked `vendor/lib/.env`: EPERM",
+        );
+        assert_eq!(event["type"], "boundary");
+        assert_eq!(event["kind"], "path_policy_unbound");
+        assert_eq!(event["control"], "path_policy:masked");
+        assert_eq!(event["target"], "vendor/lib/.env");
+        assert!(event["detail"].as_str().unwrap().contains("cannot apply"));
+        assert!(chrono::DateTime::parse_from_rfc3339(event["at"].as_str().unwrap()).is_ok());
+    }
+
+    /// Off Linux nothing can be bound, so a nested checkout's policy path is reported as unbound:
+    /// the warn line and its boundary event, once.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn the_poller_reports_an_unbound_path_with_its_boundary_event() {
+        let dir = std::env::temp_dir().join(format!("agentd-watch-{}", std::process::id()));
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(ws.join("vendor/lib/.git")).unwrap();
+        std::fs::write(ws.join("vendor/lib/.env"), "X=1\n").unwrap();
+        let state = dir.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let store = Arc::new(EventStore::open(&state).unwrap());
+        let mut poller = Poller {
+            workspace: std::fs::canonicalize(&ws).unwrap(),
+            patterns: patterns("mask-file .env\n"),
+            store,
+            reported: HashSet::new(),
+            budget_warned: false,
+        };
+        let root = std::fs::canonicalize(ws.join("vendor/lib")).unwrap();
+        poller.report(&root);
+        poller.report(&root);
+        let text = std::fs::read_to_string(state.join("events.jsonl")).unwrap();
+        let events: Vec<serde_json::Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let boundaries: Vec<_> = events.iter().filter(|e| e["type"] == "boundary").collect();
+        assert_eq!(boundaries.len(), 1, "once per path: {events:?}");
+        assert_eq!(boundaries[0]["kind"], "path_policy_unbound");
+        assert_eq!(boundaries[0]["target"], "vendor/lib/.env");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An event is policed at the deepest checkout root above it, and nowhere when there is none —
