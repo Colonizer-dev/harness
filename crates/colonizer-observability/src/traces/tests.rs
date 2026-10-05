@@ -41,6 +41,7 @@ pub(crate) fn colonies() -> BTreeMap<String, ColonyPolicy> {
         ("5ab0a9e7".to_string(), colony_policy("2026-09-24T09:59:00Z", None)),
         ("9e57c0de".to_string(), colony_policy("2026-09-24T09:59:30Z", None)),
         ("a1b2c3d4".to_string(), colony_policy("2026-09-24T09:30:00Z", None)),
+        ("6a7e3a11".to_string(), colony_policy("2026-09-24T10:59:00Z", None)),
         (
             "e5f60718".to_string(),
             ColonyPolicy {
@@ -72,6 +73,15 @@ pub(crate) struct Run<'a> {
     pub colonies: &'a BTreeMap<String, ColonyPolicy>,
     pub policy: Policy,
     pub ratio: f64,
+    pub max_trace_bytes: u64,
+}
+
+/// The SHA-256 of a line as the tailer reads it: the key of a line with no `seq`.
+pub(crate) fn digest(line: &Value) -> [u8; 32] {
+    let d = ring::digest::digest(&ring::digest::SHA256, line.to_string().as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.as_ref());
+    out
 }
 
 impl Run<'_> {
@@ -81,18 +91,35 @@ impl Run<'_> {
             host_id: HOST,
             colonies: self.colonies,
             sample_ratio: self.ratio,
+            max_trace_bytes: self.max_trace_bytes,
         }
     }
 
     /// Feeds `events` of `colony`, then `activity`, then settles the tick.
     pub(crate) fn feed(&self, state: &mut Traces, colony: &str, events: &[Value], activity: &[Value], now: u64) -> Vec<Item> {
+        self.feed_all(state, colony, events, &[], activity, now)
+    }
+
+    /// Feeds `events` of `colony`, its `gateway` lines, then `activity`, then settles the tick.
+    pub(crate) fn feed_all(
+        &self,
+        state: &mut Traces,
+        colony: &str,
+        events: &[Value],
+        gateway: &[Value],
+        activity: &[Value],
+        now: u64,
+    ) -> Vec<Item> {
         let builder = self.builder();
         let mut out = Vec::new();
+        for line in gateway {
+            builder.feed(state, Source::Gateway, Some(colony), line, &digest(line), &mut out);
+        }
         for line in events {
-            builder.feed(state, Source::Events, Some(colony), line, &mut out);
+            builder.feed(state, Source::Events, Some(colony), line, &digest(line), &mut out);
         }
         for line in activity {
-            builder.feed(state, Source::Activity, None, line, &mut out);
+            builder.feed(state, Source::Activity, None, line, &digest(line), &mut out);
         }
         builder.settle(state, &|_| true, &[], now, &mut out);
         out
@@ -104,6 +131,7 @@ pub(crate) fn run(colonies: &BTreeMap<String, ColonyPolicy>) -> Run<'_> {
         colonies,
         policy: policy(),
         ratio: 1.0,
+        max_trace_bytes: DEFAULT_MAX_TRACE_BYTES,
     }
 }
 
@@ -205,8 +233,11 @@ fn a_simple_colony_maps_to_the_golden_trace() {
     assert_eq!(
         names,
         [
+            "question",
             "execute_tool Bash",
             "execute_tool Bash",
+            "host_step boundary",
+            "host_step path_policy",
             "execute_tool Read",
             "turn 1",
             "invoke_agent acme/widgets"
@@ -222,7 +253,7 @@ fn a_simple_colony_maps_to_the_golden_trace() {
     assert_eq!(turn.parent_span_id, root.span_id);
     assert_eq!(attr(turn, "colonizer.origin"), Some(Value::from("user")));
     assert!(spans[..3].iter().all(|s| s.parent_span_id == turn.span_id));
-    let denied = &spans[1];
+    let denied = &spans[2];
     assert_eq!(attr(denied, "colonizer.denial.class"), Some(Value::from("egress")));
     assert_eq!(attr(denied, "error.type"), Some(Value::from("tool_error")));
     check_golden("traces-simple", to_json_value(&request(items)));
@@ -472,17 +503,17 @@ fn a_root_waits_for_its_colony_events_to_be_read_to_the_end() {
     let mut state = Traces::default();
     let mut out = Vec::new();
     for line in &events[..12] {
-        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &mut out);
+        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &digest(line), &mut out);
     }
     let merged = outcome("5ab0a9e7", "merged", "2026-09-24T10:01:00Z");
-    builder.feed(&mut state, Source::Activity, None, &merged, &mut out);
+    builder.feed(&mut state, Source::Activity, None, &merged, &digest(&merged), &mut out);
     builder.settle(&mut state, &|_| false, &[], NOW, &mut out);
     assert!(
         spans(&out).iter().all(|s| !s.parent_span_id.is_empty()),
         "no root while lines are unread"
     );
     for line in &events[12..] {
-        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &mut out);
+        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &digest(line), &mut out);
     }
     builder.settle(&mut state, &|_| true, &[], NOW, &mut out);
     assert_eq!(out, subagents());
@@ -496,7 +527,7 @@ fn a_deleted_colony_gets_its_root_and_its_state_is_dropped() {
     let mut state = Traces::default();
     let mut out = Vec::new();
     for line in &fixture("subagents-events.jsonl")[..5] {
-        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &mut out);
+        builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &digest(line), &mut out);
     }
     builder.settle(&mut state, &|_| true, &["5ab0a9e7".to_string()], NOW, &mut out);
     let spans = spans(&out);
@@ -613,24 +644,36 @@ fn no_content_or_secret_reaches_a_span() {
     }
     let r = run(&colonies);
     let mut items = Vec::new();
+    // Question and answer text, exec-policy commands, path-policy paths, verification commands and
+    // files, finding titles and reasons, boundary details.
     for (colony, file) in [
         ("c1a0dec0", "claude-code-events.jsonl"),
         ("5ab0a9e7", "subagents-events.jsonl"),
         ("9e57c0de", "question-events.jsonl"),
+        ("6a7e3a11", "host-chain-events.jsonl"),
     ] {
         let mut lines = fixture(file);
         for line in &mut lines {
             fill(line, &text);
         }
-        items.extend(r.feed(
+        let mut gateway = fixture("gateway.jsonl");
+        for line in &mut gateway {
+            fill(line, &text);
+        }
+        items.extend(r.feed_all(
             &mut Traces::default(),
             colony,
             &lines,
+            &gateway,
             &[outcome(colony, "merged", "2026-09-24T11:00:00Z")],
             NOW,
         ));
     }
-    assert!(spans(&items).len() > 15, "the canaries did not stop the spans being built");
+    let names: BTreeSet<String> = spans(&items).iter().map(|s| s.name.clone()).collect();
+    for name in ["question", "host_step verification", "host_step path_policy", "chat"] {
+        assert!(names.contains(name), "{name} was not built: {names:?}");
+    }
+    assert!(spans(&items).len() > 40, "the canaries did not stop the spans being built");
     assert_no_canary(&items, &canaries);
 }
 
@@ -666,7 +709,7 @@ fn large_colony_maps_in_bounded_memory() {
         let mut out = Vec::new();
         for line in &lines {
             bytes += line.to_string().len() + 1;
-            builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &mut out);
+            builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &digest(line), &mut out);
         }
         spans_out += out.len();
         if i.is_multiple_of(1000) {
@@ -681,4 +724,208 @@ fn large_colony_maps_in_bounded_memory() {
         bytes / (1024 * 1024)
     );
     assert!(growth_mib <= 64.0, "{growth_mib} MiB");
+}
+
+#[test]
+fn the_host_chain_and_gateway_retries_map_to_the_golden_trace() {
+    let colonies = colonies();
+    let r = run(&colonies);
+    let items = r.feed_all(
+        &mut Traces::default(),
+        "6a7e3a11",
+        &fixture("host-chain-events.jsonl"),
+        &fixture("gateway.jsonl"),
+        &[outcome("6a7e3a11", "merged", "2026-09-24T11:01:00Z")],
+        NOW,
+    );
+    let spans = spans(&items);
+    let root = by_name(&spans, "invoke_agent acme/widgets");
+    let verification = by_name(&spans, "host_step verification");
+    assert_eq!(verification.parent_span_id, root.span_id, "host steps hang off the root");
+    assert_eq!(
+        verification.end_time_unix_nano - verification.start_time_unix_nano,
+        6_000_000_000,
+        "a verification spans its run"
+    );
+    assert_eq!(attr(verification, "colonizer.verdict"), Some(Value::from("contradicted")));
+    assert_eq!(attr(verification, "colonizer.verify.files_changed"), Some(Value::from(2)));
+    assert_eq!(verification.status.as_ref().unwrap().code, StatusCode::Error as i32);
+    let policy = by_name(&spans, "host_step path_policy");
+    assert_eq!(attr(policy, "colonizer.path_policy.access"), Some(Value::from("write")));
+    assert_eq!(attr(policy, "colonizer.path_policy.policy"), Some(Value::from("protected")));
+    assert_eq!(policy.start_time_unix_nano, policy.end_time_unix_nano, "instantaneous");
+    let jev = by_name(&spans, "host_step jev_ladder");
+    for key in [
+        "colonizer.jev.kept",
+        "colonizer.jev.dropped_results",
+        "colonizer.jev.dropped_calls",
+    ] {
+        assert_eq!(attr(jev, key), Some(Value::from(1)), "{key}");
+    }
+    let steps = spans.iter().filter(|s| s.name.starts_with("host_step ")).count();
+    assert_eq!(steps, 11, "every chain line is one step");
+
+    // Gateway retries: one client span per attempt, the failure's code as its error type.
+    let chats: Vec<&Span> = spans.iter().filter(|s| s.name.starts_with("chat")).collect();
+    let names: Vec<&str> = chats.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["chat qwen/qwen3-coder", "chat qwen/qwen3-coder", "chat qwen3-coder"]);
+    assert!(chats.iter().all(|s| s.parent_span_id == root.span_id));
+    assert!(
+        chats
+            .iter()
+            .all(|s| s.kind == crate::proto::trace::v1::span::SpanKind::Client as i32)
+    );
+    assert_eq!(attr(chats[0], "error.type"), Some(Value::from("upstream_error")));
+    assert_eq!(attr(chats[0], "colonizer.fallback"), Some(Value::Bool(true)));
+    assert_eq!(attr(chats[1], "error.type"), None);
+    assert_eq!(attr(chats[1], "gen_ai.usage.output_tokens"), Some(Value::from(420)));
+    assert_eq!(chats[1].end_time_unix_nano - chats[1].start_time_unix_nano, 2_400_000_000);
+    assert_eq!(attr(chats[2], "error.type"), Some(Value::from("queue_full")));
+    check_golden("traces-host-chain", to_json_value(&request(items)));
+}
+
+#[test]
+fn questions_say_who_answered_and_a_restart_keeps_an_open_one() {
+    let colonies = colonies();
+    let r = run(&colonies);
+    let events = fixture("question-events.jsonl");
+    let activity = [outcome("9e57c0de", "no_changes", "2026-09-24T10:00:30Z")];
+    let whole = r.feed(&mut Traces::default(), "9e57c0de", &events, &activity, NOW);
+    let spans = spans(&whole);
+    let questions: Vec<&Span> = spans.iter().filter(|s| s.name == "question").collect();
+    assert_eq!(questions.len(), 2);
+    let turn = by_name(&spans, "turn 1");
+    assert!(questions.iter().all(|q| q.parent_span_id == turn.span_id));
+    assert_eq!(attr(questions[0], "colonizer.answered_by"), Some(Value::from("user")));
+    assert_eq!(
+        attr(questions[0], "colonizer.question.risk"),
+        Some(Value::from("workspace_write"))
+    );
+    assert_eq!(attr(questions[0], "colonizer.question.options"), Some(Value::from(2)));
+    assert_eq!(attr(questions[1], "colonizer.answered_by"), Some(Value::from("autonomy")));
+    assert_eq!(
+        attr(questions[1], "colonizer.question.kind"),
+        Some(Value::from("exec_policy"))
+    );
+    assert_eq!(attr(questions[1], "colonizer.question.blocking"), Some(Value::Bool(true)));
+    assert_eq!(
+        questions[0].end_time_unix_nano - questions[0].start_time_unix_nano,
+        2_000_000_000,
+        "from the question to its answer"
+    );
+
+    // A restart while each question is open: same span id, closed by the answer after it.
+    for cut in [3, 8] {
+        let mut state = Traces::default();
+        let mut out = r.feed(&mut state, "9e57c0de", &events[..cut], &[], NOW);
+        let open = &state.colonies["9e57c0de"].open;
+        assert!(open.iter().any(|o| o.at.kind == SpanKindName::Question), "cut {cut}");
+        let mut extra = BTreeMap::new();
+        state.store(&mut extra, "dest");
+        let mut resumed = Traces::load(&serde_json::from_slice(&serde_json::to_vec(&extra).unwrap()).unwrap(), "dest");
+        out.extend(r.feed(&mut resumed, "9e57c0de", &events[cut..], &activity, NOW));
+        assert_eq!(out, whole, "cut {cut}");
+    }
+
+    // Never answered: closed at the root, unanswered; a lead agent's question outlives its turn.
+    let lines: Vec<Value> = events[..4].iter().chain(&events[10..]).cloned().collect();
+    let items = r.feed(&mut Traces::default(), "9e57c0de", &lines, &activity, NOW);
+    let spans = self::spans(&items);
+    let q = by_name(&spans, "question");
+    assert_eq!(attr(q, "colonizer.unanswered"), Some(Value::Bool(true)));
+    assert_eq!(attr(q, "colonizer.span.incomplete"), Some(Value::Bool(true)));
+    let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["turn 1", "question", "invoke_agent acme/widgets"]);
+}
+
+#[test]
+fn a_fifty_thousand_tool_call_colony_fits_the_trace_budget() {
+    let colonies = colonies();
+    let r = run(&colonies);
+    let builder = r.builder();
+    let mut state = Traces::default();
+    let mut out = Vec::new();
+    let (turns, per_turn) = (50, 1000);
+    for t in 0..turns {
+        let ts = |i: u64| format!("2026-09-24T{:02}:{:02}:{:02}.000Z", 10 + t / 60, t % 60, i % 60);
+        let mut lines = vec![serde_json::json!({"type": "user_message", "id": format!("m{t}"), "text": "go", "ts": ts(0)})];
+        for i in 0..per_turn {
+            let id = format!("toolu_{t:02}_{i:04}");
+            lines.push(serde_json::json!({"type": "tool_call", "tool_call_id": id, "name": "Bash", "ts": ts(i)}));
+            lines.push(
+                serde_json::json!({"type": "tool_result", "tool_call_id": id, "output": "ok", "is_error": false, "ts": ts(i)}),
+            );
+        }
+        lines.push(serde_json::json!({"type": "turn_end", "is_error": false, "cost_usd": t as f64, "ts": ts(59)}));
+        for line in &lines {
+            builder.feed(&mut state, Source::Events, Some("5ab0a9e7"), line, &digest(line), &mut out);
+        }
+    }
+    let merged = outcome("5ab0a9e7", "merged", "2026-09-24T11:00:00Z");
+    builder.feed(&mut state, Source::Activity, None, &merged, &digest(&merged), &mut out);
+    builder.settle(&mut state, &|_| true, &[], NOW, &mut out);
+
+    let total: u64 = out.iter().map(encoded_size).sum();
+    assert!(total <= DEFAULT_MAX_TRACE_BYTES, "{total} bytes");
+    assert_eq!(total, state.colonies["5ab0a9e7"].bytes, "the running count is the bytes sent");
+    let spans = spans(&out);
+    let turn_spans: Vec<&Span> = spans.iter().filter(|s| s.name.starts_with("turn ")).collect();
+    assert_eq!(turn_spans.len(), turns as usize, "every turn is sent");
+    let tools = spans.iter().filter(|s| s.name == "execute_tool Bash").count() as i64;
+    assert!(tools > 10_000 && tools < 50_000, "{tools} tool spans sent");
+    let suppressed: i64 = turn_spans
+        .iter()
+        .filter_map(|t| attr(t, "colonizer.spans_suppressed.execute_tool").and_then(|v| v.as_i64()))
+        .sum();
+    assert_eq!(
+        suppressed + tools,
+        50_000,
+        "every tool call is either sent or counted on its turn"
+    );
+    let root = by_name(&spans, "invoke_agent acme/widgets");
+    assert_eq!(attr(root, "colonizer.trace_budget_exhausted"), Some(Value::Bool(true)));
+    assert_eq!(attr(root, "colonizer.trace.dropped_spans"), Some(Value::from(suppressed)));
+    assert_eq!(
+        attr(root, "colonizer.spans_suppressed.execute_tool"),
+        Some(Value::from(suppressed))
+    );
+    // The detail spans stop at 90 %: the rest is the turns' and the root's.
+    let details: u64 = out
+        .iter()
+        .zip(&spans)
+        .filter(|(_, s)| s.name == "execute_tool Bash")
+        .map(|(i, _)| encoded_size(i))
+        .sum();
+    assert!(details <= DEFAULT_MAX_TRACE_BYTES / 10 * 9);
+}
+
+#[test]
+fn span_attributes_stay_under_tempos_two_kib() {
+    let policy = Policy::new(
+        PolicyConfig {
+            max_attribute_bytes: 8192,
+            ..PolicyConfig::default()
+        },
+        ContentGate::closed(),
+        None,
+    );
+    let long = "a".repeat(6000);
+    let items = [policy
+        .span(SpanKind::ExecuteTool, "Bash")
+        .attr("gen_ai.tool.name", long.as_str(), Tier::Structure)
+        .finish()];
+    let span = &spans(&items)[0];
+    let value = attr(span, "gen_ai.tool.name").unwrap();
+    let value = value.as_str().unwrap();
+    assert!(value.len() <= crate::policy::SPAN_ATTRIBUTE_BYTES, "{}", value.len());
+    assert!(value.ends_with("more bytes)"), "cut with the marker");
+    assert_eq!(attr(span, "colonizer.truncated"), Some(Value::Bool(true)));
+    // A log record keeps the configured cap.
+    let log = policy
+        .log(Source::Gateway)
+        .attr("model", long.as_str(), Tier::Structure)
+        .finish();
+    let crate::batch::Record::Log(record) = &log.0 else { panic!() };
+    let kept = serde_json::to_value(record.attributes[0].value.as_ref().unwrap()).unwrap();
+    assert!(kept["stringValue"].as_str().unwrap().len() > 4000);
 }

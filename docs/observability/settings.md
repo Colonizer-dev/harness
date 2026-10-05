@@ -48,7 +48,7 @@ Both providers share the second table.
 | Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |
 | Max attribute size (bytes) | `1024` | 128 to 8192. |
 | Max content size (bytes) | `32768` | 1024 to 196608. |
-| Max trace size (bytes) | `4194304` | A trace longer than this is truncated. |
+| Max trace size (bytes) | `4194304` | One colony trace's budget, under Tempo's 5 MB per trace: past 90 % of it, detail spans are counted instead of sent ([Traces](traces.md#long-colonies-and-tempo-limits)). |
 | Repository names | `plain` | `plain` sends `owner/repo`; `hashed` sends a salted hash instead. |
 | Expose Prometheus metrics | off | Serve the metrics for scraping on the harness's own endpoint, too. |
 | Max backlog (days) | `7` | Older events are dropped rather than exported late; `0` keeps everything. |

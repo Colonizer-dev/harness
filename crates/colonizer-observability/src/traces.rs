@@ -22,15 +22,23 @@
 //!   spans go out again.
 //! - **Sampling:** a colony is traced or not as a whole, by its trace id (`trace_sample_ratio`).
 //!   Logs and metrics are never sampled.
+//! - **More kinds** (#847, in `kinds`): a `question` span from a question to its answer, saying
+//!   who answered; a `host_step <step>` span per host-chain verdict (validation, verification,
+//!   screening, boundaries, path policy, Jev); and a `chat <model>` client span per gateway request.
+//! - **The trace budget** (#847): every span's encoded size is counted per colony. Past 90 % of
+//!   `max_trace_bytes`, tool, subagent, question, gateway and host-step spans are counted instead
+//!   of sent — on their turn as `colonizer.spans_suppressed.<kind>` and on the root — so the
+//!   remaining 10 % keeps the turns and the root, which are always sent, inside Tempo's limit.
 
 use crate::batch::Item;
 use crate::contract::ColonyPolicy;
 use crate::map::ts_nanos;
-use crate::policy::{Policy, Source, SpanKind, Tier};
+use crate::policy::{AttrValue, Policy, Source, SpanKind, Tier};
 use crate::proto::trace::v1::status::StatusCode;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod kinds;
 mod model;
 pub(crate) use model::{ColonyTrace, Open, Ref, SpanKindName, Tokens, Traces, name_like, sampled, span_id, trace_id};
 /// The most spans one colony holds open; past it the oldest is closed with `colonizer.evicted`.
@@ -60,6 +68,27 @@ struct Close {
     output_bytes: Option<i64>,
     /// A turn's deltas.
     turn: Option<(Tokens, f64)>,
+    /// Attributes only known at the end (a question's `colonizer.answered_by`).
+    extra: Vec<(&'static str, AttrValue)>,
+}
+
+/// The default `max_trace_bytes`: 4 MiB, under Tempo's default 5 MB `max_bytes_per_trace`.
+pub(crate) const DEFAULT_MAX_TRACE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The kinds the budget may leave out; turns and the root are always sent.
+fn suppressible(kind: SpanKindName) -> bool {
+    !matches!(kind, SpanKindName::Turn | SpanKindName::InvokeAgent)
+}
+
+/// A span's encoded size: the protobuf bytes it adds to a request, framing included.
+fn encoded_size(item: &Item) -> u64 {
+    match &item.0 {
+        crate::batch::Record::Span(span) => {
+            let len = prost::Message::encoded_len(span);
+            (len + prost::length_delimiter_len(len) + 1) as u64
+        }
+        _ => 0,
+    }
 }
 
 /// Builds spans from ledger lines: the policy, the install's ids and the colonies' metadata.
@@ -68,6 +97,8 @@ pub(crate) struct Builder<'a> {
     pub host_id: &'a str,
     pub colonies: &'a BTreeMap<String, ColonyPolicy>,
     pub sample_ratio: f64,
+    /// One trace's encoded-span budget (`max_trace_bytes`).
+    pub max_trace_bytes: u64,
 }
 
 impl Builder<'_> {
@@ -75,16 +106,29 @@ impl Builder<'_> {
         sampled(trace_id(self.host_id, colony), self.sample_ratio)
     }
 
-    /// One line of `source` (`events` of `colony`, or `activity`) into `state`, appending the spans
-    /// it closes to `out`.
-    pub(crate) fn feed(&self, state: &mut Traces, source: Source, colony: Option<&str>, line: &Value, out: &mut Vec<Item>) {
+    /// One line of `source` (`events` or `gateway` of `colony`, or `activity`) into `state`,
+    /// appending the spans it closes to `out`. `digest` is the SHA-256 of the line's raw bytes: the
+    /// key of a line with no `seq`.
+    pub(crate) fn feed(
+        &self,
+        state: &mut Traces,
+        source: Source,
+        colony: Option<&str>,
+        line: &Value,
+        digest: &[u8; 32],
+        out: &mut Vec<Item>,
+    ) {
         match source {
-            Source::Events => {
+            Source::Events | Source::Gateway => {
                 if let Some(colony) = colony
                     && self.traced(colony)
                 {
                     let trace = state.colonies.entry(colony.to_string()).or_default();
-                    self.event(colony, trace, line, out);
+                    if source == Source::Gateway {
+                        self.gateway(colony, trace, line, digest, out);
+                    } else {
+                        self.event(colony, trace, line, digest, out);
+                    }
                 }
             }
             Source::Activity => {
@@ -135,7 +179,7 @@ impl Builder<'_> {
             .retain(|id, t| !gone.contains(id) && !(t.root.emitted && t.open.is_empty() && !self.colonies.contains_key(id)));
     }
 
-    fn event(&self, colony: &str, trace: &mut ColonyTrace, line: &Value, out: &mut Vec<Item>) {
+    fn event(&self, colony: &str, trace: &mut ColonyTrace, line: &Value, digest: &[u8; 32], out: &mut Vec<Item>) {
         let kind = line.get("type").and_then(Value::as_str).unwrap_or("");
         if kind == "assistant_text_delta" {
             return;
@@ -178,9 +222,11 @@ impl Builder<'_> {
                 match kind {
                     "tool_call" => self.tool_call(colony, trace, line, agent, ts, out),
                     "tool_result" => self.tool_result(colony, trace, line, ts, out),
+                    "question" => self.question(colony, trace, line, agent, ts, out),
                     _ => {}
                 }
             }
+            "question_answered" => self.answered(colony, trace, line, ts, out),
             "subagent_end" => {
                 if let Some(id) = line.get("tool_call_id").and_then(Value::as_str) {
                     let failed = line.get("status").and_then(Value::as_str) == Some("failed");
@@ -192,8 +238,8 @@ impl Builder<'_> {
                     self.close(colony, trace, SpanKindName::Subagent, id, ts, close, out);
                 }
             }
-            // The host chain and questions (#847) and content records (#848) hook in here; this
-            // build traces nothing else.
+            _ if kinds::HOST_CHAIN.contains(&kind) => self.host_step(colony, trace, line, digest, ts, out),
+            // Content records (#848) hook in here; nothing else is traced.
             _ => {}
         }
     }
@@ -201,26 +247,15 @@ impl Builder<'_> {
     fn open_turn(&self, colony: &str, trace: &mut ColonyTrace, ts: u64, origin: Option<&str>) {
         trace.turn += 1;
         let n = trace.turn.to_string();
-        trace.open.push(Open {
-            at: Ref {
-                kind: SpanKindName::Turn,
-                key: n.clone(),
-            },
-            parent: root_ref(colony),
-            subject: n,
-            start: ts,
-            origin: origin.filter(|o| name_like(o)).map(str::to_string),
-            background: false,
-        });
+        let mut open = Open::new(Ref::new(SpanKindName::Turn, n.clone()), root_ref(colony), n, ts);
+        open.origin = origin.filter(|o| name_like(o)).map(str::to_string);
+        trace.open.push(open);
     }
 
     /// The span a line belongs under: its subagent's when it has one, else the open turn's.
     fn parent(trace: &ColonyTrace, colony: &str, agent: Option<&str>) -> Ref {
         if let Some(id) = agent {
-            return Ref {
-                kind: SpanKindName::Subagent,
-                key: id.to_string(),
-            };
+            return Ref::new(SpanKindName::Subagent, id);
         }
         trace
             .open
@@ -254,25 +289,13 @@ impl Builder<'_> {
             .find(SpanKindName::ExecuteTool, id)
             .map(|i| trace.open[i].start)
             .unwrap_or(ts);
-        self.push_open(
-            colony,
-            trace,
-            Open {
-                at: Ref {
-                    kind: SpanKindName::Subagent,
-                    key: id.to_string(),
-                },
-                parent: Ref {
-                    kind: SpanKindName::ExecuteTool,
-                    key: id.to_string(),
-                },
-                subject: name.to_string(),
-                start,
-                origin: None,
-                background: false,
-            },
-            out,
+        let open = Open::new(
+            Ref::new(SpanKindName::Subagent, id),
+            Ref::new(SpanKindName::ExecuteTool, id),
+            name,
+            start,
         );
+        self.push_open(colony, trace, open, out);
     }
 
     fn tool_call(&self, colony: &str, trace: &mut ColonyTrace, line: &Value, agent: Option<&str>, ts: u64, out: &mut Vec<Item>) {
@@ -288,22 +311,8 @@ impl Builder<'_> {
             .filter(|n| name_like(n))
             .unwrap_or("");
         let parent = Self::parent(trace, colony, agent);
-        self.push_open(
-            colony,
-            trace,
-            Open {
-                at: Ref {
-                    kind: SpanKindName::ExecuteTool,
-                    key: id.to_string(),
-                },
-                parent,
-                subject: name.to_string(),
-                start: ts,
-                origin: None,
-                background: false,
-            },
-            out,
-        );
+        let open = Open::new(Ref::new(SpanKindName::ExecuteTool, id), parent, name, ts);
+        self.push_open(colony, trace, open, out);
     }
 
     fn tool_result(&self, colony: &str, trace: &mut ColonyTrace, line: &Value, ts: u64, out: &mut Vec<Item>) {
@@ -339,17 +348,8 @@ impl Builder<'_> {
             // Launched in the background: it ends with its `subagent_end`, not this ack.
             Some(sub) if background => trace.open[sub].background = true,
             None if background && !trace.ended_agents.contains(id) => {
-                let open = Open {
-                    at: Ref {
-                        kind: SpanKindName::Subagent,
-                        key: id.to_string(),
-                    },
-                    parent,
-                    subject: String::new(),
-                    start: task_start,
-                    origin: None,
-                    background: true,
-                };
+                let mut open = Open::new(Ref::new(SpanKindName::Subagent, id), parent, "", task_start);
+                open.background = true;
                 self.push_open(colony, trace, open, out);
             }
             None => {}
@@ -377,7 +377,8 @@ impl Builder<'_> {
             .open
             .iter()
             .rev()
-            .filter(|o| o.at.kind != SpanKindName::Turn)
+            // A question outlives its turn: a lead agent's is answered as the next turn's message.
+            .filter(|o| o.at.kind != SpanKindName::Turn && o.at.kind != SpanKindName::Question)
             .filter(|o| {
                 !background.contains(&o.at.key)
                     && !(o.parent.kind == SpanKindName::Subagent && background.contains(&o.parent.key))
@@ -452,7 +453,29 @@ impl Builder<'_> {
             }
             trace.ended_agents.insert(key.to_string());
         }
-        out.push(self.span(colony, trace, &open, end.max(open.start), &close));
+        self.emit(colony, trace, &open, end.max(open.start), &close, out);
+    }
+
+    /// Sends a finished span, unless the trace budget is spent and its kind may be left out: then
+    /// it is counted on its turn (tool calls, subagents, questions) and on the root instead.
+    fn emit(&self, colony: &str, trace: &mut ColonyTrace, open: &Open, end: u64, close: &Close, out: &mut Vec<Item>) {
+        let item = self.span(colony, trace, open, end, close);
+        let size = encoded_size(&item);
+        let details = self.max_trace_bytes / 10 * 9;
+        if suppressible(open.at.kind) && trace.bytes.saturating_add(size) > details {
+            let kind = open.at.kind.kind().as_str().to_string();
+            *trace.suppressed.entry(kind.clone()).or_default() += 1;
+            let in_turn = matches!(
+                open.at.kind,
+                SpanKindName::ExecuteTool | SpanKindName::Subagent | SpanKindName::Question
+            );
+            if in_turn && let Some(turn) = trace.open.iter_mut().rev().find(|o| o.at.kind == SpanKindName::Turn) {
+                *turn.suppressed.entry(kind).or_default() += 1;
+            }
+            return;
+        }
+        trace.bytes = trace.bytes.saturating_add(size);
+        out.push(item);
     }
 
     fn span(&self, colony: &str, trace: &ColonyTrace, open: &Open, end: u64, close: &Close) -> Item {
@@ -507,7 +530,19 @@ impl Builder<'_> {
                     span = span.attr("gen_ai.agent.name", open.subject.as_str(), s);
                 }
             }
+            SpanKindName::Chat => span = span.kind(crate::proto::trace::v1::span::SpanKind::Client),
             _ => {}
+        }
+        for (key, value) in &open.attrs {
+            if let Some(v) = kinds::attr_value(value) {
+                span = span.attr(key, v, s);
+            }
+        }
+        for (key, value) in &close.extra {
+            span = span.attr(key, value.clone(), s);
+        }
+        for (kind, n) in &open.suppressed {
+            span = span.attr(&format!("colonizer.spans_suppressed.{kind}"), *n as i64, s);
         }
         if let Some(error) = close.error_type {
             span = span.attr("error.type", error, s);
@@ -524,7 +559,13 @@ impl Builder<'_> {
         let status = match close.status {
             Some(code) => code,
             None if close.incomplete || close.unmatched || close.evicted => StatusCode::Unset,
-            None if open.at.kind == SpanKindName::Turn || open.at.kind == SpanKindName::ExecuteTool => StatusCode::Ok,
+            None if matches!(
+                open.at.kind,
+                SpanKindName::Turn | SpanKindName::ExecuteTool | SpanKindName::Chat | SpanKindName::Question
+            ) =>
+            {
+                StatusCode::Ok
+            }
             None => StatusCode::Unset,
         };
         span.status(status).finish()
@@ -535,10 +576,13 @@ impl Builder<'_> {
         let end = trace.last_ts.max(trace.root.outcome_ts);
         let at = trace.last_ts;
         while let Some(open) = trace.open.last().map(|o| o.at.clone()) {
-            let close = Close {
+            let mut close = Close {
                 incomplete: true,
                 ..Close::default()
             };
+            if open.kind == SpanKindName::Question {
+                close.extra.push(("colonizer.unanswered", AttrValue::Bool(true)));
+            }
             self.close(colony, trace, open.kind, &open.key, at, close, out);
         }
         let policy = self.colonies.get(colony);
@@ -590,6 +634,15 @@ impl Builder<'_> {
         for (name, at) in &trace.root.events {
             span = span.event(name, *at);
         }
+        if !trace.suppressed.is_empty() {
+            let dropped: u64 = trace.suppressed.values().sum();
+            span =
+                span.attr("colonizer.trace_budget_exhausted", true, s)
+                    .attr("colonizer.trace.dropped_spans", dropped as i64, s);
+            for (kind, n) in &trace.suppressed {
+                span = span.attr(&format!("colonizer.spans_suppressed.{kind}"), *n as i64, s);
+            }
+        }
         let status = match outcome {
             "failed" => {
                 span = span.attr("error.type", "failed", s);
@@ -598,17 +651,16 @@ impl Builder<'_> {
             "merged" | "closed" | "no_changes" => StatusCode::Ok,
             _ => StatusCode::Unset,
         };
-        out.push(span.status(status).finish());
+        let root = span.status(status).finish();
+        trace.bytes = trace.bytes.saturating_add(encoded_size(&root));
+        out.push(root);
         trace.root.emitted = true;
         trace.root.events.clear();
     }
 }
 
 fn root_ref(colony: &str) -> Ref {
-    Ref {
-        kind: SpanKindName::InvokeAgent,
-        key: colony.to_string(),
-    }
+    Ref::new(SpanKindName::InvokeAgent, colony)
 }
 
 /// An `activity.jsonl` line about a traced colony: a final outcome, or an event for its root.

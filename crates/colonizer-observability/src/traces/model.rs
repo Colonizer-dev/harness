@@ -99,6 +99,12 @@ pub(crate) struct Ref {
     pub key: String,
 }
 
+impl Ref {
+    pub(crate) fn new(kind: SpanKindName, key: impl Into<String>) -> Ref {
+        Ref { kind, key: key.into() }
+    }
+}
+
 /// [`SpanKind`] as it is committed in `state.json`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -141,6 +147,29 @@ pub(crate) struct Open {
     /// not close it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
+    /// Structure read when the span opened (a question's risk, kind and option count), as
+    /// `(attribute key, scalar)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attrs: Vec<(String, Value)>,
+    /// A turn's spans left out by the trace budget, by kind (#847).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub suppressed: BTreeMap<String, u64>,
+}
+
+impl Open {
+    /// A span of `at` under `parent`, named for `subject`, from `start`.
+    pub(crate) fn new(at: Ref, parent: Ref, subject: impl Into<String>, start: u64) -> Open {
+        Open {
+            at,
+            parent,
+            subject: subject.into(),
+            start,
+            origin: None,
+            background: false,
+            attrs: Vec::new(),
+            suppressed: BTreeMap::new(),
+        }
+    }
 }
 
 /// The root span's pending state.
@@ -155,8 +184,9 @@ pub(crate) struct Root {
     pub events: Vec<(String, u64)>,
 }
 
-/// One colony's trace state.
+/// One colony's trace state. Every field defaults, so a state written by an older build loads.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct ColonyTrace {
     /// Turns started so far: the current (or last) turn's number.
     pub turn: u64,
@@ -172,6 +202,10 @@ pub(crate) struct ColonyTrace {
     pub root: Root,
     /// Subagents whose span has ended, so a late line never reopens one.
     pub ended_agents: BTreeSet<String>,
+    /// The encoded bytes of every span sent so far: the trace budget's running count (#847).
+    pub bytes: u64,
+    /// Spans left out by the budget, by kind, over the whole trace.
+    pub suppressed: BTreeMap<String, u64>,
 }
 
 impl ColonyTrace {

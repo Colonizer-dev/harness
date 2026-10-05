@@ -58,6 +58,8 @@ pub struct Settings {
     pub max_content_bytes: u64,
     /// The share of colonies whose trace is exported, 0 to 1, decided per colony by its trace id.
     pub trace_sample_ratio: f64,
+    /// One trace's encoded-span budget; past 90 % of it the detail spans are counted, not sent.
+    pub max_trace_bytes: u64,
     pub repo_names: String,
     pub max_backlog_days: u64,
     pub max_read_mib_per_sec: u64,
@@ -89,6 +91,7 @@ impl Default for Settings {
             max_attribute_bytes: 1024,
             max_content_bytes: 32_768,
             trace_sample_ratio: 1.0,
+            max_trace_bytes: crate::traces::DEFAULT_MAX_TRACE_BYTES,
             repo_names: "plain".into(),
             max_backlog_days: 7,
             max_read_mib_per_sec: 8,

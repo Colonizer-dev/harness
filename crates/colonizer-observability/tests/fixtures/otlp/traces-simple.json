@@ -27,6 +27,46 @@
             {
               "attributes": [
                 {
+                  "key": "colonizer.question.risk",
+                  "value": {
+                    "stringValue": "workspace_write"
+                  }
+                },
+                {
+                  "key": "colonizer.question.options",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "colonizer.answered_by",
+                  "value": {
+                    "stringValue": "user"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242271000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "question",
+              "parentSpanId": "6db007a902258ab7",
+              "spanId": "bd7d42e67e7fc2e1",
+              "startTimeUnixNano": "1790242269000000000",
+              "status": {
+                "code": 1,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
                   "key": "gen_ai.operation.name",
                   "value": {
                     "stringValue": "execute_tool"
@@ -123,6 +163,92 @@
               "startTimeUnixNano": "1790242278000000000",
               "status": {
                 "code": 2,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "boundary"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.kind",
+                  "value": {
+                    "stringValue": "egress_denied"
+                  }
+                },
+                {
+                  "key": "colonizer.boundary.control",
+                  "value": {
+                    "stringValue": "egress"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242280000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step boundary",
+              "parentSpanId": "29aa1092c5335101",
+              "spanId": "b83a7e7cc59d3c36",
+              "startTimeUnixNano": "1790242280000000000",
+              "status": {
+                "code": 0,
+                "message": ""
+              },
+              "traceId": "d65950396a59b07fcf53f1761333ee11",
+              "traceState": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.step",
+                  "value": {
+                    "stringValue": "path_policy"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.access",
+                  "value": {
+                    "stringValue": "read"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.policy",
+                  "value": {
+                    "stringValue": "masked"
+                  }
+                },
+                {
+                  "key": "colonizer.path_policy.tool",
+                  "value": {
+                    "stringValue": "Read"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "droppedEventsCount": 0,
+              "droppedLinksCount": 0,
+              "endTimeUnixNano": "1790242282000000000",
+              "events": [],
+              "flags": 0,
+              "kind": 1,
+              "links": [],
+              "name": "host_step path_policy",
+              "parentSpanId": "29aa1092c5335101",
+              "spanId": "eaf4071d5077e6f9",
+              "startTimeUnixNano": "1790242282000000000",
+              "status": {
+                "code": 0,
                 "message": ""
               },
               "traceId": "d65950396a59b07fcf53f1761333ee11",
