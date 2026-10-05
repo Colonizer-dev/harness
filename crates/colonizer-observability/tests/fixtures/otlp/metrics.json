@@ -1,0 +1,83 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          },
+          {
+            "key": "colonizer.install.id",
+            "value": {
+              "stringValue": "install-1"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeMetrics": [
+        {
+          "metrics": [
+            {
+              "description": "",
+              "metadata": [],
+              "name": "colonizer.gateway.tokens",
+              "sum": {
+                "aggregationTemporality": 2,
+                "dataPoints": [
+                  {
+                    "asInt": "9007199254740993",
+                    "attributes": [
+                      {
+                        "key": "model",
+                        "value": {
+                          "stringValue": "claude-sonnet"
+                        }
+                      }
+                    ],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "1699999940123456789",
+                    "timeUnixNano": "1700000000123456789"
+                  }
+                ],
+                "isMonotonic": true
+              },
+              "unit": "{token}"
+            },
+            {
+              "description": "",
+              "gauge": {
+                "dataPoints": [
+                  {
+                    "asDouble": 0.25,
+                    "attributes": [],
+                    "exemplars": [],
+                    "flags": 0,
+                    "startTimeUnixNano": "0",
+                    "timeUnixNano": "1700000000123456789"
+                  }
+                ]
+              },
+              "metadata": [],
+              "name": "colonizer.gateway.queue",
+              "unit": "ms"
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

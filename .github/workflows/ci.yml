@@ -58,6 +58,16 @@ jobs:
       - name: Lockfile resolves
         run: CARGO_HOME="$(mktemp -d)" cargo fetch --locked
 
+      # The OTLP stack lives in colonizer-observability, an add-on the mothership never links (#844).
+      # Fails if any of it reaches the mothership's normal dependency tree.
+      - name: The mothership links no OTLP stack
+        run: |
+          tree="$(cargo tree -p colonizer-harness -e normal --locked --prefix none)"
+          if printf '%s\n' "$tree" | grep -E '^(colonizer-observability|opentelemetry|opentelemetry_sdk|opentelemetry-proto|prost|tonic|flate2) '; then
+            echo "::error::colonizer-harness depends on the crates above; they belong in colonizer-observability only"
+            exit 1
+          fi
+
       # Includes colonizer-agentd's integration and smoke tests, which boot the real agentd binary on
       # loopback against a stub agent runner. Python3 is the only thing they need beyond cargo, and
       # stock runners have it; no KVM is involved anywhere in this job. --locked, like the release
@@ -71,11 +81,11 @@ jobs:
       # repository, so an include_str! of a file outside the crate passes every step above and fails
       # only `cargo publish` on the tag: v0.1.10 and v0.1.11 never reached crates.io that way. The
       # verify build shares target/ with the test build, so only the crates themselves recompile.
+      # One invocation, not one per crate: colonizer-harness depends on colonizer-redact at the same
+      # version, which crates.io does not have before the tag, and cargo resolves it from the
+      # colonizer-redact packaged beside it only when both are in the same run.
       - name: Package
-        run: |
-          for crate in colonizer-agentd colonizer-harness; do
-            cargo publish --dry-run --locked -p "$crate"
-          done
+        run: cargo publish --dry-run --locked -p colonizer-redact -p colonizer-agentd -p colonizer-harness
 
       # The tests the way a user gets them: each crate's .crate, unpacked outside the checkout so
       # nothing but the crate itself is in reach. This is what a stray include_str! or a path above
@@ -89,16 +99,25 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          for crate in colonizer-agentd colonizer-harness; do
+          # Packaged together for the same reason as the step above.
+          cargo package --locked -p colonizer-redact -p colonizer-agentd -p colonizer-harness
+          for crate in colonizer-redact colonizer-agentd colonizer-harness; do
             pkgid=$(cargo pkgid -p "$crate")
             version="${pkgid##*@}"
             version="${version##*#}"
-            cargo package --locked -p "$crate"
             dest="$RUNNER_TEMP/packaged/$crate-$version"
             rm -rf "$dest"
             mkdir -p "$dest"
             tar -xzf "$CARGO_TARGET_DIR/package/$crate-$version.crate" -C "$dest" --strip-components=1
-            (cd "$dest" && cargo test --locked)
+            if [ "$crate" = colonizer-harness ]; then
+              # Its colonizer-redact comes from crates.io, which may not have this version yet: patch
+              # in the one unpacked above. That moves only colonizer-redact's entry in the packaged
+              # Cargo.lock, so the update is that one package and --locked still pins the rest.
+              patch="patch.crates-io.colonizer-redact.path=\"$RUNNER_TEMP/packaged/colonizer-redact-$version\""
+              (cd "$dest" && cargo update --config "$patch" -p colonizer-redact && cargo test --locked --config "$patch")
+            else
+              (cd "$dest" && cargo test --locked)
+            fi
           done
 
       - name: Lint

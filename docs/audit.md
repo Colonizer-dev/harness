@@ -93,7 +93,7 @@ limits.
   field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
   bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
   second line behind keeping secrets out of the colony, not a replacement
-  (`crates/colonizer/src/redact.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
+  (`crates/colonizer-redact/src/lib.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
   written, and a fleet export redacts the logs it carries.
   The same redactor covers the other text the mothership keeps or sends from agent and model
   output: a filed finding (`finding-body.md` and the issue), an independent review (`review.md`

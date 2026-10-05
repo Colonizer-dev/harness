@@ -26,6 +26,9 @@
 //! The JSON path ([`redact_value`], [`redact_line`]) redacts field by field, so a line stays valid
 //! JSON with its shape intact; a line with nothing to redact is returned untouched, byte for byte.
 //! Everything is a single linear pass per detector over the bytes, with no backtracking.
+//!
+//! A crate of its own, depending only on `serde_json`, so the mothership (as `crate::redact`) and
+//! the observability add-on share one set of detectors (docs/design/observability.md).
 
 use serde_json::Value;
 use std::borrow::Cow;
@@ -46,18 +49,18 @@ struct Span {
 // ── Public surface ──
 
 /// Every secret in free text replaced with `[REDACTED:<kind>]`. Borrowed when nothing matched.
-pub(crate) fn redact_text(input: &str) -> Cow<'_, str> {
+pub fn redact_text(input: &str) -> Cow<'_, str> {
     redact_text_with(input, true)
 }
 
 /// Redacts every string in a JSON value in place, field by field; `true` if anything changed.
-pub(crate) fn redact_value(value: &mut Value) -> bool {
+pub fn redact_value(value: &mut Value) -> bool {
     walk(value, None)
 }
 
 /// One log line: a JSON line is redacted field by field and re-serialised only when something
 /// changed; anything else is redacted as text.
-pub(crate) fn redact_line(line: &str) -> Cow<'_, str> {
+pub fn redact_line(line: &str) -> Cow<'_, str> {
     let trimmed = line.trim_start();
     if (trimmed.starts_with('{') || trimmed.starts_with('['))
         && let Ok(mut value) = serde_json::from_str::<Value>(line)
@@ -73,7 +76,7 @@ pub(crate) fn redact_line(line: &str) -> Cow<'_, str> {
 
 /// A whole JSON-lines file (or any line-oriented log): each UTF-8 line through [`redact_line`],
 /// line endings kept. A line that is not UTF-8 is kept as it is. Borrowed when nothing matched.
-pub(crate) fn redact_jsonl(bytes: &[u8]) -> Cow<'_, [u8]> {
+pub fn redact_jsonl(bytes: &[u8]) -> Cow<'_, [u8]> {
     let mut out: Option<Vec<u8>> = None;
     let mut at = 0;
     while at < bytes.len() {
@@ -104,7 +107,7 @@ pub(crate) fn redact_jsonl(bytes: &[u8]) -> Cow<'_, [u8]> {
 /// The `[REDACTED:<kind>]` marks in already-redacted text, counted per kind in first-seen order.
 /// How the publish, review and finding paths tell that redaction changed what they are about to
 /// send, so the operator hears that a colony exposed a secret instead of it vanishing silently.
-pub(crate) fn marks(text: &str) -> Vec<(String, usize)> {
+pub fn marks(text: &str) -> Vec<(String, usize)> {
     const OPEN: &str = "[REDACTED:";
     let mut out: Vec<(String, usize)> = Vec::new();
     let mut rest = text;
@@ -125,7 +128,7 @@ pub(crate) fn marks(text: &str) -> Vec<(String, usize)> {
 
 /// The operator-facing line for a file that redaction changed, e.g. `pr.md contained 1 secret
 /// (github token), redacted before publishing`; `None` when `text` carries no mark.
-pub(crate) fn redaction_note(file: &str, text: &str, before: &str) -> Option<String> {
+pub fn redaction_note(file: &str, text: &str, before: &str) -> Option<String> {
     let found = marks(text);
     let total: usize = found.iter().map(|(_, n)| n).sum();
     if total == 0 {

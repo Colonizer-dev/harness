@@ -106,7 +106,7 @@ mod quota_cards;
 mod rebase;
 mod reclaim;
 mod recovery;
-mod redact;
+use colonizer_redact as redact;
 mod redteam;
 mod remote;
 mod repo_identity;
