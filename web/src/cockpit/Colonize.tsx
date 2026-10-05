@@ -10,6 +10,8 @@
 //   `gh issue create` a chat's "file an issue" runs), dropped into the list pre-selected, and, unless
 //   "dispatch right after creating" is off, dispatched at once. `/loop 1h <task>` makes a loop instead,
 //   and "Launch without an issue" starts an open colony on the text, both as the composer does.
+//   `/model` is the "Switch model…" command: it closes the pane and opens the header's model
+//   switcher (issue #1051).
 //
 // The badge on the buttons is GitHub's own open-issue count until the pane has loaded the filtered one.
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactElement, type ReactNode } from "react";
@@ -24,6 +26,7 @@ import { MicButton, appendHeard, useVoiceInput } from "./Composer";
 import { relative } from "./InboxView";
 import { Pagination, SearchBox } from "./ListControls";
 import { describeLoopCadence, nameFromPrompt, parseLoopCommand } from "./loops";
+import { isModelCommand, openModelSwitcher } from "./ModelSwitcher";
 import { usePagedFilter } from "./paging";
 import { taskLine } from "../summary";
 
@@ -562,10 +565,18 @@ export function ColonizePane({
     toast({ title: `Dispatched: ${summarize(done)}`, kind: failed ? "error" : "success" });
   };
 
-  /** Enter in the box: a loop for `/loop …`, otherwise drafts for the confirm step. */
+  /** The "Switch model…" command: hand over to the header's model switcher. */
+  const switchModel = () => {
+    send({ type: "text", text: "" });
+    onClose();
+    openModelSwitcher();
+  };
+
+  /** Enter in the box: the model switcher for `/model`, a loop for `/loop …`, otherwise drafts for the confirm step. */
   const submit = async () => {
     const text = shown.trim();
     if (!text || busy || draft.stage.step !== "write") return;
+    if (isModelCommand(text)) return switchModel();
     if (voice.listening) voice.stop();
     const loop = parseLoopCommand(text);
     if (loop) {
@@ -725,6 +736,18 @@ export function ColonizePane({
                   aria-label="describe new work"
                   className="bare-field block min-h-[44px] w-full resize-none border-0 bg-transparent px-1.5 py-1 text-[14px] leading-[1.55] text-text outline-none placeholder:text-faint focus-visible:outline-none"
                 />
+                {isModelCommand(shown) && (
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected="true"
+                    onClick={switchModel}
+                    className="mb-1 flex w-full cursor-pointer items-center justify-between rounded-lg border border-accent bg-accent-soft px-2.5 py-1.5 text-left text-[13px] text-text"
+                  >
+                    <span>Switch model…</span>
+                    <span className="text-[11.5px] text-muted">install-wide or per org · ↵</span>
+                  </button>
+                )}
                 {voice.transcribing && (
                   <p role="status" className="m-0 flex items-center gap-2 px-1.5 text-[12px] text-muted">
                     <Spinner className="size-3" /> Transcribing with {voice.label}…
@@ -756,7 +779,7 @@ export function ColonizePane({
                 <div className="mt-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-1">
                   <DispatchAfter checked={dispatchAfter} onChange={setDispatchAfter} />
                   <p className="m-0 text-[11.5px] text-faint">
-                    <kbd className="font-sans">↵</kbd> drafts · <kbd className="font-sans">⇧↵</kbd> new line · <span className="font-mono">/loop 1h &lt;task&gt;</span> repeats it
+                    <kbd className="font-sans">↵</kbd> drafts · <kbd className="font-sans">⇧↵</kbd> new line · <span className="font-mono">/loop 1h &lt;task&gt;</span> repeats it · <span className="font-mono">/model</span> switches models
                     {onOpenLaunch && (
                       <>
                         {" · "}

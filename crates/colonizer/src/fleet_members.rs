@@ -11,6 +11,12 @@
 //! routes (`fleet_sync.rs`, #762), and nothing else
 //! ([`crate::api_tokens::Scope::Fleet`]). Leaving, from either side, revokes it.
 //!
+//! Beside the token, approval mints a refresh credential, handed over in the same pickup. It is
+//! the member's enrolment: when the owner stops accepting the fleet token (revoked in the token
+//! list, or lost), the member presents it at `POST /api/fleet/peer/refresh` and gets a fresh fleet
+//! token, the old one revoked (#762). It never refreshes a member the owner removed — the tombstone
+//! answers 403 — nor one that left.
+//!
 //! State lives in `<config_dir>/fleet.json` (0600), loaded never-fail and written through on
 //! every change. The plaintexts it holds — the nonce while a pairing is open, the minted token
 //! until pickup, and a member's own token for as long as it belongs — are what the protocol
@@ -75,6 +81,9 @@ struct Pairing {
     /// once the joiner takes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// The member's refresh credential, beside the token and gone with it at pickup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh: Option<String>,
     member_id: String,
 }
 
@@ -88,6 +97,10 @@ struct Member {
     url: Option<String>,
     token_id: String,
     joined_at: DateTime<Utc>,
+    /// The hash of the member's refresh credential ([`peer_refresh`]); `None` for a member that
+    /// joined before refresh existed, which re-joins instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh_hash: Option<String>,
 }
 
 /// This mothership's own join, while its confirm code waits to be compared.
@@ -106,6 +119,10 @@ struct Membership {
     owner_url: String,
     member_id: String,
     token: String,
+    /// The refresh credential the owner handed over with the token: what trades a token the owner
+    /// stopped accepting for a fresh one (#762). `None` on a membership from before refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refresh: Option<String>,
     joined_at: DateTime<Utc>,
     /// Consent to push this machine's history to the owner (`fleet_sync.rs`, #762): off at every
     /// join, turned on by the member's operator after seeing the preview. A new membership — a
@@ -266,7 +283,21 @@ impl FleetStore {
                 owner_url: m.owner_url.clone(),
                 member_id: m.member_id.clone(),
                 token: m.token.clone(),
+                refresh: m.refresh.clone(),
             })
+    }
+
+    /// Stores the fleet token a refresh handed back (#762), only while this mothership is still
+    /// the member `member_id` names — a leave or a re-join during the drain wins. `false` when
+    /// there was nothing to update.
+    pub async fn set_member_token(&self, member_id: &str, token: &str) -> bool {
+        let mut state = self.state.write().await;
+        let Some(m) = state.membership.as_mut().filter(|m| m.member_id == member_id) else {
+            return false;
+        };
+        m.token = token.to_string();
+        self.save(&state).await;
+        true
     }
 
     /// On an owner, the member a fleet token belongs to — `None` when the token names no current
@@ -320,6 +351,7 @@ impl FleetStore {
             owner_url: t.owner_url,
             member_id: t.member_id,
             token: t.token,
+            refresh: t.refresh,
             joined_at: Utc::now(),
             history_sync: false,
         });
@@ -330,7 +362,16 @@ impl FleetStore {
     /// an owner up without walking the pairing each time. Answers `(member_id, token)`.
     #[cfg(test)]
     pub(crate) async fn add_member_for_tests(app: &Shared, name: &str) -> (String, String) {
+        let (id, token, _) = Self::add_refreshable_member_for_tests(app, name).await;
+        (id, token)
+    }
+
+    /// [`Self::add_member_for_tests`], with the refresh credential approval mints as well.
+    /// Answers `(member_id, token, refresh)`.
+    #[cfg(test)]
+    pub(crate) async fn add_refreshable_member_for_tests(app: &Shared, name: &str) -> (String, String, String) {
         let (token, token_id) = app.api_tokens.create_fleet_token(name).await.unwrap();
+        let refresh = new_nonce().unwrap();
         let id = format!("mem_{}", util::short_id());
         let mut state = app.fleet_members.state.write().await;
         state.members.push(Member {
@@ -339,9 +380,17 @@ impl FleetStore {
             url: None,
             token_id,
             joined_at: Utc::now(),
+            refresh_hash: Some(sha256_hex(refresh.as_bytes())),
         });
         app.fleet_members.save(&state).await;
-        (id, token)
+        (id, token, refresh)
+    }
+
+    /// The fleet token id a member holds now: the refresh tests' check that it rotated.
+    #[cfg(test)]
+    pub(crate) async fn token_id_for_tests(&self, member_id: &str) -> Option<String> {
+        let state = self.state.read().await;
+        state.members.iter().find(|m| m.id == member_id).map(|m| m.token_id.clone())
     }
 
     /// Removes a member the way the owner's Remove does, for the history-drain tests.
@@ -658,6 +707,7 @@ pub async fn approve(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         .create_fleet_token(&pairing.name)
         .await
         .map_err(|message| client_error(StatusCode::BAD_REQUEST, &message))?;
+    let refresh = new_nonce().map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e:#}")))?;
     pairing.status = PairingStatus::Approved;
     pairing.token = Some(token);
     let member = Member {
@@ -666,7 +716,9 @@ pub async fn approve(State(app): State<Shared>, Path(id): Path<String>) -> ApiRe
         url: pairing.url.clone(),
         token_id,
         joined_at: Utc::now(),
+        refresh_hash: Some(sha256_hex(refresh.as_bytes())),
     };
+    pairing.refresh = Some(refresh);
     let answer = json!({"member": {
         "id": member.id, "name": member.name, "url": member.url, "joined_at": member.joined_at,
     }});
@@ -860,6 +912,8 @@ pub async fn join_confirm(State(app): State<Shared>) -> ApiResult<Value> {
                 owner_url: joining.owner_url,
                 member_id,
                 token,
+                // An owner from before refresh sends none; this membership then re-joins on a 401.
+                refresh: answer["refresh"].as_str().map(str::to_string),
                 joined_at: Utc::now(),
                 // Joining is not consent to push history: the operator turns it on after the
                 // preview (`POST /api/fleet/sync/consent`).
@@ -980,6 +1034,7 @@ pub async fn peer_redeem(State(app): State<Shared>, Json(req): Json<RedeemBody>)
         expires_at: Utc::now() + PAIRING_TTL,
         status: PairingStatus::Pending,
         token: None,
+        refresh: None,
         member_id: format!("mem_{}", util::short_id()),
     };
     let answer = json!({"pairing_id": pairing.id, "confirm_code": pairing.confirm_code});
@@ -1014,11 +1069,70 @@ pub async fn peer_pairing(State(app): State<Shared>, Path(id): Path<String>, Jso
             let (Some(token), member_id) = (pairing.token.clone(), pairing.member_id.clone()) else {
                 return Err(client_error(StatusCode::NOT_FOUND, "no such pairing"));
             };
+            let refresh = pairing.refresh.clone();
             state.pending.retain(|p| p.id != id);
             app.fleet_members.save(&state).await;
-            Ok(Json(json!({"status": "approved", "token": token, "member_id": member_id})))
+            Ok(Json(
+                json!({"status": "approved", "token": token, "member_id": member_id, "refresh": refresh}),
+            ))
         }
     }
+}
+
+/// The body of `POST /api/fleet/peer/refresh`.
+#[derive(Deserialize)]
+pub struct RefreshBody {
+    member_id: String,
+    refresh: String,
+}
+
+/// `POST /api/fleet/peer/refresh` (#762): a member whose fleet token the owner stopped accepting
+/// trades its refresh credential — the enrolment approval minted, which never travels on any
+/// other call — for a fresh fleet token; the old token is revoked, so only one is ever live. The
+/// credential is the whole authentication, as the invite code and nonce are for the routes beside
+/// it. A member the owner removed is never refreshable: its tombstone answers 403, as its old token
+/// does; a member that left, or an id this owner never knew, is the same 403. A wrong credential,
+/// or a member from before refresh existed, is 401: re-join.
+pub async fn peer_refresh(State(app): State<Shared>, Json(req): Json<RefreshBody>) -> ApiResult<Value> {
+    let presented = sha256_hex(req.refresh.as_bytes());
+    let mut state = app.fleet_members.state.write().await;
+    if state.membership.is_some() {
+        // A member owns no fleet, so it has no members to refresh.
+        return Err(client_error(StatusCode::FORBIDDEN, "this mothership owns no fleet"));
+    }
+    if state.removed.iter().any(|t| t.member_id == req.member_id) {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "this machine was removed from the fleet; its token is not refreshed",
+        ));
+    }
+    let Some(member) = state.members.iter_mut().find(|m| m.id == req.member_id) else {
+        return Err(client_error(
+            StatusCode::FORBIDDEN,
+            "this machine is not a member of this fleet",
+        ));
+    };
+    let matches = member
+        .refresh_hash
+        .as_deref()
+        .is_some_and(|hash| constant_time_eq(hash.as_bytes(), presented.as_bytes()));
+    if !matches {
+        return Err(client_error(
+            StatusCode::UNAUTHORIZED,
+            "the refresh credential does not match this member; re-join the fleet",
+        ));
+    }
+    let (token, token_id) = app
+        .api_tokens
+        .create_fleet_token(&member.name)
+        .await
+        .map_err(|message| client_error(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
+    let old = std::mem::replace(&mut member.token_id, token_id);
+    app.fleet_members.save(&state).await;
+    drop(state);
+    // Rotated: the token the owner stopped accepting goes for good, if anything of it is left.
+    app.api_tokens.revoke(&old).await;
+    Ok(Json(json!({"token": token})))
 }
 
 /// `POST /api/fleet/peer/leave`: a member drops itself. The fleet token in the request is the
@@ -1058,6 +1172,7 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
         .route("/api/fleet/leave", post(leave))
         .route("/api/fleet/peer/redeem", post(peer_redeem))
         .route("/api/fleet/peer/pairings/{id}", post(peer_pairing))
+        .route("/api/fleet/peer/refresh", post(peer_refresh))
         .route("/api/fleet/peer/leave", post(peer_leave))
 }
 
@@ -1312,6 +1427,7 @@ mod tests {
             owner_url: "http://owner.example".into(),
             member_id: "mem_us".into(),
             token: "col_ours".into(),
+            refresh: None,
             joined_at: Utc::now(),
             history_sync: false,
         });
@@ -1423,6 +1539,7 @@ mod tests {
                 owner_url: "http://owner.example".into(),
                 member_id: "mem_us".into(),
                 token: "col_ours".into(),
+                refresh: None,
             }))
             .await;
         let (status, _) = ask(
@@ -1642,7 +1759,7 @@ mod tests {
     #[tokio::test]
     async fn a_mothership_joins_a_fleet_and_leaves_it_end_to_end() {
         let (_owner_root, owner, owner_r, owner_bearer) = rig();
-        let (_joiner_root, _joiner, joiner_r, joiner_bearer) = rig();
+        let (_joiner_root, joiner, joiner_r, joiner_bearer) = rig();
         let (owner_bearer, joiner_bearer) = (owner_bearer.as_deref(), joiner_bearer.as_deref());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let owner_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1669,7 +1786,11 @@ mod tests {
         // Confirm: the token comes over, the membership is stored, the joining is cleared.
         let (_, answer) = ask(&joiner_r, Method::POST, "/api/fleet/join/confirm", joiner_bearer, None).await;
         assert_eq!(answer["status"], "joined");
+        // The refresh credential came over with the token (#762), and the cockpit never shows it.
+        let refresh = joiner.fleet_members.membership().await.unwrap().refresh;
+        assert!(refresh.as_deref().is_some_and(|r| r.len() == 64), "{refresh:?}");
         let view = fleet_view(&joiner_r, joiner_bearer).await;
+        assert!(!view.to_string().contains(refresh.as_deref().unwrap()));
         assert_eq!(view["role"], "member");
         assert_eq!(view["membership"]["owner_url"], owner_url);
         assert!(view["joining"].is_null());

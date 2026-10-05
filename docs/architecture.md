@@ -104,7 +104,7 @@ Two settings layers sit next to the modules:
 | `source` | GitHub issues and repositories | GitLab, Linear, Jira `PLANNED` |
 | `sandbox` | microsandbox (KVM microVMs), with the stack detected from each repository by default — or presets for Node, Python, Rust and Go picked by hand — each image pinned by digest and carrying a small shared toolbox a repository can extend with a `.colonizer/setup.sh` hook (#753) | other VMMs `PLANNED` |
 | `mesh` | Private mesh (bundled Headscale), or a loopback port | remote outposts `PLANNED` |
-| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Codex on an OpenAI API key; Pi, reaching models only through the provider gateway; Grok Build (experimental) and ACP (Gemini CLI handshake verified, `PLANNED`), both fetching their pinned CLI on first boot; Hermes as an in-tree module whose colonies stop at the runner's preflight until the `hermes` CLI is staged into the VM | more agents behind the same protocol `PLANNED` |
+| `agent` | Claude Code or OpenCode, each able to run on any Anthropic-compatible provider (DeepSeek, a local model); Codex on an OpenAI API key; Pi, reaching models only through the provider gateway; Grok Build (experimental) and ACP (Gemini CLI handshake verified, `PLANNED`), both fetching their pinned CLI on first boot; Hermes as an in-tree module that builds its pinned, hash-checked source on first boot | more agents behind the same protocol `PLANNED` |
 | `interfaces` | Chat with choice cards, terminal | dev-server previews `PLANNED` |
 | `publish` | GitHub pull request from the colony's own branch, opened automatically when the agent finishes (autopilot, on by default) | review-comment follow-ups `PLANNED` |
 | `memory` | Shared notes per repository, org and globally; agents propose, you approve. Kept on the mothership, or in your [mem0](https://mem0.ai) project with each colony's index ordered by relevance to its task | semantic search inside a colony `PLANNED` |
@@ -157,11 +157,12 @@ mothership's saved key for the provider is injected.
 | :--- | :--- | :--- |
 | [`crates/colonizer`](../crates/colonizer) | The mothership: HTTP and WebSocket API, module registry, colony lifecycle, mesh supervision, publish | `SHIPPING` |
 | [`crates/colonizer-agentd`](../crates/colonizer-agentd) | The daemon inside every colony: runner supervision, event log with replay, PTY terminals. Static musl binary | `SHIPPING` |
+| [`crates/colonizer-redact`](../crates/colonizer-redact) | Secret redaction for colony logs, published so the mothership (`crate::redact`) and the observability add-on share one set of detectors; depends only on `serde_json` | `SHIPPING` |
 | [`crates/repo-contracts`](../crates/repo-contracts) | Test-only access to the repository's own files — docs, schemas, module manifests, shared fixtures — so an in-place test reads them without the published crates reaching outside themselves | `UNPUBLISHED` |
 | [`modules/agents/claude-code`](../modules/agents/claude-code) | Claude Code through the Claude Agent SDK, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/opencode`](../modules/agents/opencode) | OpenCode through `opencode run`, speaking the runner protocol | `SHIPPING` |
 | [`modules/agents/pi`](../modules/agents/pi) | Pi through its RPC mode, speaking the runner protocol; models only through the provider gateway | `SHIPPING` |
-| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; not yet exercised in a colony — the `hermes` binary is not staged into the VM |
+| [`modules/agents/hermes`](../modules/agents/hermes) | Nous Research's Hermes Agent CLI, driven headlessly on the same runner protocol | runner in-tree; builds the pinned hermes-agent on first boot, not yet exercised in a colony microVM |
 | [`modules/agents/codex`](../modules/agents/codex) | OpenAI's Codex CLI driven headlessly on the same runner protocol; the runner fetches the pinned CLI on first boot | `SHIPPING` |
 | [`modules/agents/grok-build`](../modules/agents/grok-build) | xAI's Grok Build CLI driven headlessly on the same runner protocol; the runner fetches the pinned `grok` on first boot | experimental — not yet run in a real colony |
 | [`modules/agents/acp`](../modules/agents/acp) | Any Agent Client Protocol agent over stdio on the same runner protocol; verified against Gemini CLI, other agents by a custom command | `PLANNED` |
@@ -489,9 +490,11 @@ and that stub is the one piece left for the gate.
 Where a colony's records and evidence live is an interface, not a layout: the session index `sessions.json` and the
 per-session files and logs under `data/sessions/<id>/` are read and written through the `SessionStore` in
 `crates/colonizer/src/store.rs` ([docs/session-store.md](session-store.md)) — startup loads the index through it, the
-saves write it back, and the event, harness and findings appends go through it — and its contract, atomic replaces,
-at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets another backend serve the
-same colonies (`colonizer migrate-store` copies one store into another). That is
+saves write it back, and every record and ledger (the event and harness logs, findings, commit links, claims, messages,
+the stored issue, the colony's tokens) is read and written through it, the paths a microVM mounts aside — and its
+contract, atomic replaces, at-least-once appends that readers deduplicate by `seq`, one writer per session, is what lets
+another backend serve the same colonies (`colonizer sessions migrate` copies one store into another, verifies it, and
+switches to it). That is
 what makes agent processes disposable: any agent attaches by session id and replays from the log, and a mothership
 restart changes where the bytes are, not how the colony continues.
 

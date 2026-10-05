@@ -14,7 +14,7 @@ import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewF
 import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
-import { colonyFromUrl } from "../push";
+import { colonyFromUrl, pushTarget } from "../push";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -23,6 +23,7 @@ import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
+import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
@@ -33,6 +34,8 @@ import { focusTurn } from "./turnFocus";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
+import { runDecisionAnswer, runPrAction } from "./DecisionCards";
+import { decisionsCount, useDecisions } from "./decisions";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
@@ -293,7 +296,10 @@ export function Cockpit({
   // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
   // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
   // spend, which are this workspace's.
-  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  // The decisions inbox (issue #1036) joins the same count: one number for everything that needs you.
+  const decisions = useDecisions(api);
+  const decisionCount = useMemo(() => decisionsCount(decisions.view, sessions), [decisions.view, sessions]);
+  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0) + decisionCount, [needByOrg, decisionCount]);
   const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
@@ -415,8 +421,10 @@ export function Cockpit({
       if (event.origin !== window.location.origin) return;
       const data = event.data as { type?: string; url?: unknown } | null;
       if (data?.type !== "colonizer:open" || typeof data.url !== "string") return;
-      const id = colonyFromUrl(data.url);
-      if (id) setDeeplink(id);
+      // A colony push opens the colony; the out-of-quota push (issue #767) opens the Inbox card.
+      const target = pushTarget(data.url);
+      if (target && "colony" in target) setDeeplink(target.colony);
+      else if (target) setView(target.view);
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
@@ -634,6 +642,13 @@ export function Cockpit({
             onQuotaAction={(provider, body) =>
               runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
             }
+            decisions={decisions.view}
+            onAnswerDecision={(body) =>
+              runDecisionAnswer(api.answerDecision, (message, tone) => toast(message, tone), body).finally(() => void decisions.refresh())
+            }
+            onDecisionPrAction={(card, action) =>
+              runPrAction(api.decisionPrAction, (message, tone) => toast(message, tone), card, action).finally(() => void decisions.refresh())
+            }
           />
         );
       case "history":
@@ -728,6 +743,7 @@ export function Cockpit({
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
+        models={<ModelSwitcher selectedOrg={selectedOrg} />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -740,6 +756,7 @@ export function Cockpit({
           onOpenColony: openColonyById,
           onOpenInbox: () => navigate("inbox"),
           onOpenNotificationSettings: () => onOpenSettings("notifications"),
+          decisionCount,
         }}
       />
       {/* The mobile tab bar (below `sm`) covers the foot of the screen, so the content it overlays

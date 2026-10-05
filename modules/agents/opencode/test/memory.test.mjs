@@ -16,7 +16,7 @@ import { colonizerMcp, INSTRUCTIONS, instructionsText, mapLine, MEMORY_INSTRUCTI
 
 const moduleDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-for (const [file, origin] of [['memory.mjs', 'claude-code'], ['memory-mcp.mjs', 'acp']]) {
+for (const [file, origin] of [['memory.mjs', 'claude-code'], ['memory-mcp.mjs', 'acp'], ['vault.mjs', 'claude-code']]) {
   test(`opencode/${file} is byte-identical to the ${origin} original it is copied from`, () => {
     const copy = readFileSync(join(moduleDir, file));
     const original = readFileSync(join(moduleDir, '..', origin, file));
@@ -106,4 +106,34 @@ test('a memory read call shows in the transcript; the bridged colonizer tools st
   assert.deepEqual(mapLine(use('colonizer_memory_briefing'), st).map((e) => e.type), ['tool_call', 'tool_result']);
   assert.deepEqual(mapLine(use('colonizer_memory_propose'), st), []);
   assert.deepEqual(mapLine(use('colonizer_ask_user'), st), []);
+});
+
+test('operator vault (issue #777): mcp.mjs serves vault_search from the snapshot and forwards a checked vault_propose to the bridge', async (t) => {
+  const { createServer } = await import('node:http');
+  const root = mkdtempSync(join(tmpdir(), 'opencode-vault-'));
+  const dir = join(root, 'vault');
+  mkdirSync(join(dir, 'Notes'), { recursive: true });
+  writeFileSync(join(dir, 'Notes', 'deploy.md'), '# Deploy\n\nRun MARKER-VAULT migrations first.\n');
+  const seen = [];
+  const bridge = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      seen.push({ path: req.url, body: JSON.parse(body) });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => bridge.listen(0, '127.0.0.1', resolve));
+  t.after(() => bridge.close());
+  const srv = startServer({ COLONIZER_BRIDGE_URL: `http://127.0.0.1:${bridge.address().port}`, COLONIZER_BRIDGE_TOKEN: 'tok', COLONIZER_VAULT_DIR: dir });
+  t.after(() => srv.stop());
+  const names = (await srv.call('tools/list', {})).result.tools.map((tool) => tool.name);
+  assert.deepEqual(names.filter((name) => name.startsWith('vault_')), ['vault_search', 'vault_propose']);
+  assert.match(await srv.tool('vault_search', { query: 'marker-vault' }), /\/colonizer\/vault\/Notes\/deploy\.md:3 \(under "Deploy"\) — Deploy/);
+  await srv.tool('vault_propose', { path: 'web/n.md', title: 't', body: 'b', reason: 'r' });
+  assert.deepEqual(seen, [{ path: '/vault', body: { path: 'web/n.md', title: 't', body: 'b', reason: 'r' } }]);
+  const bare = startServer({ COLONIZER_BRIDGE_URL: 'http://127.0.0.1:9', COLONIZER_BRIDGE_TOKEN: 'tok' });
+  t.after(() => bare.stop());
+  assert.ok(!(await bare.call('tools/list', {})).result.tools.some((tool) => tool.name.startsWith('vault_')), 'no vault, no vault tools');
+  assert.equal(colonizerMcp({ moduleDir: '/m', bridge: { url: 'u', token: 't' }, env: { COLONIZER_VAULT_DIR: dir } }).environment.COLONIZER_VAULT_DIR, dir);
 });

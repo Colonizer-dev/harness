@@ -2,7 +2,7 @@
 //
 //   my.colonizer.dev            the apex: install registration, the mothership's tunnel dial, and the
 //                               signed mothership endpoints (pairing view, confirm and reject, owner
-//                               unbind);
+//                               unbind, retiring the install);
 //   <install>.my.colonizer.dev  one subdomain per install: owner sign-in under /_auth, everything else
 //                               proxied to the install's tunnel DO once a valid session is present.
 //
@@ -24,6 +24,7 @@ const PAIRING_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing$`);
 const CONFIRM_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing/confirm$`);
 const REJECT_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/pairing/reject$`);
 const OWNER_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}/owner$`);
+const INSTALL_PATH = new RegExp(`^/api/installs/${PATH_INSTALL_ID}$`);
 
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567'; // 20 chars = 100 bits of install id
 const PUBLIC_KEY_BYTES = 32;
@@ -60,6 +61,7 @@ async function apex(request, env, url) {
     return signed(request, env, url, id[1], (install, rawBody) => rejectPairing(env, install, rawBody));
   }
   if (method === 'DELETE' && (id = OWNER_PATH.exec(path))) return signed(request, env, url, id[1], (install) => unbind(env, install));
+  if (method === 'DELETE' && (id = INSTALL_PATH.exec(path))) return signed(request, env, url, id[1], (install) => retire(env, install));
   return json({ error: 'not found' }, 404);
 }
 
@@ -223,6 +225,21 @@ async function unbind(env, install) {
     env.DB.prepare('UPDATE installs SET owner_github_id = NULL, owner_github_login = NULL WHERE id = ?').bind(install.id),
     env.DB.prepare('DELETE FROM pairings WHERE install_id = ?').bind(install.id),
   ]);
+  return new Response(null, { status: 204 });
+}
+
+/** Retire an install ("reset link" in the cockpit, review finding R2): its row, owner binding and
+ * pending pairings go in one transaction, and a live tunnel on it is closed. From then on the install
+ * is unknown everywhere — a dial is 404, the subdomain shows the unknown-install page, every session
+ * for it fails — so a copy of the retired key reaches nothing. Signed by that key, like every other
+ * mothership call: only the key's holder can retire it. */
+async function retire(env, install) {
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM pairings WHERE install_id = ?').bind(install.id),
+    env.DB.prepare('DELETE FROM installs WHERE id = ?').bind(install.id),
+  ]);
+  const headers = new Headers({ 'x-relay-kind': 'retire', 'x-relay-install-id': install.id });
+  await env.TUNNELS.get(env.TUNNELS.idFromName(install.id)).fetch(new Request(`https://${env.RELAY_DOMAIN}/_retire`, { method: 'POST', headers }));
   return new Response(null, { status: 204 });
 }
 

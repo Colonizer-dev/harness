@@ -5,7 +5,9 @@ import { errorMessage, useApi, useToast } from "../context";
 import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
+import { ContinueLocally } from "../features/handoff/ContinueLocally";
 import type { Session } from "../types";
+import { BoundaryRow } from "./BoundaryRow";
 import { ChatPanel } from "./ChatPanel";
 import {
   IconAlert,
@@ -345,6 +347,7 @@ export function SessionView({
                 {busy === "catch_up" ? <Spinner /> : <IconBranch size={15} />} Catch up
               </Button>
             )}
+            <ContinueLocally session={session} />
             {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed" || session.status === "parked") && (
               <Button
                 variant="primary"
@@ -412,6 +415,16 @@ export function SessionView({
             {attention.reason === "waiting_for_answer" && <span className="opacity-80">Answer the card in the chat.</span>}
             {attention.reason === "nudges_exhausted" && (
               <span className="opacity-80">Check the terminal, message the agent, or stop the colony.</span>
+            )}
+            {attention.reason === "control_defeat" && (
+              <div className="w-full">
+                <span className="opacity-80">
+                  {attention.detail ? `${attention.detail}. ` : ""}Check the evidence, then message the agent or stop the colony.
+                </span>
+                {attention.evidence?.map((record, i) => (
+                  <BoundaryRow key={i} record={record} evidence />
+                ))}
+              </div>
             )}
             {attention.reason === "autopilot_held" && (
               <span className="opacity-80">

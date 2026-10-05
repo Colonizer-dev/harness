@@ -85,9 +85,40 @@ The Inbox has no sidebar item. It is behind the bell in the top bar.
 ### Top bar
 
 The top bar shows the avatars of the workspaces that have colonies running now. Click one to filter
-to that workspace. At the far right is the notifications bell (see [Inbox](#inbox-and-the-bell)).
+to that workspace. Toward the right is the model chip (see [Switching models](#switching-models)),
+and at the far right the notifications bell (see [Inbox](#inbox-and-the-bell)).
 The bar also warns when the mothership stops answering or the live feed drops. While remote access
 is on, it shows a "Remote access on" badge that opens its settings.
+
+### Switching models
+
+The chip at the top right names the install's main model, for example **Opus 5.5**, with a dot for
+its provider's health: green when healthy, amber when its provider is failing requests, red while it
+is out of quota. Click it, or type `/model` in ⌘K, to open the switcher:
+
+- **Scope**: **All orgs (install default)** changes the install's agent settings, which every org
+  without an override of its own follows. Pick an org to change only that org. Each role says where
+  its value comes from: set install-wide, the module's default, an org override, or the install
+  default an org inherits. In an org, **Use install default** drops that org's override.
+- **Agent**: which agent module the scope runs (Claude Code, Codex, OpenCode, Pi, …). A module that
+  can't launch on this install is greyed out, with the same reason a launch would give. A new module
+  applies to new colonies only.
+- **One row per model role** the selected module declares in its `module.json`: orchestrator,
+  subagent, background, summary, small model, small-task and large-task models. Claude Code has all
+  six; Codex three; OpenCode two; Pi, Hermes, Grok Build and ACP one. An org can override the
+  orchestrator, subagent and background models; the others are install-wide only. Each picker lists
+  the models on offer grouped by provider, with the provider's failure rate, and a model whose
+  provider is out of quota is shown disabled with its reset time.
+- **Apply to**: **New colonies only** (the default) saves the settings, as Settings would. **Also
+  switch running colonies** first says how many running, parked or queued colonies in the scope
+  would restart, then, once you confirm, restarts them on the new models the way the [provider out of
+  quota card](#inbox-and-the-bell) does.
+- **Recent**: the main models you switched between, for switching back in one click. The list is kept
+  in this browser.
+
+Nothing is saved unless the whole switch is valid: a model out of quota, not on offer, or not usable
+for a role refuses the switch with the reason, and nothing changes. Scoped API tokens cannot switch
+models.
 
 ### Page width
 
@@ -251,6 +282,26 @@ The Launch view is the full launcher: pick a repository, select one or many issu
 checks for duplicates and queues past the parallel limit. Reach it from Colonize's **launch form**
 link, the Nest's **DIG** chamber, or **More → Launch** on a phone.
 
+### Hand-off with a local session
+
+Two flows move a conversation between a developer's machine and a colony.
+
+**Continue in a colony** (Launch view): upload a txcript **Simple JSON** export of a local Claude
+Code, Codex or OpenCode session — a JSON object with a `messages` array, 2 MiB at most — name the
+repository as `owner/name`, and the form prefills the branch and title the file carries. The colony
+starts from that branch and continues where the local session stopped.
+
+**Continue locally** (a colony's header): **Continue locally** downloads the colony's conversation
+as `colony.json` and shows the two commands to run at a checkout of the repository:
+
+```sh
+git fetch origin <colony branch> && git switch <colony branch>
+txcript continue ./colony.json --with claude_code
+```
+
+The `--with` value is `codex` (or `opencode`) when the colony's agent, or the exported transcript's
+tool names, say so.
+
 ## Chat
 
 **Sidebar: Chat.**
@@ -357,6 +408,52 @@ colony's chat, so you answer there.
 
 How you get told when the tab is not in front is set in Settings, Notifications
 ([Notifications and Web Push](#notifications-and-web-push)).
+
+### Decisions
+
+Some things only a person can settle: a product question on an issue, a pull request that needs a
+review, a conflict the merge train cannot redo by itself. They show in the Inbox under their own
+**Decisions** header, below the colonies that wait on you, and count in the same "need you" number
+as the badge on the rail, the phone tab and the bell. They are not colony questions; nothing here
+reaches a colony.
+
+**Repo decisions.** An open issue labelled `needs-decision`, or whose body or latest comment has a
+line starting `Open decision:` or `Decision needed:`, gets a card in the same style as a colony's
+question. The options are the list under an `Options:` line, if the issue has one:
+
+```markdown
+Open decision: Should saved carts live in the session store or in Postgres?
+
+Options:
+- Session store
+- Postgres
+```
+
+Without options the card takes free text. Pick an option (or **Other…**), add a note if you like and
+press **Post decision**: the mothership posts one comment, `Decision (maintainer): <your choice>`
+with the note under it, and removes the `needs-decision` label. Nothing is posted until you press
+the button.
+
+**Pull requests that need you.** Each card says why and links to the pull request:
+
+- **Held by policy**: the watchdog flagged a control-defeat signature, the autopilot is holding the
+  publish because a secret was redacted from the description, or the publish was refused. **Open
+  colony** takes you to it.
+- **Needs a redo** and **Conflicted**: the merge train's mechanical rebase conflicted, its resolve
+  colony gave up, or the auto-rebase could not finish. **Dispatch redo colony** sends the merge
+  train's own redo colony, once per pull request.
+- **CI red**: a check failed and it is not a known flake the merge-train loop is already re-running.
+  **Re-run failed jobs** re-runs the failed jobs on GitHub.
+- **Review requested**: someone asked you for a review.
+- **Waiting for a merge**: CI is green, and the merge train does not drive the repository.
+
+**Open on GitHub** is on every card that has a pull request.
+
+**Which orgs.** An org is in when it is switched on as a workspace and already has colonies; switch
+an org in or out with `PUT /api/decisions/orgs/{org}` ([protocol](protocol/decisions.md)). GitHub is
+read gently: one search per org at most every five minutes, conditional requests, and a pause of 15
+minutes and more whenever GitHub pushes back. With `COLONIZER_NO_EXTERNAL_EFFECTS` set the cards
+still show, but answering and the actions are off and say why.
 
 ## Packages
 
@@ -643,21 +740,24 @@ notification on other devices — until its question is answered.
 **Web Push** reaches a device even when Colonizer is closed. Press **Subscribe** under "Push to this
 device" to enrol the current browser. Each enrolled device is listed with its name (rename it in
 place), when it was last seen, **Send test**, **Prefs** and **Revoke**. Tapping a notification opens
-the colony it names. Notifications are grouped one per colony — a colony's next push replaces its
+the colony it names; a **Provider out of quota** push opens the Inbox, where that provider's card
+is. That push is one per provider — "Z.AI is out of quota: 3 colonies are waiting; resets Oct 6,
+04:00 UTC" — never one per blocked colony. Notifications are grouped one per colony — a colony's next push replaces its
 last instead of stacking up — and when two or more colonies need you, a "N colonies need you"
 summary stands in for the pile and opens the front page; it closes again once fewer than two remain.
 
 Every device has preferences of its own, kept on the mothership and checked before it sends:
 
-- **Events**: Questions, Pull request opened, Needs rebase, Failed and Needs attention are on by
-  default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
+- **Events**: Questions, Pull request opened, Needs rebase, Failed, Needs attention and Provider out
+  of quota are on by default; Provider degraded and the Hourly digest are off until asked for. Devices enrolled before
   preferences existed keep working on these defaults — so Provider degraded and the digest now start
   off for them.
 - **Play a sound for questions.** A question is the only push that may sound; everything else
   arrives silent. **Answer buttons on questions** and the **Needs-you count on the app icon** can
   be switched off per device too.
 - **Repositories**: empty hears about every colony; entries name an `org` or an `org/repo`, and only
-  narrow the events tied to a colony.
+  narrow the events tied to a colony. A Provider out of quota push reaches the device when at least
+  one colony on the card is in its repositories.
 - **Quiet hours** hold everything back through the device's own night, with an optional break-through
   for questions. The time zone is stamped when the preferences are saved from that device, and the
   cockpit keeps it fresh while it is open.
@@ -717,9 +817,9 @@ Each setting can follow the global default or be overridden for this workspace:
 - **Models**: **Agent module** (which agent runs this workspace's colonies), Orchestrator, Subagents
   and Background models. A workspace with no pick of its own uses the global agent module. Claude
   Code is the main one. Codex, OpenCode, Pi, Hermes, Grok Build and ACP modules also exist, but
-  several are early: Pi cannot ask you questions, and the Hermes and ACP-grok binaries are not
-  yet staged into the colony image, while Codex, OpenCode, Grok Build and the ACP gemini preset fetch
-  their pinned CLI on first boot. Each module's description in Settings, Modules says what it
+  several are early: Pi cannot ask you questions, and the ACP-grok binary is not yet staged into
+  the colony image, while Codex, OpenCode, Grok Build and the ACP gemini preset fetch their pinned
+  CLI on first boot, and Hermes builds its pinned source on first boot. Each module's description in Settings, Modules says what it
   cannot do. See [runner-authoring.md](runner-authoring.md) for how agent modules work.
 - **Colonies**: Stack, parallel colonies, per-repository limit, budget per colony, host disk per
   colony.
@@ -752,6 +852,7 @@ On Linux and Windows, read Ctrl for ⌘.
 | Keys | Where | What it does |
 | --- | --- | --- |
 | ⌘K | Anywhere except the code editor and terminals | Open Colonize |
+| ⌘K, then `/model` ↵ | Anywhere ⌘K works | Switch model… (opens the model switcher) |
 | ⌘B | Anywhere except text fields | Collapse or expand the sidebar |
 | Escape | Colonize | Close, or step back from the confirm step |
 | ⌘\ | Chat | Show or hide the conversation list |

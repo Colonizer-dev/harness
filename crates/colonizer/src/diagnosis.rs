@@ -1,7 +1,7 @@
 //! Stuck-colony diagnosis (issue #230): `GET /api/sessions/{id}` carries the `events.jsonl`
 //! tail as one-line digests plus a best-guess diagnosis; `GET /api/status` flags a host-wide stall.
 
-use std::path::Path;
+use crate::store::SessionStore;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
@@ -143,44 +143,24 @@ pub fn summarize(event: &Value) -> Option<RecentEvent> {
     })
 }
 
-/// The last lines of `events.jsonl`: at most the last 64 KiB, seeked, dropping the partial first
-/// line the seek can land mid-way through.
-pub(crate) async fn tail_events(path: &Path) -> Vec<Value> {
-    tail_events_within(path, TAIL_BYTES).await
+/// The last lines of a colony's `events.jsonl`: at most the last 64 KiB, read through the session
+/// store, whole lines only.
+pub(crate) async fn tail_events(store: &dyn SessionStore, id: &str) -> Vec<Value> {
+    tail_events_within(store, id, "events.jsonl", TAIL_BYTES).await
 }
 
-/// [`tail_events`] with its own byte budget: the last `bytes` of the file, whole lines only.
-pub(crate) async fn tail_events_within(path: &Path, bytes: u64) -> Vec<Value> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let Ok(mut file) = tokio::fs::File::open(path).await else {
+/// [`tail_events`] for any of a colony's event logs (`events-N.jsonl` too), with its own byte
+/// budget: the store's [`SessionStore::read_tail`] — the last `bytes` of the file, whole lines
+/// only — parsed and redacted. An absent or unreadable log is no events.
+pub(crate) async fn tail_events_within(store: &dyn SessionStore, id: &str, name: &str, bytes: u64) -> Vec<Value> {
+    let Ok(Some(tail)) = store.read_tail(id, name, bytes).await else {
         return Vec::new();
-    };
-    let len = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(bytes);
-    // A seek landing exactly on a line start keeps every line; only a mid-line landing drops the
-    // partial head. The byte before the seek tells which: a newline means a boundary.
-    let mut boundary = start == 0;
-    if !boundary {
-        let mut probe = [0u8; 1];
-        if file.seek(std::io::SeekFrom::Start(start - 1)).await.is_err() || file.read_exact(&mut probe).await.is_err() {
-            return Vec::new();
-        }
-        boundary = probe[0] == b'\n';
-    }
-    let mut bytes = Vec::new();
-    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() || file.read_to_end(&mut bytes).await.is_err() {
-        return Vec::new();
-    }
-    let text = String::from_utf8_lossy(&bytes);
-    let tail: &str = if boundary {
-        &text
-    } else {
-        text.split_once('\n').map_or("", |(_, rest)| rest)
     };
     // #761: a rotated `events-N.jsonl` written before redaction existed can still carry a secret,
     // and this tail feeds the cockpit's diagnosis and a resumed colony's prompt, so every event is
     // redacted field by field on its way out. A line written since is already clean and unchanged.
-    tail.lines()
+    String::from_utf8_lossy(&tail)
+        .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .map(|mut event| {
             crate::redact::redact_value(&mut event);
@@ -413,10 +393,13 @@ pub(crate) async fn status_stall(app: &Shared) -> Option<HostStall> {
         let runtime = app.runtimes.lock().await.get(&session.id).cloned();
         let at = match runtime {
             Some(rt) => Some(rt.activity.lock().await.last),
-            None => tokio::fs::metadata(app.session_dir(&session.id).join("events.jsonl"))
+            None => app
+                .store()
+                .stat(&session.id, "events.jsonl")
                 .await
                 .ok()
-                .and_then(|meta| meta.modified().ok())
+                .flatten()
+                .and_then(|stat| stat.modified)
                 .map(DateTime::<Utc>::from),
         };
         last = last.into_iter().chain(at).max();
@@ -427,7 +410,7 @@ pub(crate) async fn status_stall(app: &Shared) -> Option<HostStall> {
 /// The `GET /api/sessions/{id}` body: the session (activity filled in by the caller) plus its
 /// tail digests and diagnosis.
 pub(crate) async fn for_session(app: &Shared, session: Session) -> SessionDetail {
-    let tail = tail_events(&app.session_dir(&session.id).join("events.jsonl")).await;
+    let tail = tail_events(app.store(), &session.id).await;
     SessionDetail {
         diagnosis: diagnose(&session, &tail, Utc::now()),
         recent_events: recent_events(&tail),

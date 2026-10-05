@@ -1,0 +1,230 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "50375fcf3d8511d703e7763ea8916822"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "findings"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "finding"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.finding",
+              "flags": 0,
+              "observedTimeUnixNano": "1790000000000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1790000000000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "1bd7ccf5a485988e181b3c311dc70c91"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "findings"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "state",
+                  "value": {
+                    "stringValue": "filed"
+                  }
+                },
+                {
+                  "key": "issue",
+                  "value": {
+                    "stringValue": "https://github.com/acme/widgets/issues/9"
+                  }
+                },
+                {
+                  "key": "severity",
+                  "value": {
+                    "stringValue": "high"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "filed"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.finding",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108060000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108060000000000",
+              "traceId": ""
+            },
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "8539f0f1b323486ea9097dc05c7c507a"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "findings"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "state",
+                  "value": {
+                    "stringValue": "fixed"
+                  }
+                },
+                {
+                  "key": "verdict",
+                  "value": {
+                    "stringValue": "confirmed"
+                  }
+                },
+                {
+                  "key": "fix_session",
+                  "value": {
+                    "stringValue": "d00d0001"
+                  }
+                },
+                {
+                  "key": "pr",
+                  "value": {
+                    "stringValue": "https://github.com/acme/widgets/pull/10"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "fixed"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.finding",
+              "flags": 0,
+              "observedTimeUnixNano": "1791111600000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791111600000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

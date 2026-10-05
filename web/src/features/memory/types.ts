@@ -24,6 +24,26 @@ export interface MemoryProposal extends MemoryNote {
   status: "pending";
 }
 
+/** A note a colony proposed for the operator vault (issue #777). Every text field came from a colony
+ * and is untrusted: shown escaped, never rendered as Markdown or HTML. */
+export interface VaultProposal {
+  id: string;
+  /** Where it lands under the vault's inbox folder, already checked to stay inside it. */
+  path: string;
+  title: string;
+  body: string;
+  reason: string;
+  created_at: string;
+  source: { session_id: string; repo: string; commit?: string | null; origin?: string };
+}
+
+/** GET /api/vault/proposals: whether a vault is configured, its inbox folder, and the queue. */
+export interface VaultProposalListing {
+  configured: boolean;
+  inbox: string;
+  proposals: VaultProposal[];
+}
+
 export interface MemoryListing {
   scope: MemoryScope;
   key: string;

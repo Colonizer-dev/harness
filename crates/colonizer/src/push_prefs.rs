@@ -30,6 +30,9 @@ use std::sync::{LazyLock, Mutex};
 pub const QUESTION: &str = "question";
 /// The colony-less hourly digest of what the soft layers held (notify.rs).
 pub const DIGEST: &str = "digest";
+/// A provider ran out of quota and its card holds colonies (issue #767): one push per provider,
+/// never one per blocked colony.
+pub const QUOTA: &str = "provider_quota_exhausted";
 
 /// Every event a device can switch, by the name [`crate::notify`] sends, with its default. The
 /// act-on events are on; the ambient ones (a provider's health, the hourly digest) are off. A new
@@ -40,6 +43,7 @@ pub const EVENTS: &[(&str, bool)] = &[
     ("needs_rebase", true),
     ("failed", true),
     ("attention", true),
+    (QUOTA, true),
     ("provider_degraded", false),
     (DIGEST, false),
 ];
@@ -249,6 +253,19 @@ pub fn allows(prefs: &Prefs, event: &str, session: Option<&Session>, now: i64, p
     !watching
 }
 
+/// [`allows`] for an event about several colonies at once — the out-of-quota card (issue #767),
+/// which names every colony blocked on one provider. The device takes it when it would take the
+/// event for at least one of them: a device scoped to one repo hears about a card that holds a
+/// colony there, and one scoped elsewhere does not. With no colonies it is a colony-less event.
+pub fn allows_any(prefs: &Prefs, event: &str, colonies: &[Session], now: i64, presence: Option<&Presence>) -> bool {
+    if colonies.is_empty() {
+        return allows(prefs, event, None, now, presence);
+    }
+    colonies
+        .iter()
+        .any(|colony| allows(prefs, event, Some(colony), now, presence))
+}
+
 /// Whether the push for this event goes out silent: everything but a question on a device that
 /// lets questions sound.
 pub fn silent(prefs: &Prefs, event: &str) -> bool {
@@ -322,6 +339,7 @@ mod tests {
             ("failed", true),
             ("pull_request", true),
             ("needs_rebase", true),
+            (QUOTA, true),
             ("provider_degraded", false),
             ("digest", false),
             ("not_an_event", false),
@@ -379,6 +397,32 @@ mod tests {
         for (h, m, quiet) in [(23, 59, true), (6, 59, true), (7, 0, false), (21, 59, false), (22, 0, true)] {
             assert_eq!(night.in_quiet(at(2026, 9, 25, h, m)), quiet, "{h}:{m}");
         }
+    }
+
+    /// The out-of-quota card names several colonies (issue #767): a device takes its one push when
+    /// it would take the event for any of them, and its switch and quiet hours hold it like any
+    /// other event — a card is not a question, so it never breaks through.
+    #[test]
+    fn a_quota_card_reaches_a_device_through_any_of_its_colonies_and_honours_switch_and_quiet() {
+        let webshop = colony();
+        let mut billing = colony();
+        billing.id = "def456".into();
+        billing.org = "globex".into();
+        billing.repo = "globex/billing".into();
+        let both = [webshop.clone(), billing.clone()];
+        let scoped = |entry: &str| with(|p| p.scope = vec![entry.to_string()]);
+        assert!(allows_any(&Prefs::default(), QUOTA, &both, NOW, None), "on by default");
+        assert!(allows_any(&scoped("globex/billing"), QUOTA, &both, NOW, None));
+        assert!(allows_any(&scoped("acme"), QUOTA, &both, NOW, None));
+        assert!(!allows_any(&scoped("initech"), QUOTA, &both, NOW, None), "no colony in scope");
+        let off = with(|p| p.events.insert(QUOTA.into(), false));
+        assert!(!allows_any(&off, QUOTA, &both, NOW, None), "the device's switch");
+        let quiet = with(|p| {
+            p.quiet = Some(QuietHours { start: 20, end: 40 });
+            p.questions_break_quiet = true;
+        });
+        assert!(!allows_any(&quiet, QUOTA, &both, NOW, None), "quiet hours hold it");
+        assert!(silent(&Prefs::default(), QUOTA), "it never sounds");
     }
 
     #[test]

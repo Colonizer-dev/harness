@@ -13,9 +13,12 @@ export const SOCKET_OPEN = 1;
 
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /** The parsed error body, for the fields beside `error` (a duplicate's holder, issue #832). */
+  readonly body: unknown;
+  constructor(message: string, status: number, body: unknown = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -36,7 +39,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
       data && typeof data === "object" && "error" in data
         ? String((data as { error: unknown }).error)
         : text || res.statusText;
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, data);
   }
   return data as T;
 }

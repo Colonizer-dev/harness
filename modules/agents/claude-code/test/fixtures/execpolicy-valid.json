@@ -1,0 +1,34 @@
+{
+  "comment": "Which exec policies the mothership accepts when an operator saves one (issue #924): exactly those the runner's parsePolicy keeps whole — no layer dropped, no rule dropped, no predicate a rule names dropped. Driven against execpolicy.mjs (test/execpolicy.test.mjs) and against the Rust port, crates/colonizer/src/exec_policy.rs (crates/repo-contracts). `policy` is the JSON text as saved. Pattern syntax is not covered: only the runner compiles JavaScript regular expressions.",
+  "cases": [
+    { "policy": "{\"rules\": []}", "valid": true },
+    { "policy": "{\"rules\": [{\"id\": \"no-rm\", \"decision\": \"deny\", \"reason\": \"not here\", \"command\": \"\\\\brm\\\\b\"}]}", "valid": true },
+    { "policy": "{\"rules\": [{\"decision\": \"ASK\", \"command\": [\"npm publish\", \"cargo publish\"]}]}", "valid": true, "note": "a decision is matched case-insensitively; a pattern may be a list" },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"script\": \"curl\"}]}", "valid": true },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": [\"secrets/**\", \"!secrets/README.md\"]}]}", "valid": true },
+    { "policy": "{\"rules\": [{\"decision\": \"ask\", \"writes_outside\": true}, {\"decision\": \"ask\", \"writes_outside\": \"strict\"}]}", "valid": true },
+    { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \"make\", \"writes_outside\": false}]}", "valid": true, "note": "writes_outside false is off, not a dropped predicate" },
+    { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \".\"}], \"note\": \"unknown keys are ignored\"}", "valid": true },
+
+    { "policy": "{not json", "valid": false },
+    { "policy": "", "valid": false },
+    { "policy": "[]", "valid": false },
+    { "policy": "null", "valid": false },
+    { "policy": "{}", "valid": false },
+    { "policy": "{\"rules\": \"nope\"}", "valid": false },
+    { "policy": "{\"rules\": [null]}", "valid": false },
+    { "policy": "{\"rules\": [[\"deny\"]]}", "valid": false },
+    { "policy": "{\"rules\": [{\"command\": \"ls\"}]}", "valid": false, "note": "no decision" },
+    { "policy": "{\"rules\": [{\"decision\": \"maybe\", \"command\": \"ls\"}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\"}]}", "valid": false, "note": "no predicate" },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"comand\": \"ls\"}]}", "valid": false, "note": "a misspelt predicate is no predicate" },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"command\": \"ls\", \"script\": []}]}", "valid": false, "note": "an empty pattern list drops the predicate, widening the rule" },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"command\": \"\"}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"command\": 3}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"command\": null}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": \".env\"}]}", "valid": false, "note": "touches is a list" },
+    { "policy": "{\"rules\": [{\"decision\": \"deny\", \"touches\": [\"!*.example\"]}]}", "valid": false, "note": "exclusions alone include nothing" },
+    { "policy": "{\"rules\": [{\"decision\": \"ask\", \"writes_outside\": \"loose\"}]}", "valid": false },
+    { "policy": "{\"rules\": [{\"decision\": \"allow\", \"command\": \"make\"}, {\"decision\": \"deny\"}]}", "valid": false, "note": "one bad rule refuses the whole policy" }
+  ]
+}

@@ -516,7 +516,7 @@ pub(crate) async fn load(dir: &Path) -> LoopState {
 /// Serialises every read-modify-write of the file.
 static STATE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
-async fn update<R>(dir: &Path, f: impl FnOnce(&mut LoopState) -> R) -> anyhow::Result<(LoopState, R)> {
+pub(crate) async fn update<R>(dir: &Path, f: impl FnOnce(&mut LoopState) -> R) -> anyhow::Result<(LoopState, R)> {
     let _guard = STATE_LOCK.lock().await;
     let mut state = load(dir).await;
     let r = f(&mut state);
@@ -729,7 +729,7 @@ pub(crate) fn is_throttle(error: &str) -> bool {
 }
 
 /// The colony whose redo, or whose newer pull request on the same issue, replaces this one.
-fn superseded_by<'a>(sessions: &'a [Session], s: &Session) -> Option<&'a str> {
+pub(crate) fn superseded_by<'a>(sessions: &'a [Session], s: &Session) -> Option<&'a str> {
     let redo = format!("{ORIGIN_REDO}{}", s.id);
     sessions
         .iter()
@@ -2348,7 +2348,7 @@ impl Ops for GhOps<'_> {
 }
 
 /// The launch body for a colony the loop sends: autopilot on, so it publishes its pull request.
-fn dispatch_body(d: &Dispatch) -> Value {
+pub(crate) fn dispatch_body(d: &Dispatch) -> Value {
     match d {
         Dispatch::Redo {
             session,

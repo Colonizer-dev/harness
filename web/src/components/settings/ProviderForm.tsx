@@ -1,6 +1,7 @@
 import { useId, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { fillTemplate } from "../../providerCatalog";
+import { providerTestToast } from "../../providerHealth";
 import type { ModelProvider, ProviderAuth, ProviderPricing, ProviderPreset } from "../../types";
 import { useModels } from "../../useModels";
 import { Badge, Button, InfoButton, Spinner, Switch, cx, inputClass } from "../ui";
@@ -278,6 +279,15 @@ export function ProviderForm({
         }),
       );
       toast(`${saved.name} saved`);
+      // A new provider, or one whose route or key changed, gets a one-token test through the colony's
+      // own route, and the toast names the URL and status it got: a wrong base path shows here, at
+      // setup, instead of in a run of failed colony turns (issue #1018).
+      if (isNew || url !== initial?.base_url || wire !== initial?.wire || api_key !== undefined) {
+        api
+          .testProvider(saved.id)
+          .then((result) => toast(providerTestToast(saved.name, result)))
+          .catch((e) => toast({ title: `${saved.name}: test request failed`, body: errorMessage(e), kind: "warn" }));
+      }
       onSaved(saved);
     } catch (e) {
       toast(errorMessage(e), "error");

@@ -139,9 +139,10 @@ Two options:
 The image is the stock `node:24-bookworm`. A colony-node image — that base plus bun and pnpm, each
 pinned and checksum-verified at build time, and a small shared toolbox (python3, jq, ripgrep, …) — is
 built and scanned by `.github/workflows/colony-image.yml`, along with a matching `colony-<preset>`
-toolbox image for the Python, Rust and Go presets; the presets keep using the stock images until the
-built ones are published to `ghcr.io` and their digests are pinned in
-`crates/colonizer/images.lock`.
+toolbox image for the Python, Rust and Go presets. A push to main publishes them to `ghcr.io` with a
+build-provenance attestation, and the presets keep using the stock images until the published ones
+can be pulled anonymously (the publish job checks, with `images/anonymous-pull.sh`) and their
+digests are pinned in `crates/colonizer/images.lock`.
 
 A third option, `--bundle`, is what the release workflow uses to build a release tarball; you don't
 need it.
@@ -174,7 +175,7 @@ this machine and read the same environment the mothership does:
 | `colonizer login-item enable\|disable\|status` | Starts the mothership at login ([below](#desktop-install-the-cockpit-as-an-app-start-at-login)) |
 | `colonizer telemetry show\|on\|off` | Shows or switches [usage data](usage-data.md); no network and no running mothership needed |
 | `colonizer hotspots [--days N] [--top N]` | Ranks the files merged pull requests touched most, from a git repository on this machine ([docs/cli.md](cli.md)) |
-| `colonizer migrate-store --to DIR [--from DIR] [--dry-run]` | Copies this install's colonies into another local session store ([docs/session-store.md](session-store.md#migration-and-rollback)); `--from` defaults to `COLONIZER_DATA_DIR` |
+| `colonizer sessions migrate --to STORE [--from STORE] [--dry-run]` | Copies every colony into another session store, verifies it (counts and every file's SHA-256), and switches this install to it when `--to` is a backend; resumable ([docs/session-store.md](session-store.md#migration-and-rollback)). `--from` defaults to the configured store, named in `<config dir>/session-store.json` ([Configuration](session-store.md#configuration)) |
 | `colonizer fleet export [--out FILE] [--preview]`, `colonizer fleet import FILE [--preview]` | Writes this machine's colony history, logs and stats into a bundle, or reads another machine's into `fleet-imports/` ([docs/cli.md](cli.md#fleet-export-and-import)); no mothership or token needed |
 | `colonizer completions <shell>` | Prints a completion script for `bash`, `zsh`, `fish`, `powershell` or `elvish` |
 | `colonizer man` | Prints the man page to stdout |
@@ -308,7 +309,7 @@ What the mothership keeps in the config directory:
 | `providers.json`, `provider-keys/<id>` | Model provider connections ([docs/providers.md](providers.md)) and their keys |
 | `github-token`, `claude-accounts.json`, `claude-accounts/` | Saved GitHub and Claude credentials (a pre-accounts `claude-token` is migrated into `claude-accounts/default`) |
 | `colony-secrets.json`, `colony-secrets/` | Secrets you hand to colonies |
-| `voice-keys/`, `memory-keys/`, `notify-secret`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, and Web Push |
+| `voice-keys/`, `memory-keys/`, `notify-secret`, `webhook-subscriptions.json`, `push-vapid-key`, `push-subscriptions.json` | Speech-to-text keys, the mem0 key, the webhook signing secret, webhook subscriptions and their secrets, and Web Push |
 | `secrets.json` | Where each saved secret lives (file or system keychain), for the Secrets page |
 | `api-token`, `api-tokens.json` | The owner token behind the sign-in link, and scoped API tokens ([docs/cli.md](cli.md#scoped-api-tokens)) |
 | `telemetry.json`, `usage.json`, `usage-last.json`, `usage-sent.json` | The [live map](telemetry.md) and [usage data](usage-data.md) answers, the last usage batch built, and when the last one was sent |
@@ -328,7 +329,8 @@ What it keeps in the data directory: `sessions.json` (the colony list, read back
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
 `archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
 `colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
-`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
+`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`),
+`notify-webhook-outbox.json` (webhook deliveries waiting for a retry, and the dead letter), and
 `mothership.out` when the mothership is started at login.
 
 ## Settings
@@ -336,7 +338,7 @@ worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/
 Settings come from the environment, not flags. Module settings are edited in the cockpit and kept in
 `modules.json`; the variables here are the ones a person sets. The mothership reads them when it
 starts, so restart it after changing one. The local commands (`update`, `open`, `login-item`,
-`telemetry`, `migrate-store`, `fleet export`, `fleet import`) read the same variables.
+`telemetry`, `sessions migrate`, `fleet export`, `fleet import`) read the same variables.
 
 ### The mothership
 
@@ -355,6 +357,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `COLONIZER_FLEET_SYNC` | on | Set to `off` (or `0`, `false`, `no`) to stop a fleet member's background history push ([fleet.md](fleet.md#history-push)); `colonizer fleet sync` still drains on demand. Has no effect on a machine that has not joined a fleet |
 | `COLONIZER_BENCH_POOL` | – | A bench pool directory ([docs/bench.md](bench.md#the-raid-set)): red-team runs read its `raid.json` and deal the injected bugs recorded for the raided repository out to the hunters' briefs |
 | `COLONIZER_NO_BROWSER` | – | Set to anything, even empty, to skip opening the sign-in link in a browser |
+| `COLONIZER_SESSION_STORE_ACCESS_KEY_ID`, `COLONIZER_SESSION_STORE_SECRET_ACCESS_KEY` | – (the saved secrets `session-store-access-key-id`, `session-store-secret-access-key`) | The key pair for a session store in an S3-compatible bucket ([docs/session-store.md](session-store.md#configuration)) |
 | `COLONIZER_MASTER_KEY` | – (secrets saved in plaintext, 0600) | Encrypts the secrets the mothership saves, at rest ([below](#colonizer_master_key)) |
 | `COLONIZER_NO_EXTERNAL_EFFECTS`, `COLONIZER_NO_WRITE` | – | A kill switch: set either to anything but `0`, `false`, `off` or `no`, and every write that leaves the harness (commits, pushes, pull requests, merges, comments, filed issues) refuses to run |
 | `COLONIZER_SUMMARIES` | on | `0`, `false` or `off` turns colony summaries off whatever the agent module's `summaries` setting says |
@@ -374,7 +377,7 @@ starts, so restart it after changing one. The local commands (`update`, `open`, 
 | `CI` | – | Exactly `true` keeps [usage data](usage-data.md) off; the live map does not read it |
 | `COLONIZER_TELEMETRY_URL` | `https://telemetry.colonizer.dev` | Where live map heartbeats go |
 | `COLONIZER_TELEMETRY_ENDPOINT` | – (nothing is sent) | The collector URL usage data is posted to, at most once a day. No default: unset, no [usage data](usage-data.md) is ever sent, whatever the switch says |
-| `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)) |
+| `COLONIZER_REMOTE_URL` | `wss://my.colonizer.dev` | The relay remote access dials when it is switched on ([docs/remote-tunnel.md](remote-tunnel.md)). Must be `wss://`; plaintext `ws://` is accepted only for a relay on loopback (a local test relay) |
 | `COLONIZER_VAPID_SUBJECT` | `https://github.com/Colonizer-dev/harness` | The contact the mothership names to push services when it sends Web Push notifications |
 
 ### Upgrading across the microsandbox 0.7 pin

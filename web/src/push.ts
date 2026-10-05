@@ -10,6 +10,8 @@
 import { useEffect } from "react";
 import { ApiError, type Api } from "./api";
 import type { PushPrefs, PushSubscriptionSummary } from "./types";
+import type { CockpitView } from "./cockpit/NavRail";
+import { viewFromUrl } from "./launchUrl";
 
 // ---------------------------------------------------------------------------
 // Pure decisions
@@ -23,6 +25,18 @@ export function colonyFromUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Where a tapped notification's url sends a running cockpit: a colony (`?colony=`), else a view
+ * (`?view=`) — the out-of-quota push opens the Inbox, where the provider's card is (issue #767).
+ * Null when the url names neither.
+ */
+export function pushTarget(url: string): { colony: string } | { view: CockpitView } | null {
+  const colony = colonyFromUrl(url);
+  if (colony) return { colony };
+  const view = viewFromUrl(url);
+  return view ? { view } : null;
 }
 
 /**
@@ -67,7 +81,16 @@ export function deviceLabel(ua: string): string {
 /** The prefs a freshly enrolled device has: the loud events on, the two quiet kinds off. */
 export function defaultPushPrefs(): PushPrefs {
   return {
-    events: { question: true, pull_request: true, needs_rebase: true, failed: true, attention: true, provider_degraded: false, digest: false },
+    events: {
+      question: true,
+      pull_request: true,
+      needs_rebase: true,
+      failed: true,
+      attention: true,
+      provider_quota_exhausted: true,
+      provider_degraded: false,
+      digest: false,
+    },
     question_sound: true,
     answer_actions: true,
     badge: true,

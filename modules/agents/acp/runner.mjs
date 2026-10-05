@@ -20,7 +20,9 @@ import { fileURLToPath } from 'node:url';
 
 import { EXEC_POLICY_QUESTION_KIND, createExecAllowCache, evaluateExecPolicy, execPolicyLogLine, execPolicyReason, loadExecPolicy } from './execpolicy.mjs';
 import { loadPathPolicy, matchPathPolicy, resolveInWorkspace } from './pathpolicy.mjs';
+import { createAskRefusals, execPolicyBoundary } from './boundary.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
+import { createLoopBridge, loopSwitches } from './loop-tools.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -61,12 +63,38 @@ const PRESETS = {
 // must support: memory_briefing, memory_changes and memory_search over COLONIZER_MEMORY_DIR.
 export const MEMORY_MCP = fileURLToPath(new URL('./memory-mcp.mjs', import.meta.url));
 
+// The loop tools (issue #643) as a second stdio MCP server: loop_stop for a loop colony and
+// loop_next when it is self-paced, forwarded to this runner's loopback loop bridge, which emits
+// them as protocol events (loop-tools.mjs).
+export const LOOP_MCP = fileURLToPath(new URL('./loop-tools.mjs', import.meta.url));
+
 /** The MCP servers session/new and session/load register: the memory server when memory is
- * mounted, none otherwise. Memory is pulled through it, never put into a prompt. */
-export function mcpServers(env = process.env) {
+ * mounted or the operator vault is staged (it then also serves vault_search, issue #777), and the
+ * loop server for a loop colony once its bridge is up (`loopBridge`). Memory and the vault are
+ * pulled through their server, never put into a prompt. */
+export function mcpServers(env = process.env, loopBridge = null) {
+  const servers = [];
   const dir = String(env.COLONIZER_MEMORY_DIR ?? '').trim();
-  if (!dir) return [];
-  return [{ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] }];
+  const vault = String(env.COLONIZER_VAULT_DIR ?? '').trim();
+  if (dir || vault) {
+    const serverEnv = [...(dir ? [{ name: 'COLONIZER_MEMORY_DIR', value: dir }] : []), ...(vault ? [{ name: 'COLONIZER_VAULT_DIR', value: vault }] : [])];
+    servers.push({ name: 'colonizer_memory', command: process.execPath, args: [MEMORY_MCP], env: serverEnv });
+  }
+  const { loop, selfPaced } = loopSwitches(env);
+  if (loop && loopBridge) {
+    servers.push({
+      name: 'colonizer_loop',
+      command: process.execPath,
+      args: [LOOP_MCP],
+      env: [
+        { name: 'COLONIZER_BRIDGE_URL', value: loopBridge.url },
+        { name: 'COLONIZER_BRIDGE_TOKEN', value: loopBridge.token },
+        { name: 'COLONIZER_LOOP', value: 'true' },
+        { name: 'COLONIZER_LOOP_SELF_PACED', value: String(selfPaced) },
+      ],
+    });
+  }
+  return servers;
 }
 
 /** The preset's spec, or null for `custom` and unknown names. */
@@ -406,6 +434,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
   // The operator's Allows of exec-policy asks, kept for this run (issue #759): the same command
   // under the same rule is not asked about twice. In memory only, so the agent cannot forge one.
   const execAllowCache = createExecAllowCache();
+  const askRefusals = createAskRefusals(); // exec-policy asks refused this run (issue #609)
   // The mounted path policy (issue #647), loaded once: the bind list the guest booted with is what
   // the runtime reports against. Absent (an older harness) means the feature is off, silently.
   const pathPolicy = loadPathPolicy(env).policy;
@@ -474,6 +503,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (hit) {
       process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
       if (hit.decision === 'deny') {
+        // A control refusing something: reported for the watchdog's control-defeat signature (#609).
+        emit(execPolicyBoundary(hit, command));
         const reject = optionByKind(options, 'reject');
         return reply(reject ? { outcome: { outcome: 'selected', optionId: reject.optionId } } : { outcome: { outcome: 'cancelled' } });
       }
@@ -484,6 +515,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         return reply({ outcome: { outcome: 'selected', optionId: allow.optionId } });
       }
     }
+    // The same rule asking again after a refusal is the agent retrying what it was told no to (#609).
+    const asking = hit?.decision === 'ask';
+    const retry = asking ? askRefusals.attempt(hit, command) : null;
+    if (retry) emit(retry);
     const title = String(call.title ?? '').trim() || `Allow ${call.kind ?? 'this tool call'}?`;
     const text = hit ? `${title} — ${execPolicyReason(hit)}` : title;
     const questionId = String(call.toolCallId ?? '') || `permission-${++permissionCount}`;
@@ -506,7 +541,12 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     if (!chosen && answer.response) {
       emit({ type: 'log', level: 'info', message: `a free-text reply cannot select one of the agent's options; answered cancelled for ${questionId}` });
     }
-    if (hit && chosen && !chosen.synthetic && chosen.kind?.startsWith('allow')) execAllowCache.remember(hit, command);
+    const allowed = Boolean(chosen && !chosen.synthetic && chosen.kind?.startsWith('allow'));
+    if (hit && allowed) execAllowCache.remember(hit, command);
+    if (asking && !allowed) {
+      askRefusals.refuse(hit, command);
+      emit(execPolicyBoundary({ ...hit, decision: 'ask refused' }, command));
+    }
     reply({ outcome: chosen && !chosen.synthetic ? { outcome: 'selected', optionId: chosen.optionId } : { outcome: 'cancelled' } });
   };
 
@@ -623,6 +663,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   let acp = null;
   let servers = [];
+  // A loop colony's loop_next / loop_stop cross this bridge from the registered loop MCP server.
+  const loopBridge = !problem && loopSwitches(env).loop ? await createLoopBridge({ emit }) : null;
   let memoryLine = false; // the next prompt leads with MEMORY_PROMPT_APPEND
   if (!problem) acp = startAgent({ argv, env: presetSpec(preset)?.env?.(env) ?? env, workspace, emit, spawnFn, onUpdate, onRequest, onDeath: markDead });
 
@@ -654,7 +696,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         emit({ type: 'log', level: 'warn', message: `cannot resume session ${resumeId}: the agent does not advertise loadSession; a fresh session starts instead` });
       }
       let session = {};
-      servers = mcpServers(env);
+      servers = mcpServers(env, loopBridge);
       if (loadable && resumeId) {
         replaying = true; // the agent replays the old conversation; the harness logged it once already
         try {
@@ -673,7 +715,8 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
         sessionId = String(session.sessionId ?? '');
         // A fresh session has no system prompt of ours, so its first prompt carries the one fixed
         // line naming the memory tools; a reloaded session already had it.
-        memoryLine = servers.length > 0;
+        // A server registered only for the operator vault has no memory tools to name.
+        memoryLine = servers.some((server) => server.name === 'colonizer_memory') && Boolean(String(env.COLONIZER_MEMORY_DIR ?? '').trim());
       }
       if (loadable && sessionId) emit({ type: 'agent_session', session_id: sessionId });
       modelSupported = Boolean(session.models);
@@ -755,7 +798,10 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
 
   for (;;) {
     const command = await commands.next();
-    if (dead) return 1; // a death while we awaited (or mid-command): markDead already reported it
+    if (dead) {
+      await loopBridge?.close();
+      return 1; // a death while we awaited (or mid-command): markDead already reported it
+    }
     if (!command || command.type === 'shutdown') break;
     switch (command.type) {
       case 'user_message': {
@@ -812,6 +858,7 @@ export async function run({ commands, emit, env = process.env, spawnFn = spawn, 
     }
     await acp.kill(); // bounded by the SIGKILL escalation inside
   }
+  await loopBridge?.close();
   emit({ type: 'status', state: 'exited' });
   return 0;
 }

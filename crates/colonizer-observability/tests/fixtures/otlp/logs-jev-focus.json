@@ -1,0 +1,150 @@
+{
+  "resourceLogs": [
+    {
+      "resource": {
+        "attributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "colonizer"
+            }
+          }
+        ],
+        "droppedAttributesCount": 0,
+        "entityRefs": []
+      },
+      "schemaUrl": "",
+      "scopeLogs": [
+        {
+          "logRecords": [
+            {
+              "attributes": [
+                {
+                  "key": "colonizer.record.id",
+                  "value": {
+                    "stringValue": "eb121536766f203f4dd7a2074cce843b"
+                  }
+                },
+                {
+                  "key": "colonizer.source",
+                  "value": {
+                    "stringValue": "jev_focus"
+                  }
+                },
+                {
+                  "key": "colonizer.stream",
+                  "value": {
+                    "stringValue": "activity"
+                  }
+                },
+                {
+                  "key": "colonizer.colony.id",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "colonizer.org",
+                  "value": {
+                    "stringValue": "acme"
+                  }
+                },
+                {
+                  "key": "colonizer.repo",
+                  "value": {
+                    "stringValue": "acme/widgets"
+                  }
+                },
+                {
+                  "key": "kind",
+                  "value": {
+                    "stringValue": "focus"
+                  }
+                },
+                {
+                  "key": "session",
+                  "value": {
+                    "stringValue": "c0ffee12"
+                  }
+                },
+                {
+                  "key": "mode",
+                  "value": {
+                    "stringValue": "shadow"
+                  }
+                },
+                {
+                  "key": "chosen",
+                  "value": {
+                    "stringValue": "cargo test -p web"
+                  }
+                },
+                {
+                  "key": "would_catch",
+                  "value": {
+                    "boolValue": true
+                  }
+                },
+                {
+                  "key": "verdict",
+                  "value": {
+                    "stringValue": "confirmed"
+                  }
+                },
+                {
+                  "key": "actual_first_failure_ms",
+                  "value": {
+                    "intValue": "81000"
+                  }
+                },
+                {
+                  "key": "focused_first_failure_ms",
+                  "value": {
+                    "intValue": "12000"
+                  }
+                },
+                {
+                  "key": "total_ms",
+                  "value": {
+                    "intValue": "95000"
+                  }
+                },
+                {
+                  "key": "checks_run",
+                  "value": {
+                    "intValue": "2"
+                  }
+                },
+                {
+                  "key": "candidates",
+                  "value": {
+                    "intValue": "2"
+                  }
+                }
+              ],
+              "body": {
+                "stringValue": "focus"
+              },
+              "droppedAttributesCount": 0,
+              "eventName": "colonizer.jev_focus",
+              "flags": 0,
+              "observedTimeUnixNano": "1791108300000000000",
+              "severityNumber": 9,
+              "severityText": "INFO",
+              "spanId": "",
+              "timeUnixNano": "1791108300000000000",
+              "traceId": ""
+            }
+          ],
+          "schemaUrl": "",
+          "scope": {
+            "attributes": [],
+            "droppedAttributesCount": 0,
+            "name": "colonizer",
+            "version": "<crate version>"
+          }
+        }
+      ]
+    }
+  ]
+}

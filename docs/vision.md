@@ -57,7 +57,7 @@ Checked against the code on `main`. **Built** means merged and usable; **partly*
 
 | Horizon | Where it stands |
 | --- | --- |
-| **More settlers:** other coding agents behind the same runner protocol. | **Partly.** Claude Code, OpenCode and Pi run on the stock colony images. Codex, Grok Build and an Agent Client Protocol runner (verified against Gemini CLI) are in the repository and fetch their pinned CLI on first boot; Hermes is in the repository too, but its CLI is not staged into a colony image, so it needs an image you build with it on the `PATH`. An org picks its agent module in its settings. |
+| **More settlers:** other coding agents behind the same runner protocol. | **Partly.** Claude Code, OpenCode and Pi run on the stock colony images. Codex, Grok Build and an Agent Client Protocol runner (verified against Gemini CLI) are in the repository and fetch their pinned CLI on first boot; Hermes is in the repository too, and builds its pinned, hash-checked source on first boot. An org picks its agent module in its settings. |
 | **More frontiers:** GitLab, Linear and Jira as sources; review comments as follow-up tasks. | **Not built.** GitHub is the only source and the only publisher. |
 | **Remote outposts:** other machines (a GPU box, a home server) join the mesh and host colonies. | **Not built.** The control/execution seam is drawn in the code and only the local side exists ([outposts.md](outposts.md)). |
 | **Fleet view:** a live board of every colony, what it's waiting on, and what it costs. | **Partly.** On one machine, the cockpit's Overview, Nest, Inbox and org dashboards show every colony, what it waits on and what it has spent. Across machines, motherships pair into a [fleet](fleet.md) (or are named read-only in `COLONIZER_FLEET_PEERS`), and the Fleet panel lists each one's slots, queue and disk. A fleet owner also sees its members' finished colonies once each member turns history sync on; running colonies on other machines are not listed. |
@@ -224,7 +224,7 @@ a card. Autopilot can't publish in the middle of a question.
 | Merge train, off by default: green, clean colony pull requests squash-merged one at a time and rebased when behind, with an opt-in loop that drives it ([docs/architecture.md](architecture.md#merge-train), [docs/loops.md](loops.md#merge-train), [#671](https://github.com/Colonizer-dev/harness/issues/671), [#754](https://github.com/Colonizer-dev/harness/issues/754)) | `SHIPPING` |
 | Network policies as a module of their own | `PLANNED` |
 | Dev-server previews over the mesh | `PLANNED` |
-| Optional observability add-on: OTLP export to Grafana, Datadog, Honeycomb and others, off by default, conversation content only with org opt-in ([#839](https://github.com/Colonizer-dev/harness/issues/839)) | `PLANNED` |
+| Optional observability add-on: OTLP export to Grafana, Datadog, Honeycomb and others, off by default, conversation content only with org opt-in ([#839](https://github.com/Colonizer-dev/harness/issues/839)). Logs and metrics are built ([observability.md](observability.md)); traces and content are not yet | `PLANNED` |
 | Your cockpit on your phone: its address obvious and one step onto the home screen ([#867](https://github.com/Colonizer-dev/harness/issues/867)) | `PLANNED` |
 
 The roadmap is the issue tracker. There is no private version of it. On top of it, the v0.1.3 audit

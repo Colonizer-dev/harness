@@ -387,6 +387,21 @@ URL is fetched with the provider's credential alongside the models check, and wh
 it (`remaining: null`, the reason in `error`) never changes `reachable`: reading a plan balance is not
 a health check. No probe configured, no `quota` field.
 
+**Test request.** `POST /api/providers/{id}/test` sends a one-token request (`max_tokens: 1`, the
+provider's first listed model) through the route a colony's turn takes — `/v1/messages` on the
+anthropic wire, the translated `/v1/chat/completions` on the openai wire — joined to `base_url` as the
+gateway joins it, with the provider's credential and connection policy, and a 30 s timeout:
+
+```json
+{"ok": false, "url": "https://ark.example.com/api/coding/v1/chat/completions", "status": 404, "model": "ark-code", "latency_ms": 41, "error": "HTTP 404 (upstream answered 404 at …; check the provider's base URL)"}
+```
+
+`url` is the URL the request hit with userinfo and query removed. Settings → Providers runs it when a
+provider is added, or its base URL, wire or key changes, and shows the URL and status, so a base path
+that misses the provider's API root shows at setup ([#1018]). A provider with no listed model answers
+`ok: false` with nothing sent. On the gateway's own routes, an upstream `404` or `405` is logged with
+the same redacted URL, and on a translated route reaches the colony as `not_found_error` naming it.
+
 At colony start the mothership probes every used provider: each unreachable one logs a warning, or
 refuses the launch when the route has no fallback model.
 

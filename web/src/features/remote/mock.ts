@@ -113,6 +113,8 @@ export function remoteMock(ms: MockState): RemoteApi {
       // A reset also unbinds the old link's owner; the new install starts unowned.
       ms.remotePairingState.owner = null;
       ms.remotePairingState.pending = [];
+      // And it rotates the link credentials: every browser signed in to the link is signed out.
+      ms.linkState = { devices: [], pending: [] };
       ms.logActivity({ kind: "remote.reset", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
       return clone(ms.remoteState);
     },
@@ -147,6 +149,28 @@ export function remoteMock(ms: MockState): RemoteApi {
       ms.remotePairingState.owner = null;
       ms.remotePairingState.pending = [];
       ms.logActivity({ kind: "remote.unpair", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+    },
+    linkDevices: () => ms.later(() => clone(ms.linkState)),
+    linkInvite: async () => {
+      await sleep(250);
+      if (!ms.remoteState.enabled || !ms.remoteState.host) throw new ApiError("switch remote access on first", 409);
+      // The demo's other browser opens the link at once and shows 123 456.
+      ms.linkState.pending = [{ id: `ph_${ms.mockId()}`, label: "Browser", expires_at: new Date(Date.now() + 5 * 60_000).toISOString() }];
+      return clone({ url: `https://${ms.remoteState.host}/?pair=${ms.mockId()}${ms.mockId()}`, expires_at: new Date(Date.now() + 5 * 60_000).toISOString(), ttl_secs: 300 });
+    },
+    confirmLinkDevice: async (code) => {
+      await sleep(250);
+      const waiting = ms.linkState.pending[0];
+      if (!waiting || code.replace(/\D/g, "") !== "123456") throw new ApiError("no device is waiting with that code: it is wrong, expired or already used", 404);
+      ms.linkState.pending = [];
+      ms.linkState.devices.push({ id: `lnk_${ms.mockId()}`, label: waiting.label, paired_at: now() });
+      ms.logActivity({ kind: "remote.device_approve", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
+      return { label: waiting.label };
+    },
+    revokeLinkDevice: async (id) => {
+      await sleep(150);
+      ms.linkState.devices = ms.linkState.devices.filter((d) => d.id !== id);
+      ms.logActivity({ kind: "remote.device_revoke", actor: "you", via: "cockpit", target: "remote access", section: "remote" });
     },
     phones: () => ms.later(() => clone({ ...ms.phoneState, origins: phoneOrigins(ms) })),
     phoneInvite: async () => {

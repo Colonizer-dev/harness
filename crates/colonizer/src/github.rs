@@ -937,16 +937,15 @@ pub async fn touched_files(app: &App, sessions: &[Session], s: &Session) -> Hash
     touched
 }
 
-/// Neutralizes a literal closing tag in text bound for the `<external-instructions>` block
-/// (issue #508): left alone, instructions containing one would end the block early and have the
-/// rest read as the colony's own prompt. The `<` is spaced off the tag (`< /external-instructions`),
-/// which renders harmlessly and cannot reassemble; the match ignores case. The search runs on an
-/// ASCII-lowercased copy, which keeps byte-for-byte offsets into the original.
-fn neutralize_external_close(text: &str) -> String {
-    const CLOSE: &str = "</external-instructions";
+/// Neutralizes a literal closing tag in text bound for a fenced block (issue #508, issue #738): left
+/// alone, instructions containing one would end the block early and have the rest read as the
+/// colony's own prompt. The `<` is spaced off the tag (`< /external-instructions`), which renders
+/// harmlessly and cannot reassemble; the match ignores case. The search runs on an ASCII-lowercased
+/// copy, which keeps byte-for-byte offsets into the original.
+pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
-    for (at, found) in text.to_ascii_lowercase().match_indices(CLOSE) {
+    for (at, found) in text.to_ascii_lowercase().match_indices(close) {
         out.push_str(&text[copied..at]);
         out.push_str("< ");
         out.push_str(&text[at + 1..at + found.len()]);
@@ -1086,7 +1085,7 @@ pub fn build_prompt(
             Some(name) => {
                 // With the closing tag neutralized, the text cannot end the block early and have
                 // the rest read as the colony's own prompt.
-                let instructions = neutralize_external_close(s.instructions.trim());
+                let instructions = neutralize_close(s.instructions.trim(), "</external-instructions");
                 let _ = writeln!(
                     p,
                     "<external-instructions>\nInstructions from an external API token \"{name}\" (external input):\n{instructions}\n"
@@ -2442,6 +2441,18 @@ pub async fn publish(
     let base = s.base.clone().context("session has no base branch")?;
     check_publish_branch(&s.branch, &base)?;
     let wt = PathBuf::from(&s.worktree);
+    // A `.git` the colony changed is its output crossing the publish wall (issue #609): the rewrite
+    // below holds regardless, and the boundary event tells the watchdog it was needed.
+    if let Some(what) = gitfile_tampering(&wt, &admin) {
+        log.warn(format!("publish: {what}; rewrote it from the recorded gitdir"))
+            .await;
+        crate::boundary::emit(
+            app,
+            &s.id,
+            crate::boundary::Boundary::new("publish_rewrite_refused", "gitfile", what, Some(".git")),
+        )
+        .await;
+    }
     restore_gitfile(&wt, &admin)?;
     for removed in strip_nested_git(&wt)? {
         log.info(format!("removed nested git metadata {}", removed.display())).await;
@@ -2461,7 +2472,15 @@ pub async fn publish(
     // #761: a manual press publishes the redacted description, but still says out loud that the
     // colony put a secret in it (autopilot never gets here with one: it holds for this press).
     if let Some(note) = pr_description_secret_note(&app.session_dir(&s.id).join("out"), s) {
-        log.warn(note).await;
+        log.warn(note.clone()).await;
+        // A credential in the colony's own output means a secret value reached the guest, which the
+        // placeholder swap exists to prevent (issue #609): reported to the watchdog as well.
+        crate::boundary::emit(
+            app,
+            &s.id,
+            crate::boundary::Boundary::new("publish_rewrite_refused", "pr_redaction", &note, Some("pr.md")),
+        )
+        .await;
     }
     let screen = ScreenGate::of(app.clone(), s).await;
     run_publish_with(&ops, screen.as_ref(), grant).await
@@ -2540,6 +2559,29 @@ fn read_gitdir(wt: &FsPath) -> Result<PathBuf> {
         .context("unexpected .git file in worktree")?
         .trim();
     Ok(PathBuf::from(dir))
+}
+
+/// What the colony left in place of the worktree's gitfile, when it is not the gitfile the host
+/// recorded (issue #609): a directory, a symlink, a gitfile naming another git dir, or nothing.
+/// `None` when the gitfile is the one `git worktree add` wrote. Read without following a link.
+fn gitfile_tampering(wt: &FsPath, admin: &FsPath) -> Option<&'static str> {
+    let meta = match std::fs::symlink_metadata(wt.join(".git")) {
+        Ok(meta) => meta,
+        Err(_) => return Some("the colony removed the worktree's .git file"),
+    };
+    if meta.file_type().is_symlink() {
+        return Some("a symlink stood in for the worktree's .git file");
+    }
+    if meta.is_dir() {
+        return Some("a directory stood in for the worktree's .git file");
+    }
+    let same = |dir: &FsPath| {
+        dir == admin || matches!((std::fs::canonicalize(dir), std::fs::canonicalize(admin)), (Ok(a), Ok(b)) if a == b)
+    };
+    match read_gitdir(wt) {
+        Ok(dir) if same(&dir) => None,
+        _ => Some("the worktree's .git file named another git directory"),
+    }
 }
 
 /// The VM could have replaced `.git` (e.g. with a symlink or a dir pointing at a hostile config);
@@ -4735,6 +4777,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Issue #609: a `.git` the colony replaced is rewritten as before, and publish reports it as a
+    /// boundary event in the colony's events, which flags the colony for control-defeat.
+    #[tokio::test]
+    async fn a_tampered_gitfile_is_reported_as_a_boundary_event() {
+        let root = std::env::temp_dir().join(format!("colonizer-github-{}", short_id()));
+        let app = crate::tests::test_app(&root);
+        let wt = root.join("wt");
+        std::fs::create_dir_all(wt.join(".git")).unwrap();
+        std::fs::write(wt.join(".git/config"), "[core]\n\thooksPath = /tmp/evil\n").unwrap();
+        let mut s = colony("acme", SessionStatus::Stopped);
+        s.id = "tampered".into();
+        s.branch = "colonizer/issue-609-tampered".into();
+        s.base = Some("main".into());
+        s.worktree = wt.display().to_string();
+        s.git_admin_dir = Some(root.join("admin").display().to_string());
+        app.sessions.write().await.push(s.clone());
+        std::fs::create_dir_all(app.session_dir(&s.id)).unwrap();
+
+        // Nothing to commit against, so the publish fails further on; the report comes first.
+        let _ = publish(&app, &s, &app.logger(&s.id), None).await;
+        let events = std::fs::read_to_string(app.session_dir(&s.id).join("events.jsonl")).unwrap();
+        let boundary: Value = events
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .find(|e| e["type"] == "boundary")
+            .expect("a boundary event");
+        assert_eq!(boundary["kind"], "publish_rewrite_refused");
+        assert_eq!(boundary["control"], "gitfile");
+        assert!(boundary["detail"].as_str().unwrap().contains("a directory"));
+        assert!(
+            std::fs::symlink_metadata(wt.join(".git")).unwrap().is_file(),
+            "and the rewrite held"
+        );
+        assert_eq!(
+            app.session(&s.id).await.unwrap().attention.unwrap()["signature"],
+            "publish_rewrite"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The approval's candidate is the tree the commit commits, on a real colony-shaped repo: the
     /// temp-index computation at the press and the real staging (`stage_all` + `candidate_tree`)
     /// agree whatever the agent left in its index — a staged-then-re-edited file, a staged file
@@ -4889,7 +4971,11 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
 
+        // Resolved with realpath: on macOS the temp dir is under /var, a symlink to /private/var,
+        // and git reports the worktree's admin dir resolved, which must start with the bare repo.
         let root = std::env::temp_dir().join(format!("colonizer-github-recreate-{}", short_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
         let app = crate::tests::test_app(&root);
 
         // The "remote": a seed repository with a commit on `main` and a colony branch pushed past
@@ -4953,6 +5039,37 @@ mod tests {
 
     /// The same neutralisation, run for real: whatever shape the VM left `.git` in, the rewrite
     /// puts a plain 0644 gitfile pointing at the recorded admin dir back in its place.
+    #[test]
+    fn gitfile_tampering_names_what_stood_in_for_the_gitfile() {
+        let dir = std::env::temp_dir().join(format!("colonizer-github-test-{}", short_id()));
+        let admin = dir.join("admin");
+        std::fs::create_dir_all(&admin).unwrap();
+        let case = |name: &str| {
+            let wt = dir.join(name);
+            std::fs::create_dir_all(&wt).unwrap();
+            wt
+        };
+        let honest = case("honest");
+        std::fs::write(honest.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+        assert_eq!(gitfile_tampering(&honest, &admin), None, "the recorded gitfile is no finding");
+        let elsewhere = case("elsewhere");
+        std::fs::write(elsewhere.join(".git"), "gitdir: /tmp/hostile\n").unwrap();
+        assert!(
+            gitfile_tampering(&elsewhere, &admin)
+                .unwrap()
+                .contains("another git directory")
+        );
+        let dir_git = case("dir-git");
+        std::fs::create_dir_all(dir_git.join(".git")).unwrap();
+        assert!(gitfile_tampering(&dir_git, &admin).unwrap().contains("a directory"));
+        let link = case("link");
+        std::os::unix::fs::symlink(&admin, link.join(".git")).unwrap();
+        assert!(gitfile_tampering(&link, &admin).unwrap().contains("a symlink"));
+        let gone = case("gone");
+        assert!(gitfile_tampering(&gone, &admin).unwrap().contains("removed"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn restore_gitfile_replaces_a_hostile_dotgit_with_the_recorded_gitdir() {
         use std::os::unix::fs::PermissionsExt;

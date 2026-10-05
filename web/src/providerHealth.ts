@@ -1,7 +1,8 @@
 // The providers screen's pure half after it learned to surface a provider's failure rate (issue
 // #184): the Mothership computes the numbers and decides `degraded`, so these helpers only format
 // what it says and pick a tone from it. Kept free of React and the DOM so vitest can run them as is.
-import type { ProviderQuotaState, ProviderUsageHealth } from "./types";
+import type { ProviderQuotaState, ProviderTestResult, ProviderUsageHealth } from "./types";
+import type { ToastInput } from "./toasts";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -89,4 +90,17 @@ export function quotaTone(quota: ProviderQuotaState | null | undefined): "err" |
 export function quotaExhaustedText(quota: ProviderQuotaState | null | undefined): string | null {
   if (!quota) return null;
   return quota.reset_at ? `quota exhausted, resets ${quota.reset_at}` : "quota exhausted";
+}
+
+/**
+ * The toast the save-time provider test raises (issue #1018): the URL the one-token request hit and
+ * the status it got, so a base URL that misses the provider's API root shows up at setup.
+ */
+export function providerTestToast(name: string, result: ProviderTestResult): ToastInput {
+  const where = result.url ? ` at ${result.url}` : "";
+  if (result.ok) {
+    return { title: `${name} answered ${result.status}`, body: `Test request (${result.model}) reached POST${where}`, kind: "success" };
+  }
+  const status = result.status === null ? "Test request failed" : `${name} answered ${result.status}`;
+  return { title: status, body: `${result.error ?? "no detail"}${result.url && !result.error?.includes(result.url) ? ` — POST ${result.url}` : ""}`, kind: "warn", duration: 15000 };
 }

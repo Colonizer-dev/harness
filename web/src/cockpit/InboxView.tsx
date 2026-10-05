@@ -11,12 +11,14 @@ import { Page } from "./Page";
 import { ApiContext } from "../context";
 import { store, stored } from "../components/ui";
 import { needsYou } from "../notifications";
-import type { ActivityEntry, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
+import type { ActivityEntry, DecisionAnswerRequest, DecisionsView, PrAction, PrCard, QuotaActionReply, QuotaActionRequest, QuotaCard, Session } from "../types";
 import { ProviderQuotaCard, QuotaChangeSummary, isQuotaReply, quotaCardColonyIds } from "./ProviderQuotaCard";
 import { useOpenQuestions, watchdogFlagged } from "./questions";
 import { inboxEntries, type FeedKind } from "./feed";
 import { taskLine, taskTooltip } from "../summary";
 import { LoopBadge } from "./LoopsView";
+import { DecisionsSection } from "./DecisionCards";
+import { decisionsCount, prCardColonyIds } from "./decisions";
 
 /** The local "read up to" mark, shared by the inbox and the header's notifications panel. */
 export const READ_AT = "colonizer.inboxReadAt";
@@ -41,6 +43,9 @@ export function InboxView({
   onOpenNotificationSettings,
   quotaCards = [],
   onQuotaAction,
+  decisions = null,
+  onAnswerDecision,
+  onDecisionPrAction,
 }: {
   /** Every colony in the workspace, filtered by the caller. */
   sessions: Session[];
@@ -49,6 +54,10 @@ export function InboxView({
   /** "Provider out of quota" cards (issue #767), shown first: one per provider, not one per colony. */
   quotaCards?: QuotaCard[];
   onQuotaAction?: (provider: string, body: QuotaActionRequest) => Promise<unknown>;
+  /** The decisions inbox (issue #1036): repo decisions and pull requests that need a person. */
+  decisions?: DecisionsView | null;
+  onAnswerDecision?: (body: DecisionAnswerRequest) => Promise<unknown>;
+  onDecisionPrAction?: (card: PrCard, action: PrAction) => Promise<unknown>;
 }): ReactElement {
   // Nothing server-side records a read; this is a local high-water mark, so "read" is per browser.
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
@@ -61,10 +70,13 @@ export function InboxView({
   };
 
   // A colony a quota card covers is answered on the card, not listed again as a question.
+  // A colony a pull-request card covers (a policy hold) is listed there, with why, not twice.
   const onCards = quotaCardColonyIds(quotaCards);
+  const onPrCards = prCardColonyIds(decisions);
   const needing = sessions.filter(needsYou);
-  const waiting = needing.filter((session) => !onCards.has(session.id));
-  const needCount = new Set([...needing.map((session) => session.id), ...onCards]).size;
+  const waiting = needing.filter((session) => !onCards.has(session.id) && !onPrCards.has(session.id));
+  const decisionCards = (decisions?.decisions.length ?? 0) + (decisions?.prs.length ?? 0);
+  const needCount = new Set([...needing.map((session) => session.id), ...onCards]).size + decisionsCount(decisions, sessions);
   const questions = useOpenQuestions(sessions);
 
   // The activity log, one line per event at its own time. Read through the context directly, not
@@ -126,7 +138,7 @@ export function InboxView({
             <ProviderQuotaCard key={card.provider} card={card} onOpenColony={onOpenColony} onAction={quotaAction} />
           ))}
 
-          {waiting.length === 0 && quotaCards.length > 0 ? null : waiting.length === 0 ? (
+          {waiting.length === 0 && (quotaCards.length > 0 || decisionCards > 0) ? null : waiting.length === 0 ? (
             <div className="flex items-center gap-3 border-y border-border py-3.5 text-[13px] text-muted">
               <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" className="text-ok">
                 <path d="M12 2.8 20 7.4v9.2L12 21.2 4 16.6V7.4z" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
@@ -163,6 +175,12 @@ export function InboxView({
             ))
           )}
 
+          <DecisionsSection
+            view={decisions}
+            onAnswer={(body) => onAnswerDecision?.(body) ?? Promise.resolve()}
+            onPrAction={(card, action) => onDecisionPrAction?.(card, action) ?? Promise.resolve()}
+            onOpenColony={onOpenColony}
+          />
         </section>
 
         <section aria-label="Notifications" className="flex min-w-0 flex-col gap-4">

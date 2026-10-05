@@ -373,7 +373,7 @@ const SEEN_CLIENTS_MAX: usize = 512;
 /// Why a user message was not delivered. The socket path drops each of these silently, as it
 /// always has; the HTTP twin answers each with its own status.
 #[derive(Debug)]
-enum MessageError {
+pub(crate) enum MessageError {
     NoSession,
     NotAccepting(SessionStatus),
     /// Empty or oversized text — the socket drops it, HTTP answers 400.
@@ -385,16 +385,16 @@ enum MessageError {
 }
 
 /// What one user message turned into, for the HTTP twin's reply.
-struct Sent {
-    id: String,
-    delivered: bool,
+pub(crate) struct Sent {
+    pub(crate) id: String,
+    pub(crate) delivered: bool,
 }
 
 /// The one user-message path (issue #746): the events socket's `user_message` command and
 /// `POST /api/sessions/{id}/messages` both forward through here, so both check the colony, trim
 /// and size-check the text, and mark a scoped token's message the same way. `client_id` is the
 /// HTTP twin's dedupe key; the socket passes `None` and mints its own `u-<short_id>`.
-async fn submit_message(
+pub(crate) async fn submit_message(
     app: &Shared,
     id: &str,
     rt: &Arc<Runtime>,
@@ -917,7 +917,7 @@ async fn events_socket(
     // connection is attached to, so a tab left open across a resume learns its cursor belongs to
     // a retired run. It carries no `seq` field, so it passes seq filtering like `harness_log`,
     // and old clients ignore the unknown frame.
-    let current_epoch = run_epoch_for_dir(&app.session_dir(&id));
+    let current_epoch = run_epoch(app.store(), &id).await;
     if tx
         .send(text(json!({"type": "run_epoch", "epoch": current_epoch}).to_string()))
         .await
@@ -949,7 +949,7 @@ async fn events_socket(
     // `InvalidData` error, which reads exactly like EOF here and would silently truncate the
     // replay at the first corrupt line. Split chunks decode (or skip) one at a time instead.
     let mut skipped = 0u64;
-    if let Ok(bytes) = tokio::fs::read(&rt.events_path).await {
+    if let Ok(Some(bytes)) = app.store().read_file(&id, "events.jsonl").await {
         for chunk in bytes.split(|b| *b == b'\n') {
             if chunk.is_empty() {
                 continue;
@@ -974,10 +974,9 @@ async fn events_socket(
             &id,
             "warn",
             format!(
-                "skipped {} unreadable {} in {} during replay; the transcript continues past the gap",
+                "skipped {} unreadable {} in events.jsonl during replay; the transcript continues past the gap",
                 skipped,
                 if skipped == 1 { "line" } else { "lines" },
-                rt.events_path.display(),
             ),
         )
         .await;
@@ -1104,6 +1103,8 @@ async fn client_command(
         }
         Some("interrupt") => {
             rt.interrupted.store(true, Ordering::SeqCst);
+            // The UHP response this interrupt ends reads `cancelled`, not failed (§7.4).
+            crate::uhp_responses::note_interrupt(app, id).await;
             json!({"type": "interrupt"})
         }
         Some("set_model") => {

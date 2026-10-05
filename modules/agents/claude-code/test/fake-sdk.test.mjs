@@ -282,7 +282,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
   };
   commands.push({ type: 'user_message', id: 'initial', text: 'Fix the issue' });
 
-  await runAgent({ query, commands, emit, options: { model: 'fake' }, pathPolicy: turnPathPolicy, graceMs: 100 });
+  await runAgent({ query, commands, emit, options: { model: 'fake' }, pathPolicy: turnPathPolicy, graceMs: 100, now: () => new Date('2026-01-01T00:00:00.000Z') });
 
   const fixture = readFileSync(new URL('./fixtures/events.jsonl', import.meta.url), 'utf8')
     .trimEnd()
@@ -310,6 +310,7 @@ test('a full turn emits exactly the committed contract fixture, so runner drift 
     'memory_proposal',
     'finding',
     'path_policy',
+    'boundary',
   ];
   const types = new Set(fixture.map((e) => e.type));
   for (const type of protocolTypes) assert.ok(types.has(type), `the fixture has no ${type} event`);

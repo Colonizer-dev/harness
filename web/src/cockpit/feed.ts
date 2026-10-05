@@ -56,6 +56,7 @@ export function textFor(session: Session, kind: FeedKind): string {
     if (session.attention?.reason === "stalled") return `${at} has stopped making progress`;
     if (session.attention?.reason === "nudges_exhausted") return `${at} is still stalled after being nudged`;
     if (session.attention?.reason === "autopilot_held") return `${at} finished, and autopilot is holding the pull request`;
+    if (session.attention?.reason === "control_defeat") return `${at} may have got past one of its controls`;
     return `${at} is waiting on your answer`;
   }
   switch (session.status) {

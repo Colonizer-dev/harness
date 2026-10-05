@@ -17,6 +17,7 @@ const EVENTS: ReadonlyArray<readonly [PushEventKind, string]> = [
   ["needs_rebase", "Needs rebase"],
   ["failed", "Failed"],
   ["attention", "Needs attention"],
+  ["provider_quota_exhausted", "Provider out of quota"],
   ["provider_degraded", "Provider degraded"],
   ["digest", "Hourly digest"],
 ];

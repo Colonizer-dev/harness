@@ -290,6 +290,15 @@ export async function createBridge({ emit, findings = false, setStatus = () => {
           emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
         }
+      } else if (req.url === '/vault') {
+        // The operator vault (issue #777): mcp.mjs checked the path and the caps; the mothership
+        // checks them again and queues the proposal for the operator's review.
+        const missing = ['path', 'title', 'body', 'reason'].filter((k) => typeof msg[k] !== 'string' || !msg[k].trim());
+        if (missing.length) reply(200, { error: `vault_propose needs ${missing.join(', ')}` });
+        else {
+          emit({ type: 'vault_proposal', path: msg.path, title: msg.title, body: msg.body, reason: msg.reason });
+          reply(200, { ok: true });
+        }
       } else if (req.url === '/loop_next') {
         const minutes = Number(msg.delay_minutes);
         if (!Number.isFinite(minutes) || minutes < 1) reply(200, { error: 'loop_next needs delay_minutes: a number of minutes from now' });
@@ -340,6 +349,7 @@ export function mcpArgs({ url, token, env }) {
       COLONIZER_BRIDGE_TOKEN: token,
       COLONIZER_FINDINGS: env.COLONIZER_FINDINGS, // undefined drops out of the JSON, and the table
       COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR,
+      COLONIZER_VAULT_DIR: env.COLONIZER_VAULT_DIR, // the operator vault's snapshot (issue #777)
       COLONIZER_LOOP: env.COLONIZER_LOOP, // a loop colony's pacing tools; SELF_PACED gates loop_next
       COLONIZER_LOOP_SELF_PACED: env.COLONIZER_LOOP_SELF_PACED,
     },

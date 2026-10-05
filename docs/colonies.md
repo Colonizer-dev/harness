@@ -17,6 +17,7 @@ read by the mothership when it starts.
 - [Questions, and who answers them](#questions-and-who-answers-them)
 - [Suspending a colony that waits for you](#suspending-a-colony-that-waits-for-you)
 - [Stop, resume and delete](#stop-resume-and-delete)
+- [Recovering on its own](#recovering-on-its-own)
 - [Budgets and plan balance](#budgets-and-plan-balance)
 - [What a colony cost](#what-a-colony-cost)
 - [Verifying "done"](#verifying-done)
@@ -67,8 +68,11 @@ one, a launch on a held issue or an epic is refused with a 409 (CLI exit code 5)
 
 Every colony image carries a small, language-agnostic toolbox a repository's own build or
 verification may reach for: `python3` with pip and venv, `python3-yaml` (PyYAML), `jq`, `ripgrep`,
-`curl`, `git`, `make`, `unzip` and `ca-certificates`. The node image also carries bun, pnpm, yarn
-classic and corepack. The image is pinned by digest, so a tool the image does not carry is one a
+`curl`, `git`, `make`, `unzip` and `ca-certificates`. The node preset's stock `node:24-bookworm`
+carries npm, yarn classic and corepack but not bun or pnpm: the colony-node image that adds them is
+built but not yet pinned ([#589](https://github.com/Colonizer-dev/harness/issues/589)), so a bun or
+pnpm repository's check comes back unverifiable, naming the missing tool, until it is or a
+`.colonizer/setup.sh` hook installs it. The image is pinned by digest, so a tool the image does not carry is one a
 done-claim check reports unverifiable (see [Verifying "done"](#verifying-done)). On the Debian-based
 presets `pip3 install` works despite PEP 668 — the images set `PIP_BREAK_SYSTEM_PACKAGES=1` for a
 disposable VM — and an isolated `python3 -m venv` is the alternative.
@@ -127,12 +131,40 @@ There are two ways past a held issue. Both are checkboxes in the cockpit's launc
   waiter starts, the mothership checks GitHub again. If the holder's pull request merged, or
   another mothership has claimed the issue, the waiter fails instead of redoing finished work.
 
-On GitHub a launch marks the issue with the `colonizer:claimed` label and a claim comment. The
-label comes off when the colony releases the issue. When a mothership starts, it removes marks it
-left behind for colonies that are gone.
+On GitHub a launch marks the issue with the `colonizer:claimed` label, a host label such as
+`colonizer:host:omarchy` (the hostname as a slug, one fixed colour per host, created when first
+needed), and one claim comment. Filter an org's issues by the host label to see what each machine
+is working on.
+
+The claim comment is edited in place, never posted again. It shows the colony id, the host, the
+status (queued, running, waiting for an answer, pull request opened, merged, or released with a
+short reason), the branch, the pull request link once there is one, and when it was last updated.
+It never shows prompts, costs or errors. A retry on the same issue edits the same comment and names
+the colony before it. After a restart the mothership finds its comment again by the hidden
+`<!-- colonizer:claim … -->` marker, so it never posts a second one.
+
+Status edits are gentle on GitHub: at most one edit per issue every two minutes (a final state is
+never held back), no request at all when nothing changed, and a pause from 15 minutes up to four
+hours, doubling, whenever GitHub answers with a rate limit, abuse warning or 429. If the token may
+not add labels, the claim keeps only the comment and logs a warning.
+
+When the colony releases the issue (failed, stopped or no changes without a pull request, or its
+pull request closed unmerged), the comment gets its final state and both labels come off. A merged
+pull request keeps both labels as the record of who did the work. When a mothership starts, it
+removes marks it left behind for colonies that are gone.
+
+Host labels and status edits are on by default. To turn them off for an org, set
+`"claim_updates": false` in that org's settings (`orgs.json`, or `PUT /api/orgs/{org}`). The claim
+label and comment stay, since other motherships read them. `COLONIZER_NO_EXTERNAL_EFFECTS` stops
+every claim write.
+
+One rule decides every duplicate, whoever launches: the cockpit, `colonizer launch`, the API, MCP,
+the loops, burn-down, the red team or a redo. The same answer comes back every way, and a refused
+launch in the cockpit shows who holds the work, with a link to that colony or its pull request
+(or the host, for another mothership's claim) and the **Allow duplicate** option.
 
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
-seen only through the GitHub label and comment. If a mothership never comes back, its label stays
+seen only through the GitHub labels and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
 [protocol.md, Duplicate-colony prevention and issue claims](protocol.md#duplicate-colony-prevention-and-issue-claims).
 
@@ -157,7 +189,9 @@ open for you — and the publish module's merge train skips it until you keep it
 In the cockpit a superseded colony wears a "Superseded by #N" badge, and while it is held a banner
 offers **Keep** (run it anyway), with **Stop** beside it for a live or queued colony. Launching a
 second colony for a supply-chain target one already holds is refused, not queued behind the holder,
-unless the launch passes `allow_duplicate`.
+unless the launch passes `allow_duplicate`. A target is a package and an advisory; a fix the
+supply-chain loop started holds every finding it was given, so the Packages tab, `colonizer launch
+--package P --advisory A` and the loop refuse the same finding in the same words.
 
 **Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
 at 500 paths. The API shapes are in
@@ -201,6 +235,33 @@ let through. Nobody else can, and there is no request flag for it.
 a maintainer's wishes. It is not an access control. Like the epic guard, it is best effort: a
 missing file or label is simply no signal, and only a config file that exists but cannot be read is
 logged and ignored.
+
+## Exec policy: install, org and repo
+
+The exec policy is rules about the shell commands a colony's agent runs: deny, ask you, or allow
+(the format and the built-in rules are in
+[`modules/agents/claude-code/README.md`](../modules/agents/claude-code/README.md#exec-policy)). A
+colony layers up to three policies over the built-in one, in this order:
+
+1. **install** — the agent module's `exec_policy` setting in Settings → Modules;
+2. **org** — the Exec policy box in the org's workspace settings (issue #924), stored as
+   `exec_policy` in `orgs.json` and handed to the org's colonies as `COLONIZER_EXEC_POLICY_ORG`;
+3. **repo** — the repository's own `.colonizer/exec-policy.json`.
+
+Across layers the strictest decision wins, so each layer can only narrow the ones before it: an org
+`deny` beats an install `allow` of the same command, and an org `allow` cannot undo an install
+`deny`.
+
+Only the owner can change an org's policy. The save is refused, with the reason under the box, unless
+the runner would keep every rule of it: valid JSON of at most 64 KiB, an object with a `rules` array,
+and every rule a `deny`, `ask` or `allow` decision with at least one usable `command`, `script`,
+`touches` or `writes_outside`. Leave the box empty for no org layer.
+
+**Limits.** Claude Code and ACP apply the policy; Codex, Grok Build, Hermes, OpenCode and Pi do not.
+While any layer is set, a colony on one of those refuses to launch and names where the policy came
+from — the org by name — rather than run without it. The org's policy reaches colonies launched
+after the save; a running colony keeps the policy it booted with. A pattern's regex syntax is checked
+only by the runner, which drops a rule it cannot compile.
 
 ## Questions, and who answers them
 
@@ -341,6 +402,53 @@ a VM snapshot, is in
 
 The mothership also stops colonies itself: when a budget or the host-disk quota is passed, and
 when a microVM dies on its own. In every case the worktree is kept, so Resume continues.
+
+## Recovering on its own
+
+Some failures have no work behind them: a provider that blipped, a status that fell out of step, a
+parent that paused, a sign-in that expired. The mothership handles these itself rather than
+handing each one to you as a colony that needs you.
+
+- **A transient provider error is retried, not held** (issue #980). When an autopilot colony's turn
+  ends with an error the retry classifier calls transient — a gateway 5xx, 429 or 529, an
+  "unreachable" or overloaded provider, a timeout, a dropped or refused connection — the colony is
+  parked with reason `provider_retry` (worktree kept, parallel slot released) and continued
+  automatically after 2, 5, 10, then 20 minutes. Each attempt is a `provider_retry` line in the
+  colony log. Only when the attempts run out is the colony held as `autopilot_held`, and the message
+  then names the provider's own error. A turn that ends cleanly resets the count. The Watchdog
+  setting `provider_retry_max_attempts` (default 4, at most 4, `0` turns the retry off) sets the
+  budget. An error that is not transient still holds at once, as before.
+- **A stale "waiting for an answer" is reconciled** (issue #981). On every watchdog tick, a colony
+  whose status is `waiting_for_answer` but which has no question actually pending is set back to
+  `idle`, and the colony log says why. This runs even with the Watchdog module off. An answer to one
+  question also no longer closes a different one still open (a subagent's exec-policy `ask`, say),
+  so `colonizer ask` and `colonizer answer` see what the cockpit shows.
+- **A stacked colony waits for its parent instead of failing** (issue #982). A colony launched with
+  `after` waits while its parent is `stopped` or `parked`, since the parent may still be resumed.
+  When the parent fails, the child moves onto the parent's own parent and keeps waiting there; a
+  failed parent with nothing above it leaves the child queued. Only a parent whose record is gone,
+  or one that made no changes, still retires the child. A new `after` launch onto a parent that has
+  already failed is refused, as before.
+- **Claude accounts are health-checked** (issue #983). Every five minutes the mothership makes a
+  cheap check against each configured Claude account. **Settings → Connections** shows the result
+  on the Claude card — reachable, token rejected, or unreachable — with when it last ran, and
+  `GET /api/claude-accounts` carries each account's `health_status` and `health_checked_at`. An API
+  key account is not called and always reads as reachable.
+- **An expired sign-in holds its colonies and tells you once** (issue #984). When Anthropic answers
+  a subscription account with 401 or 403, the account is marked and every colony routed to it is
+  parked with reason `waiting_for_account`. The colonies release their slots, use none of their
+  provider retries and do not land in "Needs you" one by one. You get one notification per account
+  and change of state ("Claude account `default` needs you to sign in again. N colonies are waiting
+  on it.", then a resolved message). The cockpit shows a banner with a **Sign in** button,
+  `colonizer list` prints a warning line, and `GET /api/status` carries `account_alerts`. Once you
+  sign in again — noticed from the credential file's timestamp, never its contents — the colonies
+  resume through the normal queue. A usage limit (429) is not an expired sign-in: it keeps the quota
+  pause described in [providers.md](protocol/providers.md).
+
+The marks for a broken account are kept in memory. After a mothership restart, waiting colonies
+resume, and if the account is still broken it is marked and announced again, through the same
+notification rate limits as every other alert. A keychain-held credential has no file timestamp,
+so a re-sign-in there is not noticed until the mothership restarts.
 
 ## Services that come back after a resume
 
@@ -610,6 +718,37 @@ index, before anything is written, and the `INDEX.md` (titles, paths, tags, stat
 backlinks) is built from the scrubbed text. The snapshot is taken at each boot and resume, so a later
 edit needs a new boot to reach a colony; a folder out of scope stages nothing, so `/colonizer/vault/`
 is absent. Base64- or percent-encoded forms of a secret are not caught.
+
+**Searching it.** A colony with a staged vault gets a `vault_search(query, limit?)` tool beside the
+memory tools (Claude Code, Codex, Grok Build, OpenCode, Pi and ACP; Hermes serves neither). It is a
+plain-text search of the snapshot like `memory_search`: every term must appear in a note, case
+aside, and matches are ranked by how often the terms appear, a hit in the title or a heading
+counting more. Each match names its path under `/colonizer/vault/`, the line and the heading it sits
+under, and a short excerpt, wrapped in an `<operator-vault>` frame that calls it data to verify, not
+instructions. The snapshot holds only the folders in scope for the colony, so the search never
+reaches anything else; `INDEX.md`, dot-named entries and symlinks are left out of it.
+
+**Proposing a note.** `vault_propose(path, title, body, reason)` (Claude Code, Codex, Grok Build
+and OpenCode; Pi and ACP have no channel back to the mothership) never writes inside the colony or
+the vault: it sends a `vault_proposal` event, and the mothership queues it for review with its
+provenance — the colony, its repository and the commit its worktree was at. Only the orchestrator
+proposes: a subagent's call is refused in the colony and again on the mothership. A proposal from
+a colony no vault folder reaches is ignored, the secret values the mothership knows are scrubbed
+from it, and the path must be relative (at most four parts and 200 characters, no `..` or
+dot-named part; `.md` is added); the title is capped at 200 characters, the reason at 2,000 and the
+body at 64 KiB, and at most 200 proposals wait at once. The cockpit lists them under **Proposed for
+your vault** on the Memory page, as plain escaped text. **Accept** writes the note as a new file
+under the vault's inbox folder — `Inbox/colonizer/` unless `colonizer.toml` says otherwise — with
+the provenance in its frontmatter; it never overwrites a file, never follows a symlink and never
+writes outside the vault root, and a proposal it cannot write stays in the queue. **Reject** drops
+it. Notes you accept reach colonies at their next boot only if the inbox sits in an allowlisted
+folder.
+
+```toml
+[vault]
+path = "/home/me/Obsidian/Work"
+inbox = "Inbox/colonizer"   # relative to the vault; this is the default
+```
 
 ## Search earlier colonies' conversations
 

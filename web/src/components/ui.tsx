@@ -406,6 +406,8 @@ export function attentionText(attention: Attention): string {
       return attention.detail?.trim() || "Autopilot held the PR";
     case "hold_timeout":
       return "Held too long — parked, resume to continue";
+    case "control_defeat":
+      return "A control may have been bypassed";
     default:
       return "Needs attention";
   }

@@ -86,6 +86,10 @@ fn shared_properties() -> Map<String, Value> {
         "max_read_mib_per_sec".into(),
         json!({"type": "integer", "title": "Max read rate (MiB/s)", "description": "A ceiling on how fast the exporter reads its backlog, so it never crowds a running colony.", "minimum": 1, "default": 8}),
     );
+    m.insert(
+        "start_from".into(),
+        json!({"type": "string", "title": "Start from", "enum": ["now", "backlog"], "default": "now", "description": "Where a new destination starts. now sends only what is written from the moment it is configured; backlog also sends what the ledgers already hold, back to Max backlog (days). Settled once per endpoint: changing it later does not move the read position."}),
+    );
     m
 }
 
@@ -184,6 +188,8 @@ pub struct ExporterConfig {
     pub prometheus: bool,
     pub max_backlog_days: u64,
     pub max_read_mib_per_sec: u64,
+    /// Where a new destination starts: `now` or `backlog`.
+    pub start_from: String,
     /// The OTLP headers, filled by a later issue from the `observability-headers` secret (#852).
     /// Empty in this build — nothing here reads a secret or an environment variable.
     pub headers: Vec<(String, String)>,
@@ -225,6 +231,7 @@ impl ExporterConfig {
             prometheus: bool_at(s, "prometheus", false),
             max_backlog_days: u64_at(s, "max_backlog_days", 7),
             max_read_mib_per_sec: u64_at(s, "max_read_mib_per_sec", 8),
+            start_from: str_at(s, "start_from", "now"),
             headers: Vec::new(),
         })
     }
@@ -264,6 +271,7 @@ impl std::fmt::Debug for ExporterConfig {
             .field("prometheus", &self.prometheus)
             .field("max_backlog_days", &self.max_backlog_days)
             .field("max_read_mib_per_sec", &self.max_read_mib_per_sec)
+            .field("start_from", &self.start_from)
             .field("headers", &headers)
             .finish()
     }
@@ -324,7 +332,7 @@ pub fn validate(
 
 /// The endpoint rules: a http(s) URL, no credentials in it, no query string, and a plain `http://`
 /// only to a loopback or private host unless `allow_insecure` says otherwise.
-fn check_endpoint(endpoint: &str, allow_insecure: bool) -> Result<(), String> {
+pub(crate) fn check_endpoint(endpoint: &str, allow_insecure: bool) -> Result<(), String> {
     let (scheme, rest) = if let Some(r) = endpoint.strip_prefix("https://") {
         ("https", r)
     } else if let Some(r) = endpoint.strip_prefix("http://") {
@@ -432,6 +440,7 @@ mod tests {
                 ("prometheus", json!(false)),
                 ("max_backlog_days", json!(7)),
                 ("max_read_mib_per_sec", json!(8)),
+                ("start_from", json!("now")),
             ] {
                 assert_eq!(props[key]["default"], default, "{}: {key}", provider.id);
             }

@@ -2,7 +2,8 @@
 
 The `observability` module sends the harness's logs, traces and metrics to a backend you choose,
 over OpenTelemetry's OTLP protocol, or writes them to capped files under the data directory. It is
-**off until you configure it**, and it reads no environment variable of its own.
+**off until you configure it**. The standard `OTEL_*` variables override its fields, but never turn
+it on by themselves; see [Observability](../observability.md#configuration).
 
 ## Turning it on
 
@@ -52,6 +53,7 @@ Both providers share the second table.
 | Expose Prometheus metrics | off | Serve the metrics for scraping on the harness's own endpoint, too. |
 | Max backlog (days) | `7` | Older events are dropped rather than exported late; `0` keeps everything. |
 | Max read rate (MiB/s) | `8` | A ceiling so the exporter never crowds a running colony. |
+| Start from | `now` | Where a new endpoint starts: `now` sends only what is written from then on; `backlog` also sends what the ledgers hold, back to Max backlog. Settled once per endpoint. |
 
 ## What is sent, and what is never sent
 
@@ -69,5 +71,5 @@ Both providers share the second table.
 ## Turning it off
 
 Switch the module off in **Settings → Modules → Observability** (or `PUT /api/modules/observability`
-with `"enabled": false`). Nothing is exported while it is off. Environment switches, a full reset,
-and the exact retention of the local files are added by later issues.
+with `"enabled": false`). Nothing is exported while it is off. `OTEL_SDK_DISABLED=true` turns it off too, whatever the module
+says. A full reset of the exporter's state is added by a later issue.

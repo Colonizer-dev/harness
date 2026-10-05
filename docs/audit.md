@@ -89,11 +89,15 @@ limits.
   credential shapes (PEM private keys, JWTs, `Bearer` values, webhook URLs, more token prefixes),
   passwords in `scheme://user:pass@host` and in database and broker connection strings, values of
   `KEY=value` pairs and JSON fields whose name says secret, and, last, long high-entropy strings.
-  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. JSON lines are redacted
+  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. A JSON field named as an
+  identifier or digest skips only the high-entropy layer: the key's last word, split at `_`, `-`,
+  `.` and camelCase, must be `id`, `uuid`, `sha`, `hash`, `digest`, `etag`, `signature` or the like
+  (`user_id`, `commitSha`, not `did` or `paid`), and a secret word anywhere in the key (`token`,
+  `key`, `session`, `cookie`, …) removes the exemption, so `api_key_id` is still checked. JSON lines are redacted
   field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
   bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
   second line behind keeping secrets out of the colony, not a replacement
-  (`crates/colonizer/src/redact.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
+  (`crates/colonizer-redact/src/lib.rs`). The findings ledger (`findings.jsonl`) is redacted as it is
   written, and a fleet export redacts the logs it carries.
   The same redactor covers the other text the mothership keeps or sends from agent and model
   output: a filed finding (`finding-body.md` and the issue), an independent review (`review.md`
@@ -108,10 +112,23 @@ limits.
   (the cockpit's diagnosis and a resumed colony's prompt) or bundled. Not covered: the rest of
   `sessions.json` (a colony's `error` and its pending question), architecture maps, and the
   numeric stats files (routing, spend, jev ladder).
+  There is one redactor, the `colonizer-redact` crate, and every path uses it. The session store
+  redacts every line appended through it (`SessionStore::append`, `store::ledger_line`), so a new
+  writer to `events.jsonl`, `harness.jsonl`, `findings.jsonl` or a later ledger cannot forget to;
+  writers that also broadcast the line redact it first, and for them the store's pass is a no-op.
+  An archive bundle redacts every text file it carries, not only logs: `out/pr.md`, `review.md`
+  and a staged vault note go in redacted, and binary files go in as they are. The fleet history
+  push (#762) uploads each log redacted, hashed and sized as redacted, since the owner stores
+  payloads exactly as sent. The observability exporter (#1028) redacts every string with the
+  same crate and has no detector of its own. The operator vault (#777) runs the shared redactor
+  after its exact-value scrub, on staged notes and on proposals; the deja-vu transcript copies
+  (#592) do the same. Jev's coarse token filter for text sent to Jev is followed by the shared
+  redactor. Boundary event details (#609) are redacted as they are built.
 - **Credentials stay in the session directory.** An archive bundle or a fleet export never holds
   a session's `vm/token`, `gateway-token`, `vm/mesh-authkey` or `vm/session.json`, nor any file
   there named like a credential (`*token*`, `*authkey*`, `*.key`, `*.pem`, `secrets*`)
-  (`is_credential_file` in `crates/colonizer/src/archive.rs`).
+  (`is_credential_file` in `crates/colonizer/src/archive.rs`). The fleet history push carries only
+  the three log ledgers, never one of these files.
 - **Inside the colony.** Credential files in the worktree are masked and agent config is pinned
   read-only ([path-policy.md](path-policy.md), #545); every colony boots behind an egress policy
   with a deny set no setting can reopen ([sandbox-network.md](sandbox-network.md#egress-policy-303),

@@ -18,10 +18,7 @@ use axum::{
 use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    io::{BufRead, BufReader, Seek, SeekFrom},
-    path::Path,
-};
+use std::io::{BufRead, BufReader};
 
 /// Hits returned unless the request asks for fewer, and the most it can ask for.
 const DEFAULT_LIMIT: usize = 20;
@@ -152,10 +149,12 @@ async fn search(app: &Shared, query: &str, limit: usize, visible: impl Fn(&Sessi
         if hits.len() >= limit || budget == 0 {
             break;
         }
-        let path = app.session_dir(&s.id).join("events.jsonl");
+        // The tail through the session store, whole lines only; the scan stays off the async runtime.
+        let Ok(Some(tail)) = app.store().read_tail(&s.id, "events.jsonl", budget.min(COLONY_BYTES)).await else {
+            continue;
+        };
         let terms = terms.clone();
-        let Ok((raw, read)) = tokio::task::spawn_blocking(move || scan_file(&path, &terms, budget.min(COLONY_BYTES))).await
-        else {
+        let Ok((raw, read)) = tokio::task::spawn_blocking(move || scan_tail(&tail, &terms)).await else {
             continue;
         };
         budget = budget.saturating_sub(read);
@@ -181,22 +180,14 @@ async fn search(app: &Shared, query: &str, limit: usize, visible: impl Fn(&Sessi
     hits
 }
 
-/// Reads a colony's `events.jsonl` from its tail (the last `budget` bytes, so a file past the cap
-/// still contributes its recent turns), returning up to [`PER_COLONY`] matches and the bytes read. A
+/// Scans the tail of a colony's `events.jsonl` (the store's last bytes within the budget, so a file
+/// past the cap still contributes its recent turns), returning up to [`PER_COLONY`] matches and the
+/// bytes read. A
 /// line that will not parse, is not a `user_message`/`assistant_text`, or is over [`MAX_LINE_BYTES`]
 /// is skipped; every event is redacted first.
-fn scan_file(path: &Path, terms: &[String], budget: u64) -> (Vec<RawHit>, u64) {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return (Vec::new(), 0);
-    };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let start = len.saturating_sub(budget);
-    let mut reader = BufReader::new(&mut file);
+fn scan_tail(tail: &[u8], terms: &[String]) -> (Vec<RawHit>, u64) {
+    let mut reader = BufReader::new(tail);
     let mut line = String::new();
-    // Seeking mid-file lands mid-line: drop that partial first line.
-    if start > 0 && (reader.seek(SeekFrom::Start(start)).is_err() || reader.read_line(&mut line).is_err()) {
-        return (Vec::new(), 0);
-    }
     let mut hits = Vec::new();
     while hits.len() < PER_COLONY {
         line.clear();
@@ -239,7 +230,7 @@ fn scan_file(path: &Path, terms: &[String], budget: u64) -> (Vec<RawHit>, u64) {
             snippet: snippet_around(text, at),
         });
     }
-    (hits, len.min(budget))
+    (hits, tail.len() as u64)
 }
 
 /// Maps a byte offset in `lower` (a `to_lowercase` of `text`) back to one in `text`, walking the

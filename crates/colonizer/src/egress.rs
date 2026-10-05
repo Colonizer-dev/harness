@@ -531,12 +531,18 @@ pub async fn show(State(app): State<Shared>, AxumPath(id): AxumPath<String>) -> 
     app.session(&id)
         .await
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
-    let bytes = tokio::fs::read(app.session_dir(&id).join("egress.json")).await.map_err(|_| {
-        client_error(
-            StatusCode::NOT_FOUND,
-            "no egress record for this colony; it last booted before the egress policy existed",
-        )
-    })?;
+    let bytes = app
+        .store()
+        .read_file(&id, "egress.json")
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| {
+            client_error(
+                StatusCode::NOT_FOUND,
+                "no egress record for this colony; it last booted before the egress policy existed",
+            )
+        })?;
     let record: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| client_error(StatusCode::INTERNAL_SERVER_ERROR, &format!("corrupt egress record: {e}")))?;
     Ok(Json(record))
@@ -915,9 +921,9 @@ mod tests {
         let recorded = serde_json::to_value(record(&booted, &compile(&booted.policy, &[]), 0)).unwrap();
         assert!(recorded.get("module").is_none(), "{recorded}");
 
-        // A module that declares nothing fixed (hermes, pi) adds nothing: no `module` source, no
-        // record entry, no empty-list noise.
-        let booted = resolve(&modules, &org, Some(&module("hermes", &[], &[], &["*.sentry.io"], &[])));
+        // A module that declares nothing fixed (pi) adds nothing: no `module` source, no record
+        // entry, no empty-list noise.
+        let booted = resolve(&modules, &org, Some(&module("pi", &[], &[], &["*.sentry.io"], &[])));
         assert_eq!(booted.module, None);
         assert_eq!(booted.sources.allow, vec!["global"]);
         // A module whose every host the operator already listed adds nothing of its own.

@@ -1,0 +1,2 @@
+/api/observability/status                            GET    unauth=401    token=owner            activity=-
+/api/observability/test                              POST   unauth=401    token=owner            activity=-
