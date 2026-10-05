@@ -119,6 +119,7 @@ export function Cockpit({
   onInspectorShown,
   colony,
   memory,
+  notice = null,
 }: {
   /** Every colony the mothership knows; the cockpit filters to the chosen workspace itself. */
   sessions: Session[];
@@ -173,6 +174,9 @@ export function Cockpit({
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
   colony: ReactNode;
   memory: ReactNode;
+  /** A phone-only card in the page flow (the live-map prompt): at the top of the Nest and of the
+   *  Inbox list, where it pushes the content down instead of covering it. App passes it below `sm` only. */
+  notice?: ReactNode;
 }) {
   const api = useApi();
   const toast = useToast();
@@ -636,6 +640,7 @@ export function Cockpit({
       case "inbox":
         return (
           <InboxView
+            notice={notice}
             sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
@@ -793,6 +798,9 @@ export function Cockpit({
               </div>
             </div>
           ) : null}
+          {/* The Nest is a full-bleed canvas with no scroll root, so its phone notice sits above it
+              in the flow, shrinking the canvas rather than covering it. */}
+          {notice && view === "home" ? <div className="shrink-0 px-3 pt-3 sm:hidden">{notice}</div> : null}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {body()}
             {/* The way back into the dashboard once it has been hidden: a small pill parked above

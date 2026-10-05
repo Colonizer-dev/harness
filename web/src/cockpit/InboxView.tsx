@@ -5,7 +5,7 @@
 // options live in the colony's chat, which is the only place that has them — the mothership streams
 // a question to one open colony, not to the list. Sending someone to the question beats showing a
 // hollow copy of it here.
-import { useContext, useEffect, useState, type ReactElement } from "react";
+import { useContext, useEffect, useState, type ReactElement, type ReactNode } from "react";
 import { Page } from "./Page";
 
 import { ApiContext } from "../context";
@@ -46,6 +46,7 @@ export function InboxView({
   decisions = null,
   onAnswerDecision,
   onDecisionPrAction,
+  notice = null,
 }: {
   /** Every colony in the workspace, filtered by the caller. */
   sessions: Session[];
@@ -58,6 +59,9 @@ export function InboxView({
   decisions?: DecisionsView | null;
   onAnswerDecision?: (body: DecisionAnswerRequest) => Promise<unknown>;
   onDecisionPrAction?: (card: PrCard, action: PrAction) => Promise<unknown>;
+  /** A phone-only card at the top of the list (the live-map prompt), inside the scroll root so it
+   *  scrolls away with the page instead of sitting fixed over the cards below it. */
+  notice?: ReactNode;
 }): ReactElement {
   // Nothing server-side records a read; this is a local high-water mark, so "read" is per browser.
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
@@ -113,6 +117,7 @@ export function InboxView({
 
   return (
     <Page frameClassName="flex flex-col gap-4">
+      {notice ? <div className="sm:hidden">{notice}</div> : null}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="m-0 text-[30px] font-semibold leading-[1.15] tracking-[-0.035em]">Inbox</h1>
