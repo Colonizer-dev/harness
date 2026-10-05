@@ -119,9 +119,10 @@ export function mockHost(live: number): HarnessStatus["host"] {
 }
 /**
  * GET /api/status `quota` (issue #404): null on a healthy mothership, which is the default.
- * `?quota=paused` parks the queue behind a Claude session limit so the cockpit's global banner is
- * exercisable — and flags the mock's stopped colony quota-parked to match, so Resume all has
- * something to resume.
+ * `?quota=paused` parks the queue behind the BytePlus plan's limit (the subagent and background
+ * roles route there) so the cockpit's global banner is exercisable — and flags the mock's stopped
+ * colony quota-parked to match, so Resume all has something to resume. `?quota=account` pauses on
+ * the Claude account's own session limit instead, with no colony parked yet.
  */
 export const mockQuotaParam = () => {
   try {
@@ -132,14 +133,30 @@ export const mockQuotaParam = () => {
 };
 
 export function mockQuota(): HarnessStatus["quota"] {
-  if (mockQuotaParam() !== "paused") return null;
+  const param = mockQuotaParam();
+  // Two hours and ten minutes out, so the banner's countdown reads like the real thing.
+  const resetUnix = Math.floor(Date.now() / 1000) + 2 * 3600 + 10 * 60;
+  const resetAt = new Date(resetUnix * 1000).toISOString().replace("T", " ").slice(5, 16) + " UTC";
+  if (param === "account") {
+    return {
+      paused: true,
+      reason: `queue paused — Claude account quota exhausted, resets ${resetAt} (0 waiting)`,
+      reset_at: resetAt,
+      reset_unix: resetUnix,
+      providers: [],
+      kind: "account",
+      provider_details: [{ id: "anthropic", name: "Claude", used_by: ["orchestrator"] }],
+    };
+  }
+  if (param !== "paused") return null;
   return {
     paused: true,
-    reason: "Claude session limit reached",
-    reset_at: "09-23 07:54 UTC",
-    reset_unix: 1_789_000_000,
-    providers: [],
-    kind: "account",
+    reason: `queue paused — BytePlus plan exhausted, resets ${resetAt} (1 waiting)`,
+    reset_at: resetAt,
+    reset_unix: resetUnix,
+    providers: ["byteplus"],
+    kind: "provider",
+    provider_details: [{ id: "byteplus", name: "BytePlus", used_by: ["subagents", "background"] }],
   };
 }
 
@@ -281,8 +298,8 @@ export function hostMock(ms: MockState): HostApi {
         avg_latency_ms: p.health?.avg_latency_ms ?? 0,
         degraded: p.health?.degraded ?? false,
       })),
-      // The cockpit's global session-limit banner (issue #404); null by default, paused
-      // behind a Claude session limit under `?quota=paused`.
+      // The cockpit's global plan-limit banner (issue #404); null by default, paused behind the
+      // BytePlus plan under `?quota=paused` and the Claude account under `?quota=account`.
       quota: mockQuota(),
     };
       }),
