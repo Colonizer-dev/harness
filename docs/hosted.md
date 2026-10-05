@@ -172,6 +172,34 @@ field records it today — `OrgSettings` (`crates/colonizer/src/orgs.rs`) carrie
 stack, egress, memory, watchdog and notifications, nothing about deployment targets — so the
 follow-up adds a field there, where the other per-org decisions live.
 
+## Billing
+
+Paid plans go through [Polar](https://polar.sh) as Merchant of Record
+([#941](https://github.com/Colonizer-dev/harness/issues/941)): there is no company yet, so Polar is
+the legal seller — it handles VAT and sales tax and pays the founder out, which is why this is not
+Stripe. The integration runs through Cratefield's Payments port, whose `cratefield-adapter-polar`
+(0.2.0) turns verified `PolarEvent`s into this crate's events. It needs cratefield-core ^0.8 while
+the harness pins 0.7, so it is not a dependency yet.
+
+What exists is the state machine and nothing else, in `crates/colonizer-billing`: no IO, no clock,
+no network. `Account::apply` folds one event in and returns the `AuditEntry` values the caller
+appends to the activity log, so "why is this account on the free limits?" is answerable;
+`FREE_LIMITS` is the fallback, and a caller-owned `Catalog` is the price list, so a product id this
+deployment does not sell gets the free limits rather than a guess.
+
+The policy it encodes: non-payment only ever changes limits. A lapsed, unpaid or lost-dispute
+account keeps its colonies, its history and its files and falls back to `FREE_LIMITS`. An open
+dispute flags the account and pauses the paid features — the safe reading of a chargeback, since
+the money is on its way back to the cardholder; several can be open at once and the account stays
+paused until the last resolves. Winning the last one restores the plan, losing drops it, and the
+account may buy the plan again — whether Polar sells to that customer is Polar's call. The state
+is serialized so it survives a restart, and every step is audited.
+
+`PLANNED`: the Polar dependency, the verified webhook route, the "Upgrade" checkout and "Manage
+billing" portal links, persisting the account's state, applying the limits to `max_parallel`,
+writing audit entries to the log, usage meters (no usage-based part is priced), the paid tiers
+themselves, and terms naming Polar as Merchant of Record before paid plans launch.
+
 ## Follow-ups
 
 Each of these is unbuilt; naming them keeps them out of the contract above: the hosted service
