@@ -836,7 +836,7 @@ fn plan_every_org(
 /// Restarts a colony so its next boot reads its new model settings: a live or parked one is stopped
 /// (its microVM taken down, the worktree kept) and resumed cold; a stopped one is resumed; a queued
 /// one boots with them anyway.
-async fn restart(app: &Shared, id: &str) -> Result<(), String> {
+pub(crate) async fn restart(app: &Shared, id: &str) -> Result<(), String> {
     let Some(s) = app.session(id).await else {
         return Err("no such session".into());
     };

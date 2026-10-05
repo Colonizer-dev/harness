@@ -603,6 +603,12 @@ const RULES: &[Rule] = &[
         Target::Named("Colonizer", "updates"),
     ),
     rule(
+        "POST",
+        "/api/update/restart",
+        "app.update",
+        Target::Fixed("restarted colonies on the new version", "updates"),
+    ),
+    rule(
         "PUT",
         "/api/memory/mem0",
         "settings.save",

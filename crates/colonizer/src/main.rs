@@ -152,6 +152,7 @@ mod ts_any_loop;
 mod uhp;
 mod uhp_responses;
 mod update;
+mod update_notices;
 mod upload;
 mod usage;
 mod util;
