@@ -1,0 +1,2 @@
+/api/handoff                                         POST   unauth=401    token=launch           activity=colony.handoff
+/api/sessions/{id}/handoff                           GET    unauth=401    token=session>=read    activity=-

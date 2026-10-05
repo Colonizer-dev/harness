@@ -251,6 +251,26 @@ The Launch view is the full launcher: pick a repository, select one or many issu
 checks for duplicates and queues past the parallel limit. Reach it from Colonize's **launch form**
 link, the Nest's **DIG** chamber, or **More → Launch** on a phone.
 
+### Hand-off with a local session
+
+Two flows move a conversation between a developer's machine and a colony.
+
+**Continue in a colony** (Launch view): upload a txcript **Simple JSON** export of a local Claude
+Code, Codex or OpenCode session — a JSON object with a `messages` array, 2 MiB at most — name the
+repository as `owner/name`, and the form prefills the branch and title the file carries. The colony
+starts from that branch and continues where the local session stopped.
+
+**Continue locally** (a colony's header): **Continue locally** downloads the colony's conversation
+as `colony.json` and shows the two commands to run at a checkout of the repository:
+
+```sh
+git fetch origin <colony branch> && git switch <colony branch>
+txcript continue ./colony.json --with claude_code
+```
+
+The `--with` value is `codex` (or `opencode`) when the colony's agent, or the exported transcript's
+tool names, say so.
+
 ## Chat
 
 **Sidebar: Chat.**

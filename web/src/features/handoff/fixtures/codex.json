@@ -1,0 +1,20 @@
+{
+  "id": "cx_3d81c0aa",
+  "timestamp": "2026-09-29T09:30:00Z",
+  "cwd": "/home/dev/acme/api",
+  "git_branch": "main",
+  "title": "Add idempotency keys to refunds",
+  "model": "gpt-5-codex",
+  "messages": [
+    { "role": "user", "content": "Add idempotency keys to the refund endpoint so a retry cannot double-refund." },
+    { "role": "assistant", "content": [{ "type": "tool_use", "id": "call_01", "name": "shell", "input": { "command": ["bash", "-lc", "sed -n '1,40p' src/refunds.rs"] } }] },
+    { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_01", "content": "fn refund(...) { /* ... */ }" }] },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "I'll add an Idempotency-Key header check before the refund is written." },
+        { "type": "tool_use", "id": "call_02", "name": "exec_command", "input": { "command": ["cargo", "test", "-p", "api", "refunds"] } }
+      ]
+    }
+  ]
+}

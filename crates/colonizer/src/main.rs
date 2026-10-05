@@ -62,6 +62,7 @@ mod gateway;
 mod gateway_audit;
 mod github;
 mod graft;
+mod handoff;
 mod headroom;
 mod history;
 mod hotspots;

@@ -7,6 +7,7 @@ import type { ReactElement } from "react";
 import { Page } from "./Page";
 
 import { NewSession } from "../components/Sidebar";
+import { HandoffIn } from "../features/handoff/HandoffIn";
 import type { Session } from "../types";
 
 export function LaunchView({
@@ -58,6 +59,9 @@ export function LaunchView({
           onCreated={onCreated}
           onOpenSettings={onOpenSettings}
         />
+      </div>
+      <div className="mt-4">
+        <HandoffIn onCreated={onCreated} />
       </div>
     </Page>
   );
