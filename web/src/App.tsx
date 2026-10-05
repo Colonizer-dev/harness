@@ -42,6 +42,7 @@ import { orgEntries, pendingOrgPrompts, reconcileSelectedOrg } from "./orgs";
 import { usePushPresence } from "./push";
 import { setupView, stackPresetOf, type SetupView } from "./setup";
 import { UpdatePrompt } from "./components/UpdatePrompt";
+import { LiveMapPrompt, PHONE_QUERY, liveMapPlacement } from "./components/LiveMapPrompt";
 import { useAppUpdate } from "./installApp";
 import { useImagePull } from "./useImagePull";
 import { usePollTick } from "./usePollTick";
@@ -68,6 +69,7 @@ export function App() {
   // (issue #516): below `sm` the cockpit hides its rail and shows the mobile tab bar instead, so
   // the "done when" flows — inbox, answering, colony chat, the Nest — are its own at 390px.
   const narrow = useMediaQuery("(min-width: 640px) and (max-width: 899px)");
+  const phone = useMediaQuery(PHONE_QUERY);
   const [status, setStatus] = useState<HarnessStatus | null>(null);
   const [statusError, setStatusError] = useState(false);
   // Self plus every peer configured via COLONIZER_FLEET_PEERS (issue #231); older mothership builds
@@ -612,6 +614,13 @@ export function App() {
   // The Setup checklist's live-map row replaces this prompt wherever Setup has been shown;
   // a mothership already set up still gets asked, in memory, on its first load of the page.
   const liveMapPrompt = telemetry !== null && telemetry.enabled === null && !telemetry.blocked_by && !settingsOpen && status !== null && !setupShown;
+  // On a phone the prompt joins the page flow (the top of the Nest and the Inbox) instead of a
+  // fixed sheet that covered whatever sat under it; desktop keeps the corner card.
+  const liveMapInline = liveMapPrompt && liveMapPlacement(phone) === "inline";
+  const openLiveMapDetails = () => {
+    setSettingsSection("live-map");
+    setSettingsOpen(true);
+  };
 
   const sidebar = (
     <Sidebar
@@ -807,6 +816,7 @@ export function App() {
               onInspectorShown={setInspectorShown}
               colony={colonyPane}
               memory={memoryPane}
+              notice={liveMapInline ? <LiveMapPrompt inline onAnswered={setTelemetry} onDetails={openLiveMapDetails} /> : null}
             />
           </div>
         </div>
@@ -836,7 +846,7 @@ export function App() {
         onSetupShown={() => setSetupShown(true)}
         onSetupDismissed={dismissSetup}
       />
-      {(storageAlert || liveMapPrompt || appUpdate.ready) && (
+      {(storageAlert || (liveMapPrompt && !liveMapInline) || appUpdate.ready) && (
         // The fixed cards live in the same corner; the shared column keeps them stacked and clickable.
         <div className={cx("fixed z-30 flex flex-col gap-3", floatingColumnClass(narrow, inspectorShown))}>
           {storageAlert && (
@@ -845,15 +855,7 @@ export function App() {
               onDismiss={() => setDismissedStorage((dismissed) => dismissStorageAlert(dismissed, storageAlert))}
             />
           )}
-          {liveMapPrompt && (
-            <LiveMapPrompt
-              onAnswered={setTelemetry}
-              onDetails={() => {
-                setSettingsSection("live-map");
-                setSettingsOpen(true);
-              }}
-            />
-          )}
+          {liveMapPrompt && !liveMapInline && <LiveMapPrompt onAnswered={setTelemetry} onDetails={openLiveMapDetails} />}
           {appUpdate.ready && <UpdatePrompt />}
         </div>
       )}
@@ -866,47 +868,6 @@ export function App() {
       </div>
     </div>
     </SecretsNavContext.Provider>
-  );
-}
-
-/** Asked once, after setup: the live map stays off until the user says otherwise (docs/telemetry.md). */
-function LiveMapPrompt({
-  onAnswered,
-  onDetails,
-}: {
-  onAnswered: (telemetry: TelemetryStatus) => void;
-  onDetails: () => void;
-}) {
-  const api = useApi();
-  const [busy, setBusy] = useState(false);
-  const answer = async (enabled: boolean) => {
-    setBusy(true);
-    try {
-      onAnswered(await api.setTelemetry(enabled));
-    } catch {
-      setBusy(false);
-    }
-  };
-  return (
-    <div role="region" aria-label="Live map" className="rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]">
-      <p className="text-[14px] font-semibold">Put this mothership on the live map?</p>
-      <p className="mt-1.5 text-[12.5px] text-muted">
-        colonizer.dev/live shows where colonies are running, to within about 25 km. If yours is the only mothership in its area,
-        that dot is you. It gets a heartbeat every 5 minutes: a random id, the version, the platform and how many colonies run.
-        Nothing about your code. Off unless you say yes.
-      </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button variant="primary" size="sm" disabled={busy} onClick={() => void answer(true)}>
-          Show on the map
-        </Button>
-        <Button size="sm" disabled={busy} onClick={() => void answer(false)}>
-          No thanks
-        </Button>
-        <button type="button" onClick={onDetails} className="ml-auto cursor-pointer text-[12.5px] text-accent hover:underline">
-          What is sent
-        </button>
-      </div>
-    </div>
   );
 }
 

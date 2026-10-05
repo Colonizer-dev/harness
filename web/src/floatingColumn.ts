@@ -1,4 +1,4 @@
-// Where the fixed card column (the storage alert and the live-map prompt) sits. It lives on its own
+// Where the fixed card column (the storage alert, and the live-map prompt from `sm` up) sits. It lives on its own
 // so the rule can be pinned in a test without rendering App.
 //
 // The cockpit's inspector is a 360px aside flush with the right edge, and its open-colony and stop
