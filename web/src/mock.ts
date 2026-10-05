@@ -18,6 +18,7 @@ import { eventsMock } from "./features/events/mock";
 import { historyMock } from "./features/history/mock";
 import { handoffMock } from "./features/handoff/mock";
 import { decisionsMock } from "./features/decisions/mock";
+import { modelsMock } from "./features/models/mock";
 
 export { mockSplitLabels, mockDrafts, DEMO_MAP } from "./features/repos/mock";
 
@@ -41,5 +42,6 @@ export function createMockApi(): Api {
     ...historyMock(ms),
     ...handoffMock(ms),
     ...decisionsMock(ms),
+    ...modelsMock(ms),
   };
 }

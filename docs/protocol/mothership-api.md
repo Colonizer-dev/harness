@@ -22,6 +22,8 @@ Part of the [Colonizer protocol](../protocol.md).
 | `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
+| `GET /api/models/assignments` | The header model switcher's view (issue #1051): what every model role resolves to install-wide and per org, with where it comes from; the agent modules with their roles; the models on offer with health and quota (below) |
+| `POST /api/models/switch` | `{scope: "install"\|"org", org?, module?, roles: {role: model\|null}, apply?: "new"\|"running", dry_run?}`: switches a scope's agent module and role models in one validated step, optionally restarting the scope's colonies (below) |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
 `deepseek-v4-pro`. `openai` = `https://api.openai.com`, `bearer`, wire `openai`, models `gpt-5.6`, `gpt-5.5`,
@@ -31,6 +33,51 @@ gateway (§6.5), which calls the `base_url` as saved, so a loopback base URL wor
 
 The agent module schema gains `subagent_model` and `background_model` next to `model` (all free-text
 strings; UIs offer `GET /api/models` as suggestions).
+
+**Switching models (issue #1051).** `GET /api/models/assignments` answers
+
+```json
+{"install": {"module": "claude-code",
+             "roles": [{"role": "model", "title": "Orchestrator model", "value": "claude-opus-5-5",
+                        "source": "install", "org_settable": true}]},
+ "orgs": [{"org": "acme", "module": "claude-code", "module_source": "install", "roles": [ … ]}],
+ "modules": [{"id": "codex", "name": "Codex", "roles": [{"role": "model", "title": "…", "org_settable": true}],
+              "blocked": null}],
+ "models": [{"id": "zai/glm-5", "label": "glm-5 · Z.AI", "provider": "zai", "provider_name": "Z.AI",
+             "wire": "anthropic", "failure_pct": 1.5, "rated": true, "degraded": false, "healthy": true,
+             "out_of_quota": false, "reset_at": null, "reset_unix": null}]}
+```
+
+A module's roles are the string settings of its `module.json` schema named `model`, `*_model` or
+`model_*` (`model`, `subagent_model`, `background_model`, `summary_model`, `small_model`,
+`model_low`, `model_high`), orchestrator first. `source` is `org` (the org's override), `install`
+(the install's agent settings, which apply only to the install's own module) or `default` (the
+module's schema default; an empty `value` is the agent's own default) — what boot resolves. An org
+can override `model`, `subagent_model` and `background_model` (`org_settable`); the other roles are
+install-wide only. `blocked` is why a module cannot launch here, in a launch refusal's words (its
+`requires` preflight, or a Claude login it needs); `null` when it can. `models` is `GET /api/models`
+with each provider's usage health, and `out_of_quota` with its reset while the provider's plan (or,
+for Claude's models, the account's cap) is out.
+
+`POST /api/models/switch` takes `scope: "install"` (the install's agent module settings, which
+every org without an override follows) or `scope: "org"` with `org`. `module` changes the scope's
+agent module (omitted keeps it; `""` returns an org to the install's); a module that cannot launch
+is refused. `roles` maps a role to a model, or to `null`/`""` to clear it — an org's override back to
+the install's value, the install's back to the module's default. Everything is checked before
+anything is saved, and a refusal is a `400` that changes nothing: the role must be one the module
+declares, per org one an org can override; the model must be on offer, not out of quota, and fit
+the role by the quota card's rules (a provider's `model_map`, `summary_model` needing an Anthropic
+key). The save goes through `PUT /api/modules/agent` or `PUT /api/orgs/{org}`'s own handler, so it is
+validated and written as a Settings save is. `apply: "new"` (the default) changes new colonies only.
+`apply: "running"` also moves the scope's colonies — live, parked or queued, on the scope's module,
+in the org (install-wide, every org that does not override the role itself) — whose role resolves to
+something else after the switch: their `model_override`/`subagent_model_override` follow the new
+values, and they restart through the quota card's restart path (a live or parked one stopped and
+resumed cold, a queued one simply boots). `dry_run: true` answers the plan and changes nothing; the
+cockpit counts the colonies with it before asking to restart them. The reply is
+`{dry_run, scope, org, module, changes: [change], affected: [id], colonies: [id], failed: [{id, ok: false, error}]}`,
+`changes` in the quota card's `{scope, target, key, was, now}` shape. Both routes are owner-only: a
+scoped API token gets `403`.
 
 **Org workspaces.** `Session` gains `"org": "<repo owner>"`.
 

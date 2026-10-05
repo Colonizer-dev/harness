@@ -87,6 +87,7 @@ mod memory;
 mod merge_loop;
 mod merge_train;
 mod mesh;
+mod model_switch;
 mod modules;
 mod notify;
 mod observability;

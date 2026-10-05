@@ -57,7 +57,7 @@ export function installModulesMockState(ms: MockState): void {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner", loop_tools: true }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
+      settings: { model: "claude-opus-5-5", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
       schema: {
         type: "object",
         properties: {

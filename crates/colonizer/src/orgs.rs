@@ -735,7 +735,7 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
     }
 }
 
-fn validate(settings: &OrgSettings) -> Result<(), String> {
+pub(crate) fn validate(settings: &OrgSettings) -> Result<(), String> {
     if let Some(agent) = &settings.agent {
         for model in [&agent.model, &agent.subagent_model, &agent.background_model]
             .into_iter()

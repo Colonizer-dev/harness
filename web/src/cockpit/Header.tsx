@@ -1,5 +1,6 @@
 // The cockpit's top bar: the workspaces that have colonies running right now, as avatars at the
-// right, each a filter, then the notifications bell (the inbox) at the far right. (Issues are handed
+// right, each a filter, then the model switcher's chip (issue #1051) and the notifications bell (the
+// inbox) at the far right. (Issues are handed
 // off from Colonize: the sidebar's button, the dashboard's, or ⌘K.) Navigation and the rest of the
 // state live in the sidebar and the views; the bar only speaks up otherwise when something is wrong
 // (the mothership unreachable, the live feed down), plus the one persistent marker: remote access
@@ -60,8 +61,10 @@ export function Header(props: {
   judge?: AutonomyStatus | null;
   /** Opens Settings → Your cockpit: the address to bookmark (issue #867). */
   onOpenCockpit?: () => void;
+  /** The model switcher's chip and popover (issue #1051); absent in static tests, which have no API. */
+  models?: ReactElement;
 }): ReactElement {
-  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit } =
+  const { statusError, connection, inbox, user, remoteOn, onOpenRemote, judge, onOpenCockpit, models } =
     props;
 
   return (
@@ -107,6 +110,8 @@ export function Header(props: {
       )}
 
       <div className="min-w-0 flex-1" />
+
+      {models}
 
       {onOpenCockpit && (
         <button
