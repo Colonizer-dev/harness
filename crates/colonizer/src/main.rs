@@ -45,6 +45,7 @@ mod diagnosis;
 mod disk_cleanup;
 mod docs_loop;
 mod drain;
+mod duplicates;
 mod egress;
 mod epic;
 mod events;

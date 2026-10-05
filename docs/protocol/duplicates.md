@@ -5,6 +5,25 @@ Part of the [Colonizer protocol](../protocol.md).
 [colonies.md](../colonies.md#claims-one-colony-per-issue) tells the same story for an operator;
 this section is the API contract.
 
+**One owner** (issue #832). Every rule below is decided in one place, `duplicates.rs`: the create
+path behind `POST /api/sessions` asks it before anything is created and again under the admission
+lock, and every launcher goes through that path — the cockpit, `colonizer launch`, the MCP tool,
+the API, the colony loops, burn-down, red-team hunters, hand-offs and the merge train's redo. The
+supply-chain loop asks the same function before it dispatches, and the merge-time supersede pass
+reads its supply-chain rule, so a skipped target, a refused launch and a superseded colony are one
+decision. A refusal is a **409** whose body carries the holder beside the message:
+
+```json
+{"error": "colony ab12cd34 is already on #7 and it is running. …",
+ "duplicate": {"kind": "issue", "colony": "ab12cd34", "host": null, "status": "running",
+               "pr_url": null, "issue": 7, "what": "#7", "queueable": true}}
+```
+
+`kind` is `issue`, `supply_chain` or `remote_claim` (another mothership's GitHub claim, which names
+its `host` and, when the claim says, its `colony`); `queueable` says whether `queue_behind_holder`
+would wait for it. The cockpit shows it under the launch with a link to the colony or pull request
+and the Allow duplicate option.
+
 `POST /api/sessions` refuses a second colony on the same `(repo, issue)` while another colony
 holds it: one `queued`, live (`starting`, `running`, `waiting_for_answer`, `idle`), `publishing`,
 or `pr_opened` — answered **409** naming the holder, its state, and its PR URL when one is open.
@@ -67,7 +86,7 @@ land. Contested-claim detection after launch, and label repair, are not implemen
 and repository whose work it covered is marked `superseded` (issue #673). One covers another when
 the first of these holds:
 
-- both carry the same `supply_chain` target (compared trimmed and case-insensitively);
+- their supply-chain claims share a target, by the launch rule below;
 - both are on the same issue;
 - their changed files overlap enough: at least three files in common — lockfiles (`Cargo.lock`,
   `package-lock.json`, `go.sum`, …, matched by name) don't count, so two dependency bumps sharing a
@@ -99,12 +118,22 @@ What happens to a newly marked colony, by its state:
   (§6.3); otherwise it is left open for a person.
 
 `POST /api/sessions/{id}/keep` sets `kept: true`: the hold lifts and the queue starts the colony as
-slots free, while the record stays for the history. Launch-time dedupe mirrors the issue hold: a
-second live colony for one supply-chain target of the same repository is a **409** naming the holder
-and its state (or its open pull request) — a target is refused, not queued behind its holder, and
-there is no `queue_behind_holder` for one — and `allow_duplicate: true` starts one anyway. The check
-runs as a fast pre-check plus an authoritative re-check under the admission write lock, and a
-finished holder leaves its target free to try again.
+slots free, while the record stays for the history.
+
+**Supply-chain targets.** A colony's supply-chain claim is the set of `{package, advisory}` pairs it
+was launched to fix: `supply_chain` (the Packages tab's one target, or `colonizer launch --package
+P --advisory A`) plus `supply_chain_targets` (every finding the supply-chain loop dispatched it
+with; an empty advisory there is a yanked or outdated release). Two claims in one repository are the
+same work when they share a package and its advisory — compared trimmed and case-insensitively —
+and a side that names no advisory matches every advisory of its package. A loop colony from before
+its findings rode on the session is read from the loop's records, and with none it counts as on
+every target of its own `supply-chain:<ecosystem>` origin; a Packages hand-off from before targets
+were recorded claims the package its `Supply chain: <package>` title names. A second launch on a
+held claim is a **409** naming the holder and its state (or its open pull request) — a target is
+refused, not queued behind its holder, so `queue_behind_holder` does not apply — and
+`allow_duplicate: true` starts one anyway. The hold lasts while an issue's would, and while the
+holder is parked too: a parked fix resumes and pushes the same bump. The loop applies the same rule
+before dispatching, so a target it skips is exactly a launch the API would refuse (issue #821).
 
 Module `schema` is a JSON Schema subset (also used for `settings` in agent `module.json` manifests):
 
@@ -167,6 +196,7 @@ needs-you count (the app badge's) until a person has opened the colony; colonies
 field existed load as seen.
 
 `supply_chain` is the `{package, advisory}` target the colony was launched to fix (§4 `POST /api/sessions`),
+`supply_chain_targets` the list of them a supply-chain loop colony was dispatched with,
 and `superseded` is set when a same-repository colony's pull request merged over this one's work
 (*Superseded colony work*, below): `{by, pr_url, pr?, title, reason: "supply_chain"|"issue"|"files", at, kept}`.
 Both are left out entirely on a colony they do not apply to.

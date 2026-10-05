@@ -45,6 +45,11 @@ pub struct NewSession {
     /// `allow_duplicate` overrides.
     #[serde(default)]
     pub supply_chain: Option<crate::supersede::SupplyChainTarget>,
+    /// Every package/advisory pair a supply-chain loop colony is dispatched to fix (issue #832). Each
+    /// claims the work the way `supply_chain` does; an empty advisory claims every advisory of its
+    /// package (a yanked or outdated release has none).
+    #[serde(default)]
+    pub supply_chain_targets: Vec<crate::supersede::SupplyChainTarget>,
     /// Run this colony on a named model tier — `low`, `medium` or `high` — instead of the one the
     /// routing rule picks for the task.
     #[serde(default)]
@@ -109,60 +114,9 @@ pub(crate) fn launch_model(app: &crate::App, raw: Option<&str>, what: &str) -> R
     Ok(Some(model.to_string()))
 }
 
-/// A colony that makes a second one on the same issue a mistake rather than a retry: one still
-/// live or queued, or one whose pull request is open and waiting to be read.
-///
-/// On 2026-09-16/17 `FindsYou-Work/app` issue #7 drew **four** colonies — two of them ten seconds
-/// apart, a double submission — and issue #13 drew two. Three of the four wrote a complete,
-/// working implementation of the same feature; one was merged and the rest were closed unread.
-/// Nothing here refuses the retry that matters: a colony that stopped, failed, found no changes,
-/// or whose pull request is merged or closed leaves the issue free.
-/// Whether `s` is in one of the states that hold its issue against a second colony: still live or
-/// queued somewhere, or published with its pull request open and waiting to be read. The shared
-/// predicate behind [`issue_held_by`] and the boot-time claim reconcile (`claims.rs`).
-pub(crate) fn holds_issue(s: &Session) -> bool {
-    matches!(
-        s.status,
-        SessionStatus::Queued
-            | SessionStatus::Starting
-            | SessionStatus::Running
-            | SessionStatus::WaitingForAnswer
-            | SessionStatus::Idle
-            | SessionStatus::Publishing
-            | SessionStatus::PrOpened
-    )
-}
-
-/// The colony effectively holding `issue`: the first holding session that is not a `claim_wait`
-/// waiter, else — once the holder is gone and only waiters remain — the oldest waiter (issue #321).
-/// The oldest-first tiebreak is what keeps a waiter queue honest: a fresh launch is refused naming,
-/// or queues behind, the waiter whose turn is next, never one that arrived later, and a waiter can
-/// never be jumped by a later one.
-pub(crate) fn issue_held_by(sessions: &[Session], repo: &str, issue: u64) -> Option<Session> {
-    let holding = |s: &Session| holds_issue(s) && s.repo == repo && s.issue == Some(issue);
-    sessions
-        .iter()
-        .find(|s| holding(s) && !s.claim_wait)
-        .or_else(|| sessions.iter().filter(|s| holding(s)).min_by_key(|s| s.created_at))
-        .cloned()
-}
-
-/// The 409 message for a second colony on an issue another colony still holds: the holder, where
-/// its work stands, and the way out. One function, so the fast-path pre-check and the authoritative
-/// in-lock re-check refuse with the same words.
-fn duplicate_message(held: &Session, issue: u64) -> String {
-    let where_it_is = match held.pr_url.as_deref() {
-        Some(url) => format!("its pull request is open at {url}"),
-        None => format!("it is {}", held.status.as_str()),
-    };
-    format!(
-        "colony {} is already on #{issue} and {where_it_is}. Starting a second one duplicates its \
-         work: read that colony first, or pass allow_duplicate (`colonizer launch --allow-duplicate`) \
-         to start another anyway, or queue_behind_holder (`colonizer launch --queue-behind-holder`) \
-         to wait for it.",
-        held.id
-    )
-}
+// The duplicate rules live in one place (issue #832); the queue and the claim reconcile read the
+// issue hold through these names.
+pub(crate) use crate::duplicates::{holds_issue, issue_held_by};
 
 /// Issue #453: the colony a fresh same-repo colony queues behind for overlap, if any — the oldest
 /// live same-repo colony that already has a worktree, and so may be touching files. Pure, so the
@@ -202,7 +156,8 @@ async fn overlap_queue_target(sessions: &[Session], repo: &str) -> Option<String
 /// pre-check in `create` reads under a read lock, so two launches can both pass it before either
 /// inserts — this re-check closes that window, and the loser gets its holder back for a 409.
 /// `Ok` carries the admitted colony, whether it queued, and how many were already waiting;
-/// `Err` carries the colony already holding the issue, and nothing is inserted.
+/// `Err` carries the refusal naming the holder, and nothing is inserted. The rules are the shared
+/// duplicates service's (`duplicates::check`), asked about the work the colony record is on.
 #[allow(clippy::result_large_err, clippy::too_many_arguments)]
 fn try_claim_session(
     sessions: &mut Vec<Session>,
@@ -213,29 +168,26 @@ fn try_claim_session(
     allow_duplicate: bool,
     queue_behind_holder: bool,
     wait_for_parent: bool,
-) -> Result<(Session, bool, usize), Session> {
+) -> Result<(Session, bool, usize), crate::duplicates::Refusal> {
     // Issue #321: a launch that asked to wait its turn is not refused when the issue is held — it
     // is admitted as a `claim_wait` waiter behind whoever effectively holds it, however full or
     // empty the queue. The holder's mark on GitHub stays; the waiter never claims over it.
+    // Issue #673: the supply-chain hold is re-checked beside the issue hold under the same lock, and
+    // is never a queue.
+    let work = crate::duplicates::Work {
+        repo: repo.to_string(),
+        issue,
+        ..crate::duplicates::Work::of(&session)
+    };
     let mut queued_for_holder = false;
-    if let (Some(number), false) = (issue, allow_duplicate)
-        && let Some(held) = issue_held_by(sessions, repo, number)
-    {
-        if !queue_behind_holder {
-            return Err(held);
+    match crate::duplicates::check(sessions, &[], &work, allow_duplicate, queue_behind_holder) {
+        crate::duplicates::Verdict::Refuse(refusal) => return Err(refusal),
+        crate::duplicates::Verdict::Queue(holder) => {
+            queued_for_holder = true;
+            session.claim_wait = true;
+            session.queued_behind = Some(holder);
         }
-        queued_for_holder = true;
-        session.claim_wait = true;
-        session.queued_behind = Some(held.id);
-    }
-    // Issue #673: the supply-chain hold, re-checked beside the issue hold under the same lock — the
-    // pre-check below reads under a read lock, so two launches for one target can both pass it.
-    // `allow_duplicate` overrides, and the holder is handed back for the 409 like an issue's is.
-    if !allow_duplicate
-        && let Some(target) = session.supply_chain.as_ref()
-        && let Some(held) = crate::supersede::supply_chain_held_by(sessions, repo, target)
-    {
-        return Err(held.clone());
+        crate::duplicates::Verdict::Allow => {}
     }
     // A colony still waiting for its parent's branch queues even when a slot is free: booting now
     // would branch from the default branch, which is exactly what stacking exists to avoid. A
@@ -271,7 +223,7 @@ fn try_claim_session(
 /// step, closing that window the way the duplicate re-check does. The claim is boxed: a colony
 /// record is large, and a cap refusal carries only a message.
 enum Admission {
-    Claimed(Box<Result<(Session, bool, usize), Session>>),
+    Claimed(Box<Result<(Session, bool, usize), crate::duplicates::Refusal>>),
     Capped(String),
 }
 
@@ -455,6 +407,18 @@ pub async fn create(
             Some(crate::supersede::SupplyChainTarget::new(&target.package, &target.advisory))
         }
     };
+    // A loop's targets name a package each; the advisory may be empty (it then claims them all).
+    if req.supply_chain_targets.iter().any(|t| t.package.trim().is_empty()) {
+        return Err(client_error(
+            StatusCode::BAD_REQUEST,
+            "every supply-chain target names a package",
+        ));
+    }
+    let supply_chain_targets: Vec<crate::supersede::SupplyChainTarget> = req
+        .supply_chain_targets
+        .iter()
+        .map(|t| crate::supersede::SupplyChainTarget::new(&t.package, &t.advisory))
+        .collect();
     // Relating to the parent (`after`): by default the colony queues until the parent's pull request
     // merges and then starts from the fresh default branch; `stack: true` branches from the parent's
     // branch as soon as it is pushed instead. Whitespace is refused rather than read as nothing — an
@@ -526,29 +490,6 @@ pub async fn create(
             return Err(client_error(StatusCode::CONFLICT, &message));
         }
     }
-    // Issue #321: a launch that asks to `queue_behind_holder` waits for a local holder instead of
-    // being refused. GitHub is checked either way: a conflict attributable to one of this
-    // mothership's own colonies on the issue is the holder being queued behind, while a merged PR
-    // or a claim another mothership holds refuses the launch as ever — cross-mothership queueing
-    // is out of scope.
-    let mut queue_behind_holder = false;
-    if let (Some(issue), false) = (req.issue, req.allow_duplicate)
-        && let Some(held) = issue_held_by(&app.sessions.read().await, &repo, issue)
-    {
-        if !req.queue_behind_holder {
-            return Err(client_error(StatusCode::CONFLICT, &duplicate_message(&held, issue)));
-        }
-        queue_behind_holder = true;
-    }
-    // Issue #673: a second live colony for the same supply-chain target is refused the way a second
-    // colony on one issue is, with the same way out. The authoritative re-check runs in the
-    // admission lock (`try_claim_session`), beside the issue re-check.
-    if let Some(target) = req.supply_chain.as_ref() {
-        let sessions = app.sessions.read().await;
-        if let Some(message) = crate::supersede::launch_refusal(&sessions, &repo, target, req.allow_duplicate) {
-            return Err(client_error(StatusCode::CONFLICT, &message));
-        }
-    }
     // The fleet as placement candidates (issue #688): this member plus the last-known row of every
     // peer the fleet view has polled — cached data only, never a fresh poll. With no fleet this is
     // just this member, and placement below changes nothing but the reason it records.
@@ -556,46 +497,15 @@ pub async fn create(
     // The peers the fleet reads as unreachable: a claim their host left is still refused, but the
     // refusal can say their colony is not being re-run here (issue #688).
     let unreachable_ids: Vec<String> = peers.iter().filter(|c| !c.online).map(|c| c.id.clone()).collect();
-    // A second mothership shares no memory with this one, so the local guard above cannot see its
-    // colonies: the issue itself carries the claim (see claims.rs). A failed lookup degrades to the
-    // local guard rather than refusing the launch.
-    if crate::claims::should_check_remote(req.issue, req.allow_duplicate)
-        && let Some(issue) = req.issue
+    // Issue #832: one answer to "is this work already being done" for every launch path — the
+    // issue hold (or, issue #321, a wait behind a local holder when `queue_behind_holder` asks),
+    // the supply-chain hold (issue #673), and the claim a second mothership left on GitHub. The
+    // authoritative local re-check runs in the admission lock (`try_claim_session`).
+    let work = crate::duplicates::Work::requested(&repo, &req);
+    if let Err(refusal) =
+        crate::duplicates::check_launch(&app, &work, req.allow_duplicate, req.queue_behind_holder, &unreachable_ids).await
     {
-        let checked = crate::claims::check_remote_claim(&app, &repo, issue).await;
-        if let Err(e) = &checked {
-            eprintln!("claims: remote duplicate check for #{issue} in {repo} failed ({e:#}); falling back to the local guard");
-        }
-        let conflict = if let Some(info) = crate::claims::remote_result_or_fallback(checked) {
-            if queue_behind_holder {
-                // The waiter tolerates only a claim of ours — the holder it queues behind, or
-                // another colony on this mothership; `claim_wait_conflict` refuses the rest.
-                let sessions = app.sessions.read().await;
-                let ours: Vec<&str> = sessions
-                    .iter()
-                    .filter(|s| s.repo == repo && s.issue == Some(issue))
-                    .map(|s| s.id.as_str())
-                    .collect();
-                crate::claims::claim_wait_conflict(Some(&info), issue, &ours)
-            } else {
-                // A holder whose host the fleet reads as unreachable is named as such, so the
-                // operator knows its colony is not being re-run elsewhere (issue #688).
-                let mut message = crate::claims::remote_conflict_message(&info, issue);
-                let holder_down = info
-                    .host
-                    .as_deref()
-                    .is_some_and(|host| crate::claims::holder_host_unreachable(host, &unreachable_ids));
-                if holder_down {
-                    message.push_str(crate::claims::UNREACHABLE_HOLDER_NOTE);
-                }
-                Some(message)
-            }
-        } else {
-            None
-        };
-        if let Some(message) = conflict {
-            return Err(client_error(StatusCode::CONFLICT, &message));
-        }
+        return Err(refusal.into_error());
     }
     // Placement (issue #688): a pure policy whose verdict is recorded on the colony. Nothing here
     // executes remotely (issue #298), so an unpinned choice of a peer is recorded and the colony runs
@@ -743,6 +653,7 @@ pub async fn create(
         resume_note: None,
         prewarm: None,
         supply_chain,
+        supply_chain_targets,
         superseded: None,
         // A fresh colony has no suspension behind it for the boot's `restore` to name (issue #700).
         was_suspended: false,
@@ -813,19 +724,11 @@ pub async fn create(
     let (session, queued, waiting) = match claimed {
         Admission::Claimed(claimed) => match *claimed {
             Ok(admitted) => admitted,
-            Err(held) => {
+            Err(refusal) => {
                 // The colony directories created above belong to a colony that never was; take them
                 // back out, best effort, before refusing.
                 let _ = tokio::fs::remove_dir_all(&dir).await;
-                // The claim refuses for an issue's holder or, issue #673, a supply-chain target's;
-                // whichever the holder is, the 409 says so in that hold's own words.
-                let message = match (&req.supply_chain, &held.supply_chain) {
-                    (Some(target), Some(held_target)) if held_target == target && holds_issue(&held) => {
-                        crate::supersede::refusal_message(&held, target)
-                    }
-                    _ => duplicate_message(&held, req.issue.unwrap_or_default()),
-                };
-                return Err(client_error(StatusCode::CONFLICT, &message));
+                return Err(refusal.into_error());
             }
         },
         Admission::Capped(reason) => {

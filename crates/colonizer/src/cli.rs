@@ -186,6 +186,12 @@ enum Command {
         /// Start a colony on an epic — an issue with sub-issues, an `epic` label, or a title marking one — which would otherwise be refused (409)
         #[arg(long)]
         allow_epic: bool,
+        /// Fix this package's supply-chain advisory (with --advisory): a second live colony on the same package and advisory is refused (409), like a held issue
+        #[arg(long, value_name = "PACKAGE", requires = "advisory")]
+        package: Option<String>,
+        /// The advisory --package is fixed for (GHSA-…, RUSTSEC-…)
+        #[arg(long, value_name = "ADVISORY", requires = "package")]
+        advisory: Option<String>,
         /// The task, when the issue alone does not say it (the issue body is read either way)
         task: Option<String>,
     },
@@ -397,7 +403,7 @@ impl RedteamPreset {
 /// chose one, so the publish module's setting decides otherwise; the claim and epic overrides
 /// travel as booleans, each off by default, the same fields the cockpit and the API take.
 #[allow(clippy::too_many_arguments)]
-fn launch_body(
+pub(crate) fn launch_body(
     repo: &str,
     issue: Option<u64>,
     task: Option<String>,
@@ -407,6 +413,7 @@ fn launch_body(
     allow_duplicate: bool,
     queue_behind_holder: bool,
     allow_epic: bool,
+    supply_chain: Option<(String, String)>,
 ) -> Value {
     json!({
         "repo": repo,
@@ -418,6 +425,7 @@ fn launch_body(
         "allow_duplicate": allow_duplicate,
         "queue_behind_holder": queue_behind_holder,
         "allow_epic": allow_epic,
+        "supply_chain": supply_chain.map(|(package, advisory)| json!({"package": package, "advisory": advisory})),
     })
 }
 
@@ -1507,6 +1515,8 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             allow_duplicate,
             queue_behind_holder,
             allow_epic,
+            package,
+            advisory,
             task,
         } => {
             let json = cli.json;
@@ -1529,6 +1539,7 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                     allow_duplicate,
                     queue_behind_holder,
                     allow_epic,
+                    package.zip(advisory),
                 );
                 // A person is launching, so `origin` stays unset: the field marks machine
                 // launchers (the burn-down scheduler, red-team hunters), not this command.
@@ -3494,6 +3505,7 @@ mod tests {
             allow_duplicate,
             queue_behind_holder,
             allow_epic,
+            None,
         );
         assert_eq!(body["allow_duplicate"], json!(true));
         assert_eq!(body["queue_behind_holder"], json!(true));
@@ -3529,6 +3541,7 @@ mod tests {
             allow_duplicate,
             queue_behind_holder,
             allow_epic,
+            None,
         );
         assert_eq!(body["allow_duplicate"], json!(false));
         assert_eq!(body["queue_behind_holder"], json!(false));

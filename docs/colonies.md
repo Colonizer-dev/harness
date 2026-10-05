@@ -135,6 +135,11 @@ On GitHub a launch marks the issue with the `colonizer:claimed` label and a clai
 label comes off when the colony releases the issue. When a mothership starts, it removes marks it
 left behind for colonies that are gone.
 
+One rule decides every duplicate, whoever launches: the cockpit, `colonizer launch`, the API, MCP,
+the loops, burn-down, the red team or a redo. The same answer comes back every way, and a refused
+launch in the cockpit shows who holds the work, with a link to that colony or its pull request
+(or the host, for another mothership's claim) and the **Allow duplicate** option.
+
 **Limits.** The duplicate check only looks at this mothership's colonies. Other motherships are
 seen only through the GitHub label and comment. If a mothership never comes back, its label stays
 until a person removes it. The full rules are in
@@ -161,7 +166,9 @@ open for you — and the publish module's merge train skips it until you keep it
 In the cockpit a superseded colony wears a "Superseded by #N" badge, and while it is held a banner
 offers **Keep** (run it anyway), with **Stop** beside it for a live or queued colony. Launching a
 second colony for a supply-chain target one already holds is refused, not queued behind the holder,
-unless the launch passes `allow_duplicate`.
+unless the launch passes `allow_duplicate`. A target is a package and an advisory; a fix the
+supply-chain loop started holds every finding it was given, so the Packages tab, `colonizer launch
+--package P --advisory A` and the loop refuse the same finding in the same words.
 
 **Limits.** Only this mothership's colonies are compared, and a pull request's file list is capped
 at 500 paths. The API shapes are in

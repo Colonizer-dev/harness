@@ -289,6 +289,8 @@ export interface Session {
   prewarm?: { requested_at: string; started_at?: string | null; ready_at?: string | null } | null;
   /** The supply-chain target this colony was launched to fix (issue #673); absent for a colony launched against none. */
   supply_chain?: { package: string; advisory: string } | null;
+  /** Every package/advisory pair a supply-chain loop colony was dispatched to fix (issue #832); absent otherwise. */
+  supply_chain_targets?: { package: string; advisory: string }[];
   /**
    * Set when a same-repository colony's pull request merged over this one's work (issue #673).
    * While it stands unkept the queue and the resume route hold the colony; absent for a colony no
@@ -470,4 +472,21 @@ export interface SessionDiff {
   removed: number;
   diff: string;
   truncated: boolean;
+}
+
+/**
+ * Who already holds the work a launch was refused for: the 409 body's `duplicate` (duplicates.rs,
+ * issue #832). `colony` is absent for a remote claim found only by its branch or label; `host` is
+ * set only for another mothership's claim; `queueable` says Wait behind the holder would work.
+ */
+export interface DuplicateHolder {
+  kind: "issue" | "supply_chain" | "remote_claim";
+  colony: string | null;
+  host: string | null;
+  status: string | null;
+  pr_url: string | null;
+  issue: number | null;
+  /** The held work in words: `#7`, `lodash / ghsa-1`. */
+  what: string;
+  queueable: boolean;
 }

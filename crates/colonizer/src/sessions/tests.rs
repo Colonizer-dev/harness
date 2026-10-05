@@ -77,6 +77,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         resume_note: None,
         prewarm: None,
         supply_chain: None,
+        supply_chain_targets: Vec::new(),
         superseded: None,
         was_suspended: false,
         last_activity_at: None,
