@@ -1,7 +1,7 @@
 // Modules API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
-import { enc, put, request } from "../../http";
-import type { AutonomyStatus, ModuleInfo } from "./types";
+import { enc, post, put, request } from "../../http";
+import type { AutonomyStatus, ModuleInfo, ObservabilityStatus, ObservabilityTest } from "./types";
 
 export interface SaveModuleRequest {
   provider: string;
@@ -19,10 +19,16 @@ export interface ModulesApi {
   saveModule(kind: string, body: SaveModuleRequest): Promise<ModuleInfo>;
   /** GET /api/autonomy/status (issue #875): the judge's recent health, for Settings and the header chip. */
   autonomyStatus(): Promise<AutonomyStatus>;
+  /** GET /api/observability/status (issue #839): export on or off, why, and the add-on's health. */
+  observabilityStatus(): Promise<ObservabilityStatus>;
+  /** POST /api/observability/test: one test log record and metric point to the saved backend. */
+  observabilityTest(): Promise<ObservabilityTest>;
 }
 
 export const modulesHttp: ModulesApi = {
   modules: () => request("/api/modules"),
   saveModule: (kind, body) => put(`/api/modules/${enc(kind)}`, body),
   autonomyStatus: () => request("/api/autonomy/status"),
+  observabilityStatus: () => request("/api/observability/status"),
+  observabilityTest: () => post("/api/observability/test"),
 };

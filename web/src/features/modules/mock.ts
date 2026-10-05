@@ -28,5 +28,17 @@ export function modulesMock(ms: MockState): ModulesApi {
         consecutive_failures: 0,
         alerted: false,
       })),
+    // Export is off until the module is saved and enabled; the mock never sends anything.
+    observabilityStatus: () =>
+      ms.later(() => {
+        const module = ms.modules.find((m) => m.kind === "observability");
+        return module?.enabled
+          ? { state: "running" as const, configured: true, endpoint: String(module.settings?.endpoint ?? ""), headers: { source: "none" as const, names: [] } }
+          : { state: "off" as const, configured: false, reason: "the observability module is not configured" };
+      }),
+    observabilityTest: async () => {
+      await sleep(400);
+      return { ok: true, signals: { logs: { ok: true, rejected: 0 }, metrics: { ok: true, rejected: 0 } } };
+    },
   };
 }

@@ -1,8 +1,8 @@
 # The observability tailer
 
-The lowest layer of the observability exporter (issue #842), in
-`crates/colonizer/src/observability/`. It is not wired into the running app yet; the multi-source
-tailer (issue #843) will drive it. This note is for maintainers and operators.
+The lowest layer of the observability exporter (issue #842), in the add-on crate
+`crates/colonizer-observability/src/` (`cursor.rs`, `state.rs`). The exporter loop (`exporter.rs`)
+drives it over the sources `sources.rs` lists, one cursor per file and signal. This note is for maintainers and operators.
 
 ## What it reads
 

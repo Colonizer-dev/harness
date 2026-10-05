@@ -1,8 +1,8 @@
 //! The tailer's tests: incremental appends, restarts, rotation, truncation, deletion, oversized
-//! lines, the real activity log's rotation, and a seeded randomised interleaving.
+//! lines, an activity-style rotation, and a seeded randomised interleaving.
 
 use super::*;
-use crate::observability::state::{self, CursorKey, Signal, State};
+use crate::state::{self, CursorKey, Signal, State};
 use serde_json::json;
 use std::{
     io::Write,
@@ -18,7 +18,7 @@ impl Drop for TempRoot {
 }
 
 fn temp(tag: &str) -> TempRoot {
-    let dir = std::env::temp_dir().join(format!("colonizer-tailer-{tag}-{}", crate::util::short_id()));
+    let dir = std::env::temp_dir().join(format!("colonizer-tailer-{tag}-{}", crate::testkit::unique()));
     std::fs::create_dir_all(&dir).unwrap();
     TempRoot(dir)
 }
@@ -188,32 +188,32 @@ fn double_rotation_while_behind_yields_exactly_one_rotated_past_gap() {
     assert_eq!(seqs(&batch), vec![4]);
 }
 
-#[tokio::test]
-async fn the_real_activity_rotation_yields_every_line_exactly_once() {
+/// The activity log's own rotation (`crates/colonizer/src/activity.rs`): append to the live file,
+/// and once it passes its size limit rename it over `activity.jsonl.1` so the next append starts a
+/// fresh live file. Reading after each append must see every line once.
+#[test]
+fn an_activity_style_rotation_yields_every_line_exactly_once() {
     let root = temp("activity");
-    let app = crate::tests::test_app(&root.0);
-    let data = app.cfg.data_dir.clone();
-    let live = data.join(crate::activity::FILE);
-    let rolled = data.join(crate::activity::ROLLED);
+    let live = root.0.join("activity.jsonl");
+    let rolled = root.0.join("activity.jsonl.1");
     let limits = Limits::default();
     let mut cursor = Cursor::default();
     let mut seen: Vec<u64> = Vec::new();
     let mut gaps = 0usize;
 
     // A limit small enough that the log rolls over several times across the run.
-    for _ in 0..12 {
-        crate::activity::record_with_limit(&app, crate::activity::Entry::new("outcome.merged", "you"), 200).await;
-        let batch = read_batch(&live, Some(&rolled), &cursor, &limits).unwrap();
-        for line in &batch.lines {
-            seen.push(line["seq"].as_u64().unwrap());
+    for seq in 1..=12u64 {
+        if std::fs::metadata(&live).map(|m| m.len()).unwrap_or(0) > 20 {
+            let _ = std::fs::rename(&live, &rolled);
         }
+        append(&live, &line(seq));
+        let batch = read_batch(&live, Some(&rolled), &cursor, &limits).unwrap();
+        seen.extend(seqs(&batch));
         gaps += batch.gaps.len();
         cursor = batch.cursor;
     }
     let batch = read_batch(&live, Some(&rolled), &cursor, &limits).unwrap();
-    for line in &batch.lines {
-        seen.push(line["seq"].as_u64().unwrap());
-    }
+    seen.extend(seqs(&batch));
     gaps += batch.gaps.len();
 
     seen.sort_unstable();

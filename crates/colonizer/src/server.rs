@@ -362,6 +362,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::merge_train::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
+        .merge(crate::observability::routes())
         .merge(crate::orgs::routes())
         .merge(crate::packages::routes())
         .merge(crate::phone::routes())
@@ -430,6 +431,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::merge_train::start_tasks(app);
     crate::mesh::start_tasks(app).await;
     crate::notify::start_tasks(app);
+    crate::observability::start_tasks(app);
     crate::publish::start_tasks(app);
     crate::queue::start_tasks(app);
     crate::reclaim::start_tasks(app);
