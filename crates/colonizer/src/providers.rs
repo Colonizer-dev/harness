@@ -1000,6 +1000,61 @@ pub(crate) struct QuotaStatus {
     /// providers (`"provider"`). `None` when the queue is not paused. The cockpit honors it when
     /// present and otherwise derives the scope from `providers`, so older web builds keep working.
     pub kind: Option<String>,
+    /// Each exhausted provider's display name and the model roles that route to it, so the banner
+    /// says "BytePlus plan limit reached, used by subagents" rather than an id. An account pause
+    /// carries one entry for the Claude account itself, with the roles that run on Claude models.
+    pub details: Vec<QuotaProviderDetail>,
+}
+
+/// One exhausted plan, as the cockpit banner names it.
+pub(crate) struct QuotaProviderDetail {
+    /// The provider id, or `anthropic` for the Claude account's own cap.
+    pub id: String,
+    /// The name the operator gave the provider (`BytePlus`), or `Claude` for the account cap.
+    pub name: String,
+    /// Plain-word labels of the roles that route here (`orchestrator`, `subagents`, …).
+    pub used_by: Vec<&'static str>,
+}
+
+impl QuotaProviderDetail {
+    pub(crate) fn to_json(&self) -> Value {
+        json!({"id": self.id, "name": self.name, "used_by": self.used_by})
+    }
+}
+
+/// The plain words for a model setting, as the banner lists what an exhausted plan affects.
+fn role_label(setting: &str) -> &'static str {
+    match setting {
+        "model" => "orchestrator",
+        "subagent_model" => "subagents",
+        "background_model" => "background",
+        "small_model" => "small model",
+        "model_low" => "small tasks",
+        "model_high" => "large tasks",
+        _ => "other roles",
+    }
+}
+
+/// The roles that run on the Claude account rather than a configured provider: every model setting
+/// whose value names no provider's model. An empty setting is the agent's own default, which is a
+/// Claude model, so it counts too — but only the orchestrator, since the others fall back to it.
+fn claude_used_by(providers: &[Provider], envs: &[Map<String, Value>]) -> Vec<&'static str> {
+    let mut used: Vec<&'static str> = Vec::new();
+    for env in envs {
+        for (var, setting) in MODEL_VARS.iter().zip(SETTING_NAMES) {
+            let value = env.get(*var).and_then(Value::as_str).unwrap_or_default().trim();
+            let on_claude = if value.is_empty() {
+                setting == "model"
+            } else {
+                !providers.iter().any(|p| names_model_on(value, &p.id))
+            };
+            let label = role_label(setting);
+            if on_claude && !used.contains(&label) {
+                used.push(label);
+            }
+        }
+    }
+    used
 }
 
 pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
@@ -1019,6 +1074,12 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             record.as_ref().and_then(|q| q.reset_unix),
             waiting,
         );
+        let envs = runner_envs(app).await;
+        let details = vec![QuotaProviderDetail {
+            id: "anthropic".to_string(),
+            name: "Claude".to_string(),
+            used_by: claude_used_by(&app.providers(), &envs),
+        }];
         return QuotaStatus {
             paused: true,
             reason: Some(pause.reason),
@@ -1026,6 +1087,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_unix: pause.reset_unix,
             providers: pause.providers,
             kind: Some("account".to_string()),
+            details,
         };
     }
     let envs = runner_envs(app).await;
@@ -1037,6 +1099,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             let hit = exhausted.iter().find(|(id, _, _)| id == &p.id);
             provider_quota::ProviderQuota {
                 id: p.id.clone(),
+                name: p.name.clone(),
                 exhausted: hit.is_some(),
                 reset_at: hit.and_then(|(_, reset, _)| reset.clone()),
                 reset_unix: hit.and_then(|(_, _, unix)| *unix),
@@ -1045,14 +1108,32 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
         })
         .collect();
     match provider_quota::quota_pause(&states, waiting) {
-        Some(pause) => QuotaStatus {
-            paused: true,
-            reason: Some(pause.reason),
-            reset_at: pause.reset_at,
-            reset_unix: pause.reset_unix,
-            providers: pause.providers,
-            kind: Some("provider".to_string()),
-        },
+        Some(pause) => {
+            let details = pause
+                .providers
+                .iter()
+                .map(|id| QuotaProviderDetail {
+                    id: id.clone(),
+                    name: providers
+                        .iter()
+                        .find(|p| &p.id == id)
+                        .map(|p| p.name.trim())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id)
+                        .to_string(),
+                    used_by: used_by(id, &envs).into_iter().map(role_label).collect(),
+                })
+                .collect();
+            QuotaStatus {
+                paused: true,
+                reason: Some(pause.reason),
+                reset_at: pause.reset_at,
+                reset_unix: pause.reset_unix,
+                providers: pause.providers,
+                kind: Some("provider".to_string()),
+                details,
+            }
+        }
         None => QuotaStatus {
             paused: false,
             reason: None,
@@ -1060,6 +1141,7 @@ pub(crate) async fn quota_status(app: &Shared) -> QuotaStatus {
             reset_unix: None,
             providers: Vec::new(),
             kind: None,
+            details: Vec::new(),
         },
     }
 }
@@ -2068,6 +2150,23 @@ mod tests {
         env.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("two words/x"));
         env.insert("COLONIZER_BACKGROUND_MODEL".into(), json!(".hidden/x"));
         assert_eq!(routes.unusable_route("claude-code", &env), None);
+    }
+
+    #[test]
+    fn claude_used_by_names_the_roles_left_on_claude_models() {
+        let mut global = Map::new();
+        global.insert("COLONIZER_MODEL".into(), json!("opus"));
+        global.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("byteplus/seed-2.0-code"));
+        global.insert("COLONIZER_BACKGROUND_MODEL".into(), json!("haiku"));
+        let providers = vec![provider("byteplus")];
+        assert_eq!(claude_used_by(&providers, &[global]), vec!["orchestrator", "background"]);
+        // An unset orchestrator is the agent's own default, a Claude model; an unset subagent model
+        // follows the orchestrator, so it is not counted twice.
+        let mut routed = Map::new();
+        routed.insert("COLONIZER_SUBAGENT_MODEL".into(), json!("byteplus/seed-2.0-code"));
+        assert_eq!(claude_used_by(&providers, &[routed]), vec!["orchestrator"]);
+        assert_eq!(role_label("subagent_model"), "subagents");
+        assert_eq!(role_label("model_high"), "large tasks");
     }
 
     #[test]

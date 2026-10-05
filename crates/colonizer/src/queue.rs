@@ -2337,6 +2337,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_provider_pause_names_the_provider_by_its_display_name_never_claude() {
+        let root = std::env::temp_dir().join(format!("colonizer-quota-name-{}", crate::util::short_id()));
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let body = json!([{"id": "byteplus", "name": "BytePlus", "base_url": "http://127.0.0.1:1", "auth": "none"}]);
+        std::fs::write(root.join("config/providers.json"), serde_json::to_vec(&body).unwrap()).unwrap();
+        let app = crate::tests::test_app(&root);
+        app.gateway
+            .mark_quota_exhausted("byteplus", Some("10-05 19:51:58".into()), Some(Utc::now().timestamp() + 3600));
+        let status = crate::providers::quota_status(&app).await;
+        assert!(status.paused);
+        assert_eq!(status.kind.as_deref(), Some("provider"));
+        assert_eq!(status.providers, vec!["byteplus".to_string()]);
+        let reason = status.reason.clone().unwrap_or_default();
+        assert!(reason.contains("BytePlus plan exhausted"), "{reason}");
+        assert!(
+            !reason.contains("Claude"),
+            "a non-Anthropic plan is never called Claude: {reason}"
+        );
+        assert_eq!(status.details.len(), 1);
+        assert_eq!(status.details[0].id, "byteplus");
+        assert_eq!(status.details[0].name, "BytePlus");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn a_draining_mothership_admits_nothing_until_the_drain_is_cleared() {
         let root = std::env::temp_dir().join(format!("colonizer-drain-hold-{}", crate::util::short_id()));
         let app = crate::tests::test_app(&root);
