@@ -343,6 +343,19 @@ pub fn question_payload(
     value
 }
 
+/// Where an out-of-quota push opens (issue #767): the Inbox, where the provider's card is.
+pub const QUOTA_URL: &str = "/?view=inbox";
+
+/// The out-of-quota push (issue #767): the five keys of [`payload`], linking to the Inbox that
+/// shows the card and tagged per provider, so a second push about the same provider replaces the
+/// first on the device instead of stacking. No `colony` key: the card is about many.
+pub fn quota_payload(provider: &str, text: &str, prefs: &Prefs, badge: Option<usize>) -> Value {
+    let mut value = payload(push_prefs::QUOTA, text, None, prefs, badge);
+    value["url"] = json!(QUOTA_URL);
+    value["tag"] = json!(format!("quota-{provider}"));
+    value
+}
+
 /// The short title per event. A notification shade has room for one line of sense, not a sentence.
 fn title(event: &str) -> &'static str {
     match event {
@@ -351,6 +364,7 @@ fn title(event: &str) -> &'static str {
         "failed" => "Colony failed",
         "pull_request" => "Pull request opened",
         "provider_degraded" => "Provider degraded",
+        push_prefs::QUOTA => "Provider out of quota",
         "needs_rebase" => "Needs rebase",
         "digest" => "Colony digest",
         _ => "Colonizer",
@@ -863,6 +877,53 @@ pub async fn deliver(app: &App, client: &reqwest::Client, event: &str, text: &st
         sent |= send_one(app, client, &key, subscription, &body, urgency, colony).await;
     }
     sent
+}
+
+/// The push channel for an out-of-quota card (issue #767): one push per provider, to every device
+/// whose own preferences take the event for at least one of the card's colonies
+/// ([`push_prefs::allows_any`]). Carries the one line notify built — provider name and reset time,
+/// never anything a colony said.
+pub async fn deliver_quota(app: &App, client: &reqwest::Client, provider: &str, text: &str, colonies: &[Session]) -> bool {
+    let list = match load(&app.cfg.config_dir) {
+        Ok(list) => list,
+        Err(e) => {
+            eprintln!("push: the subscription list could not be read ({e:#}); nothing sent");
+            return false;
+        }
+    };
+    if list.is_empty() {
+        return false;
+    }
+    let key = match signing_key(app) {
+        Ok(key) => key,
+        Err(e) => {
+            eprintln!("push: the VAPID key is unavailable ({e:#}); nothing sent");
+            return false;
+        }
+    };
+    let badge = attention_count(&app.sessions.read().await);
+    let mut sent = false;
+    for subscription in quota_recipients(&list, colonies, Utc::now().timestamp()) {
+        let body = quota_payload(
+            provider,
+            text,
+            &subscription.prefs,
+            push_prefs::badge(&subscription.prefs, badge),
+        );
+        let Ok(body) = serde_json::to_vec(&body) else { continue };
+        sent |= send_one(app, client, &key, subscription, &body, "normal", None).await;
+    }
+    sent
+}
+
+/// The devices an out-of-quota card reaches: [`recipients`] over several colonies at once.
+fn quota_recipients<'a>(list: &'a [Subscription], colonies: &[Session], now: i64) -> Vec<&'a Subscription> {
+    list.iter()
+        .filter(|subscription| {
+            let seen = push_prefs::presence_of(&subscription.id);
+            push_prefs::allows_any(&subscription.prefs, push_prefs::QUOTA, colonies, now, seen.as_ref())
+        })
+        .collect()
 }
 
 /// The devices one event reaches: each subscription's own [`push_prefs::allows`] — its switch,
@@ -1608,9 +1669,14 @@ pub(crate) mod tests {
         }
     }
 
+    /// A device's public key bytes, as the sender encrypted to them.
+    pub(crate) fn ua_public(device: &Device) -> Vec<u8> {
+        un_b64url(&device.subscription.p256dh).unwrap()
+    }
+
     /// The receiver's ECDH: the shared secret with a sender's ephemeral point, under the
     /// subscription's private half.
-    fn agree(device: &mut Device, as_public: &[u8]) -> Vec<u8> {
+    pub(crate) fn agree(device: &mut Device, as_public: &[u8]) -> Vec<u8> {
         agreement::agree_ephemeral(
             device.private.take().unwrap(),
             &agreement::UnparsedPublicKey::new(&agreement::ECDH_P256, as_public),
@@ -1622,7 +1688,7 @@ pub(crate) mod tests {
     /// The RFC 8291 receiver, the inverse of [`seal`]: the key schedule run back out of the body's
     /// own header, one AES-GCM open, the 0x02 delimiter stripped. Pinned against the RFC's worked
     /// example, and the end-to-end test reads its captures through it.
-    fn unseal(ecdh_secret: &[u8], ua_public: &[u8], auth_secret: &[u8], body: &[u8]) -> Vec<u8> {
+    pub(crate) fn unseal(ecdh_secret: &[u8], ua_public: &[u8], auth_secret: &[u8], body: &[u8]) -> Vec<u8> {
         // The header: salt(16) || rs(4) || keyid length(1) || keyid, the sender's ephemeral point.
         let salt = &body[..16];
         let keyid_len = body[20] as usize;

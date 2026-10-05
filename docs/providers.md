@@ -131,7 +131,10 @@ them so the form prefills.
   connection's `fallback_model` — a Claude model, or a model on a same-wire connection — so the next
   exhaustion retries on it by itself. **Wait until reset**
   parks them and resumes them at the reset. **Stop** stops them. The API is
-  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5).
+  `GET /api/attention` and `POST /api/providers/{id}/quota-action` (docs/protocol.md §6.5). With the
+  notify module on, a card opening is also one notification per provider (`on_quota`, and the
+  device's "Provider out of quota" switch for Web Push) naming the provider and its reset; tapping
+  it opens the Inbox.
 - **`trusted`** — off by default. A colony whose task names restricted paths (secrets, `.env` files,
   infrastructure config) may only reach a connection marked `trusted: true`; any other answers `403`
   and the colony log says why. The launch resolves the orchestrator, subagent, background and small

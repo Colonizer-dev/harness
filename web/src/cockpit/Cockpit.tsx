@@ -14,7 +14,7 @@ import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewF
 import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
-import { colonyFromUrl } from "../push";
+import { colonyFromUrl, pushTarget } from "../push";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -415,8 +415,10 @@ export function Cockpit({
       if (event.origin !== window.location.origin) return;
       const data = event.data as { type?: string; url?: unknown } | null;
       if (data?.type !== "colonizer:open" || typeof data.url !== "string") return;
-      const id = colonyFromUrl(data.url);
-      if (id) setDeeplink(id);
+      // A colony push opens the colony; the out-of-quota push (issue #767) opens the Inbox card.
+      const target = pushTarget(data.url);
+      if (target && "colony" in target) setDeeplink(target.colony);
+      else if (target) setView(target.view);
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
