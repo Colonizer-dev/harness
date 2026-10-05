@@ -100,6 +100,29 @@ async fn config_disables(fetch: &Fetch, repo: &str) -> Result<bool> {
     Ok(enabled == Some(false))
 }
 
+/// `max_prs_per_day` under the `[colonizer]` table of `.colonizer/config.toml`: the repo's override
+/// of [`crate::publish::DEFAULT_MAX_PRS_PER_DAY`] (issue #910). `None` when the file is missing,
+/// empty, unreadable, unparseable or sets no such key — the caller then applies the default, the
+/// same best effort as [`config_disables`]. A `0` is uncapped.
+pub async fn max_prs_per_day(fetch: &Fetch, repo: &str) -> Option<u64> {
+    let file = fetch(format!("repos/{repo}/contents/{CONFIG_FILE_PATH}")).await.ok()?;
+    let content = file["content"].as_str().unwrap_or_default().replace(['\n', '\r'], "");
+    if content.is_empty() {
+        return None;
+    }
+    let bytes = crate::util::b64_decode(&content)?;
+    let text = String::from_utf8(bytes).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    let per_day = value
+        .as_table()
+        .and_then(|t| t.get("colonizer"))
+        .and_then(toml::Value::as_table)
+        .and_then(|t| t.get("max_prs_per_day"))
+        .and_then(toml::Value::as_integer);
+    // A negative cap is nonsense rather than an uncapped one: it is read as no cap at all.
+    Some(per_day?.max(0) as u64)
+}
+
 /// The 409's words: which opt-out the repo set, and how it can be lifted.
 fn refusal_message(repo: &str, reason: &str) -> String {
     format!(
@@ -241,6 +264,39 @@ mod tests {
             recording(),
         );
         assert_eq!(launch_refusal(&broken, "acme/app", None).await, None);
+    }
+
+    #[tokio::test]
+    async fn the_repos_own_daily_pr_cap_is_read_from_its_config() {
+        // The cap a repo sets beside its `enabled` key, and the shapes that leave it unset.
+        for (text, want) in [
+            ("[colonizer]\nmax_prs_per_day = 12\n", Some(12)),
+            ("[colonizer]\nenabled = true\nmax_prs_per_day = 1\n", Some(1)),
+            // `0` is uncapped, and a negative number is nonsense read as no cap.
+            ("[colonizer]\nmax_prs_per_day = 0\n", Some(0)),
+            ("[colonizer]\nmax_prs_per_day = -3\n", Some(0)),
+            ("[colonizer]\nenabled = false\n", None),
+            ("[other]\nmax_prs_per_day = 9\n", None),
+            ("[colonizer]\nmax_prs_per_day = \"many\"\n", None),
+            ("", None),
+        ] {
+            let fetch = fake(
+                vec![("repos/acme/app/contents/.colonizer/config.toml", config_content(text))],
+                recording(),
+            );
+            assert_eq!(max_prs_per_day(&fetch, "acme/app").await, want, "{text:?}");
+        }
+
+        // A repo with no config file at all (or an unreadable one) is the default's business.
+        assert_eq!(max_prs_per_day(&fake(vec![], recording()), "acme/app").await, None);
+        let broken = fake(
+            vec![(
+                "repos/acme/app/contents/.colonizer/config.toml",
+                json!({"content": "not base64 !!"}),
+            )],
+            recording(),
+        );
+        assert_eq!(max_prs_per_day(&broken, "acme/app").await, None);
     }
 
     #[test]

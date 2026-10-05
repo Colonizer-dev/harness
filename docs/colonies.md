@@ -202,6 +202,34 @@ a maintainer's wishes. It is not an access control. Like the epic guard, it is b
 missing file or label is simply no signal, and only a config file that exists but cannot be read is
 logged and ignored.
 
+## A repo's daily PR cap
+
+Colonies open pull requests; a repository would rather be handed a few than be flooded. So a repo
+can have at most **5 pull requests opened per UTC day** — the cap every repo starts with, because
+most would rather colonies trickle changes in than have twenty land at once.
+
+The cap is checked when a pull request is about to be opened, not at launch, so a colony that runs
+out of room is the only thing delayed. The Create PR press and autopilot's verdict both go through
+the same check, so neither can outrun it, and a publish already in flight counts toward the cap —
+so two presses at once cannot both slip a sixth one through. A colony that hits the cap is
+**parked** with the reason `repo_pr_rate_limit`: it keeps its worktree, its branch and its work, the
+cockpit shows the park and when it resumes, and the queue requeues it on its own once the UTC day
+rolls over — nothing to press. A park releases the colony's slot and tears its microVM down, as
+every park does, unless your org sets `discard_vm = false` (or its worktree cannot be verified, in
+which case the machine is kept for the work in it).
+
+**How to change it.** Set `max_prs_per_day` under the `[colonizer]` table in `.colonizer/config.toml`
+at the repo's root, next to the `enabled` key above:
+
+```toml
+[colonizer]
+max_prs_per_day = 12   # a busier repo's own cap
+```
+
+`0` means uncapped, for a repo that wants none of this. A key that is missing means the default of
+5. Like the opt-out above, the lookup is best effort: if the config file cannot be read, the default
+applies.
+
 ## Questions, and who answers them
 
 An agent asks you something with a multiple-choice question. The colony's status becomes

@@ -39,6 +39,12 @@ pub async fn record_publish_stage(app: &App, id: &str, stage: PublishStage) {
 /// verdict — so every external effect inside can check itself against it (issue #98). A removal
 /// that cannot be confirmed fails the publish before anything touches the worktree.
 pub async fn publish_session(app: Shared, id: String, grant: Option<crate::authority::Grant>) {
+    publish_session_with(app.clone(), id, grant, &crate::epic::gh_fetch(&app)).await
+}
+
+/// [`publish_session`] with the `gh api` fetcher handed in, so a test can answer a repo's config
+/// (issue #910) without shelling out. Production always goes through `epic::gh_fetch`.
+async fn publish_session_with(app: Shared, id: String, grant: Option<crate::authority::Grant>, fetch: &crate::epic::Fetch) {
     // Checked before claiming and tearing down, so a refused push leaves the colony running.
     let Some(current) = app.session(&id).await else { return };
     if let Err(e) = github::check_publish_branch(&current.branch, current.base.as_deref().unwrap_or_default()) {
@@ -54,13 +60,41 @@ pub async fn publish_session(app: Shared, id: String, grant: Option<crate::autho
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
-    // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
-    let Some((s, (claimed, was_live))) = app.update_session(&id, claim_publish).await else {
-        return;
+    // Issue #910: the repo's daily pull-request cap, applied together with the claim, so a colony
+    // over the cap keeps its worktree and its branch and simply waits for tomorrow. The park tears
+    // the microVM down, as every park does, unless the org turns `discard_vm` off (or the worktree
+    // cannot be verified, in which case the machine is kept). The limit is the repo's own
+    // `.colonizer/config.toml` key, defaulting to `DEFAULT_MAX_PRS_PER_DAY`; the count and the claim
+    // that spends it are one step, so two concurrent publishes of one repo cannot both read a count
+    // the other has not spent. Both the operator's press and autopilot's verdict land here, so
+    // neither can outrun the cap.
+    let limit = repo_pr_limit(fetch, &current.repo).await;
+    // The claim captures whether a microVM was live, because the status it leaves behind is
+    // `publishing`; it also comes before the teardown, so a refused publish tears nothing down.
+    let (s, was_live) = match claim_publish_within_daily_cap(&app, &id, limit).await {
+        Claim::Nothing => return,
+        Claim::Capped(message) => {
+            app.session_log(&id, "warn", format!("not publishing: {message}")).await;
+            // Only a live colony has something to park: a stopped, failed or already-parked one has
+            // no agent to release, so the refusal rides on the session's own error instead — the
+            // operator's Create PR press has already been answered 200 by this point.
+            if current.status.is_live() {
+                crate::lifecycle::park_colony(
+                    &app,
+                    &current,
+                    REPO_PR_RATE_LIMIT_REASON,
+                    Some(next_utc_midnight().to_rfc3339()),
+                    message.clone(),
+                    format!("{message} — parked, the worktree is kept, and the colony resumes when the day rolls over"),
+                )
+                .await;
+            } else {
+                app.update_session(&id, |x| x.error = Some(message)).await;
+            }
+            return;
+        }
+        Claim::Claimed { session, was_live } => (*session, was_live),
     };
-    if !claimed {
-        return;
-    }
     let log = app.logger(&id);
     // Every branch below ends at the same gate: the worktree is touched only once the colony's
     // microVM is confirmed gone — `msb rm` ran and the sandbox no longer appears in `msb ls`. A
@@ -112,6 +146,13 @@ pub async fn publish_session(app: Shared, id: String, grant: Option<crate::autho
             app.update_session(&id, |x| {
                 x.status = SessionStatus::PrOpened;
                 x.pr_url = Some(url);
+                // Issue #910: stamped here, not left to the pull-request watcher, which only learns
+                // this from GitHub a minute or more after the PR opened. A repo's daily cap counts
+                // these, and a burst of publishes inside that minute would all read the count
+                // before the watcher filled it in. `apply_pr_facts` keeps the first value it is
+                // given (`pr_opened_at.or(info.created_at)`), so GitHub's own timestamp fills in
+                // only a colony that has none — this stays the moment the PR actually opened.
+                x.pr_opened_at.get_or_insert(Utc::now());
                 x.publish_stage = Some(PublishStage::PrOpened);
             })
             .await;
@@ -1099,7 +1140,7 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
     // is still about. It publishes once it is answered or resumed. Clearing the suspension here is
     // not an option for the same reason: the answer must stay restorable.
     // `pr_allowed` implies the commit and push gates, and fails closed on the kill-switch (#84).
-    let allowed = x.suspended.is_none() && pr_allowed(x.status, x.cleaned_up, x.git_admin_dir.is_some());
+    let allowed = claim_allowed(x);
     // Before the mutation: `publishing` itself is not a live status.
     let was_live = allowed && x.status.is_live();
     if allowed {
@@ -1112,6 +1153,16 @@ pub(crate) fn claim_publish(x: &mut Session) -> (bool, bool) {
         x.parked = None;
     }
     (allowed, was_live)
+}
+
+/// Whether this colony may be claimed for a publish at all: not suspended (issue #562's held
+/// answer) and past the lifecycle gates under [`pr_allowed`], which is also the kill-switch. It is
+/// [`claim_publish`]'s own question, lifted out so the daily-cap gate (issue #910) can ask it
+/// before spending a slot of the repo's budget on a colony that was never going to publish — a
+/// suspended colony, or a second publish call arriving on a session already `Publishing`, must
+/// never be answered by the cap.
+pub(crate) fn claim_allowed(x: &Session) -> bool {
+    x.suspended.is_none() && pr_allowed(x.status, x.cleaned_up, x.git_admin_dir.is_some())
 }
 
 /// Whether a colony can publish: it needs its worktree on disk, no publish already in flight, and a
@@ -1168,6 +1219,127 @@ pub(crate) fn push_allowed(status: SessionStatus, cleaned_up: bool, has_worktree
 
 pub(crate) fn pr_allowed(status: SessionStatus, cleaned_up: bool, has_worktree: bool) -> bool {
     !crate::authority::external_writes_blocked() && push_allowed(status, cleaned_up, has_worktree)
+}
+
+/// Default cap on pull requests one repo can have opened per UTC day, for a repo whose
+/// `.colonizer/config.toml` sets no `max_prs_per_day` of its own (issue #910). Slow rather than
+/// flood: most repositories would rather colonies trickle a few changes in than have twenty pull
+/// requests land in one go.
+pub(crate) const DEFAULT_MAX_PRS_PER_DAY: u64 = 5;
+
+/// The park reason recorded when a repo's daily pull-request cap is reached (issue #910). The
+/// queue's resume pass looks for exactly this, so a colony parked under it rejoins the queue once
+/// the UTC day rolls over.
+pub(crate) const REPO_PR_RATE_LIMIT_REASON: &str = "repo_pr_rate_limit";
+
+/// What the pull requests `repo` has spent today (UTC) come to, out of its daily cap: the ones
+/// already opened ([`Session::pr_opened_at`], stamped the moment a publish opens one) plus the
+/// publishes that have claimed a slot and will open more. The second term is what makes the cap
+/// hold under concurrent publishes: a claimed colony carries `Publishing` and the `updated_at` its
+/// claim stamped, so two colonies of one repo cannot both read a count the other has not spent
+/// yet. That reservation is deliberately undated: a publish claimed at 23:59 is still in flight
+/// after midnight, and releasing its reservation at the day boundary would let a second colony
+/// into a budget the first one is about to spend. Every session counts, not just the token's or
+/// colony's own, because the cap is the repository's. Pure, so the cap is testable without a boot.
+pub(crate) fn repo_pr_budget_spent(sessions: &[Session], repo: &str, now: DateTime<Utc>) -> u64 {
+    let today = now.date_naive();
+    sessions
+        .iter()
+        .filter(|s| s.repo == repo)
+        .filter(|s| s.pr_opened_at.is_some_and(|at| at.date_naive() == today) || s.status == SessionStatus::Publishing)
+        .count() as u64
+}
+
+/// Whether `repo` has spent `limit` or more of its day's pull requests — the words the publish path
+/// refuses a colony with, and parks it under [`REPO_PR_RATE_LIMIT_REASON`]. A `limit` of `0` is no
+/// cap at all: that is how a repo opts out of this gate.
+pub(crate) fn repo_pr_cap_error(sessions: &[Session], repo: &str, limit: u64, now: DateTime<Utc>) -> Option<String> {
+    if limit == 0 {
+        return None;
+    }
+    let spent = repo_pr_budget_spent(sessions, repo, now);
+    (spent >= limit).then(|| {
+        format!(
+            "{repo} has already spent {spent} of its {limit} pull request{} for today (UTC); wait for tomorrow or raise max_prs_per_day in .colonizer/config.toml",
+            if spent == 1 { "" } else { "s" }
+        )
+    })
+}
+
+/// The repo's own daily cap, read from its `.colonizer/config.toml` and falling back to
+/// [`DEFAULT_MAX_PRS_PER_DAY`] (issue #910). Best effort like the repo-config lookups elsewhere:
+/// a config that cannot be read or parsed is simply the default.
+async fn repo_pr_limit(fetch: &crate::epic::Fetch, repo: &str) -> u64 {
+    crate::ignore::max_prs_per_day(fetch, repo)
+        .await
+        .unwrap_or(DEFAULT_MAX_PRS_PER_DAY)
+}
+
+/// What the publish path's claim step decided, the repo's daily cap answered inside the same step
+/// (issue #910).
+pub(crate) enum Claim {
+    /// The colony cannot be claimed from its state, or a publish is already in flight.
+    Nothing,
+    /// The repo's cap is spent: the words to refuse this colony with.
+    Capped(String),
+    /// Claimed: the colony itself, and whether a microVM was live under it.
+    Claimed { session: Box<Session>, was_live: bool },
+}
+
+/// The publish claim, with the repo's daily pull-request cap answered in the same critical section
+/// (issue #910). The cap is a GitHub lookup, so [`repo_pr_limit`] reads it first; the count and
+/// the status flip that spends the slot then happen under one write lock, so the first publisher
+/// to take the lock leaves its colony `Publishing` — a pull request counted as spent by
+/// [`repo_pr_budget_spent`] — and the second one reads that. Hand-rolled rather than
+/// `App::update_session` because the count needs the whole list while the claim needs one entry;
+/// what `update_session` adds here is skipped deliberately: a claim is not a terminal transition,
+/// so only the persist and the broadcast remain, and both are done by hand below.
+async fn claim_publish_within_daily_cap(app: &Shared, id: &str, limit: u64) -> Claim {
+    let now = Utc::now();
+    let mut sessions = app.sessions.write().await;
+    let Some(session) = sessions.iter().find(|s| s.id == id) else {
+        return Claim::Nothing;
+    };
+    // Eligibility first, and the cap only after it (issue #910): a suspended colony (issue #562),
+    // a second publish call arriving on a session already `Publishing`, anything else
+    // `claim_publish` refuses — those take the refusal they always took, and the cap never answers
+    // for them. It matters most for a suspended colony: a park would clear the suspension and the
+    // held answer, and tear down the microVM they were waiting on.
+    if !claim_allowed(session) {
+        return Claim::Nothing;
+    }
+    let repo = session.repo.clone();
+    if let Some(message) = repo_pr_cap_error(&sessions, &repo, limit, now) {
+        return Claim::Capped(message);
+    }
+    let Some(session) = sessions.iter_mut().find(|s| s.id == id) else {
+        return Claim::Nothing;
+    };
+    let (claimed, was_live) = claim_publish(session);
+    if !claimed {
+        return Claim::Nothing;
+    }
+    // The claim's own timestamp: what tells this in-flight publish from a colony that has not
+    // claimed today's budget yet, so it is stamped here rather than left to a later write.
+    session.updated_at = now;
+    let claimed = session.clone();
+    drop(sessions);
+    app.persist_and_broadcast(&claimed).await;
+    Claim::Claimed {
+        session: Box::new(claimed),
+        was_live,
+    }
+}
+
+/// The next UTC midnight, as the park record's `resets_at`: the cap is counted in UTC days, so
+/// that is the moment the colony can publish again.
+fn next_utc_midnight() -> DateTime<Utc> {
+    let today = Utc::now().date_naive();
+    today
+        .succ_opt()
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|naive| naive.and_utc())
+        .unwrap_or_else(Utc::now)
 }
 
 /// Binds the evidence a PR grant must name: the hex sha256 (see
@@ -1234,6 +1406,185 @@ mod tests {
                 "{status:?} never takes a slot another colony is waiting for"
             );
         }
+    }
+
+    #[test]
+    fn a_repos_daily_pr_cap_refuses_once_it_is_reached_and_counts_only_its_own_pull_requests() {
+        let now = DateTime::from_timestamp(1_789_000_000, 0)
+            .unwrap()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        let today = now.date_naive();
+        // `colony`'s repo is `acme/repo`; a colony with no pull request opened yet, one that
+        // opened its PR earlier today, and one that opened its PR yesterday.
+        let mut opened_today = colony("acme", SessionStatus::PrOpened);
+        opened_today.pr_opened_at = Some(now - chrono::Duration::hours(3));
+        let mut opened_yesterday = colony("acme", SessionStatus::PrOpened);
+        opened_yesterday.pr_opened_at = Some(now - chrono::Duration::days(1));
+        let no_pr = colony("acme", SessionStatus::Running);
+        let mut other_repo = colony("other", SessionStatus::PrOpened);
+        other_repo.pr_opened_at = Some(now);
+        let sessions = vec![no_pr.clone(), opened_today.clone(), opened_yesterday, other_repo];
+
+        // Under the cap: the PR from earlier today and the untouched colony leave room.
+        assert!(repo_pr_cap_error(&sessions, "acme/repo", 2, now).is_none());
+        // At the cap: yesterday's pull request and another repo's are not today's, so one is open.
+        let err = repo_pr_cap_error(&sessions, "acme/repo", 1, now).expect("the cap of one is reached");
+        assert!(err.contains("spent 1 of its 1 pull request for today"), "{err}");
+        assert!(err.contains("(UTC)"), "{err}");
+        assert!(err.contains("max_prs_per_day"), "{err}");
+
+        // A zero cap is no cap at all (issue #910): the repo opted out of this gate.
+        assert_eq!(
+            repo_pr_cap_error(&sessions, "acme/repo", 0, now),
+            None,
+            "max_prs_per_day = 0 opts the repo out of the cap"
+        );
+        // Two open, and the words are plural.
+        let mut opened_twice = colony("acme", SessionStatus::PrOpened);
+        opened_twice.pr_opened_at = Some(now - chrono::Duration::minutes(5));
+        let err = repo_pr_cap_error(&[opened_today, opened_twice], "acme/repo", 1, now)
+            .expect("two pull requests is over a cap of one");
+        assert!(err.contains("spent 2 of its 1 pull requests for today"), "{err}");
+        // A colony with no pull request opened has spent no pull request.
+        assert!(
+            repo_pr_cap_error(&[no_pr], "acme/repo", 1, now).is_none(),
+            "a colony with no pr_opened_at has spent no pull request"
+        );
+        // Yesterday's pull request is not today's: the cap starts fresh at UTC midnight, so the
+        // pull request opened three hours before `now` has stopped counting by then.
+        let after_midnight = today.succ_opt().unwrap().and_hms_opt(0, 0, 1).unwrap().and_utc();
+        assert!(
+            repo_pr_cap_error(&sessions, "acme/repo", 1, after_midnight).is_none(),
+            "a new UTC day starts the count again"
+        );
+    }
+
+    /// A publish that has claimed a slot but not opened its pull request yet spends one anyway
+    /// (issue #910): that is what stops two concurrent publishes of one repo from each reading the
+    /// count a moment before the other spends it. The colony carrying the claim is `Publishing` and
+    /// its `updated_at` is the claim's own stamp.
+    #[test]
+    fn a_publish_in_flight_counts_as_a_spent_pull_request() {
+        let now = DateTime::from_timestamp(1_789_000_000, 0)
+            .unwrap()
+            .date_naive()
+            .and_hms_opt(12, 0, 0)
+            .unwrap()
+            .and_utc();
+        let mut claimed_today = colony("acme", SessionStatus::Publishing);
+        claimed_today.updated_at = now;
+        let mut claimed_yesterday = colony("acme", SessionStatus::Publishing);
+        claimed_yesterday.updated_at = now - chrono::Duration::days(1);
+        // A colony whose pull request opened today no longer counts as in flight: it is the opened
+        // term now, and it must not be counted twice.
+        let mut opened = colony("acme", SessionStatus::PrOpened);
+        opened.pr_opened_at = Some(now);
+        opened.updated_at = now;
+
+        assert_eq!(repo_pr_budget_spent(&[claimed_today.clone()], "acme/repo", now), 1);
+        assert_eq!(
+            repo_pr_budget_spent(&[opened], "acme/repo", now),
+            1,
+            "counted once, as opened"
+        );
+        // A publish claimed before midnight is still in flight after it, so its reservation is
+        // undated: releasing it at the day boundary would let a second colony into a budget the
+        // first one is about to spend.
+        assert_eq!(
+            repo_pr_budget_spent(&[claimed_yesterday], "acme/repo", now),
+            1,
+            "an in-flight publish keeps its reservation across the day boundary"
+        );
+        let err =
+            repo_pr_cap_error(&[claimed_today], "acme/repo", 1, now).expect("the in-flight publish has spent the only slot");
+        assert!(err.contains("spent 1 of its 1 pull request for today"), "{err}");
+    }
+
+    /// The race this whole claim step exists to close (issue #910): two colonies of one repo, one
+    /// pull request of headroom left, both publishing at once — the operator's Create PR press and
+    /// autopilot's verdict. The count and the claim that spends it are one critical section, so
+    /// exactly one of them proceeds and the other is capped. Run on real worker threads: the window
+    /// is the interval between a publisher reading the count and its claim becoming visible, which a
+    /// single-threaded runtime would close by accident.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_publishes_of_one_repo_spend_one_slot_between_them() {
+        let root = std::env::temp_dir().join(format!("colonizer-pr-cap-race-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let ready = |id: &str| {
+            let mut s = colony("acme", SessionStatus::Running);
+            s.id = id.into();
+            s.git_admin_dir = Some("git".into());
+            s
+        };
+        // One pull request already opened today, and a cap of two: one slot left, two claimants.
+        app.sessions.write().await.extend(
+            ["a", "b", "c", "d", "e", "f", "g", "h"]
+                .map(ready)
+                .into_iter()
+                .chain([opened_today("acme")]),
+        );
+
+        let claimants: Vec<_> = ["a", "b", "c", "d", "e", "f", "g", "h"]
+            .into_iter()
+            .map(|id| {
+                let app = app.clone();
+                tokio::spawn(async move { claim_publish_within_daily_cap(&app, id, 2).await })
+            })
+            .collect();
+        let (mut claimed, mut capped, mut nothing) = (0, 0, 0);
+        for outcome in futures_util::future::join_all(claimants).await {
+            match outcome.unwrap() {
+                Claim::Claimed { .. } => claimed += 1,
+                Claim::Capped(_) => capped += 1,
+                Claim::Nothing => nothing += 1,
+            }
+        }
+        assert_eq!(
+            (claimed, capped, nothing),
+            (1, 7, 0),
+            "exactly one proceeds, the rest are capped"
+        );
+        // The winner is `Publishing` (its claim is the reservation), and the loser never moved.
+        let sessions = app.sessions.read().await;
+        let publishing = sessions.iter().filter(|s| s.status == SessionStatus::Publishing).count();
+        assert_eq!(publishing, 1, "exactly one claim landed");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony that cannot be claimed at all is never answered by the cap (issue #910): a suspended
+    /// colony holds an undelivered answer (issue #562), and a park would clear the suspension, the
+    /// pending answer and the microVM they were waiting on.
+    #[tokio::test]
+    async fn the_daily_cap_never_answers_for_a_colony_the_claim_would_refuse() {
+        let root = std::env::temp_dir().join(format!("colonizer-pr-cap-suspended-{}", crate::util::short_id()));
+        let app = crate::tests::test_app(&root);
+        let mut suspended = colony("acme", SessionStatus::WaitingForAnswer);
+        suspended.id = "held".into();
+        suspended.git_admin_dir = Some("git".into());
+        suspended.suspended = Some(Suspension {
+            at: Utc::now(),
+            snapshot: None,
+            reason: WAITING_FOR_ANSWER.into(),
+            path: SESSION_RESUME.into(),
+        });
+        // The repo is well over a cap of one, so a cap-first gate would divert this colony.
+        let mut opened_twice = opened_today("acme");
+        opened_twice.id = "other".into();
+        app.sessions.write().await.extend([suspended.clone(), opened_twice]);
+
+        assert!(
+            matches!(claim_publish_within_daily_cap(&app, "held", 1).await, Claim::Nothing),
+            "a suspended colony takes the refusal it always took, not the cap's"
+        );
+        let after = app.session("held").await.unwrap();
+        assert_eq!(after.status, SessionStatus::WaitingForAnswer, "untouched");
+        assert!(after.suspended.is_some(), "the suspension and its answer are intact");
+        assert!(after.parked.is_none(), "nothing was parked");
+        assert!(after.error.is_none(), "no error was stamped either");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1883,6 +2234,106 @@ mod tests {
         std::fs::read_to_string(app.session_dir(id).join("harness.jsonl")).unwrap_or_default()
     }
 
+    /// A `gh api` fetcher answering from a fixed list of paths and 404ing everything else, the shape
+    /// `ignore.rs`'s own tests use: the repo-config read behind the daily PR cap (issue #910) is
+    /// then answerable without a real GitHub.
+    fn fake_fetch(answers: Vec<(&'static str, serde_json::Value)>) -> crate::epic::Fetch {
+        Box::new(move |path: String| {
+            let answer = answers.iter().find(|(p, _)| *p == path).map(|(_, v)| v.clone());
+            Box::pin(async move { answer.ok_or_else(|| anyhow::anyhow!("HTTP 404: Not Found ({path})")) })
+        })
+    }
+
+    /// `.colonizer/config.toml` as the contents API answers with it: the base64 `content` field,
+    /// wrapped at 60 columns the way GitHub wraps it.
+    fn repo_config(text: &str) -> serde_json::Value {
+        let wrapped: String = crate::util::b64_encode(text.as_bytes())
+            .as_bytes()
+            .chunks(60)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        json!({"content": wrapped, "encoding": "base64"})
+    }
+
+    /// A fetcher for a repo whose own `max_prs_per_day` is `cap` (issue #910).
+    fn capped_at(cap: u64) -> crate::epic::Fetch {
+        fake_fetch(vec![(
+            "repos/acme/repo/contents/.colonizer/config.toml",
+            repo_config(&format!("[colonizer]\nmax_prs_per_day = {cap}\n")),
+        )])
+    }
+
+    /// A colony of `acme/repo` that already opened its pull request today, so the repo's day has a
+    /// pull request in it.
+    fn opened_today(org: &str) -> Session {
+        let mut s = colony(org, SessionStatus::PrOpened);
+        s.pr_opened_at = Some(Utc::now());
+        s
+    }
+
+    #[tokio::test]
+    async fn a_live_colony_over_the_repos_daily_cap_is_parked_instead_of_published() {
+        let root = std::env::temp_dir().join(format!("colonizer-pr-cap-live-{}", crate::util::short_id()));
+        let app = test_app(&root);
+        let mut s = publishable(&root, "live", SessionStatus::Running);
+        s.repo = "acme/repo".into();
+        app.sessions.write().await.extend([s, opened_today("acme")]);
+        tokio::fs::create_dir_all(app.session_dir("live")).await.unwrap();
+
+        // The repo's own config says one a day, and it has already opened one.
+        publish_session_with(app.clone(), "live".into(), None, &capped_at(1)).await;
+
+        let after = app.session("live").await.unwrap();
+        assert_eq!(
+            after.status,
+            SessionStatus::Parked,
+            "a colony over the cap waits instead of publishing"
+        );
+        let park = after.parked.as_ref().expect("the park is the queue's visible state");
+        assert_eq!(park.reason, REPO_PR_RATE_LIMIT_REASON);
+        assert!(
+            park.resets_at.is_some(),
+            "the cockpit shows when the day rolls over: {:?}",
+            park.resets_at
+        );
+        assert!(
+            after.error.as_deref().is_some_and(|e| e.contains("max_prs_per_day")),
+            "{:?}",
+            after.error
+        );
+        let log = harness_log(&app, "live");
+        assert!(
+            log.contains("not publishing: acme/repo has already spent 1 of its 1"),
+            "{log}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_colony_over_the_repos_daily_cap_is_refused_with_an_error_and_no_park() {
+        let root = std::env::temp_dir().join(format!("colonizer-pr-cap-stopped-{}", crate::util::short_id()));
+        let app = test_app(&root);
+        let mut s = publishable(&root, "stopped", SessionStatus::Stopped);
+        s.repo = "acme/repo".into();
+        app.sessions.write().await.extend([s, opened_today("acme")]);
+        tokio::fs::create_dir_all(app.session_dir("stopped")).await.unwrap();
+
+        publish_session_with(app.clone(), "stopped".into(), None, &capped_at(1)).await;
+
+        // Nothing is live to park, and the Create PR press has already been answered 200, so the
+        // refusal has to be visible on the session itself.
+        let after = app.session("stopped").await.unwrap();
+        assert_eq!(after.status, SessionStatus::Stopped, "the status is its own answer");
+        assert!(after.parked.is_none(), "a stopped colony is not parked");
+        assert!(
+            after.error.as_deref().is_some_and(|e| e.contains("max_prs_per_day")),
+            "the refusal is on the session, where the operator sees it: {:?}",
+            after.error
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn a_publish_refuses_while_the_microvm_cannot_be_confirmed_removed() {
         let root = std::env::temp_dir().join(format!("colonizer-publish-gate-{}", crate::util::short_id()));
@@ -1901,7 +2352,7 @@ mod tests {
         tokio::fs::create_dir_all(app.session_dir("live").join("vm")).await.unwrap();
         std::fs::write(app.session_dir("live").join("vm/token"), "t").unwrap();
 
-        publish_session(app.clone(), "live".into(), None).await;
+        publish_session_with(app.clone(), "live".into(), None, &fake_fetch(vec![])).await;
 
         let after = app.session("live").await.unwrap();
         assert_eq!(
@@ -1945,7 +2396,7 @@ mod tests {
         app.sessions.write().await.push(s.clone());
         tokio::fs::create_dir_all(app.session_dir("retry")).await.unwrap();
 
-        publish_session(app.clone(), "retry".into(), None).await;
+        publish_session_with(app.clone(), "retry".into(), None, &fake_fetch(vec![])).await;
 
         let after = app.session("retry").await.unwrap();
         assert_eq!(after.status, SessionStatus::Failed, "the retry is refused and fails again");
@@ -1973,7 +2424,7 @@ mod tests {
         app.sessions.write().await.push(s.clone());
         tokio::fs::create_dir_all(app.session_dir("open")).await.unwrap();
 
-        publish_session(app.clone(), "open".into(), None).await;
+        publish_session_with(app.clone(), "open".into(), None, &fake_fetch(vec![])).await;
 
         let after = app.session("open").await.unwrap();
         assert_eq!(after.status, SessionStatus::Failed, "the publish fails on its own");
