@@ -16,10 +16,10 @@ use std::pin::Pin;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The one file every backend keeps under this exact name: the session index.
-const INDEX: &str = "sessions.json";
+pub(crate) const INDEX: &str = "sessions.json";
 
 /// The per-session prefix every file name is resolved under.
-const SESSIONS: &str = "sessions";
+pub(crate) const SESSIONS: &str = "sessions";
 
 /// The future every operation answers with: boxed and `Send`, so the trait stays object-safe and
 /// `migrate` can drive any backend — including ones not written yet — as `&dyn SessionStore`.
@@ -130,7 +130,7 @@ fn is_drive_prefix(component: &str) -> bool {
 
 /// Refuses a session id that is not a single plain path component — no `/`, `\`, `..` or NUL,
 /// not empty, no drive prefix. The wall that keeps host paths (worktrees among them) out.
-fn check_id(id: &str) -> io::Result<()> {
+pub(crate) fn check_id(id: &str) -> io::Result<()> {
     if id.is_empty()
         || id == "."
         || id == ".."
@@ -146,7 +146,7 @@ fn check_id(id: &str) -> io::Result<()> {
 
 /// Refuses a file name that is not relative with only normal components (`vm/token` is fine):
 /// no absolute path, no empty or `.` or `..` component, no `\`, no NUL byte, no drive prefix.
-fn check_name(name: &str) -> io::Result<()> {
+pub(crate) fn check_name(name: &str) -> io::Result<()> {
     let normal = !name.is_empty()
         && !name.starts_with('/')
         && !name.contains('\\')
@@ -563,8 +563,7 @@ impl SessionStore for MemoryObjectStore {
 
 /// The unix-seconds stamp every quarantine appends — the same shape the mothership's startup
 /// move-aside uses. One-second resolution: an aside from an earlier second is never overwritten.
-#[cfg_attr(not(test), allow(dead_code))]
-fn quarantine_stamp() -> u64 {
+pub(crate) fn quarantine_stamp() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
@@ -674,11 +673,11 @@ async fn put_like(dst: &dyn SessionStore, id: &str, name: &str, bytes: &[u8]) ->
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     hex(ring::digest::digest(&ring::digest::SHA256, bytes).as_ref())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -779,7 +778,7 @@ fn into_io_error(e: Error) -> io::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::util::faults::{Op, inject};
     use crate::{sessions::Session, util};
@@ -787,24 +786,24 @@ mod tests {
     use std::io::ErrorKind;
 
     /// A throwaway store root, as in sessions.rs.
-    fn temp_root(tag: &str) -> PathBuf {
+    pub(crate) fn temp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("colonizer-store-{tag}-{}", util::short_id()))
     }
 
-    fn cleanup(root: &Path) {
+    pub(crate) fn cleanup(root: &Path) {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn event(seq: u64) -> Vec<u8> {
+    pub(crate) fn event(seq: u64) -> Vec<u8> {
         format!(r#"{{"seq":{seq},"type":"progress","message":"step {seq}"}}"#).into_bytes()
     }
 
-    fn lines(events: &[Vec<u8>]) -> Vec<u8> {
+    pub(crate) fn lines(events: &[Vec<u8>]) -> Vec<u8> {
         events.iter().flat_map(|e| [e.as_slice(), b"\n"].concat()).collect()
     }
 
     /// `write_file` + `unwrap`, so seeds read as one line per file.
-    async fn put(s: &dyn SessionStore, id: &str, name: &str, bytes: &[u8]) {
+    pub(crate) async fn put(s: &dyn SessionStore, id: &str, name: &str, bytes: &[u8]) {
         s.write_file(id, name, bytes).await.unwrap()
     }
 
@@ -853,7 +852,7 @@ mod tests {
     }
 
     /// Everything a backend must do, run against both of them below.
-    async fn contract(s: &dyn SessionStore, label: &str) {
+    pub(crate) async fn contract(s: &dyn SessionStore, label: &str) {
         assert_eq!(idx(s).await, None, "{label}: an empty store reads as a first run");
         // The index is replaced whole: a later read sees exactly the newest bytes.
         s.write_index(br#"[{"id":"a"}]"#).await.unwrap();
@@ -900,7 +899,7 @@ mod tests {
     }
 
     /// The derived operations (#610), each against the promise in its doc comment.
-    async fn derived(s: &dyn SessionStore, label: &str) {
+    pub(crate) async fn derived(s: &dyn SessionStore, label: &str) {
         let log = b"one\ntwo\nthree\n";
         s.write_file("c", "log.jsonl", log).await.unwrap();
         let tail = |max: u64| async move { s.read_tail("c", "log.jsonl", max).await.unwrap().unwrap() };
@@ -935,7 +934,7 @@ mod tests {
 
     /// A host path — the shape every worktree has — and every traversal spelling, refused wherever
     /// an id or a file name is taken, with nothing written anywhere.
-    async fn refuses_host_paths(s: &dyn SessionStore, label: &str) {
+    pub(crate) async fn refuses_host_paths(s: &dyn SessionStore, label: &str) {
         let worktree = "/home/u/.local/share/colonizer/worktrees/a1b2c3d4";
         for id in [worktree, "../victim", "a/../b", "C:", ""] {
             let refused = [
@@ -1015,7 +1014,7 @@ mod tests {
 
     /// Two colonies with the files a live one actually has, plus the index over them. Returns the
     /// ids so a test can walk what it planted.
-    async fn seed(s: &dyn SessionStore) -> Vec<String> {
+    pub(crate) async fn seed(s: &dyn SessionStore) -> Vec<String> {
         let moon = b"{\n  \"session_id\": \"a1b2c3d4\"\n}\n";
         put(s, "a1b2c3d4", "events.jsonl", &lines(&[event(1), event(2)])).await;
         put(s, "a1b2c3d4", "vm/session.json", moon).await;
@@ -1027,7 +1026,7 @@ mod tests {
     }
 
     /// The bytes `seed` put into a store: the figure the migration tests must report.
-    async fn seeded_volume(s: &dyn SessionStore) -> u64 {
+    pub(crate) async fn seeded_volume(s: &dyn SessionStore) -> u64 {
         let mut bytes = s.read_index().await.unwrap().unwrap().len() as u64;
         for id in s.list_sessions().await.unwrap() {
             for name in s.list_files(&id).await.unwrap() {

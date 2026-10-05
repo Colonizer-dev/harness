@@ -131,6 +131,7 @@ mod stale;
 mod status;
 mod store;
 mod store_config;
+mod store_s3;
 mod stream;
 mod summaries;
 mod supersede;
