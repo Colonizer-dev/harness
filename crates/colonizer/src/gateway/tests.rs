@@ -26,6 +26,131 @@ fn upstream_urls_keep_the_base_path_and_reject_traversal() {
     assert!(upstream_url("http://h", "v1/messages", None).is_none());
 }
 
+/// Issue #1018: a base whose path ends in any `/v<digits>` is the provider's documented API root,
+/// so the guest path's `/v1` is dropped once; any other base keeps the full path appended.
+#[test]
+fn upstream_urls_respect_a_versioned_base_path() {
+    let cases: &[(&str, &str, &str)] = &[
+        // BytePlus ModelArk Coding Plan and Volcengine Ark: openai wire, version other than v1.
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+            "/v1/chat/completions",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/",
+            "/v1/chat/completions",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/chat/completions",
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        ),
+        (
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/models",
+            "https://ark.cn-beijing.volces.com/api/v3/models",
+        ),
+        (
+            "https://example.com/v4//",
+            "/v1/responses",
+            "https://example.com/v4/responses",
+        ),
+        // OpenAI and others documenting a /v1 root.
+        (
+            "https://api.openai.com/v1",
+            "/v1/responses",
+            "https://api.openai.com/v1/responses",
+        ),
+        (
+            "https://api.openai.com/v1/",
+            "/v1/chat/completions",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://openrouter.ai/api/v1",
+            "/v1/chat/completions",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ),
+        (
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "/v1/chat/completions",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ),
+        // Z.AI documents /api/paas/v4 for its OpenAI-compatible API.
+        (
+            "https://api.z.ai/api/paas/v4",
+            "/v1/chat/completions",
+            "https://api.z.ai/api/paas/v4/chat/completions",
+        ),
+        // Unversioned bases keep today's behaviour: the full request path is appended.
+        (
+            "https://api.deepseek.com",
+            "/v1/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+        ),
+        (
+            "https://api.deepseek.com/",
+            "/v1/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
+        ),
+        (
+            "https://api.deepseek.com/anthropic",
+            "/v1/messages",
+            "https://api.deepseek.com/anthropic/v1/messages",
+        ),
+        (
+            "https://api.z.ai/api/anthropic",
+            "/v1/messages",
+            "https://api.z.ai/api/anthropic/v1/messages",
+        ),
+        (
+            "https://ark.ap-southeast.bytepluses.com/api/coding",
+            "/v1/messages",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v1/messages",
+        ),
+        (
+            "http://192.168.1.20:11434",
+            "/v1/chat/completions",
+            "http://192.168.1.20:11434/v1/chat/completions",
+        ),
+        ("http://localhost:8000/", "/v1/models", "http://localhost:8000/v1/models"),
+        // Only the path counts: a host named v1, or a segment that merely starts with v, is no version.
+        ("http://v1", "/v1/models", "http://v1/v1/models"),
+        ("http://v1:8080", "/v1/models", "http://v1:8080/v1/models"),
+        (
+            "https://example.com/v1beta",
+            "/v1/models",
+            "https://example.com/v1beta/v1/models",
+        ),
+        ("https://example.com/dev", "/v1/models", "https://example.com/dev/v1/models"),
+        ("https://example.com/v", "/v1/models", "https://example.com/v/v1/models"),
+    ];
+    for (base, rest, want) in cases {
+        assert_eq!(upstream_url(base, rest, None).as_deref(), Some(*want), "base {base} + {rest}");
+    }
+    // A path that does not start with /v1/ is appended as is, even to a versioned base.
+    assert_eq!(
+        upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1", None).as_deref(),
+        Some("https://ark.cn-beijing.volces.com/api/v3/v1")
+    );
+}
+
+#[test]
+fn upstream_urls_reject_traversal_after_a_versioned_base() {
+    assert!(upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1/../admin", None).is_none());
+    assert!(upstream_url("https://ark.cn-beijing.volces.com/api/v3", "/v1/%2e%2e/admin", None).is_none());
+    assert!(
+        upstream_url(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "/v1/chat/completions",
+            Some("a b")
+        )
+        .is_none()
+    );
+}
+
 #[test]
 fn anthropic_bodies_are_normalized_only_for_providers_with_quirks() {
     let meta = ProviderQuirks {

@@ -1144,8 +1144,9 @@ fn valid_price(value: f64) -> bool {
 /// The gateway appends the request's own path to a base_url (e.g. `/v1/messages`, and `/v1/models`
 /// for the health probe), so on the `anthropic` wire — where the path is fixed — a base already
 /// ending in `/v1` doubles it and 404s silently until the first real call surfaces it, and is
-/// refused here instead. An `openai`-wire base legitimately ends in `/v1` (xai-grok's is
-/// `https://api.x.ai/v1`): the gateway's join there skips the guest path's repeated `/v1`.
+/// refused here instead. An `openai`-wire base legitimately ends in a version segment (xai-grok's is
+/// `https://api.x.ai/v1`, BytePlus's `…/api/coding/v3`): the gateway's join there drops the guest
+/// path's leading `/v1` for any `/v<N>` base (issue #1018).
 fn base_url_needs_stripping(base_url: &str, wire: Wire) -> bool {
     wire == Wire::Anthropic && base_url.ends_with("/v1")
 }
