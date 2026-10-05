@@ -45,6 +45,10 @@ pub struct NotifySettings {
     /// Whether a provider running out of quota with colonies blocked on it announces (issue #767):
     /// one line per provider, never one per colony. A card spans orgs, so no org overrides this.
     pub on_quota: bool,
+    /// Whether the webhook receives the whole colony lifecycle (issue #897): one event per status
+    /// transition, plus `cleaned`. Webhook only — never the desktop or a phone — and off by default,
+    /// so a webhook that only wants the events a person must act on keeps getting just those.
+    pub on_lifecycle: bool,
     pub desktop: bool,
     pub webhook_url: String,
 }
@@ -72,9 +76,124 @@ pub enum Event {
     /// behind its base is gone, so nothing is left running that will ever rebase it or clear the
     /// flag itself — a person has to.
     NeedsRebase,
+    /// One colony lifecycle transition (issue #897), named as [`LIFECYCLE_EVENTS`] lists. Exactly
+    /// one per status change, whichever switches are on, plus `cleaned` when the colony's worktree
+    /// is reclaimed; it goes to webhooks only, never through the anti-spam ledger, because it is
+    /// for a machine keeping a record, not for a person to read.
+    Lifecycle(&'static str),
+}
+
+/// The version of the webhook payload's shape, sent as `version` in every payload. It changes only
+/// when a key changes meaning or goes away; a new event name or a new key does not change it, since
+/// receivers ignore what they do not know (issue #897).
+pub const SCHEMA_VERSION: u64 = 1;
+
+/// Every lifecycle event name, one per status a colony can enter plus `cleaned` (issue #897).
+/// `question`, `pull_request` and `failed` are also the names of the events a person is told about,
+/// and carry the same id either way.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const LIFECYCLE_EVENTS: &[&str] = &[
+    "queued",
+    "started",
+    "running",
+    "idle",
+    "question",
+    "answered",
+    "publishing",
+    "pull_request",
+    "merged",
+    "closed",
+    "no_changes",
+    "parked",
+    "resumed",
+    "stopped",
+    "failed",
+    "cleaned",
+];
+
+/// Every `event` a webhook payload can carry: the lifecycle, the events a person is told about,
+/// and the host-level ones. `docs/webhook-events.schema.json` enumerates the same list.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const EVENT_NAMES: &[&str] = &[
+    "queued",
+    "started",
+    "running",
+    "idle",
+    "question",
+    "answered",
+    "publishing",
+    "pull_request",
+    "merged",
+    "closed",
+    "no_changes",
+    "parked",
+    "resumed",
+    "stopped",
+    "failed",
+    "cleaned",
+    "attention",
+    "needs_rebase",
+    "provider_degraded",
+    "judge_degraded",
+    "provider_quota_exhausted",
+    "account_needs_sign_in",
+    "account_resolved",
+    "ci_unavailable",
+    "digest",
+];
+
+/// The lifecycle event a status change is (issue #897): exactly one per change, `None` when the
+/// status held. Coming back from a parked, stopped or failed state is `resumed`, and leaving a
+/// question is `answered`, so a receiver sees why the colony is moving again.
+pub fn transition(last: SessionStatus, now: SessionStatus) -> Option<&'static str> {
+    use SessionStatus::*;
+    if last == now {
+        return None;
+    }
+    let back = matches!(last, Parked | Stopped | Failed);
+    Some(match now {
+        Queued | Starting | Running if back => "resumed",
+        Running | Idle if last == WaitingForAnswer => "answered",
+        Queued => "queued",
+        Starting => "started",
+        Running => "running",
+        Idle => "idle",
+        WaitingForAnswer => "question",
+        Publishing => "publishing",
+        PrOpened => "pull_request",
+        Merged => "merged",
+        Closed => "closed",
+        NoChanges => "no_changes",
+        Parked => "parked",
+        Stopped => "stopped",
+        Failed => "failed",
+    })
+}
+
+/// The lifecycle events a colony's change since it was last seen calls for: its status transition,
+/// and `cleaned` when its worktree was reclaimed. Seeds like [`decide`] — a colony seen for the
+/// first time announces nothing — and nothing while the module, or the colony's org, is off.
+pub fn lifecycle(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec<Event> {
+    let Some(last) = last.filter(|_| settings.enabled) else {
+        return Vec::new();
+    };
+    let mut events: Vec<Event> = transition(last.status, now.status)
+        .map(Event::Lifecycle)
+        .into_iter()
+        .collect();
+    if now.cleaned && !last.cleaned {
+        events.push(Event::Lifecycle("cleaned"));
+    }
+    events
 }
 
 impl Event {
+    /// Whether this is a status transition a person is also told about — the webhook gets it once,
+    /// from the lifecycle stream, when [`NotifySettings::on_lifecycle`] is on.
+    fn is_transition(self) -> bool {
+        matches!(self, Event::Question | Event::Failed | Event::PullRequest)
+    }
+
     /// What tells two events of one colony apart in its [`event_id`]: the name, and for an
     /// attention event the reason too — a stall and an out-of-nudges are two different events.
     fn id_kind(self) -> String {
@@ -94,6 +213,7 @@ impl Event {
             Event::ProviderDegraded => "provider_degraded",
             Event::JudgeDegraded => "judge_degraded",
             Event::NeedsRebase => "needs_rebase",
+            Event::Lifecycle(name) => name,
         }
     }
 
@@ -109,6 +229,7 @@ impl Event {
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",
             Event::NeedsRebase => "fell behind its base, but the colony behind it is gone",
+            Event::Lifecycle(name) => lifecycle_text(name),
             // A provider names no colony, so this session-shaped path is never called with the
             // provider event; its line is [`Event::provider_text`]'s to build.
             Event::ProviderDegraded => {
@@ -147,6 +268,29 @@ impl Event {
     }
 }
 
+/// The words a lifecycle event's line ends with.
+fn lifecycle_text(name: &str) -> &'static str {
+    match name {
+        "queued" => "is queued",
+        "started" => "started",
+        "running" => "is running",
+        "idle" => "is idle, waiting for a message",
+        "question" => "needs an answer",
+        "answered" => "got its answer and is running again",
+        "publishing" => "is publishing",
+        "pull_request" => "opened a pull request",
+        "merged" => "had its pull request merged",
+        "closed" => "had its pull request closed",
+        "no_changes" => "finished with no changes",
+        "parked" => "is parked",
+        "resumed" => "resumed",
+        "stopped" => "stopped",
+        "failed" => "failed",
+        "cleaned" => "was cleaned up",
+        _ => "changed",
+    }
+}
+
 /// What was last seen of a colony: the whole of what edge detection needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Seen {
@@ -155,6 +299,8 @@ pub struct Seen {
     /// Mirrors [`Session::rebase_orphaned`]: set once nothing is left running to clear
     /// `needs_rebase` on its own.
     pub rebase_orphaned: bool,
+    /// Mirrors [`Session::cleaned_up`], for the `cleaned` lifecycle event.
+    pub cleaned: bool,
 }
 
 impl Seen {
@@ -167,6 +313,7 @@ impl Seen {
                 .and_then(|a| a["reason"].as_str())
                 .map(String::from),
             rebase_orphaned: session.rebase_orphaned,
+            cleaned: session.cleaned_up,
         }
     }
 }
@@ -351,10 +498,11 @@ pub fn quota_edges<'a>(
     (edges, next)
 }
 
-/// The webhook payload for an out-of-quota card: the seven-key shape, `colony` and `pr_url` null, and
+/// The webhook payload for an out-of-quota card: the eight-key shape, `colony` and `pr_url` null, and
 /// `provider` the id, name, reset time and how many colonies wait — nothing of any repository.
 pub fn quota_payload(card: &QuotaCard, at: DateTime<Utc>) -> Value {
     json!({
+        "version": SCHEMA_VERSION,
         "id": host_event_id(&format!("quota:{}", card.provider), crate::push_prefs::QUOTA, at),
         "event": crate::push_prefs::QUOTA,
         "at": at.to_rfc3339(),
@@ -362,7 +510,7 @@ pub fn quota_payload(card: &QuotaCard, at: DateTime<Utc>) -> Value {
         "colony": None::<Value>,
         "pr_url": None::<Value>,
         "provider": {
-            "id": card.provider,
+        "id": card.provider,
             "name": card.name,
             "reset_at": card.reset_at,
             "colonies": card.colonies.len(),
@@ -381,7 +529,12 @@ fn diff<'a>(
     let mut events = Vec::new();
     for session in sessions {
         let now = Seen::of(session);
-        for event in decide(&settings_for(session), seen.get(&session.id), &now) {
+        let settings = settings_for(session);
+        let last = seen.get(&session.id);
+        for event in decide(&settings, last, &now)
+            .into_iter()
+            .chain(lifecycle(&settings, last, &now))
+        {
             events.push((session, event));
         }
         next.insert(session.id.clone(), now);
@@ -582,12 +735,13 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
     // Keyed on the colony's own history, not on `at`: the same edge rebuilt later is the same id.
     let sequence = session.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     json!({
+        "version": SCHEMA_VERSION,
         "id": event_id(&session.id, &event.id_kind(), &sequence),
         "event": event.name(),
         "at": at.to_rfc3339(),
         "text": event.text(&session.repo, session.issue),
         "colony": {
-            "id": session.id.clone(),
+        "id": session.id.clone(),
             "repo": session.repo.clone(),
             "org": session.org.clone(),
             "issue": session.issue,
@@ -607,6 +761,7 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
 /// counters behind the announcement — still nothing of any repository.
 pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealth, at: DateTime<Utc>) -> Value {
     json!({
+        "version": SCHEMA_VERSION,
         "id": host_event_id(&format!("provider:{id}"), Event::ProviderDegraded.name(), at),
         "event": Event::ProviderDegraded.name(),
         "at": at.to_rfc3339(),
@@ -614,7 +769,7 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
         "colony": None::<Value>,
         "pr_url": None::<Value>,
         "provider": {
-            "id": id,
+        "id": id,
             "name": name,
             "failure_pct": health.failure_pct,
             "avg_latency_ms": health.avg_latency_ms,
@@ -629,6 +784,7 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
 /// is the provider's words or a transport reason — never repository content.
 pub fn judge_payload(provider: &str, kind: &str, status: Option<u16>, message: &str, at: DateTime<Utc>) -> Value {
     json!({
+        "version": SCHEMA_VERSION,
         "id": host_event_id(&format!("judge:{provider}"), Event::JudgeDegraded.name(), at),
         "event": Event::JudgeDegraded.name(),
         "at": at.to_rfc3339(),
@@ -791,7 +947,7 @@ pub async fn run(app: Shared) {
         seen = next;
         for (session, event) in events {
             let Some(settings) = per_org.get(&session.org) else { continue };
-            announce(&app, client.as_ref(), session, event, settings, &mut reasons).await;
+            dispatch(&app, client.as_ref(), session, event, settings, &mut reasons).await;
         }
         // A provider is not org-scoped — no colony, no org to resolve — so its settings are the
         // notify module's own global choice. `effective_notify` with a default org is exactly that:
@@ -840,15 +996,16 @@ pub async fn run(app: Shared) {
         if let Some((summary, held)) = app.ledger.digest_due(Utc::now()) {
             let at = Utc::now();
             let payload = json!({
-                "id": host_event_id("digest", "digest", at),
-                "event": "digest",
-                "at": at.to_rfc3339(),
-                "text": summary,
-                // The same seven-key shape every webhook payload carries, with nothing to name here.
-                "colony": None::<Value>,
-                "pr_url": None::<Value>,
-                "provider": None::<Value>,
-            });
+                    "version": SCHEMA_VERSION,
+            "id": host_event_id("digest", "digest", at),
+                    "event": "digest",
+                    "at": at.to_rfc3339(),
+                    "text": summary,
+                    // The same eight-key shape every webhook payload carries, with nothing to name here.
+                    "colony": None::<Value>,
+                    "pr_url": None::<Value>,
+                    "provider": None::<Value>,
+                });
             if deliver(&app, client.as_ref(), &summary, &payload, None, &settings, &mut reasons).await {
                 app.ledger.commit_digest(&held, at).await;
             }
@@ -872,7 +1029,12 @@ fn fact_key(event: Event, session: &str, open_question: Option<&str>) -> Option<
     match event {
         Event::Attention(reason) => Some(format!("attention:{reason}:{session}")),
         Event::Question => open_question.map(|id| format!("question:{session}:{id}")),
-        Event::Failed | Event::PullRequest | Event::NeedsRebase | Event::ProviderDegraded | Event::JudgeDegraded => None,
+        Event::Failed
+        | Event::PullRequest
+        | Event::NeedsRebase
+        | Event::ProviderDegraded
+        | Event::JudgeDegraded
+        | Event::Lifecycle(_) => None,
     }
 }
 
@@ -912,6 +1074,18 @@ async fn announce(
     }
     let text = event.text(&session.repo, session.issue);
     let payload = payload(event, Utc::now(), session);
+    // With the lifecycle on, the webhook already gets this transition from the lifecycle stream —
+    // once, with the same id — so the person's channels carry it here and the webhook does not.
+    let human_only;
+    let settings = if settings.on_lifecycle && event.is_transition() {
+        human_only = NotifySettings {
+            webhook_url: String::new(),
+            ..settings.clone()
+        };
+        &human_only
+    } else {
+        settings
+    };
     if deliver(app, client, &text, &payload, Some(session), settings, reasons).await {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
     } else {
@@ -921,6 +1095,42 @@ async fn announce(
             .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
             .await;
     }
+}
+
+/// Sends one colony event where it goes: a lifecycle event to the webhook alone, anything else down
+/// every channel through the ledger.
+async fn dispatch(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    session: &Session,
+    event: Event,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    if let Event::Lifecycle(_) = event {
+        announce_lifecycle(app, client, session, event, settings, reasons).await;
+    } else {
+        announce(app, client, session, event, settings, reasons).await;
+    }
+}
+
+/// Sends one lifecycle event (issue #897) to the webhook, when [`NotifySettings::on_lifecycle`] is
+/// on. Webhook only and outside the anti-spam ledger: the lifecycle is a record for a machine, one
+/// event per transition, and a rate limit that dropped some would make it a wrong record.
+async fn announce_lifecycle(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    session: &Session,
+    event: Event,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let Some(client) = client else { return };
+    if !settings.on_lifecycle {
+        return;
+    }
+    let payload = payload(event, Utc::now(), session);
+    post_webhook(app, client, &payload, Some(session), settings, reasons).await;
 }
 
 /// The shared tail of a host-level announcement — a provider's, the judge's or a Claude account's
@@ -1060,6 +1270,7 @@ async fn announce_account(
     };
     let at = Utc::now();
     let payload = json!({
+        "version": SCHEMA_VERSION,
         "id": host_event_id(&format!("account:{account}"), event, at),
         "event": event,
         "at": at.to_rfc3339(),
@@ -1125,6 +1336,7 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
     let text = truncate(line, MAX_TEXT);
     let at = Utc::now();
     let payload = json!({
+        "version": SCHEMA_VERSION,
         "id": host_event_id(&candidate.topic, event, at),
         "event": event,
         "at": at.to_rfc3339(),

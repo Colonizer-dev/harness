@@ -725,6 +725,8 @@ pub fn effective_notify(modules: &ModulesConfig, org: &OrgSettings) -> NotifySet
         on_provider: flag("on_provider", true),
         // An out-of-quota card spans orgs (issue #767), so this one has no org override either.
         on_quota: flag("on_quota", true),
+        // The lifecycle stream (issue #897) is the webhook's alone and has no org override.
+        on_lifecycle: flag("on_lifecycle", false),
         desktop: overrides.desktop.unwrap_or_else(|| flag("desktop", false)),
         webhook_url: overrides
             .webhook_url
