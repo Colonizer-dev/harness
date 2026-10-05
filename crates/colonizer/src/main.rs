@@ -20,6 +20,7 @@ mod auth;
 mod authority;
 mod autonomy;
 mod boot;
+mod boundary;
 mod brief_pick;
 mod burn_down;
 mod cache_store;

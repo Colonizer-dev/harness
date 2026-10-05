@@ -68,6 +68,11 @@ pub enum EventShape {
         path: String,
         tool: String,
     },
+    Boundary {
+        kind: String,
+        control: String,
+        target: Option<String>,
+    },
     Other,
 }
 
@@ -118,6 +123,9 @@ pub fn event_shape(line: &str) -> EventShape {
             path,
             tool,
         },
+        AgentEvent::Boundary {
+            kind, control, target, ..
+        } => EventShape::Boundary { kind, control, target },
         _ => EventShape::Other,
     }
 }

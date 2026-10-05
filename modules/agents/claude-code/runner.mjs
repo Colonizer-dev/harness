@@ -10,6 +10,7 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { createAskRefusals, denialBoundary, execPolicyBoundary } from './boundary.mjs';
 import { annotateDenial, classifyDenial, denialGuidance } from './denials.mjs';
 import {
   EXEC_POLICY_QUESTION_KIND,
@@ -476,8 +477,9 @@ export function backgroundRecordName(command) {
  * @param {object[]} [extras.routes]     model routes, for provider timeouts and context limits (§6.5)
  * @param {ConditionalInstructions} [extras.instructions]  conditional instruction hooks (issue #473)
  * @param {object} [extras.execPolicy]   the layered exec policy (issue #471); loaded here when absent
+ * @param {(event: object) => void} [extras.onBoundary]  told of each exec-policy deny as a `boundary` event (issue #609)
  */
-export function buildOptions(env = process.env, { routerUrl, memoryServer, vaultServer, recallServer, historyServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy } = {}) {
+export function buildOptions(env = process.env, { routerUrl, memoryServer, vaultServer, recallServer, historyServer, coordinateServer, findingsServer, loopServer, githubServer, waitServer, hiddenEnv = [], routes = [], instructions, execPolicy, onBoundary } = {}) {
   const warnings = [];
   const claudeEnv = childEnv(env);
   for (const key of hiddenEnv) delete claudeEnv[key];
@@ -684,6 +686,9 @@ export function buildOptions(env = process.env, { routerUrl, memoryServer, vault
         // One harness-log line per decision (agentd turns stderr lines into `log` events).
         process.stderr.write(`${execPolicyLogLine(hit, command)}\n`);
         if (hit.decision === 'allow') return { continue: true };
+        // A deny is a control refusing something: reported as a `boundary` event for the
+        // watchdog's control-defeat signature (issue #609). An ask is reported once answered.
+        if (hit.decision === 'deny') onBoundary?.(execPolicyBoundary(hit, command));
         return {
           continue: true,
           hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: hit.decision, permissionDecisionReason: execPolicyReason(hit) },
@@ -840,8 +845,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * @param {number} [args.graceMs]   how long shutdown waits for Claude Code before force-closing
  * @param {boolean} [args.enforceChoices]  re-prompt once when a turn ends with a plain-text question
  * @param {ConditionalInstructions} [args.instructions]  told when a compaction happened (issue #473)
+ * @param {() => Date} [args.now]  the clock `boundary` events are stamped with (issue #609)
  */
-export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, execAllowCache = createExecAllowCache(), pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null }) {
+export async function runAgent({ query, commands, emit, options = {}, execPolicy = null, execAllowCache = createExecAllowCache(), pathPolicy = null, graceMs = 8000, enforceChoices = true, instructions = null, now = () => new Date() }) {
   let status = null;
   const setStatus = (state, detail) => {
     if (state === status && detail === undefined) return;
@@ -867,6 +873,8 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
   const jevPendingCalls = new Map(); // tool_call_id -> { tool, result } until the result arrives
   let jevLivePairs = []; // pairs present in the transcript, in call order: { tool_call_id, tool }
   const pathPolicySeen = new Set(); // `access\0path` already reported, so one attempt is one event
+  const askRefusals = createAskRefusals(); // exec-policy asks refused this run (issue #609)
+  const toolInputs = new Map(); // tool_call_id -> input, until its result names a refusal's target
 
   /**
    * Who produced a message. The SDK sets `parent_tool_use_id` to the Task call that started the
@@ -972,12 +980,20 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
       process.stderr.write(`exec policy: allowed earlier in this colony rule=${hit.rule} layer=${hit.layer}\n`);
       return true;
     }
+    // The same rule asking again after a refusal is the agent retrying what it was told no to,
+    // however it rephrased the command (issue #609): reported, and asked again as before.
+    const retry = askRefusals.attempt(hit, toolInput.command, { now });
+    if (retry) emit(retry);
     const questionId = toolUseID || `exec-policy-${pending.size + 1}`;
     const questions = normalizeQuestions(execPolicyQuestion(hit, toolInput.command));
     const answer = await putQuestion(questionId, questions, { signal, kind: EXEC_POLICY_QUESTION_KIND, blocking: true });
     settleAnswer(questionId, answer);
     const allowed = Boolean(answer) && Object.values(answer.answers ?? {}).some((label) => label === 'Allow');
     if (allowed) execAllowCache.remember(hit, toolInput.command);
+    else {
+      askRefusals.refuse(hit, toolInput.command);
+      emit(execPolicyBoundary({ ...hit, decision: 'ask refused' }, toolInput.command, { now }));
+    }
     return allowed;
   };
 
@@ -1086,6 +1102,7 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
           if (parent) subagentAsks.add(block.id);
         } else {
           jevPendingCalls.set(block.id, { tool: block.name, result: false });
+          toolInputs.set(block.id, block.input ?? {});
           emit(
             withAgent(
               {
@@ -1132,6 +1149,11 @@ export async function runAgent({ query, commands, emit, options = {}, execPolicy
         output,
       );
       emit(event);
+      // A refusal the denial layer classified is also a control refusing something: reported as a
+      // `boundary` event after its result, for the watchdog's control-defeat signature (issue #609).
+      const boundary = denialBoundary(event.denial, output, toolInputs.get(block.tool_use_id), { now });
+      toolInputs.delete(block.tool_use_id);
+      if (boundary) emit(withAgent(boundary, parent));
       const pendingCall = jevPendingCalls.get(block.tool_use_id);
       if (pendingCall) {
         pendingCall.result = true;
@@ -1475,6 +1497,7 @@ async function main() {
     routes: plan.routes,
     instructions,
     execPolicy,
+    onBoundary: emit,
   });
   for (const message of warnings) emit({ type: 'log', level: 'warn', message });
   for (const message of pathPolicy.warnings) emit({ type: 'log', level: 'warn', message });

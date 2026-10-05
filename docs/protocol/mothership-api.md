@@ -224,9 +224,12 @@ enabled, a colony that is `waiting_for_answer` with no question actually pending
 held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
 (Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
-provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
-watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
-it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
+provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, a
+`boundary` event, or a watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
+it sets itself. The exception is `control_defeat` (issue #609, docs/boundaries.md "Watchdog
+signatures"): set when the colony's `boundary` events complete a control-defeat signature, it carries
+`signature`, `detail` and the events as `evidence`, the watchdog's tick neither nudges over it nor
+replaces it, and only a person's own `user_message` (or the colony stopping) clears it. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
 announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`

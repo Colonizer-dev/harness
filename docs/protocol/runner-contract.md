@@ -77,6 +77,7 @@ answers with `model_changed`, or with a `warn` log if the SDK refuses the model.
 {"type":"loop_next","delay_minutes":120,"reason":"CI reruns at 11"}   // a self-paced loop's colony names its next run (Loops, below)
 {"type":"loop_stop","reason":"all flakes fixed"}                      // a loop's colony ends its loop
 {"type":"path_policy","access":"read","policy":"masked","path":".env","tool":"Read"}  // the agent reached for a masked or write-protected path (docs/path-policy.md); reporting only — the mount enforced before this ran, and the harness logs it once per distinct (access, path)
+{"type":"boundary","kind":"egress_denied","control":"egress","detail":"Could not resolve host: x.example","target":"x.example","at":"2026-01-01T00:00:00.000Z"}  // a control refused something (issue #609, docs/boundaries.md "Watchdog signatures"): kind is one of exec_policy_deny, exec_policy_ask_bypass_attempt, path_policy_denied, path_policy_unbound, egress_denied, publish_rewrite_refused, sandbox_denied; detail is one redacted line ≤ 300 chars; target only when named; reporting only — the watchdog reads it for its control-defeat signature
 ```
 
 `memory_proposal` (§6.2) and `finding` (§6.6) are runner events too; they are described with the

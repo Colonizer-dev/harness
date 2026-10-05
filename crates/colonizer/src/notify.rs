@@ -91,6 +91,7 @@ impl Event {
         let what = match self {
             Event::Question => "needs an answer",
             Event::Attention("nudges_exhausted") => "is out of nudges",
+            Event::Attention(crate::watchdog::CONTROL_DEFEAT_REASON) => "may have got past one of its controls",
             Event::Attention(crate::queue::HOLD_UNANSWERED_REASON) => "is parked on a question too risky to answer on its own",
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
@@ -172,7 +173,12 @@ pub fn decide(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec
         events.push(Event::Question);
     }
     if settings.on_attention {
-        for reason in ["stalled", "nudges_exhausted", crate::queue::HOLD_UNANSWERED_REASON] {
+        for reason in [
+            "stalled",
+            "nudges_exhausted",
+            crate::queue::HOLD_UNANSWERED_REASON,
+            crate::watchdog::CONTROL_DEFEAT_REASON,
+        ] {
             if now.attention.as_deref() == Some(reason) && last.attention.as_deref() != Some(reason) {
                 events.push(Event::Attention(reason));
             }
@@ -1202,6 +1208,13 @@ mod tests {
             "autopilot's flag is not the watchdog's"
         );
         assert!(edge(Some("autopilot_held"), None).is_empty(), "clearing announces nothing");
+        // The control-defeat flag (issue #609) is an edge a person hears about, in its own words.
+        assert_eq!(edge(None, Some("control_defeat")), vec![Event::Attention("control_defeat")]);
+        assert!(
+            Event::Attention("control_defeat")
+                .text("acme/webshop", Some(42))
+                .contains("controls")
+        );
     }
 
     /// An above-ceiling hold-parked colony announces exactly once (issue #876): the reason change is

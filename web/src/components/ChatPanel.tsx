@@ -36,6 +36,7 @@ import type { MemoryScope, Origin } from "../types";
 import { AntAvatar, type AntActivity } from "./AntAvatar";
 import { antActivity, describeTool, isNoiseTool, toolDetail, type ActivityIcon } from "./activity";
 import { AskUserCard, QuestionActionsContext, type QuestionActions } from "./AskUserCard";
+import { BoundaryRow } from "./BoundaryRow";
 import {
   IconAlert,
   IconBranch,
@@ -269,6 +270,7 @@ export function ChatPanel({
                     {thread.notices[message.id]?.map((notice) => (
                       <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
                     ))}
+                    {thread.boundaries[message.id]?.map((notice, i) => <BoundaryRow key={i} record={notice.record} />)}
                   </div>
                 )}
               </ThreadPrimitive.Messages>
@@ -276,6 +278,7 @@ export function ChatPanel({
               {thread.notices[END_OF_THREAD]?.map((notice) => (
                 <MemoryNoticeRow key={notice.proposal.id} notice={notice} onOpen={onOpenMemory} />
               ))}
+              {thread.boundaries[END_OF_THREAD]?.map((notice, i) => <BoundaryRow key={i} record={notice.record} />)}
               <ActivityLine state={state} hasOpenQuestion={thread.hasOpenQuestion} live={live} />
               {/* What the outbox is still holding from this panel: the messages as queued bubbles,
                   the answer as a note at the foot, until the worker reports them delivered. */}

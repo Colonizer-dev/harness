@@ -1061,9 +1061,25 @@ async fn a_path_policy_attempt_is_logged_once_and_sanitised() {
     assert_eq!(logged[0].actor, "colony");
     assert_eq!(logged[0].colony.as_deref(), Some("abc"));
     assert_eq!(logged[0].detail.as_deref(), Some("tried to read masked `.env` (Read)"));
+    // And one boundary event in the colony's events, for the control-defeat signature (#609).
+    let boundaries = || {
+        std::fs::read_to_string(app.session_dir("abc").join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|e| e["type"] == "boundary")
+            .collect::<Vec<_>>()
+    };
+    let first = boundaries();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0]["kind"], "path_policy_denied");
+    assert_eq!(first[0]["control"], "path_policy:masked");
+    assert_eq!(first[0]["target"], ".env");
+    assert_eq!(first[0]["origin"], "system");
 
     handle_agent_event(&app, "abc", &rt, attempt).await;
     assert_eq!(entries().await.len(), 1, "a repeated attempt is not a second entry");
+    assert_eq!(boundaries().len(), 1, "nor a second boundary event");
     {
         let logs = rt.logs.lock().await;
         assert_eq!(
@@ -1284,5 +1300,99 @@ async fn the_account_credential_never_reaches_a_line_or_the_status() {
         assert!(!part.contains(secret), "the credential leaked: {part}");
         assert!(!part.contains("sk-ant-oat"), "nothing of the secret leaks: {part}");
     }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #609: runner `boundary` lines feed the watchdog's control-defeat signature. One denial is a
+/// wall; the third of one control in the window flags the colony with the evidence. The colony
+/// carrying on does not lift the flag — a person's own message does.
+#[tokio::test]
+async fn runner_boundary_events_flag_control_defeat_and_only_a_person_clears_it() {
+    let (app, root) = crate::sessions::tests::app_with_colony("cd1", SessionStatus::Running).await;
+    let rt = app.runtime("cd1").await;
+    let boundary = |seq: u64, host: &str| {
+        format!(
+            r#"{{"seq":{seq},"type":"boundary","kind":"egress_denied","control":"egress","detail":"Could not resolve host: {host}","target":"{host}","at":"2026-01-01T00:00:00.000Z"}}"#
+        )
+    };
+    handle_agent_event(&app, "cd1", &rt, &boundary(1, "a.example")).await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_none(),
+        "one denial is a wall, not a defeat"
+    );
+    handle_agent_event(&app, "cd1", &rt, &boundary(2, "b.example")).await;
+    handle_agent_event(&app, "cd1", &rt, &boundary(3, "c.example")).await;
+    let attention = app.session("cd1").await.unwrap().attention.expect("the third flags");
+    assert_eq!(attention["reason"], crate::watchdog::CONTROL_DEFEAT_REASON);
+    assert_eq!(attention["signature"], "repeated_denial");
+    let targets: Vec<&str> = attention["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["target"].as_str())
+        .collect();
+    assert_eq!(targets, ["a.example", "b.example", "c.example"], "the evidence is the events");
+
+    handle_agent_event(
+        &app,
+        "cd1",
+        &rt,
+        r#"{"seq":4,"type":"assistant_text","message_id":"m1","block_index":0,"text":"carrying on"}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_some(),
+        "the colony's own progress does not lift a control-defeat flag"
+    );
+    handle_agent_event(
+        &app,
+        "cd1",
+        &rt,
+        r#"{"seq":5,"type":"user_message","id":"u-7","text":"I looked; carry on"}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd1").await.unwrap().attention.is_none(),
+        "a person's message does"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Issue #609: a target a control refused, then named by a successful tool call, is the
+/// deny-then-reach signature — and the boundary line itself is not progress.
+#[tokio::test]
+async fn a_refused_host_reached_by_a_later_call_flags_deny_then_reach() {
+    let (app, root) = crate::sessions::tests::app_with_colony("cd2", SessionStatus::Running).await;
+    let rt = app.runtime("cd2").await;
+    let before = rt.activity.lock().await.last;
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":1,"type":"boundary","kind":"egress_denied","control":"egress","detail":"denied","target":"evil.example","at":"2026-01-01T00:00:00.000Z"}"#,
+    )
+    .await;
+    assert_eq!(rt.activity.lock().await.last, before, "a boundary event is not progress");
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":2,"type":"tool_call","message_id":"m","tool_call_id":"t9","name":"Bash","input":{"command":"node -e \"fetch('https://evil.example/x')\""}}"#,
+    )
+    .await;
+    assert!(
+        app.session("cd2").await.unwrap().attention.is_none(),
+        "not until the call succeeds"
+    );
+    handle_agent_event(
+        &app,
+        "cd2",
+        &rt,
+        r#"{"seq":3,"type":"tool_result","tool_call_id":"t9","output":"ok","is_error":false}"#,
+    )
+    .await;
+    let attention = app.session("cd2").await.unwrap().attention.expect("flagged");
+    assert_eq!(attention["signature"], "deny_then_reach");
+    assert_eq!(attention["evidence"][0]["target"], "evil.example");
     let _ = std::fs::remove_dir_all(root);
 }

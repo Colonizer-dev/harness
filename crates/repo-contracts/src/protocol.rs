@@ -65,20 +65,20 @@ fn every_fixture_event_deserialises_and_lands_on_its_variant() {
         EventShape::Finding { title, evidence, .. } if !title.is_empty() && !evidence.is_empty()
     ));
     assert!(matches!(
-        &events[24],
+        &events[25],
         EventShape::Status {
             state,
             detail: None
         } if *state == "idle"
     ));
     assert!(matches!(
-        &events[25],
+        &events[26],
         EventShape::Status {
             state,
             detail: None
         } if *state == "exited"
     ));
-    match &events[23] {
+    match &events[24] {
         EventShape::TurnEnd {
             is_error,
             cost_usd,
@@ -93,12 +93,22 @@ fn every_fixture_event_deserialises_and_lands_on_its_variant() {
     }
     // The masked read the runner reports (issue #647): the attempt, with the tool that made it.
     assert_eq!(
-        events[21],
+        events[22],
         EventShape::PathPolicy {
             access: "read".into(),
             policy: "masked".into(),
             path: ".env".into(),
             tool: "Read".into(),
+        }
+    );
+
+    // The egress refusal the runner reports for the watchdog (issue #609), after its result.
+    assert_eq!(
+        events[20],
+        EventShape::Boundary {
+            kind: "egress_denied".into(),
+            control: "egress".into(),
+            target: Some("github.com".into()),
         }
     );
 
@@ -112,8 +122,8 @@ fn every_fixture_event_deserialises_and_lands_on_its_variant() {
     assert_eq!(events[15], EventShape::Other, "tool_result");
     assert_eq!(events[18], EventShape::Other, "tool_call");
     assert_eq!(events[19], EventShape::Other, "tool_result with a denial");
-    assert_eq!(events[20], EventShape::Other, "tool_call for the masked read");
-    assert_eq!(events[22], EventShape::Other, "tool_result of the masked read");
+    assert_eq!(events[21], EventShape::Other, "tool_call for the masked read");
+    assert_eq!(events[23], EventShape::Other, "tool_result of the masked read");
 }
 
 /// The schema's `#/$defs/origin` enum is this vocabulary's second hand-kept side: a variant
