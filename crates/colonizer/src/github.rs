@@ -4888,7 +4888,11 @@ mod tests {
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
 
+        // Resolved with realpath: on macOS the temp dir is under /var, a symlink to /private/var,
+        // and git reports the worktree's admin dir resolved, which must start with the bare repo.
         let root = std::env::temp_dir().join(format!("colonizer-github-recreate-{}", short_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
         let app = crate::tests::test_app(&root);
 
         // The "remote": a seed repository with a commit on `main` and a colony branch pushed past

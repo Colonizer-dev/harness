@@ -2246,6 +2246,37 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// The same fallback for pnpm (#589): the stock node image carries neither bun nor pnpm, so a
+    /// pnpm repository verified there is named unverifiable, never contradicted by a failed install.
+    #[tokio::test]
+    async fn a_pnpm_repository_without_pnpm_in_the_image_is_unverifiable_not_contradicted() {
+        let (app, root) = app_with_colony("abc", SessionStatus::Running).await;
+        let repo = worktree_fixture(&app, None, "did the work", false).await;
+        std::fs::write(
+            repo.join("package.json"),
+            r#"{"name": "web", "scripts": {"test": "vitest run"}}"#,
+        )
+        .unwrap();
+        std::fs::write(repo.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git_commit(&repo, "a pnpm repository");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/fix.ts"), "export const fixed = true;\n").unwrap();
+
+        let v = verify(&app, &missing_tool_runner(PNPM.check)).await;
+        assert_eq!(v.verdict, Verdict::Unverifiable, "{v:?}");
+        assert!(v.contradictions.is_empty(), "{v:?}");
+        assert_eq!(v.command_source.as_deref(), Some("pnpm-lock.yaml"));
+        assert_eq!(v.exit_code, Some(127));
+        assert_eq!(
+            v.summary,
+            "`pnpm` (picked from `pnpm-lock.yaml`) is not in the colony image, so \
+             `pnpm install --frozen-lockfile && pnpm test` could not run (exit 127)"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn broken_infra_or_a_missing_command_leaves_the_claim_unverifiable() {
         let (app, root) = app_with_colony("abc", SessionStatus::Running).await;

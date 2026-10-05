@@ -68,8 +68,11 @@ one, a launch on a held issue or an epic is refused with a 409 (CLI exit code 5)
 
 Every colony image carries a small, language-agnostic toolbox a repository's own build or
 verification may reach for: `python3` with pip and venv, `python3-yaml` (PyYAML), `jq`, `ripgrep`,
-`curl`, `git`, `make`, `unzip` and `ca-certificates`. The node image also carries bun, pnpm, yarn
-classic and corepack. The image is pinned by digest, so a tool the image does not carry is one a
+`curl`, `git`, `make`, `unzip` and `ca-certificates`. The node preset's stock `node:24-bookworm`
+carries npm, yarn classic and corepack but not bun or pnpm: the colony-node image that adds them is
+built but not yet pinned ([#589](https://github.com/Colonizer-dev/harness/issues/589)), so a bun or
+pnpm repository's check comes back unverifiable, naming the missing tool, until it is or a
+`.colonizer/setup.sh` hook installs it. The image is pinned by digest, so a tool the image does not carry is one a
 done-claim check reports unverifiable (see [Verifying "done"](#verifying-done)). On the Debian-based
 presets `pip3 install` works despite PEP 668 — the images set `PIP_BREAK_SYSTEM_PACKAGES=1` for a
 disposable VM — and an isolated `python3 -m venv` is the alternative.
