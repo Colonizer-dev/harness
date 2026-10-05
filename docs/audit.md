@@ -89,7 +89,11 @@ limits.
   credential shapes (PEM private keys, JWTs, `Bearer` values, webhook URLs, more token prefixes),
   passwords in `scheme://user:pass@host` and in database and broker connection strings, values of
   `KEY=value` pairs and JSON fields whose name says secret, and, last, long high-entropy strings.
-  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. JSON lines are redacted
+  Git SHAs, UUIDs, lockfile hashes and base64 image data are left alone. A JSON field named as an
+  identifier or digest skips only the high-entropy layer: the key's last word, split at `_`, `-`,
+  `.` and camelCase, must be `id`, `uuid`, `sha`, `hash`, `digest`, `etag`, `signature` or the like
+  (`user_id`, `commitSha`, not `did` or `paid`), and a secret word anywhere in the key (`token`,
+  `key`, `session`, `cookie`, …) removes the exemption, so `api_key_id` is still checked. JSON lines are redacted
   field by field, so they stay valid JSON. The local archive redacts older logs on the way into a
   bundle. It is pattern matching, so it can miss a secret with no recognisable shape; it is a
   second line behind keeping secrets out of the colony, not a replacement
