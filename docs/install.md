@@ -329,7 +329,8 @@ What it keeps in the data directory: `sessions.json` (the colony list, read back
 worktree), `mesh/`, `plugins/` (your own plugins), `memory/`, `chats/`, `drafts/`, `maps/`,
 `archive/`, `cache/`, `deja/` (per-org transcript indexes), `fleet-imports/` (bundles read with
 `colonizer fleet import`), `headroom/` and `hunters/` (downloaded on demand), the ledgers (`spend.jsonl`,
-`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`), and
+`routing.jsonl`, `activity.jsonl`, `ledger.json`, `provider-usage.json`, `provider-quota.json`),
+`notify-webhook-outbox.json` (webhook deliveries waiting for a retry, and the dead letter), and
 `mothership.out` when the mothership is started at login.
 
 ## Settings

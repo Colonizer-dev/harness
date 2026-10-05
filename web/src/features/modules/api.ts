@@ -1,7 +1,7 @@
 // Modules API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
-import { enc, post, put, request } from "../../http";
-import type { AutonomyStatus, ModuleInfo, ObservabilityStatus, ObservabilityTest } from "./types";
+import { del, enc, post, put, request } from "../../http";
+import type { AutonomyStatus, ModuleInfo, ObservabilityStatus, ObservabilityTest, WebhookDeliveries } from "./types";
 
 export interface SaveModuleRequest {
   provider: string;
@@ -23,6 +23,12 @@ export interface ModulesApi {
   observabilityStatus(): Promise<ObservabilityStatus>;
   /** POST /api/observability/test: one test log record and metric point to the saved backend. */
   observabilityTest(): Promise<ObservabilityTest>;
+  /** GET /api/notify/deliveries (issue #898): webhook retries waiting, the dead letter and the last success. */
+  webhookDeliveries(): Promise<WebhookDeliveries>;
+  /** POST /api/notify/dead-letters/{key}/replay: one attempt now; `delivered` false with the receiver's error when it still fails. */
+  replayDeadLetter(key: string): Promise<{ delivered: boolean; error: string | null }>;
+  /** DELETE /api/notify/dead-letters/{key}: discards one dead letter. */
+  discardDeadLetter(key: string): Promise<unknown>;
 }
 
 export const modulesHttp: ModulesApi = {
@@ -31,4 +37,7 @@ export const modulesHttp: ModulesApi = {
   autonomyStatus: () => request("/api/autonomy/status"),
   observabilityStatus: () => request("/api/observability/status"),
   observabilityTest: () => post("/api/observability/test"),
+  webhookDeliveries: () => request("/api/notify/deliveries"),
+  replayDeadLetter: (key) => post(`/api/notify/dead-letters/${enc(key)}/replay`),
+  discardDeadLetter: (key) => del(`/api/notify/dead-letters/${enc(key)}`),
 };

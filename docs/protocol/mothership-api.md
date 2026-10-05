@@ -325,13 +325,18 @@ derived, and how to verify a request, is in [Webhooks](webhooks.md).
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
 `X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
-and without one it is sent unsigned. Transport errors and non-2xx answers are logged, never
-retried.
+and without one it is sent unsigned. Transport errors and non-2xx answers are logged and retried
+with exponential backoff and jitter, at most 6 attempts in all, then kept in a persistent dead
+letter the owner can list, replay or discard (issue #898; [Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)).
 
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/notify/secret` | `{has_secret, source}`: whether a webhook signing secret is set (`file` or `env` for `COLONIZER_NOTIFY_SECRET`). Never the secret |
 | `PUT /api/notify/secret` | `{secret}`: save it on the mothership; `null` or an empty string removes it. **400** over 512 characters or with non-printable characters |
+| `GET /api/notify/deliveries` | Webhook deliveries waiting for a retry, the dead letter and the last success ([Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)) |
+| `POST /api/notify/dead-letters/{key}/replay` | Replays one dead letter now: `{delivered, error}`; **404** for an unknown key |
+| `POST /api/notify/dead-letters/replay` | Replays every dead letter once: `{delivered, failed}` |
+| `DELETE /api/notify/dead-letters/{key}` | Discards one dead letter; **404** for an unknown key |
 
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn

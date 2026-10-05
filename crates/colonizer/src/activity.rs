@@ -615,6 +615,12 @@ const RULES: &[Rule] = &[
         Target::Named("notification secret", "notifications"),
     ),
     rule(
+        "DELETE",
+        "/api/notify/dead-letters/{key}",
+        "settings.remove",
+        Target::Fixed("a webhook dead letter", "notifications"),
+    ),
+    rule(
         "PUT",
         "/api/voice/key",
         "settings.save",

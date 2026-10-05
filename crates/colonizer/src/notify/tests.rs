@@ -1273,3 +1273,199 @@ async fn a_colony_run_is_one_webhook_event_per_transition() {
     let names: Vec<&str> = got.iter().map(|b| b["event"].as_str().unwrap()).collect();
     assert_eq!(names, ["question", "pull_request"]);
 }
+
+// ---------------------------------------------------------------------------
+// Retries and the dead letter (issue #898)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_backoff_doubles_is_capped_and_jitters_both_ways() {
+    let secs = |attempts, jitter| outbox::backoff(attempts, jitter).num_milliseconds() as f64 / 1000.0;
+    assert_eq!(secs(1, 0.0), 30.0);
+    assert_eq!(secs(2, 0.0), 60.0);
+    assert_eq!(secs(3, 0.0), 120.0);
+    assert_eq!(secs(5, 0.0), 480.0);
+    assert_eq!(secs(30, 0.0), 3600.0, "no wait is longer than an hour");
+    assert_eq!(secs(1, 1.0), 36.0);
+    assert_eq!(secs(1, -1.0), 24.0);
+    assert_eq!(secs(1, 7.0), 36.0, "jitter is clamped");
+}
+
+/// A test App with the notify secret set, and a client.
+fn outbox_app(name: &str) -> (Shared, std::path::PathBuf, reqwest::Client) {
+    let root = std::env::temp_dir().join(format!("colonizer-notify-{name}-{}", crate::util::short_id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let app = crate::tests::test_app(&root);
+    std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+    write_secret(&secret_file(&app), "whsec-test").unwrap();
+    (app, root, reqwest::Client::new())
+}
+
+fn ids_received(received: &Received) -> Vec<String> {
+    received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(headers, _)| headers.get(EVENT_ID_HEADER).unwrap().to_str().unwrap().to_string())
+        .collect()
+}
+
+/// End to end: a receiver that answers 500 and then 200 gets the event twice, with one id — so it
+/// is delivered once — and nothing is left to retry or in the dead letter.
+#[tokio::test]
+async fn a_500_then_a_200_delivers_once() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), vec![500]).await;
+    let (app, root, client) = outbox_app("retry");
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let body = payload(Event::Failed, Utc::now(), &colony("c1", SessionStatus::Failed));
+    assert!(
+        !post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await,
+        "the first attempt failed"
+    );
+    let book = outbox::load(&app);
+    assert_eq!(book.pending.len(), 1);
+    assert_eq!(book.pending[0].attempts, 1);
+    assert!(book.pending[0].next_at.unwrap() > Utc::now(), "the retry waits its backoff");
+
+    // Not due yet: nothing is sent.
+    assert_eq!(outbox::retry_due(&app, &client, Utc::now()).await, 0);
+    assert_eq!(received.lock().unwrap().len(), 1);
+
+    // Due: the retry delivers, with the same id and a valid signature.
+    let later = Utc::now() + chrono::Duration::hours(1);
+    assert_eq!(outbox::retry_due(&app, &client, later).await, 1);
+    let ids = ids_received(&received);
+    assert_eq!(ids.len(), 2);
+    assert_eq!(ids[0], ids[1], "a retry is the same event");
+    assert_eq!(ids[0], body["id"].as_str().unwrap());
+    let (headers, sent) = received.lock().unwrap()[1].clone();
+    let timestamp = headers.get("X-Colonizer-Timestamp").unwrap().to_str().unwrap();
+    assert_eq!(
+        headers.get("X-Colonizer-Signature").unwrap().to_str().unwrap(),
+        format!("sha256={}", signature("whsec-test", timestamp, &sent))
+    );
+    assert_eq!(
+        sent,
+        serde_json::to_string(&body).unwrap(),
+        "every attempt sends the same body"
+    );
+
+    let book = outbox::load(&app);
+    assert!(book.pending.is_empty() && book.dead.is_empty(), "{book:?}");
+    assert!(book.last_success_at.is_some());
+    // Delivered once: nothing more goes out.
+    assert_eq!(outbox::retry_due(&app, &client, later + chrono::Duration::hours(1)).await, 0);
+    assert_eq!(received.lock().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// End to end: a receiver that keeps failing gets every attempt, then the delivery is
+/// dead-lettered; the dead letter survives a restart, shows in the API, and replays once the
+/// receiver is back.
+#[tokio::test]
+async fn a_delivery_that_keeps_failing_is_dead_lettered_and_replays() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), vec![500; outbox::MAX_ATTEMPTS as usize]).await;
+    let (app, root, client) = outbox_app("dead");
+    let settings = NotifySettings {
+        webhook_url: format!("{url}?token=kept-out-of-the-api"),
+        ..settings()
+    };
+    let body = payload(Event::PullRequest, Utc::now(), &colony("c1", SessionStatus::PrOpened));
+    assert!(!post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await);
+    let mut at = Utc::now();
+    for _ in 1..outbox::MAX_ATTEMPTS {
+        at += chrono::Duration::hours(2);
+        assert_eq!(outbox::retry_due(&app, &client, at).await, 0);
+    }
+    assert_eq!(
+        received.lock().unwrap().len(),
+        outbox::MAX_ATTEMPTS as usize,
+        "every attempt was made"
+    );
+    let book = outbox::load(&app);
+    assert!(book.pending.is_empty(), "{book:?}");
+    assert_eq!(book.dead.len(), 1, "it ran out of attempts");
+    assert_eq!(book.dead[0].attempts, outbox::MAX_ATTEMPTS);
+    assert!(book.dead[0].last_error.contains("500"), "{}", book.dead[0].last_error);
+    // Nothing is retried from the dead letter on its own.
+    assert_eq!(outbox::retry_due(&app, &client, at + chrono::Duration::days(1)).await, 0);
+    assert_eq!(received.lock().unwrap().len(), outbox::MAX_ATTEMPTS as usize);
+
+    // A restart: a new App over the same directories still has the dead letter.
+    let restarted = crate::tests::test_app(&root);
+    let listed = outbox::deliveries(State(restarted.clone())).await.0;
+    let dead = listed["dead_letters"].as_array().unwrap();
+    assert_eq!(dead.len(), 1);
+    assert_eq!(dead[0]["event"], "pull_request");
+    assert_eq!(dead[0]["event_id"], body["id"]);
+    assert!(
+        !listed.to_string().contains("kept-out-of-the-api"),
+        "the API shows the address without its query: {listed}"
+    );
+    assert_eq!(listed["max_attempts"], json!(outbox::MAX_ATTEMPTS));
+    let key = dead[0]["key"].as_str().unwrap().to_string();
+
+    // Replay: the receiver is back (its scripted failures are spent), and the event goes out once
+    // more with the same id.
+    assert!(
+        outbox::replay_one(State(restarted.clone()), axum::extract::Path("nope".into()))
+            .await
+            .is_err()
+    );
+    let answer = outbox::replay_one(State(restarted.clone()), axum::extract::Path(key.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(answer, json!({"delivered": true, "error": null}));
+    let ids = ids_received(&received);
+    assert_eq!(ids.len(), outbox::MAX_ATTEMPTS as usize + 1);
+    assert!(ids.iter().all(|id| id == body["id"].as_str().unwrap()));
+    let book = outbox::load(&restarted);
+    assert!(book.dead.is_empty() && book.pending.is_empty(), "{book:?}");
+    assert!(
+        outbox::discard(State(restarted), axum::extract::Path(key)).await.is_err(),
+        "a replayed letter is gone"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A replay that fails again stays in the dead letter with the attempt counted, and discarding
+/// removes it.
+#[tokio::test]
+async fn a_failed_replay_stays_dead_and_a_discard_removes_it() {
+    let received: Received = Default::default();
+    let url = receiver(received.clone(), vec![500; outbox::MAX_ATTEMPTS as usize + 1]).await;
+    let (app, root, client) = outbox_app("discard");
+    let settings = NotifySettings {
+        webhook_url: url,
+        ..settings()
+    };
+    let body = payload(Event::Failed, Utc::now(), &colony("c1", SessionStatus::Failed));
+    post_webhook(&app, &client, &body, None, &settings, &mut Reasons::default()).await;
+    let mut at = Utc::now();
+    for _ in 1..outbox::MAX_ATTEMPTS {
+        at += chrono::Duration::hours(2);
+        outbox::retry_due(&app, &client, at).await;
+    }
+    let key = outbox::load(&app).dead[0].key.clone();
+    assert_eq!(outbox::replay(&app, &client, &key).await.map(|r| r.is_ok()), Some(false));
+    let book = outbox::load(&app);
+    assert_eq!(book.dead.len(), 1);
+    assert_eq!(book.dead[0].attempts, outbox::MAX_ATTEMPTS + 1);
+    assert!(
+        book.pending.is_empty(),
+        "a failed replay does not start a new round of retries"
+    );
+    let discarded = outbox::discard(State(app.clone()), axum::extract::Path(key.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(discarded, json!({"discarded": key}));
+    assert!(outbox::load(&app).dead.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
