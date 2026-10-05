@@ -16,6 +16,7 @@ import { chatMock } from "./features/chat/mock";
 import { loopsMock } from "./features/loops/mock";
 import { eventsMock } from "./features/events/mock";
 import { historyMock } from "./features/history/mock";
+import { handoffMock } from "./features/handoff/mock";
 
 export { mockSplitLabels, mockDrafts, DEMO_MAP } from "./features/repos/mock";
 
@@ -37,5 +38,6 @@ export function createMockApi(): Api {
     ...loopsMock(ms),
     ...eventsMock(ms),
     ...historyMock(ms),
+    ...handoffMock(ms),
   };
 }

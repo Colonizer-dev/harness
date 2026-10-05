@@ -134,7 +134,7 @@ impl Harness {
 /// Why a colony's transcript could not be read. [`refused`] is the one place
 /// these map to HTTP statuses.
 #[derive(Debug)]
-enum TranscriptError {
+pub(crate) enum TranscriptError {
     /// The agent module has no `txcript` harness to read its transcripts as.
     Unsupported { agent: String },
     /// No session was recorded — a module that does not persist one, or one
@@ -154,7 +154,7 @@ enum TranscriptError {
 /// of the mapping: an unsupported module is **422**, nothing recorded is the
 /// **404** an unknown colony gets, an over-cap store is a **413**, and a store
 /// that will not load or stage is a **500** whose body is deliberately generic.
-fn refused(error: TranscriptError) -> Response {
+pub(crate) fn refused(error: TranscriptError) -> Response {
     match error {
         TranscriptError::Unsupported { agent } => client_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -176,7 +176,7 @@ fn refused(error: TranscriptError) -> Response {
 
 /// The generic **500** for a store that would not load or stage: the detail is
 /// logged, never returned, so no host path leaks.
-fn unreadable(error: &dyn std::fmt::Display) -> Response {
+pub(crate) fn unreadable(error: &dyn std::fmt::Display) -> Response {
     eprintln!("transcript: {error}");
     client_error(
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -333,6 +333,13 @@ fn read(harness: Harness, transcripts: &FsPath, caps: Caps) -> Result<Transcript
         Harness::Hermes => newest(&HermesStore::new(root.join("state.db")), |_: &String| None)?,
     };
     found.ok_or(TranscriptError::NotRecorded)
+}
+
+/// Read the most recent session of an agent module's transcripts directory, for callers that want the
+/// whole conversation rather than a page: [`read`] with the real caps. `handoff_out` uses it to export
+/// a colony's conversation back to a laptop (issue #738).
+pub(crate) fn load_latest(agent: &str, transcripts: &FsPath) -> Result<Transcript<Common>, TranscriptError> {
+    read(Harness::of(agent)?, transcripts, Caps::default())
 }
 
 /// `GET /api/sessions/{id}/transcript?format=common&limit=&cursor=`: the

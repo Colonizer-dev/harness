@@ -5,6 +5,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import { useSessionDiagnosis } from "../sessionDiagnosis";
 import { childrenOf, parentOf } from "../stack";
 import { useSessionStream, type LogEntry } from "../sessionStream";
+import { ContinueLocally } from "../features/handoff/ContinueLocally";
 import type { Session } from "../types";
 import { ChatPanel } from "./ChatPanel";
 import {
@@ -345,6 +346,7 @@ export function SessionView({
                 {busy === "catch_up" ? <Spinner /> : <IconBranch size={15} />} Catch up
               </Button>
             )}
+            <ContinueLocally session={session} />
             {!live && !session.cleaned_up && (session.status === "stopped" || session.status === "failed" || session.status === "parked") && (
               <Button
                 variant="primary"

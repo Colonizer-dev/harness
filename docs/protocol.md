@@ -95,6 +95,8 @@ Every heading of the single-page protocol, in its original order, and the area f
 | <a id="get-apisessionsidtranscriptformatcommonlimitcursor"></a>`GET /api/sessions/{id}/transcript?format=common&limit=&cursor=` | [protocol/sessions.md](protocol/sessions.md#get-apisessionsidtranscriptformatcommonlimitcursor) |
 | <a id="get-apisessionsideventssinceepoch-websocket"></a>`GET /api/sessions/{id}/events?since=<seq>&epoch=<epoch>` (WebSocket) | [protocol/sessions.md](protocol/sessions.md#get-apisessionsideventssinceepoch-websocket) |
 | <a id="get-apisessionsidterminalcolsrows-websocket"></a>`GET /api/sessions/{id}/terminal?cols=<n>&rows=<n>` (WebSocket) | [protocol/sessions.md](protocol/sessions.md#get-apisessionsidterminalcolsrows-websocket) |
+| <a id="post-apihandoff"></a>`POST /api/handoff` | [protocol/sessions.md](protocol/sessions.md#post-apihandoff) |
+| <a id="get-apisessionsidhandoff"></a>`GET /api/sessions/{id}/handoff` | [protocol/sessions.md](protocol/sessions.md#get-apisessionsidhandoff) |
 | <a id="saved-secrets-apisecrets"></a>Saved secrets: `/api/secrets` | [protocol/secrets.md](protocol/secrets.md#saved-secrets-apisecrets) |
 | <a id="colony-secrets-post-apisecretscolony"></a>Colony secrets: `POST /api/secrets/colony` | [protocol/secrets.md](protocol/secrets.md#colony-secrets-post-apisecretscolony) |
 | <a id="5-web-ui-contract"></a>5. Web UI contract | [protocol/web-ui.md](protocol/web-ui.md#5-web-ui-contract) |

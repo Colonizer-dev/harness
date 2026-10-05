@@ -3,7 +3,7 @@
 
 use super::*;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct NewSession {
     pub repo: String,
     #[serde(default)]
@@ -85,6 +85,11 @@ pub struct NewSession {
     /// them up. See `overlap_queue_target`.
     #[serde(default)]
     pub serialize: Option<bool>,
+    /// A hand-off's seed (issue #738): the rendered, redacted conversation and the branch the colony
+    /// starts from. Never part of the JSON body — the route that builds it (`handoff_in`) is in-process
+    /// — so it is skipped by serde and `Default` leaves it empty for every ordinary launch.
+    #[serde(skip)]
+    pub(crate) handoff: Option<crate::handoff::Seed>,
 }
 
 /// A launch-time model choice, trimmed: empty is none, and a `<provider>/<model>` must name a
@@ -656,7 +661,9 @@ pub async fn create(
         instructions: truncate(req.instructions.trim(), 20_000),
         status: SessionStatus::Starting, // decided by admission, just before the push
         branch: format!("colonizer/{slug}"),
-        base: None,
+        // A hand-off colony starts from the branch its transcript was recorded on (issue #738); an
+        // ordinary launch starts from the repository default, resolved at boot.
+        base: req.handoff.as_ref().and_then(|seed| seed.branch.clone()),
         parent: parent.clone(),
         stack: req.stack,
         stack_fork: None,
@@ -755,6 +762,15 @@ pub async fn create(
     let dir = app.session_dir(&id);
     tokio::fs::create_dir_all(dir.join("vm")).await?;
     tokio::fs::create_dir_all(dir.join("out")).await?;
+    // A hand-off's rendered conversation is written beside the colony's own directories — never inside
+    // the guest-writable `transcripts/` mount — and read once, by the boot, into the first prompt
+    // (issue #738). Written before admission so a refused launch's `remove_dir_all` takes it back out.
+    if let Some(seed) = &req.handoff
+        && let Err(e) = tokio::fs::write(crate::handoff::seed_path(&dir), seed.text.as_bytes()).await
+    {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        return Err(e.into());
+    }
     // The room check and the push share one write lock, so two launches colliding on the last free slot
     // cannot both take it. Counted before the push, so this colony is never waiting behind itself.
     // The duplicate-issue check is re-checked here too: the fast-path pre-check above reads under a
@@ -1051,6 +1067,7 @@ mod tests {
             origin: None,
             host: None,
             serialize,
+            handoff: None,
         })
     }
 
@@ -1528,6 +1545,7 @@ mod tests {
                 origin: None,
                 host: None,
                 serialize: None,
+                handoff: None,
             }),
         )
         .await
@@ -1611,6 +1629,7 @@ mod tests {
                 origin: None,
                 host: None,
                 serialize: None,
+                handoff: None,
             }),
         )
         .await
@@ -1654,6 +1673,7 @@ mod tests {
             origin: None,
             host: None,
             serialize: None,
+            handoff: None,
         })
     }
 

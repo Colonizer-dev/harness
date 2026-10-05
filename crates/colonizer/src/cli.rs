@@ -9,7 +9,7 @@
 //! and friends are defined once here, shown in `--help`, and returned from [`run`].
 
 use crate::{Settings, auth, util};
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, FixedOffset};
 use clap::{ArgAction, CommandFactory as _, FromArgMatches as _, Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
@@ -188,6 +188,21 @@ enum Command {
         allow_epic: bool,
         /// The task, when the issue alone does not say it (the issue body is read either way)
         task: Option<String>,
+    },
+    /// Hand a local agent session to a colony: a session you ran here continues on the mothership
+    Handoff {
+        /// The session to hand over: a txcript session id, or a file holding its exported Simple JSON
+        #[arg(value_name = "SESSION")]
+        session: String,
+        /// The repository the colony works in, as owner/repo
+        #[arg(long, value_name = "OWNER/REPO")]
+        repo: String,
+        /// The branch the colony starts from; the session's recorded branch when omitted
+        #[arg(long)]
+        branch: Option<String>,
+        /// The colony's title; the session's recorded title when omitted
+        #[arg(long)]
+        title: Option<String>,
     },
     /// List the colonies this token may see, newest first
     List {
@@ -404,6 +419,76 @@ fn launch_body(
         "queue_behind_holder": queue_behind_holder,
         "allow_epic": allow_epic,
     })
+}
+
+/// The `POST /api/handoff` body `handoff` sends: the repository, the optional base branch and title,
+/// and the Session's Simple JSON document. An optional field left empty is omitted, so the mothership
+/// falls back to what the transcript itself records.
+fn handoff_body(repo: &str, branch: Option<String>, title: Option<String>, transcript: Value) -> Value {
+    json!({
+        "repo": repo,
+        "branch": branch.filter(|b| !b.trim().is_empty()),
+        "title": title.filter(|t| !t.trim().is_empty()),
+        "transcript": transcript,
+    })
+}
+
+/// The most a transcript document may be (2 MiB), the same cap the mothership enforces: checked here
+/// too, so an over-large session is refused locally rather than as a 413 after the upload.
+const HANDOFF_MAX_BYTES: usize = 2 << 20;
+
+/// The `txcript` CLI `handoff` runs to export a session, overridable so a test (or an operator with it
+/// somewhere else) can point at its own.
+fn txcript_program() -> String {
+    std::env::var("COLONIZER_TXCRIPT").unwrap_or_else(|_| "txcript".to_string())
+}
+
+/// The Simple JSON document `handoff` uploads: the file the argument names when it is one, else the
+/// session with that id, exported locally by `txcript`. The document is capped before it is sent.
+fn handoff_document(session: &str, txcript: &str) -> Result<Value, Fail> {
+    let path = PathBuf::from(session);
+    let text = if path.is_file() {
+        std::fs::read_to_string(&path).with_context(|| format!("could not read {}", path.display()))?
+    } else {
+        export_session(txcript, session)?
+    };
+    if text.len() > HANDOFF_MAX_BYTES {
+        return Err(Fail::Transport(anyhow!(
+            "the transcript is larger than 2 MiB; export a shorter range of the session \
+             (`{txcript} export {session}#range`)"
+        )));
+    }
+    serde_json::from_str(&text).map_err(|e| Fail::Transport(anyhow!("the transcript is not a txcript Simple JSON document: {e}")))
+}
+
+/// A session exported by `txcript export <id> --out <file>`: the document, or a refusal naming the
+/// program and how to install it when it is not on PATH.
+fn export_session(txcript: &str, session: &str) -> Result<String, Fail> {
+    let out = std::env::temp_dir().join(format!("colonizer-handoff-{}.json", util::short_id()));
+    let result = match std::process::Command::new(txcript)
+        .args(["export", session, "--out"])
+        .arg(&out)
+        .output()
+    {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(Fail::Transport(anyhow!(
+            "could not run `{txcript}` (looked for it on PATH); install it with \
+             `cargo install --git https://github.com/skillsynchq/txcript txcript-cli`, or pass a file \
+             with the session's exported JSON instead"
+        ))),
+        Err(e) => Err(Fail::Transport(anyhow!("could not run `{txcript}`: {e}"))),
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(Fail::Transport(anyhow!(
+                "`{txcript} export {session}` failed: {}",
+                stderr.trim()
+            )))
+        }
+        Ok(_) => std::fs::read_to_string(&out)
+            .with_context(|| format!("`{txcript} export {session}` wrote no document to {}", out.display()))
+            .map_err(Fail::Transport),
+    };
+    let _ = std::fs::remove_file(&out);
+    result
 }
 
 /// The `POST /api/redteam/runs` body `redteam start` sends.
@@ -1456,6 +1541,34 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                 } else {
                     let status = session["status"].as_str().unwrap_or("queued");
                     println!("colony {} started ({status})", session["id"].as_str().unwrap_or("?"));
+                }
+                Ok(EXIT_OK)
+            })
+            .await
+        }
+        Command::Handoff {
+            session,
+            repo,
+            branch,
+            title,
+        } => {
+            let json = cli.json;
+            client_command(cli, move |machine| async move {
+                let transcript = handoff_document(&session, &txcript_program())?;
+                let body = handoff_body(&repo, branch, title, transcript);
+                let Some(colony) = machine.post("/api/handoff", Some(&body)).await? else {
+                    println!("colony started");
+                    return Ok(EXIT_OK);
+                };
+                if json {
+                    println!("{}", pretty(&colony)?);
+                } else {
+                    let status = colony["status"].as_str().unwrap_or("queued");
+                    println!(
+                        "colony {} started ({status}) on {}",
+                        colony["id"].as_str().unwrap_or("?"),
+                        colony["branch"].as_str().unwrap_or("?")
+                    );
                 }
                 Ok(EXIT_OK)
             })
@@ -3045,6 +3158,7 @@ mod tests {
             &["completions", "bash"][..],
             &["man"][..],
             &["launch", "acme/app"][..],
+            &["handoff", "sess-1", "--repo", "acme/app"][..],
             &["list", "--org", "acme", "--status", "running"][..],
             &["list", "--parked"][..],
             &["status", "abc123"][..],
@@ -3382,6 +3496,113 @@ mod tests {
         let parsed: crate::sessions::NewSession =
             serde_json::from_value(body).expect("a plain launch body deserializes into NewSession");
         assert!(!parsed.allow_duplicate && !parsed.queue_behind_holder && !parsed.allow_epic);
+    }
+
+    /// `handoff` takes the session (or file) as its argument and the repository as `--repo`, and the
+    /// optional overrides are carried only when given.
+    #[test]
+    fn a_handoff_parses_its_session_and_overrides() {
+        let cli = parse(&[
+            "handoff",
+            "sess-1",
+            "--repo",
+            "acme/app",
+            "--branch",
+            "feature/parser",
+            "--title",
+            "Continue the parser work",
+        ])
+        .unwrap();
+        let Command::Handoff {
+            session,
+            repo,
+            branch,
+            title,
+        } = cli.command.unwrap()
+        else {
+            panic!("handoff did not parse");
+        };
+        assert_eq!((session.as_str(), repo.as_str()), ("sess-1", "acme/app"));
+        assert_eq!(
+            (branch.as_deref(), title.as_deref()),
+            (Some("feature/parser"), Some("Continue the parser work"))
+        );
+        // The repository is required: without it there is nothing to launch on.
+        assert!(parse(&["handoff", "sess-1"]).is_err());
+        // The overrides are omitted when not given, so the mothership uses what the transcript records.
+        let plain = handoff_body("acme/app", None, Some("  ".into()), json!({"messages": []}));
+        assert_eq!(plain["repo"], json!("acme/app"));
+        assert_eq!(plain["branch"], json!(null));
+        assert_eq!(plain["title"], json!(null));
+    }
+
+    /// A file argument is what `handoff` uploads as the transcript: each fixture, exported to Simple
+    /// and written to disk, arrives in the body as the document the route parses.
+    #[test]
+    fn a_handoff_reads_a_file_as_the_transcript() {
+        use crate::handoff::tests::{CLAUDE_FIXTURE, CODEX_FIXTURE, simple_document};
+        use txcript::TextCodec as _;
+        let dir = std::env::temp_dir().join(format!("colonizer-handoff-cli-{}", util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (agent, fixture) in [("claude-code", CLAUDE_FIXTURE), ("codex", CODEX_FIXTURE)] {
+            let doc = simple_document(agent, fixture);
+            let path = dir.join(format!("{agent}.json"));
+            std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+            let transcript = handoff_document(path.to_str().unwrap(), "txcript").expect("the file is read");
+            assert!(transcript["messages"].as_array().is_some_and(|m| !m.is_empty()), "{agent}");
+            let body = handoff_body("acme/app", None, None, transcript);
+            // The body is what the route parses: the same document, and nothing the client invented.
+            let text = serde_json::to_string(&body["transcript"]).unwrap();
+            assert!(txcript::harness::simple::Simple::from_text(&text).is_ok(), "{agent}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Over the 2 MiB cap, `handoff` refuses locally rather than uploading a document the mothership
+    /// would answer with a 413.
+    #[test]
+    fn a_handoff_over_the_size_cap_is_refused_before_it_is_sent() {
+        let dir = std::env::temp_dir().join(format!("colonizer-handoff-big-{}", util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.json");
+        std::fs::write(&path, "x".repeat(HANDOFF_MAX_BYTES + 1)).unwrap();
+        let err = handoff_document(path.to_str().unwrap(), "txcript").unwrap_err();
+        assert!(err.to_string().contains("larger than 2 MiB"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session id runs the injected `txcript` program (`export <id> --out <file>`), and its document
+    /// is what goes in the body.
+    #[test]
+    fn a_handoff_exports_a_session_with_the_txcript_program() {
+        use crate::handoff::tests::{CLAUDE_FIXTURE, simple_document};
+        let dir = std::env::temp_dir().join(format!("colonizer-handoff-export-{}", util::short_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = simple_document("claude-code", CLAUDE_FIXTURE);
+        let text = serde_json::to_string(&doc).unwrap();
+        let script = dir.join("txcript");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nout=\"\"\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"--out\" ]; then out=\"$2\"; fi; shift; done\n\
+                 cat > \"$out\" <<'TXEOF'\n{text}\nTXEOF\n"
+            ),
+        )
+        .unwrap();
+        // 0o755: the injected program is executed, not read.
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let transcript = handoff_document("sess-1", script.to_str().unwrap()).expect("the export is read");
+        assert_eq!(
+            transcript["messages"].as_array().unwrap().len(),
+            doc["messages"].as_array().unwrap().len()
+        );
+
+        // A program that is not on PATH is refused with the install hint, never a bare io error.
+        let err = handoff_document("sess-1", "txcript-not-installed-here").unwrap_err();
+        assert!(err.to_string().contains("cargo install --git"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `redteam start` sends the preset and the rest as the API wants them: armed unless --now,

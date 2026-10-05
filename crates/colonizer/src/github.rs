@@ -937,16 +937,15 @@ pub async fn touched_files(app: &App, sessions: &[Session], s: &Session) -> Hash
     touched
 }
 
-/// Neutralizes a literal closing tag in text bound for the `<external-instructions>` block
-/// (issue #508): left alone, instructions containing one would end the block early and have the
-/// rest read as the colony's own prompt. The `<` is spaced off the tag (`< /external-instructions`),
-/// which renders harmlessly and cannot reassemble; the match ignores case. The search runs on an
-/// ASCII-lowercased copy, which keeps byte-for-byte offsets into the original.
-fn neutralize_external_close(text: &str) -> String {
-    const CLOSE: &str = "</external-instructions";
+/// Neutralizes a literal closing tag in text bound for a fenced block (issue #508, issue #738): left
+/// alone, instructions containing one would end the block early and have the rest read as the
+/// colony's own prompt. The `<` is spaced off the tag (`< /external-instructions`), which renders
+/// harmlessly and cannot reassemble; the match ignores case. The search runs on an ASCII-lowercased
+/// copy, which keeps byte-for-byte offsets into the original.
+pub(crate) fn neutralize_close(text: &str, close: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut copied = 0;
-    for (at, found) in text.to_ascii_lowercase().match_indices(CLOSE) {
+    for (at, found) in text.to_ascii_lowercase().match_indices(close) {
         out.push_str(&text[copied..at]);
         out.push_str("< ");
         out.push_str(&text[at + 1..at + found.len()]);
@@ -1086,7 +1085,7 @@ pub fn build_prompt(
             Some(name) => {
                 // With the closing tag neutralized, the text cannot end the block early and have
                 // the rest read as the colony's own prompt.
-                let instructions = neutralize_external_close(s.instructions.trim());
+                let instructions = neutralize_close(s.instructions.trim(), "</external-instructions");
                 let _ = writeln!(
                     p,
                     "<external-instructions>\nInstructions from an external API token \"{name}\" (external input):\n{instructions}\n"
