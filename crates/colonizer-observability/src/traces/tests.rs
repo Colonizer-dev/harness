@@ -76,9 +76,27 @@ pub(crate) struct Run<'a> {
     pub max_trace_bytes: u64,
 }
 
+/// A line's compact JSON with its object keys sorted: the bytes a fixture line holds, whether or not
+/// a workspace build turns on serde_json's `preserve_order` (which keeps insertion order instead).
+fn canonical(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let fields: Vec<String> = keys
+                .into_iter()
+                .map(|k| format!("{}:{}", Value::from(k.as_str()), canonical(&map[k])))
+                .collect();
+            format!("{{{}}}", fields.join(","))
+        }
+        Value::Array(items) => format!("[{}]", items.iter().map(canonical).collect::<Vec<_>>().join(",")),
+        other => other.to_string(),
+    }
+}
+
 /// The SHA-256 of a line as the tailer reads it: the key of a line with no `seq`.
 pub(crate) fn digest(line: &Value) -> [u8; 32] {
-    let d = ring::digest::digest(&ring::digest::SHA256, line.to_string().as_bytes());
+    let d = ring::digest::digest(&ring::digest::SHA256, canonical(line).as_bytes());
     let mut out = [0u8; 32];
     out.copy_from_slice(d.as_ref());
     out
