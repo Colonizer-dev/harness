@@ -64,7 +64,7 @@ without AVX2.
 - Streaming is per part, not per token; resume starts a fresh OpenCode session per turn series.
 - The native `question` tool is unavailable in `run` mode; questions use `colonizer_ask_user`.
 - The [exec policy](../claude-code/README.md#exec-policy) is not applied: the harness refuses to
-  launch an OpenCode colony while one is set (the install's `exec_policy` setting, or a repo
+  launch an OpenCode colony while one is set (the install's `exec_policy` setting, the org's exec policy, or a repo
   `.colonizer/exec-policy.json`).
 
 ## Develop

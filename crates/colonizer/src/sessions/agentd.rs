@@ -45,13 +45,19 @@ fn install_exec_policy(install: &crate::config::ModuleChoice) -> Option<String> 
         .map(String::from)
 }
 
+/// The env var the runners read the org layer of the exec policy from (execpolicy.mjs): a fixed
+/// name, unlike the install layer's, which each module's schema names for its `exec_policy` setting.
+pub(crate) const EXEC_POLICY_ORG_ENV: &str = "COLONIZER_EXEC_POLICY_ORG";
+
 /// The exec policy is the operator's rule about commands, not a model setting, so unlike models it
 /// follows the colony to an org's module pick: a module that applies the policy inherits the
-/// install's policy when its own settings do not name one, and a module that does not apply it
-/// refuses to boot rather than silently ignoring a policy the operator set.
+/// install's policy when its own settings do not name one, and the org's layer (`org_policy`: the
+/// org and its policy text, issue #924) as `COLONIZER_EXEC_POLICY_ORG`; a module that does not
+/// apply it refuses to boot rather than silently ignoring a policy the operator set.
 pub(crate) fn apply_exec_policy(
     agent: &AgentModule,
     install: &crate::config::ModuleChoice,
+    org_policy: Option<(&str, &str)>,
     agents: &[AgentModule],
     worktree: &std::path::Path,
     env: &mut Map<String, Value>,
@@ -59,25 +65,34 @@ pub(crate) fn apply_exec_policy(
     if applies_exec_policy(&agent.schema) {
         // The colony's own setting already travelled (agent_env); otherwise the install's policy
         // rides along under this module's env name for the setting.
-        let Some(var) = agent.schema["properties"]["exec_policy"]["env"].as_str() else {
-            return Ok(());
-        };
-        if !env.contains_key(var)
+        if let Some(var) = agent.schema["properties"]["exec_policy"]["env"].as_str()
+            && !env.contains_key(var)
             && let Some(policy) = install_exec_policy(install)
         {
             env.insert(var.to_string(), Value::String(policy));
         }
+        // The org layer sits between the install and the repo file; the runner layers the three
+        // and the strictest decision wins, so it can only narrow the install's.
+        if let Some((_, policy)) = org_policy {
+            env.insert(EXEC_POLICY_ORG_ENV.into(), Value::String(policy.to_string()));
+        }
         return Ok(());
     }
-    let repo_policy = worktree.join(".colonizer/exec-policy.json").is_file();
-    let (source, clear) = match (install_exec_policy(install).is_some(), repo_policy) {
-        (false, false) => return Ok(()),
-        (true, false) => ("the install's `exec_policy` setting is set", "it"),
-        (false, true) => ("the repo's `.colonizer/exec-policy.json` is set", "it"),
-        (true, true) => (
-            "both the install's `exec_policy` setting and the repo's `.colonizer/exec-policy.json` are set",
-            "them",
-        ),
+    let mut sources = Vec::new();
+    if install_exec_policy(install).is_some() {
+        sources.push("the install's `exec_policy` setting".to_string());
+    }
+    if let Some((org, _)) = org_policy {
+        sources.push(format!("the {org} org's exec policy (workspace settings)"));
+    }
+    if worktree.join(".colonizer/exec-policy.json").is_file() {
+        sources.push("the repo's `.colonizer/exec-policy.json`".to_string());
+    }
+    let (source, clear) = match sources.as_slice() {
+        [] => return Ok(()),
+        [one] => (format!("{one} is set"), "it"),
+        [a, b] => (format!("both {a} and {b} are set"), "them"),
+        [rest @ .., last] => (format!("{} and {last} are set", rest.join(", ")), "them"),
     };
     let pick = agents
         .iter()
@@ -259,7 +274,7 @@ mod tests {
         let agents = [module("Claude Code", true), module("ACP", true)];
         let wt = worktree(false);
         let mut env = Map::new();
-        apply_exec_policy(&module("ACP", true), &install(INSTALL_POLICY), &agents, &wt.0, &mut env).unwrap();
+        apply_exec_policy(&module("ACP", true), &install(INSTALL_POLICY), None, &agents, &wt.0, &mut env).unwrap();
         assert_eq!(env["COLONIZER_EXEC_POLICY"], INSTALL_POLICY);
     }
 
@@ -270,7 +285,15 @@ mod tests {
         let wt = worktree(false);
         let mut env = Map::new();
         env.insert("COLONIZER_EXEC_POLICY".into(), Value::String(r#"{"rules": []}"#.into()));
-        apply_exec_policy(&module("Claude Code", true), &install(INSTALL_POLICY), &[], &wt.0, &mut env).unwrap();
+        apply_exec_policy(
+            &module("Claude Code", true),
+            &install(INSTALL_POLICY),
+            None,
+            &[],
+            &wt.0,
+            &mut env,
+        )
+        .unwrap();
         assert_eq!(env["COLONIZER_EXEC_POLICY"], r#"{"rules": []}"#);
     }
 
@@ -279,7 +302,7 @@ mod tests {
         let agents = [module("Claude Code", true), module("ACP", true)];
         let wt = worktree(false);
         let mut env = Map::new();
-        let error = apply_exec_policy(&module("Pi", false), &install(INSTALL_POLICY), &agents, &wt.0, &mut env)
+        let error = apply_exec_policy(&module("Pi", false), &install(INSTALL_POLICY), None, &agents, &wt.0, &mut env)
             .unwrap_err()
             .to_string();
         assert_eq!(
@@ -293,7 +316,7 @@ mod tests {
         let agents = [module("Claude Code", true), module("ACP", true)];
         let wt = worktree(true);
         let mut env = Map::new();
-        let error = apply_exec_policy(&module("Codex", false), &install(""), &agents, &wt.0, &mut env)
+        let error = apply_exec_policy(&module("Codex", false), &install(""), None, &agents, &wt.0, &mut env)
             .unwrap_err()
             .to_string();
         assert_eq!(
@@ -310,6 +333,7 @@ mod tests {
         let error = apply_exec_policy(
             &module("Grok Build", false),
             &install(INSTALL_POLICY),
+            None,
             &agents,
             &wt.0,
             &mut env,
@@ -328,7 +352,79 @@ mod tests {
         let wt = worktree(false);
         let mut env = Map::new();
         // A whitespace-only install setting reads as unset, like every other string setting.
-        apply_exec_policy(&module("Pi", false), &install("  "), &agents, &wt.0, &mut env).unwrap();
+        apply_exec_policy(&module("Pi", false), &install("  "), None, &agents, &wt.0, &mut env).unwrap();
+        assert!(env.is_empty());
+    }
+
+    const ORG_POLICY: &str = r#"{"rules": [{"id": "no-publish", "decision": "deny", "command": "npm publish"}]}"#;
+
+    #[test]
+    fn the_orgs_exec_policy_reaches_the_colony_beside_the_installs() {
+        let agents = [module("Claude Code", true), module("ACP", true)];
+        let wt = worktree(false);
+        let mut env = Map::new();
+        apply_exec_policy(
+            &module("Claude Code", true),
+            &install(INSTALL_POLICY),
+            Some(("acme", ORG_POLICY)),
+            &agents,
+            &wt.0,
+            &mut env,
+        )
+        .unwrap();
+        // Two layers, two variables: the runner narrows the install's by the org's.
+        assert_eq!(env["COLONIZER_EXEC_POLICY"], INSTALL_POLICY);
+        assert_eq!(env[EXEC_POLICY_ORG_ENV], ORG_POLICY);
+        // With no install policy, the org layer still travels alone.
+        let mut env = Map::new();
+        apply_exec_policy(
+            &module("ACP", true),
+            &install(""),
+            Some(("acme", ORG_POLICY)),
+            &agents,
+            &wt.0,
+            &mut env,
+        )
+        .unwrap();
+        assert_eq!(env[EXEC_POLICY_ORG_ENV], ORG_POLICY);
+        assert!(!env.contains_key("COLONIZER_EXEC_POLICY"));
+    }
+
+    #[test]
+    fn a_module_that_does_not_apply_the_policy_refuses_the_orgs_naming_the_org() {
+        let agents = [module("Claude Code", true), module("ACP", true)];
+        let wt = worktree(false);
+        let mut env = Map::new();
+        let error = apply_exec_policy(
+            &module("OpenCode", false),
+            &install(""),
+            Some(("acme", ORG_POLICY)),
+            &agents,
+            &wt.0,
+            &mut env,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "the OpenCode agent module does not apply the exec policy, and the acme org's exec policy (workspace settings) is set: clear it, or pick an agent module that applies it (Claude Code, ACP)"
+        );
+        // All three sources at once are each named.
+        let wt = worktree(true);
+        let error = apply_exec_policy(
+            &module("Hermes", false),
+            &install(INSTALL_POLICY),
+            Some(("acme", ORG_POLICY)),
+            &agents,
+            &wt.0,
+            &mut env,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "the Hermes agent module does not apply the exec policy, and the install's `exec_policy` setting, the acme org's exec policy (workspace settings) and the repo's `.colonizer/exec-policy.json` are set: clear them, or pick an agent module that applies it (Claude Code, ACP)"
+        );
         assert!(env.is_empty());
     }
 }

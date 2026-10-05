@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../context";
+import { execPolicyProblem } from "../execPolicy";
 import { HIDE_EMPTY_ORGS_KEY, orgEnabled, parseHideEmptyOrgs, serializeHideEmptyOrgs } from "../orgs";
 import type { ModuleInfo, OrgInfo, OrgSettings } from "../types";
 import { useModels } from "../useModels";
@@ -286,6 +287,11 @@ function withEnabled(settings: OrgSettings, enabled: boolean): OrgSettings {
   return { ...settings, enabled: enabled ? null : false };
 }
 
+/** The org's exec policy layer (issue #924) rides in the same payload; blank is sent as null, no layer. */
+function withExecPolicy(settings: OrgSettings, text: string): OrgSettings {
+  return { ...settings, exec_policy: text.trim() ? text : null };
+}
+
 /** The skillsets switched on in Settings → Modules, which every org inherits. */
 function globalSkillsets(modules: ModuleInfo[] | null): string[] | null {
   const agent = modules?.find((m) => m.kind === "agent");
@@ -362,11 +368,17 @@ export function OrgSettingsForm({
     setHideEmpty(hide);
     store(HIDE_EMPTY_ORGS_KEY, serializeHideEmptyOrgs(hide));
   };
+  const [execPolicy, setExecPolicy] = useState(() => info?.settings?.exec_policy ?? "");
+  // A refusal the server gave for the exec policy, shown under it until the text changes.
+  const [execPolicyRefusal, setExecPolicyRefusal] = useState<string | null>(null);
   const [initial, setInitial] = useState(() =>
     JSON.stringify(
-      withEnabled(
-        withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
-        orgEnabled(info?.settings),
+      withExecPolicy(
+        withEnabled(
+          withSkillsets(fromDraft(toDraft(info?.settings ?? {}, null)).settings, info?.settings?.agent?.skillsets ?? {}),
+          orgEnabled(info?.settings),
+        ),
+        info?.settings?.exec_policy ?? "",
       ),
     ),
   );
@@ -394,8 +406,10 @@ export function OrgSettingsForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api]);
 
-  const { settings: fields, error } = fromDraft(draft);
-  const settings = withEnabled(withSkillsets(fields, skillsets), enabled);
+  const { settings: fields, error: fieldError } = fromDraft(draft);
+  const execPolicyError = execPolicyProblem(execPolicy) ?? execPolicyRefusal;
+  const error = fieldError ?? (execPolicyError ? "Exec policy: fix the JSON above" : null);
+  const settings = withExecPolicy(withEnabled(withSkillsets(fields, skillsets), enabled), execPolicy);
   const overrides = FIELDS.filter((spec) => draft[spec.key].override).length + Object.keys(skillsets).length;
   const inheritedSkillsets = globalSkillsets(modules);
   // Every installed skillset, plus any this org still names that is no longer installed.
@@ -429,7 +443,9 @@ export function OrgSettingsForm({
       toast(`Saved ${org} workspace settings`);
       onClose();
     } catch (e) {
-      toast(errorMessage(e), "error");
+      const message = errorMessage(e);
+      if (/exec policy/.test(message)) setExecPolicyRefusal(message);
+      toast(message, "error");
     } finally {
       setSaving(false);
     }
@@ -626,6 +642,15 @@ export function OrgSettingsForm({
             )}
           </Fragment>
         ))}
+        <ExecPolicyEditor
+          org={org}
+          value={execPolicy}
+          error={execPolicyError}
+          onChange={(text) => {
+            setExecPolicy(text);
+            setExecPolicyRefusal(null);
+          }}
+        />
       </div>
 
       <div className="page-pad flex shrink-0 flex-wrap items-center gap-2 border-t border-border px-5 py-3">
@@ -649,6 +674,52 @@ export function OrgSettingsForm({
         </Button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The org layer of the exec policy (issue #924): one JSON text box, checked as it is typed with the
+ * server's own rules, the problem shown under it. Not an inherit/override field: the install's
+ * policy always applies too, and this one can only narrow it.
+ */
+export function ExecPolicyEditor({
+  org,
+  value,
+  error,
+  onChange,
+}: {
+  org: string;
+  value: string;
+  error: string | null;
+  onChange: (text: string) => void;
+}) {
+  return (
+    <section className="border-t border-border py-3">
+      <h3 className="text-[11.5px] font-semibold uppercase tracking-wide text-faint">Exec policy</h3>
+      <div className="py-3">
+        <div className="text-[12px] text-muted">
+          Rules for the commands {org} colonies run, as JSON: {'{"rules": [{"id", "decision": "deny" | "ask" | "allow", "reason", "command" | "script" | "touches" | "writes_outside"}]}'}.
+          Layered between the install's policy and a repository's own .colonizer/exec-policy.json; the strictest decision
+          wins, so it can only narrow. Agent modules that cannot apply it refuse to launch while it is set. Empty adds nothing.
+        </div>
+        <textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          rows={6}
+          spellCheck={false}
+          placeholder={'{"rules": [{"id": "no-publish", "decision": "deny", "command": "npm publish"}]}'}
+          aria-label={`Exec policy for ${org}`}
+          aria-invalid={error !== null}
+          aria-describedby={error ? "org-exec-policy-error" : undefined}
+          className={cx(inputClass, "mt-2 h-auto w-full py-2 font-mono text-[12.5px]", error !== null && "border-err focus:border-err")}
+        />
+        {error && (
+          <div id="org-exec-policy-error" role="alert" className="mt-1 text-[12px] text-err [overflow-wrap:anywhere]">
+            {error}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 

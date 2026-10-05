@@ -198,6 +198,49 @@ test('a later layer can narrow but never widen', () => {
   }
 });
 
+test('an org layer narrows the install layer: an org deny overrides an install allow (#924)', () => {
+  const dir = workspace();
+  try {
+    const policy = policyIn(dir, {
+      COLONIZER_EXEC_POLICY: JSON.stringify({ rules: [{ id: 'allow-publish', decision: 'allow', command: 'npm publish' }] }),
+      COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules: [{ id: 'org-no-publish', decision: 'deny', reason: 'acme publishes from CI', command: 'npm publish' }] }),
+    });
+    assert.deepEqual(policy.layers.map((layer) => layer.name), ['default', 'install', 'org']);
+    const hit = decide(policy, 'npm publish', dir);
+    assert.deepEqual({ decision: hit.decision, rule: hit.rule, layer: hit.layer }, { decision: 'deny', rule: 'org-no-publish', layer: 'org' });
+    // And an org allow cannot widen the install's deny.
+    const widen = policyIn(dir, {
+      COLONIZER_EXEC_POLICY: JSON.stringify({ rules: [{ id: 'no-publish', decision: 'deny', command: 'npm publish' }] }),
+      COLONIZER_EXEC_POLICY_ORG: JSON.stringify({ rules: [{ id: 'org-publish', decision: 'allow', command: 'npm publish' }] }),
+    });
+    assert.deepEqual(decide(widen, 'npm publish', dir).layer, 'install');
+    assert.equal(decide(widen, 'npm publish', dir).decision, 'deny');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The mothership refuses to save an exec policy unless this parser keeps it whole (issue #924); the
+// same fixture drives the Rust port (crates/colonizer/src/exec_policy.rs) in crates/repo-contracts.
+const validFixture = JSON.parse(readFileSync(new URL('./fixtures/execpolicy-valid.json', import.meta.url), 'utf8'));
+
+/** Whether parsePolicy keeps a policy whole: the layer, every rule, every predicate a rule names. */
+function keptWhole(text) {
+  const policy = parsePolicy(text);
+  if (!policy) return false;
+  const raw = JSON.parse(text).rules;
+  if (policy.rules.length !== raw.length) return false;
+  const named = (rule) =>
+    ['command', 'script', 'touches'].filter((key) => key in rule).length +
+    (rule.writes_outside !== undefined && rule.writes_outside !== false ? 1 : 0);
+  return policy.rules.every((rule, i) => rule.predicates.length === named(raw[i]));
+}
+
+test('the save-time validity fixture matches what parsePolicy keeps whole (#924)', () => {
+  assert.ok(validFixture.cases.length > 10);
+  for (const { policy, valid } of validFixture.cases) assert.equal(keptWhole(policy), valid, policy);
+});
+
 test('a malformed layer is ignored with a warning; the default keeps enforcing', () => {
   for (const broken of ['{not json', '{"rules": "nope"}', '[]']) {
     const policy = loadExecPolicy({ COLONIZER_EXEC_POLICY: broken });
