@@ -8,6 +8,7 @@ use crate::proto::collector::logs::v1::ExportLogsServiceRequest;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use prost::Message;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
@@ -17,9 +18,12 @@ struct Seen {
     path: String,
     headers: HeaderMap,
     body: Vec<u8>,
+    status: u16,
 }
 
 type Respond = Arc<dyn Fn(&str, &[u8]) -> (u16, Vec<u8>) + Send + Sync>;
+/// A scripted answer that also sees the request headers and can set response headers.
+type RespondFull = Arc<dyn Fn(&str, &HeaderMap, &[u8]) -> (u16, Vec<(&'static str, String)>, Vec<u8>) + Send + Sync>;
 
 struct Collector {
     url: String,
@@ -28,6 +32,14 @@ struct Collector {
 
 impl Collector {
     async fn start(respond: Respond) -> Collector {
+        Collector::start_full(Arc::new(move |path, _, body| {
+            let (status, reply) = respond(path, body);
+            (status, Vec::new(), reply)
+        }))
+        .await
+    }
+
+    async fn start_full(respond: RespondFull) -> Collector {
         let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
         let log = seen.clone();
         let handler = move |path: &'static str| {
@@ -43,13 +55,18 @@ impl Collector {
                         flate2::read::GzDecoder::new(raw.as_slice()).read_to_end(&mut out).unwrap();
                         raw = out;
                     }
-                    let (status, reply) = respond(path, &raw);
+                    let (status, extra, reply) = respond(path, &headers, &raw);
                     log.lock().unwrap().push(Seen {
                         path: path.to_string(),
                         headers,
                         body: raw,
+                        status,
                     });
-                    (StatusCode::from_u16(status).unwrap(), reply)
+                    let mut out = HeaderMap::new();
+                    for (name, value) in extra {
+                        out.insert(name, value.parse().unwrap());
+                    }
+                    (StatusCode::from_u16(status).unwrap(), out, reply)
                 }
             }
         };
@@ -68,8 +85,21 @@ impl Collector {
 
     /// Every log record body received, in order.
     fn bodies(&self) -> Vec<String> {
-        self.seen("/v1/logs")
-            .iter()
+        Self::record_bodies(&self.seen("/v1/logs"))
+    }
+
+    /// Every log record body the collector answered 2xx to, in order.
+    fn accepted(&self) -> Vec<String> {
+        let ok: Vec<Seen> = self
+            .seen("/v1/logs")
+            .into_iter()
+            .filter(|s| (200..300).contains(&s.status))
+            .collect();
+        Self::record_bodies(&ok)
+    }
+
+    fn record_bodies(seen: &[Seen]) -> Vec<String> {
+        seen.iter()
             .filter_map(|s| ExportLogsServiceRequest::decode(s.body.as_slice()).ok())
             .flat_map(|r| r.resource_logs)
             .flat_map(|r| r.scope_logs)
@@ -229,18 +259,19 @@ async fn a_refused_request_is_bisected_down_to_the_bad_record() {
     let path = contract(&root, &collector.url, |_| {});
     let mut x = Exporter::new(&path, Vec::new()).unwrap();
     assert_eq!(x.tick().await, TICK, "a refusal is not retried");
-    let delivered: std::collections::BTreeSet<_> = collector
-        .seen("/v1/logs")
-        .iter()
-        .filter(|s| !String::from_utf8_lossy(&s.body).contains("poison"))
-        .flat_map(|s| ExportLogsServiceRequest::decode(s.body.as_slice()).unwrap().resource_logs)
-        .flat_map(|r| r.scope_logs)
-        .flat_map(|s| s.log_records)
-        .map(|r| format!("{:?}", r.body))
-        .collect();
-    assert_eq!(delivered.len(), 4, "every good record got through: {delivered:?}");
-    assert_eq!(x.aggregates.dropped.get("refused"), Some(&1));
-    assert!(committed_offset(&root).is_some(), "the cursor moves past the dropped record");
+    let mut delivered = collector.accepted();
+    delivered.sort();
+    assert_eq!(delivered, ["a", "b", "c", "d"], "every good record got through, once");
+    assert_eq!(x.aggregates.dropped.get("refused"), Some(&1), "exactly one record dropped");
+    assert_eq!(x.aggregates.dropped.len(), 1, "{:?}", x.aggregates.dropped);
+    let size = std::fs::metadata(root.0.join("sessions/c0ffee12/harness.jsonl"))
+        .unwrap()
+        .len();
+    assert_eq!(
+        committed_offset(&root),
+        Some(size),
+        "the cursor moves past the dropped record"
+    );
 }
 
 #[tokio::test]
@@ -373,4 +404,266 @@ fn a_version_mismatch_is_refused() {
     std::fs::write(&path, serde_json::to_vec(&c).unwrap()).unwrap();
     let err = Exporter::new(&path, Vec::new()).err().unwrap();
     assert!(err.starts_with("refused"), "{err}");
+}
+
+/// Lets the next tick past its backoff without sleeping.
+fn skip_backoff(x: &mut Exporter) {
+    x.backoff = x.backoff.map(|(_, d)| (Instant::now() - d, d));
+}
+
+fn file_size(root: &Root) -> u64 {
+    std::fs::metadata(root.0.join("sessions/c0ffee12/harness.jsonl"))
+        .unwrap()
+        .len()
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// A collector that answers `status` unless the request carries `x-api-key: good`, or `open` is set.
+async fn guarded(status: u16, open: Arc<std::sync::atomic::AtomicBool>) -> Collector {
+    Collector::start_full(Arc::new(move |_, headers, _| {
+        let good = headers.get("x-api-key").is_some_and(|v| v == "good");
+        if good || open.load(std::sync::atomic::Ordering::SeqCst) {
+            (200, Vec::new(), Vec::new())
+        } else {
+            (status, Vec::new(), b"invalid api key".to_vec())
+        }
+    }))
+    .await
+}
+
+#[tokio::test]
+async fn a_401_keeps_every_record_and_delivers_them_after_the_key_is_fixed() {
+    let root = root("auth401");
+    let collector = guarded(401, Arc::default()).await;
+    for msg in ["a", "b", "c", "d", "e"] {
+        harness(&root, msg);
+    }
+    let path = contract(&root, &collector.url, |_| {});
+    let wrong = "wrong-key-value".to_string();
+    let mut x = Exporter::new(&path, vec![("x-api-key".into(), wrong.clone())]).unwrap();
+
+    let wait = x.tick().await;
+    assert!(wait >= Duration::from_millis(700), "backs off: {wait:?}");
+    assert_eq!(x.status.state, "auth_failed");
+    assert_eq!(x.status.signals["logs"].state, "auth_failed");
+    assert_eq!(collector.seen("/v1/logs").len(), 1, "one request, never bisected");
+    assert!(x.aggregates.dropped.is_empty(), "nothing dropped: {:?}", x.aggregates.dropped);
+    assert_eq!(committed_offset(&root), None, "nothing committed");
+
+    // Paused: an early tick sends nothing; after the backoff the same batch is tried again, whole.
+    x.tick().await;
+    assert_eq!(collector.seen("/v1/logs").len(), 1);
+    skip_backoff(&mut x);
+    harness(&root, "during the pause");
+    x.tick().await;
+    assert_eq!(collector.seen("/v1/logs").len(), 2);
+    assert_eq!(x.status.consecutive_failures, 2);
+    assert!(x.status.next_retry_unix.is_some());
+    assert!(x.aggregates.dropped.is_empty());
+    assert_eq!(committed_offset(&root), None);
+
+    x.write_status(true);
+    let status = std::fs::read_to_string(status_path(&root.0)).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&status).unwrap();
+    assert_eq!(json["state"], "auth_failed");
+    assert_eq!(json["endpoint"], collector.url.as_str());
+    assert!(json["last_error"].as_str().unwrap().contains("401"), "{status}");
+    assert!(json["backlog_bytes"].as_u64().unwrap() >= file_size(&root) - 1, "{status}");
+    assert!(!status.contains(&wrong), "the header value leaked: {status}");
+
+    // The operator fixes the key: the mothership restarts the add-on (here mid-pause, without a
+    // clean shutdown) and every record, including the one written during the pause, arrives.
+    drop(x);
+    let mut y = Exporter::new(&path, vec![("x-api-key".into(), "good".into())]).unwrap();
+    assert_eq!(y.tick().await, TICK);
+    assert_eq!(
+        sorted(collector.accepted()),
+        ["a", "b", "c", "d", "during the pause", "e"],
+        "zero loss, no duplicates among the accepted"
+    );
+    assert!(y.aggregates.dropped.is_empty(), "{:?}", y.aggregates.dropped);
+    assert_eq!(committed_offset(&root), Some(file_size(&root)));
+    assert_eq!(y.status.state, "running");
+}
+
+#[tokio::test]
+async fn a_403_holds_the_batch_and_resumes_once_the_backend_accepts_the_key() {
+    let root = root("auth403");
+    let open: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let collector = guarded(403, open.clone()).await;
+    for msg in ["a", "b", "c"] {
+        harness(&root, msg);
+    }
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, vec![("x-api-key".into(), "stale".into())]).unwrap();
+    x.tick().await;
+    skip_backoff(&mut x);
+    x.tick().await;
+    assert_eq!(x.status.state, "auth_failed");
+    assert_eq!(collector.seen("/v1/logs").len(), 2, "retried whole, never bisected");
+    assert!(x.aggregates.dropped.is_empty());
+    assert_eq!(committed_offset(&root), None);
+
+    // The key gets its permission back; the same process delivers the held batch.
+    open.store(true, std::sync::atomic::Ordering::SeqCst);
+    skip_backoff(&mut x);
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(sorted(collector.accepted()), ["a", "b", "c"]);
+    assert_eq!(x.status.state, "running");
+    assert_eq!(x.status.signals["logs"].state, "ok");
+    assert_eq!(x.status.consecutive_failures, 0);
+    assert!(x.status.bytes_sent > 0);
+    assert!(x.aggregates.dropped.is_empty());
+    assert_eq!(committed_offset(&root), Some(file_size(&root)));
+}
+
+#[tokio::test]
+async fn retry_after_is_honoured_in_seconds_and_as_a_date() {
+    let root = root("retry-after");
+    let calls = Arc::new(Mutex::new(0u32));
+    let counter = calls.clone();
+    let collector = Collector::start_full(Arc::new(move |_, _, _| {
+        let mut n = counter.lock().unwrap();
+        *n += 1;
+        match *n {
+            1 => (429, vec![("retry-after", "3".to_string())], b"slow down".to_vec()),
+            2 => {
+                let at = SystemTime::now() + Duration::from_secs(8);
+                let date = chrono::DateTime::<chrono::Utc>::from(at).format("%a, %d %b %Y %H:%M:%S GMT");
+                (503, vec![("retry-after", date.to_string())], Vec::new())
+            }
+            _ => (200, Vec::new(), Vec::new()),
+        }
+    }))
+    .await;
+    harness(&root, "hello");
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+
+    let wait = x.tick().await;
+    assert!(
+        wait >= Duration::from_secs(3) && wait <= Duration::from_millis(3100),
+        "{wait:?}"
+    );
+    assert_eq!(x.status.state, "retrying");
+    let early = x.tick().await;
+    assert!(early > Duration::from_secs(2), "still waiting: {early:?}");
+    assert_eq!(collector.seen("/v1/logs").len(), 1);
+
+    skip_backoff(&mut x);
+    let wait = x.tick().await;
+    assert!(
+        wait >= Duration::from_secs(6) && wait <= Duration::from_secs(9),
+        "an HTTP-date: {wait:?}"
+    );
+    skip_backoff(&mut x);
+    assert_eq!(x.tick().await, TICK);
+    assert_eq!(collector.accepted(), ["hello"]);
+    assert!(x.aggregates.dropped.is_empty());
+}
+
+#[tokio::test]
+async fn a_partial_success_counts_the_rejected_and_keeps_the_message() {
+    use crate::proto::collector::logs::v1::{ExportLogsPartialSuccess, ExportLogsServiceResponse};
+    let root = root("partial");
+    let collector = Collector::start(Arc::new(|_, _| {
+        let reply = ExportLogsServiceResponse {
+            partial_success: Some(ExportLogsPartialSuccess {
+                rejected_log_records: 1,
+                error_message: "record 2 has an invalid timestamp".into(),
+            }),
+        };
+        (200, reply.encode_to_vec())
+    }))
+    .await;
+    for msg in ["a", "b", "c"] {
+        harness(&root, msg);
+    }
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    assert_eq!(x.tick().await, TICK, "an ack is an ack: not retried");
+    assert_eq!(collector.seen("/v1/logs").len(), 1);
+    assert_eq!(x.aggregates.dropped.get("rejected"), Some(&1));
+    let partial = x.status.last_partial_success.clone().unwrap();
+    assert_eq!(partial.rejected, 1);
+    assert_eq!(partial.message.as_deref(), Some("record 2 has an invalid timestamp"));
+    assert_eq!(x.status.signals["logs"].records_sent, 2);
+    assert_eq!(committed_offset(&root), Some(file_size(&root)));
+
+    // The JSON form, with the count as a string.
+    let root = self::root("partial-json");
+    let collector = Collector::start(Arc::new(|_, _| {
+        (
+            200,
+            br#"{"partialSuccess":{"rejectedLogRecords":"2","errorMessage":"two too big"}}"#.to_vec(),
+        )
+    }))
+    .await;
+    harness(&root, "x");
+    let path = contract(&root, &collector.url, |s| s.protocol = "http/json".into());
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    assert_eq!(x.aggregates.dropped.get("rejected"), Some(&2));
+    assert_eq!(x.status.last_partial_success.unwrap().message.as_deref(), Some("two too big"));
+}
+
+#[tokio::test]
+async fn an_outage_with_lines_appended_meanwhile_loses_nothing() {
+    let root = root("outage");
+    let up: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+    let collector = guarded(503, up.clone()).await;
+    let mut expected = Vec::new();
+    for i in 0..3 {
+        harness(&root, &format!("before {i}"));
+        expected.push(format!("before {i}"));
+    }
+    let path = contract(&root, &collector.url, |_| {});
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    for tick in 0..4 {
+        x.tick().await;
+        skip_backoff(&mut x);
+        harness(&root, &format!("during {tick}"));
+        expected.push(format!("during {tick}"));
+    }
+    assert!(collector.accepted().is_empty());
+    assert_eq!(committed_offset(&root), None);
+
+    // A clean shutdown mid-outage commits nothing it was not acknowledged for.
+    x.shutdown();
+    assert_eq!(committed_offset(&root), None);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    up.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..4 {
+        skip_backoff(&mut x);
+        x.tick().await;
+    }
+    expected.sort();
+    assert_eq!(sorted(collector.accepted()), expected);
+    assert_eq!(committed_offset(&root), Some(file_size(&root)));
+    assert!(x.aggregates.dropped.is_empty(), "{:?}", x.aggregates.dropped);
+}
+
+#[tokio::test]
+async fn no_canary_reaches_the_wire() {
+    let root = root("canary");
+    let collector = Collector::start(ok()).await;
+    let canaries = crate::testkit::Canaries::new();
+    for canary in &canaries.all {
+        harness(&root, &canary.text);
+    }
+    harness(&root, &canaries.content);
+    let path = contract(&root, &collector.url, |s| s.stream_metrics = true);
+    let mut x = Exporter::new(&path, Vec::new()).unwrap();
+    x.tick().await;
+    let seen = collector.seen.lock().unwrap().clone();
+    assert!(seen.iter().any(|s| s.path == "/v1/logs"));
+    assert_eq!(collector.bodies().len(), canaries.all.len() + 1, "every line was exported");
+    for request in &seen {
+        crate::testkit::assert_absent(&request.body, canaries.secrets(), &request.path);
+    }
 }
