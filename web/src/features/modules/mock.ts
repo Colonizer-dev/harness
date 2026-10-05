@@ -4,6 +4,23 @@ import { ago, clone, sleep } from "../../mockShared";
 import { ApiError } from "../../http";
 import type { MockState } from "../../mockState";
 import type { ModulesApi } from "./api";
+import type { WebhookDelivery } from "./types";
+
+let mockDeadLetters: WebhookDelivery[] = [
+  {
+    key: "evt_5b1f0c9e7a2d4e6f8a0b1c2d3e4f5a6b.owner",
+    event_id: "evt_5b1f0c9e7a2d4e6f8a0b1c2d3e4f5a6b",
+    event: "pull_request",
+    target: "owner",
+    url: "https://hooks.example.com/colonizer",
+    colony: null,
+    attempts: 6,
+    first_at: ago(120),
+    last_at: ago(105),
+    next_at: null,
+    last_error: "the webhook answered 503 Service Unavailable",
+  },
+];
 
 export function modulesMock(ms: MockState): ModulesApi {
   return {
@@ -39,6 +56,24 @@ export function modulesMock(ms: MockState): ModulesApi {
     observabilityTest: async () => {
       await sleep(400);
       return { ok: true, signals: { logs: { ok: true, rejected: 0 }, metrics: { ok: true, rejected: 0 } } };
+    },
+    // Webhook deliveries (issue #898): one dead letter, so the Settings panel has a row in mock mode.
+    webhookDeliveries: () =>
+      ms.later(() => ({
+        pending: [],
+        dead_letters: mockDeadLetters,
+        last_success_at: ago(30),
+        max_attempts: 6,
+      })),
+    replayDeadLetter: async (key) => {
+      await sleep(300);
+      mockDeadLetters = mockDeadLetters.filter((d) => d.key !== key);
+      return { delivered: true, error: null };
+    },
+    discardDeadLetter: async (key) => {
+      await sleep(150);
+      mockDeadLetters = mockDeadLetters.filter((d) => d.key !== key);
+      return { discarded: key };
     },
   };
 }

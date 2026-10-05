@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useId, useState, type ReactNode } from "react";
 import { errorMessage, useApi, useToast } from "../../context";
 import { MergeTrainSection } from "../MergeTrain";
-import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField } from "../../types";
+import type { AutonomyStatus, Mem0Check, Mem0Status, ModelOption, ModuleInfo, SchemaField, WebhookDeliveries as Deliveries } from "../../types";
 import { type ImagePull } from "../../useImagePull";
 import { Button, Spinner, Switch, cx, inputClass, seconds } from "../ui";
 import { ModuleProviderMark, isAdvancedField } from "../settingsGuide";
 import { IconCheck, IconChevron } from "../icons";
 import { Pane, Row } from "./ui";
 import { AutonomyHealth } from "./AutonomyHealth";
+import { WebhookDeliveries } from "./WebhookDeliveries";
 import { ObservabilityRows } from "./ObservabilityRows";
 import { HeadroomRow, JevCompactionNotice, SettingField, VoiceKeyRow, VoiceTestRow, isDirty, kindInfo, useHeadroom, valueOf, type ModuleDraft } from "./moduleFields";
 
@@ -177,6 +178,44 @@ export function ModulePane({
     if (module.kind === "autonomy") void loadJudge();
   }, [module.kind, loadJudge]);
 
+  // The webhook's deliveries (issue #898): retries waiting and the dead letter, with Replay and
+  // Discard. Fetched when the notify pane opens; an older mothership has no route and shows nothing.
+  const [deliveries, setDeliveries] = useState<Deliveries | null>(null);
+  const [deliveryBusy, setDeliveryBusy] = useState<string | null>(null);
+  const loadDeliveries = useCallback(async () => {
+    try {
+      setDeliveries(await api.webhookDeliveries());
+    } catch {
+      /* no /api/notify/deliveries on an older mothership */
+    }
+  }, [api]);
+  useEffect(() => {
+    if (module.kind === "notify") void loadDeliveries();
+  }, [module.kind, loadDeliveries]);
+  const replayDeadLetter = (key: string) => {
+    setDeliveryBusy(key);
+    void api
+      .replayDeadLetter(key)
+      .then((answer) =>
+        answer.delivered ? toast("Delivered.", "success") : toast(`Still failing: ${answer.error ?? "the webhook did not take it"}`, "error"),
+      )
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => {
+        setDeliveryBusy(null);
+        void loadDeliveries();
+      });
+  };
+  const discardDeadLetter = (key: string) => {
+    setDeliveryBusy(key);
+    void api
+      .discardDeadLetter(key)
+      .catch((error) => toast(errorMessage(error), "error"))
+      .finally(() => {
+        setDeliveryBusy(null);
+        void loadDeliveries();
+      });
+  };
+
   const save = async (anyway = false) => {
     // Autonomy above workspace_write asks the operator once before it runs (#776). Turning a save
     // into a no-op when they decline is the whole point: nothing is sent.
@@ -278,6 +317,11 @@ export function ModulePane({
       {module.kind === "sandbox" && (
         <div className="mb-1">
           <ImagePullRow pull={pull} />
+        </div>
+      )}
+      {module.kind === "notify" && deliveries && (
+        <div className="mb-3">
+          <WebhookDeliveries status={deliveries} busy={deliveryBusy} onReplay={replayDeadLetter} onDiscard={discardDeadLetter} />
         </div>
       )}
       {module.kind === "autonomy" && (judge !== null || saveError !== null || draft.provider === "full_autonomy") && (

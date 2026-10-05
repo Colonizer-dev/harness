@@ -57,6 +57,30 @@ export interface AutonomyStatus {
   alerted: boolean;
 }
 
+/** One webhook delivery as GET /api/notify/deliveries lists it (issue #898): never the body, and the address without its query. */
+export interface WebhookDelivery {
+  key: string;
+  event_id: string;
+  event: string;
+  target: string;
+  url: string;
+  colony: string | null;
+  attempts: number;
+  first_at: string;
+  last_at: string;
+  /** When the next retry is due; null in the dead letter. */
+  next_at: string | null;
+  last_error: string;
+}
+
+/** GET /api/notify/deliveries (issue #898): what is waiting for a retry, the dead letter (newest first), and the last success. */
+export interface WebhookDeliveries {
+  pending: WebhookDelivery[];
+  dead_letters: WebhookDelivery[];
+  last_success_at: string | null;
+  max_attempts: number;
+}
+
 /**
  * GET /api/observability/status (issue #839): whether OTLP export is on, why not, where each
  * setting came from, the header names (never values) and the exporter add-on's own health.

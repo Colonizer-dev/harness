@@ -817,9 +817,8 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// POSTs one signed body, its event id in [`EVENT_ID_HEADER`] as well as in the body. No retries:
-/// the next event tries again, and a webhook that answers 500 is the receiver's problem to describe,
-/// not ours to fix.
+/// POSTs one signed body, its event id in [`EVENT_ID_HEADER`] as well as in the body. One attempt:
+/// a failed one is the outbox's to retry ([`outbox`], issue #898), with the same body.
 async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, event_id: &str, body: &str) -> Result<()> {
     let timestamp = Utc::now().timestamp().to_string();
     let mut request = client
@@ -1462,20 +1461,25 @@ async fn post_webhook(
     let Ok(body) = serde_json::to_string(payload) else {
         return false;
     };
-    // Read where it is used, so saving or removing the secret takes effect without a restart.
-    let signing = secret(app);
-    match post(
-        client,
+    // The signing secret is read where each attempt is made, so saving or removing it takes effect
+    // without a restart, and a retry signs with whatever is set by then.
+    let delivery = outbox::Delivery::new(
+        outbox::OWNER,
         &settings.webhook_url,
-        signing.as_ref().map(|(value, _)| value.as_str()),
-        payload["id"].as_str().unwrap_or_default(),
-        &body,
-    )
-    .await
-    {
+        payload,
+        body,
+        session.map(|s| s.id.clone()),
+    );
+    match outbox::send(app, client, delivery).await {
         Ok(()) => true,
-        Err(e) => {
-            report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
+        Err((error, failed)) => {
+            let next = match failed {
+                outbox::Failed::Retrying { attempt } => {
+                    format!("attempt {attempt} of {}; it will be retried", outbox::MAX_ATTEMPTS)
+                }
+                outbox::Failed::DeadLettered => "it is in the dead letter, where Settings can replay it".to_string(),
+            };
+            report_failure(app, session, format!("notify: the webhook failed ({error}); {next}")).await;
             false
         }
     }
@@ -1494,14 +1498,23 @@ async fn report_failure(app: &App, session: Option<&Session>, what: String) {
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
 pub(crate) fn start_tasks(app: &crate::Shared) {
     tokio::spawn(run(app.clone()));
+    // Retries run whether or not the module is on now: what is waiting was announced while it was.
+    tokio::spawn(outbox::run(app.clone()));
 }
 
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
-    axum::Router::new().route("/api/notify/secret", routing::get(secret_status).put(put_secret))
+    axum::Router::new()
+        .route("/api/notify/secret", routing::get(secret_status).put(put_secret))
+        .route("/api/notify/deliveries", routing::get(outbox::deliveries))
+        .route("/api/notify/dead-letters/replay", routing::post(outbox::replay_all))
+        .route("/api/notify/dead-letters/{key}/replay", routing::post(outbox::replay_one))
+        .route("/api/notify/dead-letters/{key}", routing::delete(outbox::discard))
 }
+
+pub(crate) mod outbox;
 
 #[cfg(test)]
 mod tests;

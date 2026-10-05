@@ -124,7 +124,37 @@ HMAC-SHA256 with the secret over the exact bytes `"{timestamp}.{body}"`, where `
 time, and refuse a timestamp more than a few minutes old. The body includes `id`, so the signature
 covers it. Without a secret the request is sent unsigned.
 
-## Delivery
+## Delivery, retries and the dead letter
 
-A non-2xx answer or a transport error is logged into the colony's log (or onto stderr for a
-host-level event). It is not retried.
+A 2xx answer is a delivery. A non-2xx answer or a transport error (including a 15-second timeout)
+is logged into the colony's log, or onto stderr for a host-level event, and the delivery goes into
+the outbox to be retried (issue [#898](https://github.com/Colonizer-dev/harness/issues/898)):
+
+- **Backoff.** The first retry waits 30 seconds, and each later one twice as long as the one
+  before, capped at an hour. Each wait is moved up to 20% either way at random (jitter), so a burst
+  of failures does not retry in lockstep against a receiver that is just coming back.
+- **Bounded.** A delivery gets at most 6 attempts, the first included, so the last retry comes
+  roughly fifteen minutes after the first failure. One that still fails moves to the dead letter.
+- **The same event.** Every attempt sends the same body, so the same `id`, re-signed with the
+  current secret and a fresh `X-Colonizer-Timestamp`. A receiver that dedupes on the id takes the
+  event once however many attempts it took. A 500 followed by a 200 is one delivery.
+- **Persistent.** The waiting deliveries and the dead letter live in `data/notify-webhook-outbox.json`
+  (mode 0600), so a restart neither forgets a retry nor loses a dead letter. It keeps the payload
+  and the address it was sent to, never the signing secret. Retries run whether or not the notify
+  module is still on: what waits was announced while it was. At most 1,000 deliveries wait and 500
+  dead letters are kept; past either, the oldest goes to the dead letter, or out of it.
+- **Replay.** A dead letter stays until the owner replays or discards it, from Settings > Notify
+  or the API below. A replay is one attempt now. If it fails again, the letter stays in the dead
+  letter with that attempt counted, rather than starting a fresh round of retries.
+
+The anti-spam ledger counts an announcement whose webhook failed its first attempt as undelivered
+(when no other channel took it), even if a retry delivers it later.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/notify/deliveries` | `{pending, dead_letters, last_success_at, max_attempts}`. Each delivery is `{key, event_id, event, target, url, colony, attempts, first_at, last_at, next_at, last_error}`: never the body, and `url` without its query string, where a webhook address sometimes keeps a token. `next_at` is `null` in the dead letter, which lists the newest first |
+| `POST /api/notify/dead-letters/{key}/replay` | One attempt now: `{delivered, error}`, **200** either way. **404** for an unknown key |
+| `POST /api/notify/dead-letters/replay` | Replays every dead letter, oldest first, one attempt each: `{delivered, failed}` |
+| `DELETE /api/notify/dead-letters/{key}` | Discards one dead letter. **404** for an unknown key |
+
+All four are owner-only: a scoped API token gets a 403.
