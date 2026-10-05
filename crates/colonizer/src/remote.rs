@@ -51,6 +51,12 @@ const DEFAULT_RELAY: &str = "wss://my.colonizer.dev";
 const KEY_FILE: &str = "key";
 /// The switch and identity, `<config>/remote/state.json`.
 const STATE_FILE: &str = "state.json";
+/// The link credentials, hashed, `<config>/remote/links.json` (review finding R3).
+const LINKS_FILE: &str = "links.json";
+/// A link credential's prefix, telling it apart from the install token, `col_` and `cph_` at a glance.
+const LINK_PREFIX: &str = "clk_";
+/// The most devices signed in to the link at once.
+const MAX_LINK_DEVICES: usize = 32;
 /// The tunnel protocol version this build speaks; sent in the hello.
 const VERSION: u64 = 1;
 /// The most raw bytes one body chunk carries.
@@ -79,6 +85,23 @@ const NONCE_CAP: usize = 1024;
 /// Frames waiting to go to the relay at once; beyond this, stream tasks wait, so a relay that
 /// stops reading slows the answer instead of growing the queue without limit.
 const OUT_QUEUE: usize = 256;
+/// The largest single message or frame the tunnel socket takes from the relay (review finding R5;
+/// tungstenite's default is 64 MiB). The relay's biggest legitimate frame is a 48 KiB body chunk
+/// as base64, or a browser websocket message it caps at 128 KiB (`WS_MSG_MAX`, tunnel.js) — at
+/// most about 768 KiB once JSON-escaped — so a relay sending more ends the tunnel instead.
+const TUNNEL_MESSAGE_MAX: usize = 1024 * 1024;
+/// Request body frames waiting for their stream at once. The reader waits for room rather than
+/// dropping one, and a stream reads its body until the end, so this only paces a burst.
+const BODY_QUEUE: usize = 16;
+/// Relay-to-cockpit websocket frames waiting for one tunnelled socket. A cockpit handler that falls
+/// this far behind gets its socket closed (1008) rather than a queue that grows without limit.
+const WS_QUEUE: usize = 64;
+/// How long a tunnelled websocket's cockpit side may take to close once its relay side is gone,
+/// before the stream is ended anyway and its slot freed.
+const WS_CLOSE_GRACE: Duration = Duration::from_secs(5);
+/// The longest base64 `chunk` a body frame may carry: [`CHUNK`] raw bytes, checked before any
+/// decoding.
+const CHUNK_B64_MAX: usize = CHUNK.div_ceil(3) * 4;
 
 /// The switch and identity as persisted (`<config>/remote/state.json`). No file means off.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -86,6 +109,43 @@ struct Saved {
     enabled: bool,
     install_id: Option<String>,
     host: Option<String>,
+    /// Whether the relay sends every browser through GitHub sign-in before forwarding anything
+    /// (#534), on top of this machine's own pairing (#1086). `None` is a state file from before the
+    /// setting: an install registered then keeps the gate it was built with, a fresh one starts
+    /// without it. [`Saved::require_github`] reads it.
+    #[serde(default)]
+    require_github: Option<bool>,
+}
+
+impl Saved {
+    /// The GitHub gate as it stands: what was set, else on for an install already registered (the
+    /// relay keeps the gate on for those until told otherwise) and off for a new one.
+    fn require_github(&self) -> bool {
+        self.require_github.unwrap_or(self.install_id.is_some())
+    }
+}
+
+/// The header the cockpit answers a tunnelled request with when the invite, pairing secret or
+/// link/phone credential it carried did not authenticate (#1086). Its only value is `rejected`; the
+/// relay counts it toward its throttle and strips it, so it never reaches a browser.
+pub(crate) const CREDENTIAL_VERDICT: &str = "x-colonizer-credential";
+/// The close code of a tunnelled websocket whose credential did not authenticate, for the same count.
+const REJECTED_CLOSE: u16 = 4401;
+
+/// Marks an answer to a tunnelled request as a rejected credential ([`CREDENTIAL_VERDICT`]).
+pub(crate) fn mark_rejected(mut res: axum::response::Response) -> axum::response::Response {
+    res.headers_mut()
+        .insert(CREDENTIAL_VERDICT, axum::http::HeaderValue::from_static("rejected"));
+    res
+}
+
+/// Whether a request presents a link (`clk_…`) or phone (`cph_…`) credential, as a bearer or as the
+/// cockpit cookie: what the relay forwards without a GitHub session, and so what the cockpit must
+/// report back when it does not authenticate.
+pub(crate) fn presents_credential(headers: &axum::http::HeaderMap) -> bool {
+    let credential = |token: &str| token.starts_with(LINK_PREFIX) || token.starts_with("cph_");
+    crate::auth::bearer_token(headers).is_some_and(|t| credential(&t))
+        || crate::auth::cookie_token(headers).is_some_and(|t| credential(&t))
 }
 
 /// Marks a request that arrived through the tunnel. Only in-process code can create one —
@@ -96,9 +156,42 @@ pub struct Tunnelled {
     pub host: String,
 }
 
+/// One browser signed in to the link (review finding R3): what it is called and the hash of its
+/// credential. The plaintext is handed over once, as that browser's cookie on the link's origin.
+#[derive(Clone, Serialize, Deserialize)]
+struct LinkDevice {
+    id: String,
+    label: String,
+    token_hash: String,
+    paired_at: chrono::DateTime<Utc>,
+}
+
+/// Marks a request the owner made through the link with a link credential; `host_guard` attaches it.
+#[derive(Clone, Debug)]
+pub(crate) struct LinkSession {
+    pub(crate) id: String,
+}
+
+impl LinkSession {
+    /// The key its revocation fires under (`auth::Revocation`): revoking the device, or a reset.
+    pub(crate) fn revocation_key(&self) -> String {
+        link_key(&self.id)
+    }
+}
+
+fn link_key(id: &str) -> String {
+    format!("link:{id}")
+}
+
+fn link_digest(secret: &str) -> String {
+    util::hex(ring::digest::digest(&ring::digest::SHA256, secret.as_bytes()).as_ref())
+}
+
 /// Settings, identity and live link status, held on `App`.
 pub struct Remote {
     dir: PathBuf,
+    /// The link credentials (hashed), read once and saved on every change.
+    links: std::sync::RwLock<Vec<LinkDevice>>,
     relay: RwLock<String>,
     saved: RwLock<Saved>,
     status: RwLock<Status>,
@@ -126,7 +219,19 @@ impl Remote {
             Err(_) => Saved::default(),
         };
         let relay = util::env_nonempty("COLONIZER_REMOTE_URL").unwrap_or_else(|| DEFAULT_RELAY.into());
+        // An unreadable file signs every link device out: the safe direction.
+        let links = match std::fs::read(dir.join(LINKS_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+                eprintln!(
+                    "remote: {} does not parse ({e}); no device is signed in to the link",
+                    dir.join(LINKS_FILE).display()
+                );
+                Vec::new()
+            }),
+            Err(_) => Vec::new(),
+        };
         Ok(Self {
+            links: std::sync::RwLock::new(links),
             dir,
             relay: RwLock::new(relay.trim_end_matches('/').to_string()),
             saved: RwLock::new(saved),
@@ -168,6 +273,7 @@ impl Remote {
             "connected": connected,
             "since": connected.then(|| status.since.clone()).flatten(),
             "replaced": saved.enabled && status.replaced,
+            "require_github": saved.require_github(),
         })
     }
 
@@ -191,6 +297,82 @@ impl Remote {
         *self.saved.write().await = saved.clone();
         std::fs::create_dir_all(&self.dir)?;
         util::write_atomic(&self.dir.join(STATE_FILE), &serde_json::to_vec(&saved)?).await
+    }
+
+    fn save_links(&self, links: &[LinkDevice]) {
+        let saved = std::fs::create_dir_all(&self.dir)
+            .map_err(anyhow::Error::from)
+            .and_then(|()| Ok(serde_json::to_vec_pretty(links)?))
+            .and_then(|bytes| util::write_private(&self.dir.join(LINKS_FILE), &bytes));
+        if let Err(e) = saved {
+            eprintln!("remote: could not save {}: {e:#}", self.dir.join(LINKS_FILE).display());
+        }
+    }
+
+    /// The link device a presented credential belongs to, if it is a live link credential.
+    pub(crate) fn authenticate_link(&self, token: &str) -> Option<LinkSession> {
+        if !token.starts_with(LINK_PREFIX) {
+            return None;
+        }
+        let hash = link_digest(token);
+        let links = self.links.read().unwrap_or_else(|p| p.into_inner());
+        links
+            .iter()
+            .find(|d| crate::gateway::constant_time_eq(d.token_hash.as_bytes(), hash.as_bytes()))
+            .map(|d| LinkSession { id: d.id.clone() })
+    }
+
+    /// Mints a link credential for a newly confirmed device; the plaintext is returned once, to be
+    /// set as that browser's cookie, and never stored. `None` past [`MAX_LINK_DEVICES`].
+    pub(crate) fn add_link(&self, label: &str) -> Option<String> {
+        let mut links = self.links.write().unwrap_or_else(|p| p.into_inner());
+        if links.len() >= MAX_LINK_DEVICES {
+            return None;
+        }
+        let token = format!("{LINK_PREFIX}{}", util::random_token());
+        links.push(LinkDevice {
+            id: format!("lnk_{}", util::short_id()),
+            label: label.to_string(),
+            token_hash: link_digest(&token),
+            paired_at: Utc::now(),
+        });
+        self.save_links(&links);
+        Some(token)
+    }
+
+    /// Signs one device out of the link: its credential stops working, and its in-flight requests
+    /// and open sockets end now. `false` for an unknown device.
+    fn revoke_link(&self, id: &str) -> bool {
+        let mut links = self.links.write().unwrap_or_else(|p| p.into_inner());
+        let before = links.len();
+        links.retain(|d| d.id != id);
+        if links.len() == before {
+            return false;
+        }
+        self.save_links(&links);
+        drop(links);
+        crate::auth::Revocation::fire(&link_key(id));
+        true
+    }
+
+    /// Rotates the link credentials (Reset link): every one is forgotten and revoked at once, so a
+    /// copy the relay — or anyone — saw stops working, sockets included.
+    fn rotate_links(&self) {
+        let mut links = self.links.write().unwrap_or_else(|p| p.into_inner());
+        let gone: Vec<String> = links.drain(..).map(|d| d.id).collect();
+        self.save_links(&links);
+        drop(links);
+        for id in gone {
+            crate::auth::Revocation::fire(&link_key(&id));
+        }
+    }
+
+    fn links_view(&self) -> Vec<Value> {
+        let links = self.links.read().unwrap_or_else(|p| p.into_inner());
+        links
+            .iter()
+            .map(|d| json!({"id": d.id, "label": d.label, "paired_at": d.paired_at}))
+            .collect()
     }
 
     /// The test relay's base URL (`COLONIZER_REMOTE_URL` is read once at construction, and
@@ -236,7 +418,66 @@ pub async fn put(
 pub async fn reset(State(app): State<Shared>, via: Option<Extension<crate::auth::Via>>) -> ApiResult<Value> {
     let view = reset_identity(&app).await?;
     record_change(&app, "remote.reset", via).await;
+    // Every link credential goes with the old link (R3): signed out at once, sockets included.
+    // Last, because a reset made through the link revokes its own request here.
+    app.remote.rotate_links();
     Ok(Json(view))
+}
+
+#[derive(Deserialize)]
+pub struct RequireGithubRequest {
+    require_github: bool,
+}
+
+/// `PUT /api/remote/require-github {"require_github": bool}` (#1086): whether the relay sends every
+/// browser through GitHub sign-in before it forwards anything. Off, a device pairs with this
+/// machine's pair code alone — the single-use invite and the six digits confirmed here — and the
+/// relay forwards only invites and link/phone credentials, which this cockpit checks. On, the
+/// GitHub owner gate of #534 comes first, as before. Local only: loosening or tightening who may
+/// reach the link is this machine's call. With a link registered, the relay is told first (a
+/// signed `PUT …/settings`), and nothing is saved unless it agreed; before the first enable the
+/// choice is only saved, and the registration carries it. Records `remote.require_github`.
+pub async fn put_require_github(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+    Json(body): Json<RequireGithubRequest>,
+) -> ApiResult<Value> {
+    local_only(tunnelled.as_ref(), "change the GitHub sign-in requirement")?;
+    let mut saved = app.remote.saved().await;
+    let changed = saved.require_github() != body.require_github;
+    if !changed && saved.install_id.is_none() {
+        return Ok(Json(app.remote.view().await)); // no change: nothing to do, nothing to record
+    }
+    // With a link registered the relay is always told, even when this machine already reads the
+    // same value: the relay holds the gate that counts, and a PUT is how the two are put back in
+    // step if they ever drifted (an install registered against a relay older than the setting).
+    if saved.install_id.is_some() {
+        let request = json!({ "require_github": body.require_github });
+        match install_call(&app, Method::PUT, "/settings", Some(&request)).await? {
+            (StatusCode::OK, answer) if answer["require_github"] == body.require_github => {}
+            // A relay deployed before #1086 has no settings endpoint: its catch-all answers 404
+            // `not found`, and it keeps the GitHub gate on whatever this machine says.
+            (StatusCode::NOT_FOUND, answer) if answer["error"] == "not found" => {
+                return Err(client_error(
+                    StatusCode::BAD_GATEWAY,
+                    "the relay does not support pairing without GitHub yet (it needs a redeploy); nothing was changed",
+                ));
+            }
+            (status, answer) => return Err(relay_refused(status, &answer)),
+        }
+    }
+    saved.require_github = Some(body.require_github);
+    app.remote.persist(saved).await?;
+    if !changed {
+        return Ok(Json(app.remote.view().await)); // re-sent to the relay, but nothing to record
+    }
+    let mut entry = activity::Entry::new("remote.require_github", "you");
+    entry.via = activity::via_name(via.map(|Extension(v)| v));
+    entry.target = Some(if body.require_github { "on" } else { "off" }.into());
+    entry.section = Some("remote".into());
+    activity::record(&app, entry).await;
+    Ok(Json(app.remote.view().await))
 }
 
 async fn set_enabled(app: &Shared, on: bool) -> Result<Value, AppError> {
@@ -249,9 +490,10 @@ async fn set_enabled(app: &Shared, on: bool) -> Result<Value, AppError> {
             )
         })?;
         if saved.install_id.is_none() {
-            let (install_id, host) = register(&app.remote.relay().await, &key).await?;
+            let (install_id, host, require_github) = register(&app.remote.relay().await, &key, saved.require_github()).await?;
             saved.install_id = Some(install_id);
             saved.host = Some(host);
+            saved.require_github = Some(require_github);
         }
         saved.enabled = true;
         app.remote.persist(saved).await?;
@@ -277,24 +519,58 @@ async fn reset_identity(app: &Shared) -> Result<Value, AppError> {
         )
     })?;
     let relay = app.remote.relay().await;
-    let (install_id, host) = register(&relay, &key).await?;
-    // The old install's owner binding goes with the old link (#534: "reset link" unbinds): signed
-    // with the old key, before it is overwritten. Best effort — the new install starts unowned
-    // whatever happens here, and the old host has no tunnel left to forward to.
-    let old = app.remote.saved().await.install_id;
-    if let (Some(old), Ok(old_key)) = (old, read_key(&app.remote.dir))
-        && let Err(e) = signed_call(&relay, &old, &old_key, Method::DELETE, "/owner", None).await
-    {
-        eprintln!("remote: could not unbind the old link's owner at the relay: {}", e.message());
+    // The new install is registered with the gate the old one had: a reset is not a way to drop it.
+    let (install_id, host, require_github) = register(&relay, &key, app.remote.saved().await.require_github()).await?;
+    // The old install is retired at the relay (review finding R2): its row, owner and pairings are
+    // deleted and its tunnel closed, signed with the old key before it is overwritten, so a leaked
+    // copy of that key reaches nothing afterwards. If the relay cannot be told, the reset stops
+    // here and the old link stays in place — a reset that left the old install live would be the
+    // finding itself — and the install just registered is withdrawn again, best effort. Only an
+    // unreadable old key goes on regardless: nothing can sign for that install any more.
+    if let Some(old) = app.remote.saved().await.install_id {
+        match read_key(&app.remote.dir) {
+            Ok(old_key) => {
+                if let Err(e) = retire_install(&relay, &old, &old_key).await {
+                    if let Err(undo) = signed_call(&relay, &install_id, &key, Method::DELETE, "", None).await {
+                        eprintln!(
+                            "remote: could not withdraw the unused new install at the relay: {}",
+                            undo.message()
+                        );
+                    }
+                    return Err(client_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("could not retire the old link at the relay, so it was kept: {}", e.message()),
+                    ));
+                }
+            }
+            Err(e) => eprintln!("remote: the old link cannot be retired at the relay, its key is unreadable: {e:#}"),
+        }
     }
     util::write_private(&app.remote.dir.join(KEY_FILE), doc.as_ref())?;
     let mut saved = app.remote.saved().await;
     saved.install_id = Some(install_id);
     saved.host = Some(host);
+    saved.require_github = Some(require_github);
     app.remote.persist(saved).await?;
     app.remote.set_replaced(false).await; // a reset is the way out of a taken-over link
     app.remote.signal.send_replace(()); // an immediate redial under the new identity
     Ok(app.remote.view().await)
+}
+
+/// Retires `install_id` at the relay: a signed `DELETE /api/installs/<id>` deletes the install, its
+/// owner and its pairings, and closes its tunnel. An install the relay no longer knows is already
+/// retired. A relay older than that endpoint answers its catch-all `404 not found`; there the old
+/// owner is at least unbound (`DELETE …/owner`, #663), which is all such a relay can do.
+async fn retire_install(relay: &str, install_id: &str, key: &Ed25519KeyPair) -> Result<(), AppError> {
+    match signed_call(relay, install_id, key, Method::DELETE, "", None).await? {
+        (StatusCode::NO_CONTENT | StatusCode::OK, _) => Ok(()),
+        (StatusCode::NOT_FOUND, answer) if answer["error"] == "unknown install" => Ok(()),
+        (StatusCode::NOT_FOUND, _) => match signed_call(relay, install_id, key, Method::DELETE, "/owner", None).await? {
+            (StatusCode::NO_CONTENT | StatusCode::OK, _) => Ok(()),
+            (status, answer) => Err(relay_refused(status, &answer)),
+        },
+        (status, answer) => Err(relay_refused(status, &answer)),
+    }
 }
 
 /// The key pair to sign with, from the stored file — minted only when there is no file yet. Key
@@ -328,15 +604,22 @@ fn read_key(dir: &Path) -> Result<Ed25519KeyPair> {
 }
 
 /// Registers the public key with the relay: `POST /api/installs` answers `{"install_id", "host"}`,
-/// and the tunnel URL and admitted `Host` are both derived from that host.
-async fn register(relay: &str, key: &Ed25519KeyPair) -> Result<(String, String), AppError> {
+/// and the tunnel URL and admitted `Host` are both derived from that host. `require_github` asks
+/// the relay for its GitHub sign-in gate on the new install (#1086); without it the install pairs
+/// with this machine's pair code alone. Answers the gate the relay actually gave the install, from
+/// its answer's `require_github`; a relay older than the setting names none and always gates, so a
+/// missing field reads as on.
+async fn register(relay: &str, key: &Ed25519KeyPair, require_github: bool) -> Result<(String, String, bool), AppError> {
     let bad = |message: String| client_error(StatusCode::BAD_GATEWAY, &message);
     let url = format!("{}/api/installs", http_base(relay)?);
     let answer = tokio::time::timeout(
         REGISTER_WAIT,
         reqwest::Client::new()
             .post(&url)
-            .json(&json!({"public_key": util::b64_encode(key.public_key().as_ref())}))
+            .json(&json!({
+                "public_key": util::b64_encode(key.public_key().as_ref()),
+                "require_github": require_github,
+            }))
             .send(),
     )
     .await
@@ -356,15 +639,34 @@ async fn register(relay: &str, key: &Ed25519KeyPair) -> Result<(String, String),
             .map(str::to_string)
             .ok_or_else(|| bad(format!("the relay's registration answer named no {name}")))
     };
-    Ok((field("install_id")?, field("host")?))
+    let granted = answer["require_github"].as_bool().unwrap_or(true);
+    Ok((field("install_id")?, field("host")?, granted))
 }
 
 /// `wss://my.colonizer.dev` → `https://my.colonizer.dev` (and ws → http, for a local test relay).
+/// Plaintext `ws://` is accepted only for a loopback host (review finding R3): everything the
+/// tunnel and the signed calls carry — cookies, tokens, bodies — would otherwise cross the network
+/// in the clear, so a relay anywhere else must be `wss://`.
 fn http_base(relay: &str) -> Result<String> {
     if let Some(rest) = relay.strip_prefix("wss://") {
         Ok(format!("https://{rest}"))
     } else if let Some(rest) = relay.strip_prefix("ws://") {
-        Ok(format!("http://{rest}"))
+        let base = format!("http://{rest}");
+        let host = reqwest::Url::parse(&base)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+        let loopback = host.is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        if !loopback {
+            bail!("COLONIZER_REMOTE_URL may be plaintext ws:// only for a loopback relay; use wss://, got {relay:?}")
+        }
+        Ok(base)
     } else {
         bail!("COLONIZER_REMOTE_URL must be a ws:// or wss:// URL, got {relay:?}")
     }
@@ -588,6 +890,86 @@ pub async fn unbind_owner(
 }
 
 // ---------------------------------------------------------------------------
+// Signing a browser in on the link (review finding R3). The install token is never accepted
+// through the tunnel; the owner's browser elsewhere gets a link credential of its own instead,
+// handed over the way a phone is paired (phone.rs): a single-use invite opened on the link, a
+// six-digit code confirmed here, then a claim that sets the credential as that browser's cookie on
+// the link's origin. Reset link rotates them all.
+// ---------------------------------------------------------------------------
+
+/// `GET /api/remote/devices`: the browsers signed in to the link and those waiting for their code.
+pub async fn devices(State(app): State<Shared>) -> Json<Value> {
+    let pending = app.phones.book().pending_link_view(crate::phone::now_secs());
+    Json(json!({"devices": app.remote.links_view(), "pending": pending}))
+}
+
+/// `POST /api/remote/devices/invites`: a single-use, five-minute invite, as the link URL to open on
+/// the other device. It is a ticket to ask, never a credential, and it opens only on the link.
+pub async fn device_invite(State(app): State<Shared>) -> ApiResult<Value> {
+    let Some((host, _)) = app.remote.link().await else {
+        return Err(client_error(StatusCode::CONFLICT, "switch remote access on first"));
+    };
+    let now = crate::phone::now_secs();
+    let Some(code) = app.phones.book().mint_link(now) else {
+        return Err(client_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many open invites; use one or wait a few minutes for them to expire",
+        ));
+    };
+    Ok(Json(json!({
+        "url": format!("https://{host}/?pair={code}"),
+        "expires_at": crate::phone::rfc3339(now + crate::phone::TTL_SECS),
+        "ttl_secs": crate::phone::TTL_SECS,
+    })))
+}
+
+/// `POST /api/remote/devices/confirm {"code"}`: approves the browser showing this code. Local only:
+/// approving through the link would let whoever got a request through approve themselves.
+pub async fn confirm_device(
+    State(app): State<Shared>,
+    tunnelled: Option<Extension<Tunnelled>>,
+    via: Option<Extension<crate::auth::Via>>,
+    Json(body): Json<CodeRequest>,
+) -> ApiResult<Value> {
+    local_only(tunnelled.as_ref(), "approve a device")?;
+    let now = crate::phone::now_secs();
+    let label = {
+        let mut book = app.phones.book();
+        if book.limited(now) {
+            return Err(client_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many failed pairing attempts; wait a minute",
+            ));
+        }
+        match book.confirm_link(&body.code, now) {
+            Some(label) => label,
+            None => {
+                book.failed(now);
+                return Err(client_error(
+                    StatusCode::NOT_FOUND,
+                    "no device is waiting with that code: it is wrong, expired or already used",
+                ));
+            }
+        }
+    };
+    record_change(&app, "remote.device_approve", via).await;
+    Ok(Json(json!({"label": label})))
+}
+
+/// `DELETE /api/remote/devices/{id}`: signs one browser out of the link, at once.
+pub async fn revoke_device(
+    State(app): State<Shared>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    via: Option<Extension<crate::auth::Via>>,
+) -> Result<StatusCode, AppError> {
+    if !app.remote.revoke_link(&id) {
+        return Err(client_error(StatusCode::NOT_FOUND, "no such device"));
+    }
+    record_change(&app, "remote.device_revoke", via).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
 // The supervisor.
 // ---------------------------------------------------------------------------
 
@@ -682,6 +1064,10 @@ async fn connect_and_serve(app: &Shared, router: &Router) -> (bool, bool) {
         return (false, false);
     };
     let relay = app.remote.relay().await;
+    if let Err(e) = http_base(&relay) {
+        eprintln!("remote: not dialing: {e:#}");
+        return (false, false);
+    }
     let Ok(request) = format!("{relay}/tunnel/{install_id}").into_client_request() else {
         eprintln!("remote: bad relay URL {relay:?}");
         return (false, false);
@@ -722,7 +1108,7 @@ async fn handshake(
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let (mut ws, _) = tokio::time::timeout(
         HANDSHAKE_WAIT,
-        tokio_tungstenite::connect_async_tls_with_config(request, None, false, None),
+        tokio_tungstenite::connect_async_tls_with_config(request, Some(tunnel_config()), false, None),
     )
     .await
     .context("dialing the relay timed out")?
@@ -751,6 +1137,13 @@ async fn handshake(
     Ok(ws)
 }
 
+/// The tunnel socket's limits: no message or frame from the relay past [`TUNNEL_MESSAGE_MAX`].
+fn tunnel_config() -> tungstenite::protocol::WebSocketConfig {
+    tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(TUNNEL_MESSAGE_MAX))
+        .max_frame_size(Some(TUNNEL_MESSAGE_MAX))
+}
+
 /// What a relay frame carries for one open tunnelled websocket.
 enum WsIn {
     Msg(tungstenite::Message),
@@ -759,7 +1152,7 @@ enum WsIn {
 
 /// Request bodies waiting for their remaining `body` frames, keyed by stream id; a sender's
 /// presence is also the stream's claim on the id.
-type Bodies = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<(String, bool)>>>>;
+type Bodies = Arc<Mutex<HashMap<String, mpsc::Sender<(String, bool)>>>>;
 
 /// The state of one live connection: the frame queue every task sends through, the routing
 /// tables for open streams, the stream budget, and the spawned tasks torn down on exit.
@@ -768,7 +1161,7 @@ struct Conn {
     out: mpsc::Sender<String>,
     /// Feeds one side of a duplex pair to the in-memory websocket server per `ws_open`.
     conns: mpsc::Sender<DuplexStream>,
-    ws_in: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<WsIn>>>>,
+    ws_in: Arc<Mutex<HashMap<String, mpsc::Sender<WsIn>>>>,
     bodies: Bodies,
     live: Arc<AtomicUsize>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -844,17 +1237,21 @@ impl Drop for Slot {
 
 /// Removes a stream's routing entry when its task ends — however it ends, including a refusal
 /// mid-setup. Compares channels, so an entry can only be removed while it is still this
-/// stream's own.
+/// stream's own. It holds its channel only weakly: the map's sender is the only strong one, so
+/// removing the entry (an overflowing websocket) ends the stream's receiver.
 struct Routing<T> {
-    map: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<T>>>>,
+    map: Arc<Mutex<HashMap<String, mpsc::Sender<T>>>>,
     id: String,
-    mine: mpsc::UnboundedSender<T>,
+    mine: mpsc::WeakSender<T>,
 }
 
 impl<T> Drop for Routing<T> {
     fn drop(&mut self) {
         let mut map = self.map.lock().unwrap();
-        if map.get(&self.id).is_some_and(|tx| tx.same_channel(&self.mine)) {
+        if map
+            .get(&self.id)
+            .is_some_and(|tx| self.mine.upgrade().is_some_and(|mine| tx.same_channel(&mine)))
+        {
             map.remove(&self.id);
         }
     }
@@ -917,7 +1314,7 @@ async fn serve_connection(
                             app.remote.set_connected(true).await;
                         }
                         last_frame = Instant::now();
-                        dispatch(&conn, router, &text);
+                        dispatch(&conn, router, &text).await;
                     }
                     Some(Ok(tungstenite::Message::Close(frame))) => {
                         replaced = frame.is_some_and(|f| is_replaced_close(u16::from(f.code)));
@@ -949,7 +1346,7 @@ async fn serve_connection(
 
 /// One frame from the relay: a ping, a new stream, or traffic for an open one. Frames outside the
 /// v1 set are ignored rather than allowed to kill the tunnel.
-fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
+async fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
     let Ok(frame) = serde_json::from_str::<Frame>(frame) else {
         return;
     };
@@ -965,7 +1362,9 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
         Frame::Body { id, chunk, end } => {
             let sink = conn.bodies.lock().unwrap().get(&id.to_string()).cloned();
             if let Some(sink) = sink {
-                let _ = sink.send((chunk, end));
+                // Waits for room: the stream is reading its body, so this is a pause, not a stall.
+                // Once it has its body it drops the receiver, and late frames fail here at once.
+                let _ = sink.send((chunk, end)).await;
             }
         }
         Frame::WsOpen { id, path, headers } => start_ws(conn, id, path, headers),
@@ -976,17 +1375,26 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
                 Some(tungstenite::Message::Text(data.into()))
             };
             let Some(message) = message else { return };
-            let sink = conn.ws_in.lock().unwrap().get(&id.to_string()).cloned();
-            if let Some(sink) = sink {
-                let _ = sink.send(WsIn::Msg(message));
-            }
+            ws_deliver(conn, &id, WsIn::Msg(message));
         }
-        Frame::WsClose { id, code } => {
-            let sink = conn.ws_in.lock().unwrap().get(&id.to_string()).cloned();
-            if let Some(sink) = sink {
-                let _ = sink.send(WsIn::Close(code));
-            }
+        Frame::WsClose { id, code } => ws_deliver(conn, &id, WsIn::Close(code)),
+    }
+}
+
+/// Hands one relay frame to its tunnelled websocket without waiting: a socket whose cockpit handler
+/// has [`WS_QUEUE`] frames unread is closed (1008) and forgotten, so neither the tunnel's reader
+/// nor the mothership's memory waits on one slow socket (review finding R5).
+fn ws_deliver(conn: &Conn, id: &Value, frame: WsIn) {
+    let key = id.to_string();
+    let sink = conn.ws_in.lock().unwrap().get(&key).cloned();
+    let Some(sink) = sink else { return };
+    if let Err(mpsc::error::TrySendError::Full(_)) = sink.try_send(frame) {
+        let mut routes = conn.ws_in.lock().unwrap();
+        if routes.get(&key).is_some_and(|tx| tx.same_channel(&sink)) {
+            routes.remove(&key); // the last strong sender: the socket's pump sees the end
         }
+        drop(routes);
+        conn.close_ws(id, 1008);
     }
 }
 
@@ -997,18 +1405,19 @@ fn dispatch(conn: &Arc<Conn>, router: &Router, frame: &str) {
 fn start_req(conn: &Arc<Conn>, router: Router, id: Value, method: String, path: String, headers: Option<Value>) {
     // The routing entry is claimed under the lock, so a duplicate id is refused without touching
     // the open stream — and its guard is what removes the entry, on every exit below.
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(BODY_QUEUE);
     let routing = match conn.bodies.lock().unwrap().entry(id.to_string()) {
         std::collections::hash_map::Entry::Occupied(_) => {
             conn.refuse_res(&id, StatusCode::SERVICE_UNAVAILABLE);
             return;
         }
         std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(tx.clone());
+            let mine = tx.downgrade();
+            slot.insert(tx);
             Routing {
                 map: conn.bodies.clone(),
                 id: id.to_string(),
-                mine: tx,
+                mine,
             }
         }
     };
@@ -1032,7 +1441,7 @@ async fn serve_req(
     method: String,
     path: String,
     headers: Option<Value>,
-    mut chunks: mpsc::UnboundedReceiver<(String, bool)>,
+    mut chunks: mpsc::Receiver<(String, bool)>,
     _slot: Slot,
     // Pure drop guard: holds the stream's routing entry until the task ends, whichever way.
     _routing: Routing<(String, bool)>,
@@ -1048,6 +1457,11 @@ async fn serve_req(
         loop {
             match tokio::time::timeout(BODY_WAIT, chunks.recv()).await {
                 Ok(Some((chunk, end))) => {
+                    // Sized before it is decoded: no chunk the relay may send is longer.
+                    if chunk.len() > CHUNK_B64_MAX {
+                        refused(StatusCode::PAYLOAD_TOO_LARGE);
+                        return;
+                    }
                     let Some(bytes) = b64_empty_ok(&chunk) else {
                         refused(StatusCode::BAD_REQUEST);
                         return;
@@ -1070,6 +1484,9 @@ async fn serve_req(
             }
         }
     }
+    // The body is in: body frames still arriving for this stream are dropped from here on, never
+    // queued (the routing entry stays, so the id stays taken).
+    drop(chunks);
     if !plausible_path(&path) {
         refused(StatusCode::BAD_REQUEST);
         return;
@@ -1095,7 +1512,14 @@ async fn serve_req(
         .iter()
         // A header value that is not visible ASCII cannot ride a JSON frame; it is dropped.
         .filter(|(name, value)| !is_hop_by_hop(name.as_str()) && value.to_str().is_ok())
-        .map(|(name, value)| json!([name.as_str(), value.to_str().unwrap_or_default()]))
+        .map(|(name, value)| {
+            let value = value.to_str().unwrap_or_default();
+            if name == header::SET_COOKIE {
+                json!([name.as_str(), secure_cookie(value)])
+            } else {
+                json!([name.as_str(), value])
+            }
+        })
         .collect();
     conn.emit(json!({"t": "res", "id": &id, "status": res.status().as_u16(), "headers": head}).to_string())
         .await;
@@ -1126,18 +1550,19 @@ async fn serve_req(
 fn start_ws(conn: &Arc<Conn>, id: Value, path: String, headers: Option<Value>) {
     // The routing entry is claimed under the lock, so a duplicate id is refused without touching
     // the open stream — and its guard is what removes the entry, on every exit below.
-    let (tx, from_relay) = mpsc::unbounded_channel();
+    let (tx, from_relay) = mpsc::channel(WS_QUEUE);
     let routing = match conn.ws_in.lock().unwrap().entry(id.to_string()) {
         std::collections::hash_map::Entry::Occupied(_) => {
             conn.close_ws(&id, 1008);
             return;
         }
         std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(tx.clone());
+            let mine = tx.downgrade();
+            slot.insert(tx);
             Routing {
                 map: conn.ws_in.clone(),
                 id: id.to_string(),
-                mine: tx,
+                mine,
             }
         }
     };
@@ -1159,7 +1584,7 @@ async fn serve_ws(
     id: Value,
     path: String,
     headers: Option<Value>,
-    mut from_relay: mpsc::UnboundedReceiver<WsIn>,
+    mut from_relay: mpsc::Receiver<WsIn>,
     _slot: Slot,
     routing: Routing<WsIn>,
 ) {
@@ -1182,15 +1607,34 @@ async fn serve_ws(
     }
     let inner = match tokio_tungstenite::client_async(request, client_io).await {
         Ok((inner, _)) => inner,
+        // The guard turned the socket's credential down (#1086): a close the relay counts toward
+        // its throttle, as it counts a rejected HTTP request by its verdict header.
+        Err(tungstenite::Error::Http(res)) if res.headers().contains_key(CREDENTIAL_VERDICT) => {
+            conn.close_ws(&id, REJECTED_CLOSE);
+            return;
+        }
         Err(_) => {
             conn.close_ws(&id, 1014); // Bad Gateway: the inner upgrade did not happen
             return;
         }
     };
     let (mut inner_out, mut inner_in) = inner.split();
-    // Relay → cockpit.
+    // Relay → cockpit. The channel ends when [`ws_deliver`] dropped an overflowing socket: the
+    // cockpit side is closed too. Either way the pump's end is reported, so the loop below cannot
+    // outlive it by more than [`WS_CLOSE_GRACE`] even when the cockpit never answers the close.
+    let (pump_done, mut pumped) = tokio::sync::oneshot::channel::<()>();
     conn.spawn(async move {
-        while let Some(msg) = from_relay.recv().await {
+        let _done = pump_done; // dropped, and so reported, however the pump ends
+        loop {
+            let Some(msg) = from_relay.recv().await else {
+                let _ = inner_out
+                    .send(tungstenite::Message::Close(Some(CloseFrame {
+                        code: 1008.into(),
+                        reason: Default::default(),
+                    })))
+                    .await;
+                break;
+            };
             let message = match msg {
                 WsIn::Msg(message) => message,
                 WsIn::Close(code) => {
@@ -1208,9 +1652,21 @@ async fn serve_ws(
             }
         }
     });
-    // Cockpit → relay.
+    // Cockpit → relay, until the cockpit closes or, once the pump has ended, the grace runs out.
+    let mut grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
     loop {
-        match inner_in.next().await {
+        let next = tokio::select! {
+            next = inner_in.next() => next,
+            _ = &mut pumped, if grace.is_none() => {
+                grace = Some(Box::pin(tokio::time::sleep(WS_CLOSE_GRACE)));
+                continue;
+            }
+            () = async { grace.as_mut().expect("guarded").await }, if grace.is_some() => {
+                conn.close_ws(&id, 1008);
+                break;
+            }
+        };
+        match next {
             Some(Ok(tungstenite::Message::Text(text))) => {
                 conn.emit(json!({"t": "ws_msg", "id": &id, "data": text.as_str(), "binary": false}).to_string())
                     .await;
@@ -1347,6 +1803,21 @@ fn clean_headers(headers: Option<Value>, ws: bool) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A `Set-Cookie` value as it may leave through the tunnel (review finding R4): the browser reaches
+/// the cockpit there only over `https://<host>`, so every cookie gets `Secure` if it lacks it. The
+/// cockpit's own cookies stay without it on localhost and the LAN, which are plain `http://`.
+fn secure_cookie(value: &str) -> String {
+    let secure = value
+        .split(';')
+        .skip(1)
+        .any(|attribute| attribute.trim().eq_ignore_ascii_case("secure"));
+    if secure {
+        value.to_string()
+    } else {
+        format!("{value}; Secure")
+    }
+}
+
 /// The RFC 9110 §7.6.1 hop-by-hop headers, stripped on both sides of the tunnel.
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
@@ -1376,10 +1847,15 @@ pub(crate) fn routes() -> axum::Router<crate::Shared> {
     axum::Router::new()
         .route("/api/remote", routing::get(status).put(put))
         .route("/api/remote/reset", routing::post(reset))
+        .route("/api/remote/require-github", routing::put(put_require_github))
         .route("/api/remote/pairing", routing::get(pairing))
         .route("/api/remote/pairing/confirm", routing::post(confirm_pairing))
         .route("/api/remote/pairing/reject", routing::post(reject_pairing))
         .route("/api/remote/owner", routing::delete(unbind_owner))
+        .route("/api/remote/devices", routing::get(devices))
+        .route("/api/remote/devices/invites", routing::post(device_invite))
+        .route("/api/remote/devices/confirm", routing::post(confirm_device))
+        .route("/api/remote/devices/{id}", routing::delete(revoke_device))
 }
 
 #[cfg(test)]
@@ -1418,7 +1894,8 @@ mod tests {
 
     // -- The fake relay -----------------------------------------------------
 
-    /// A fake relay on 127.0.0.1:0: `POST /api/installs` registers a public key, and
+    /// A fake relay on 127.0.0.1:0: `POST /api/installs` registers a public key, `DELETE
+    /// /api/installs/<id>` retires one, and
     /// `GET /tunnel/<id>` speaks the challenge/hello handshake — verifying the signature against
     /// the registered key the way the real relay must — then hands the live socket to the test.
     async fn spawn_relay() -> (String, mpsc::UnboundedReceiver<RelayWs>) {
@@ -1448,6 +1925,11 @@ mod tests {
                         let body =
                             json!({"install_id": install_id, "host": format!("{install_id}.my.colonizer.dev")}).to_string();
                         io.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                    } else if method == "DELETE" && path.starts_with("/api/installs/") {
+                        // A reset retiring the old install (R2); this fake checks no signature.
+                        io.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                            .await
+                            .unwrap();
                     } else if let Some(install_id) = path.strip_prefix("/tunnel/") {
                         let ws_key = header_of(&head, "sec-websocket-key").unwrap();
                         let accept = util::b64_encode(
@@ -1533,6 +2015,14 @@ mod tests {
         "released"
     }
 
+    /// A websocket whose handler never reads: what a stuck cockpit socket looks like to the tunnel.
+    async fn deaf_socket(ws: axum::extract::WebSocketUpgrade) -> Response {
+        ws.on_upgrade(|socket| async move {
+            let _held = socket;
+            std::future::pending::<()>().await
+        })
+    }
+
     async fn big_answer() -> Vec<u8> {
         vec![0xAB; 120_000] // 2.4 chunks at the 48 KiB cap
     }
@@ -1541,13 +2031,22 @@ mod tests {
         Router::new()
             .route("/api/remote", get(status).put(put))
             .route("/api/remote/reset", post(reset))
+            .route("/api/remote/require-github", axum::routing::put(put_require_github))
             .route("/api/remote/pairing", get(pairing))
             .route("/api/remote/pairing/confirm", post(confirm_pairing))
             .route("/api/remote/pairing/reject", post(reject_pairing))
             .route("/api/remote/owner", axum::routing::delete(unbind_owner))
+            .route("/api/remote/devices", get(devices))
+            .route("/api/remote/devices/invites", post(device_invite))
+            .route("/api/remote/devices/confirm", post(confirm_device))
+            .route("/api/remote/devices/{id}", axum::routing::delete(revoke_device))
+            .route("/", get(|| async { "the cockpit" }))
+            .merge(crate::phone::routes())
             .route("/api/activity", get(crate::activity::list))
             .route("/api/stream", get(crate::stream::handler))
             .route("/api/big", get(big_answer))
+            .route("/api/demo", get(demo))
+            .route("/api/deaf", get(deaf_socket))
             .route("/api/park", get(park_handler))
             .layer(Extension(park))
             .layer(middleware::from_fn_with_state(app.clone(), crate::server::host_guard))
@@ -1583,6 +2082,12 @@ mod tests {
             .body(Body::from(json!({ "enabled": enabled }).to_string()))
             .unwrap();
         router.clone().oneshot(request).await.unwrap()
+    }
+
+    /// `Bearer <link credential>`: what authenticates the owner through the tunnel (R3), minted
+    /// fresh for the test the way a confirmed hand-over would.
+    fn link_bearer(app: &Shared) -> String {
+        format!("Bearer {}", app.remote.add_link("test").unwrap())
     }
 
     // -- Driving the relay side of a live tunnel ----------------------------
@@ -1648,12 +2153,56 @@ mod tests {
 
     // -- The tests ----------------------------------------------------------
 
+    #[test]
+    fn plaintext_ws_is_only_for_a_loopback_relay() {
+        assert_eq!(http_base("wss://my.colonizer.dev").unwrap(), "https://my.colonizer.dev");
+        assert_eq!(
+            http_base("wss://relay.example.com:8443").unwrap(),
+            "https://relay.example.com:8443"
+        );
+        for local in [
+            "ws://127.0.0.1:7000",
+            "ws://localhost:7000",
+            "ws://LOCALHOST",
+            "ws://[::1]:7000",
+            "ws://127.8.9.10",
+        ] {
+            assert!(http_base(local).is_ok(), "{local} is loopback");
+        }
+        // Anything off this machine over plaintext would carry cookies, tokens and bodies in the clear.
+        for remote in [
+            "ws://my.colonizer.dev",
+            "ws://relay.example.com:80",
+            "ws://10.0.0.5:7000",
+            "ws://[2001:db8::1]:7000",
+            "ws://localhost.evil.example",
+            "ws://127.0.0.1.evil.example",
+            "ws://",
+        ] {
+            let refused = http_base(remote).expect_err(remote).to_string();
+            assert!(refused.contains("wss://"), "{remote}: {refused}");
+        }
+        assert!(http_base("https://my.colonizer.dev").is_err());
+    }
+
+    #[tokio::test]
+    async fn enabling_against_a_plaintext_remote_relay_is_refused() {
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay("ws://relay.example.com".into()).await;
+        let Err(refused) = set_enabled(&app, true).await else {
+            panic!("a plaintext relay off this machine was accepted");
+        };
+        assert!(refused.message().contains("wss://"), "{}", refused.message());
+        assert!(!app.remote.enabled().await, "the switch stays off");
+    }
+
     #[tokio::test]
     async fn a_tunnelled_request_round_trips() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let host = app.remote.saved().await.host.unwrap();
         let mut ws = next_tunnel(&mut tunnels).await;
-        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        let headers = json!([["Authorization", link_bearer(&app)]]);
         ws.send(req_frame("1", "GET", "/api/remote", headers)).await.unwrap();
         let (status, head, body) = read_response(&mut ws, "1", "the tunnelled GET").await;
         assert_eq!(status, 200);
@@ -1668,6 +2217,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cookies_leave_the_tunnel_secure() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", link_bearer(&app)]]);
+        ws.send(req_frame("c", "GET", "/api/demo", headers)).await.unwrap();
+        let (status, head, _) = read_response(&mut ws, "c", "the cookie answer").await;
+        assert_eq!(status, 201);
+        let cookies: Vec<&str> = head
+            .iter()
+            .filter(|pair| pair[0] == "set-cookie")
+            .map(|pair| pair[1].as_str().unwrap())
+            .collect();
+        assert_eq!(cookies, ["one=1; Path=/; HttpOnly; Secure", "two=2; Path=/; Secure"]);
+        // The same handler on localhost keeps its cookies as they were: plain http has no Secure.
+        assert_eq!(secure_cookie("a=1; secure"), "a=1; secure");
+        assert_eq!(secure_cookie("a=1; Path=/"), "a=1; Path=/; Secure");
+        assert_eq!(
+            secure_cookie("secure=1"),
+            "secure=1; Secure",
+            "a cookie named secure is not the attribute"
+        );
+    }
+
+    #[tokio::test]
     async fn the_tunnel_enforces_the_same_auth_as_the_lan() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let host = app.remote.saved().await.host.unwrap();
@@ -1678,7 +2251,7 @@ mod tests {
         assert_eq!(status, 401);
         // Cookie-authenticated writes keep the Origin fence, pinned to exactly https://<host>.
         // The refused ones never reach the handler, so the tunnel stays up under them.
-        let cookie = format!("{}={}", crate::auth::COOKIE_NAME, app.api_token);
+        let cookie = format!("{}={}", crate::auth::COOKIE_NAME, app.remote.add_link("test").unwrap());
         for origin in [format!("http://{host}"), "https://other.example".into()] {
             let headers = json!([["Cookie", cookie], ["Origin", origin]]);
             ws.send(req_frame("b", "POST", "/api/remote/reset", headers)).await.unwrap();
@@ -1702,7 +2275,7 @@ mod tests {
         );
         // A bearer token skips the fence, like on the LAN: any origin, and a no-op write passes.
         let headers = json!([
-            ["Authorization", format!("Bearer {}", app.api_token)],
+            ["Authorization", link_bearer(&app)],
             ["Origin", "http://evil.example"],
             ["Content-Type", "application/json"],
         ]);
@@ -1712,11 +2285,281 @@ mod tests {
         assert_eq!(status, 200);
     }
 
+    // -- The link credential (review finding R3) -----------------------------
+
+    /// A request as the tunnel client would hand it to the router: marked, with the tunnel host.
+    fn via_tunnel(app_host: &str, uri: &str, headers: &[(&str, String)]) -> Request {
+        let mut builder = Request::builder().method(Method::GET).uri(uri).header(header::HOST, app_host);
+        for (name, value) in headers {
+            builder = builder.header(*name, value.as_str());
+        }
+        let mut request = builder.body(Body::empty()).unwrap();
+        request.extensions_mut().insert(Tunnelled { host: app_host.into() });
+        request
+    }
+
+    /// A router and app with remote access on under a fixed host, no relay needed.
+    async fn linked_app() -> (Shared, Router, String, TempRoot) {
+        let root = temp_root();
+        let app = test_app(root.path());
+        let host = "abcdefghijklmnopqrst.my.colonizer.dev".to_string();
+        app.remote
+            .persist(Saved {
+                enabled: true,
+                install_id: Some("abcdefghijklmnopqrst".into()),
+                host: Some(host.clone()),
+                require_github: None,
+            })
+            .await
+            .unwrap();
+        let router = remote_router(&app, idle_park());
+        (app, router, host, root)
+    }
+
+    #[tokio::test]
+    async fn the_install_token_is_refused_through_the_tunnel_and_the_link_credential_accepted() {
+        let (app, router, host, _root) = linked_app().await;
+        let install_cookie = format!("{}={}", crate::auth::COOKIE_NAME, app.api_token);
+        for headers in [
+            vec![("authorization", format!("Bearer {}", app.api_token))],
+            vec![("cookie", install_cookie.clone())],
+        ] {
+            let res = router
+                .clone()
+                .oneshot(via_tunnel(&host, "/api/remote", &headers))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED, "{headers:?}");
+            let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("Settings → Remote access"));
+        }
+        // The sign-in link's ?token= sets no cookie through the tunnel either.
+        let res = router
+            .clone()
+            .oneshot(via_tunnel(&host, &format!("/?token={}", app.api_token), &[]))
+            .await
+            .unwrap();
+        assert!(
+            res.headers().get(header::SET_COOKIE).is_none(),
+            "no install-token cookie through the link"
+        );
+        // A link credential works, by cookie or by header, with full owner reach (not a phone's).
+        let token = app.remote.add_link("laptop").unwrap();
+        let cookie = format!("{}={token}", crate::auth::COOKIE_NAME);
+        for headers in [
+            vec![("authorization", format!("Bearer {token}"))],
+            vec![("cookie", cookie.clone())],
+        ] {
+            let res = router
+                .clone()
+                .oneshot(via_tunnel(&host, "/api/remote", &headers))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{headers:?}");
+        }
+        let mut write = via_tunnel(
+            &host,
+            "/api/remote",
+            &[
+                ("cookie", cookie.clone()),
+                ("origin", format!("https://{host}")),
+                ("content-type", "application/json".into()),
+            ],
+        );
+        *write.method_mut() = Method::PUT;
+        *write.body_mut() = Body::from(r#"{"enabled":true}"#);
+        assert_eq!(router.clone().oneshot(write).await.unwrap().status(), StatusCode::OK);
+        // A forged marker cannot be had: off the tunnel the link credential is worth nothing, Host
+        // header or not, and the install token still works locally.
+        for host_header in [host.as_str(), "127.0.0.1:7878"] {
+            let request = Request::builder()
+                .uri("/api/remote")
+                .header(header::HOST, host_header)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-colonizer-tunnelled", "1")
+                .body(Body::empty())
+                .unwrap();
+            let status = router.clone().oneshot(request).await.unwrap().status();
+            assert!(
+                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+                "{host_header}: {status}"
+            );
+        }
+        let (status, _) = local(&router, &app, Method::GET, "/api/remote", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn revoking_a_link_device_ends_it_at_once_and_reset_rotates_them_all() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let token = app.remote.add_link("laptop").unwrap();
+        let bearer = json!([["Authorization", format!("Bearer {token}")]]);
+        // A live socket on the link credential.
+        ws.send(
+            json!({ "t": "ws_open", "id": "s", "path": "/api/stream", "headers": bearer })
+                .to_string()
+                .into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next_frame(&mut ws, "the stream's first frame").await["t"], "ws_msg");
+        let id = app.remote.links_view()[0]["id"].as_str().unwrap().to_string();
+        let (status, _) = local(
+            &remote_router(&app, idle_park()),
+            &app,
+            Method::DELETE,
+            &format!("/api/remote/devices/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        // The socket closes now, on the live tunnel, and the credential answers 401 from here on.
+        let close = loop {
+            let frame = next_frame(&mut ws, "the revoked socket's close").await;
+            if frame["t"] == "ws_close" {
+                break frame;
+            }
+        };
+        assert_eq!(close["id"], "s");
+        ws.send(req_frame("r", "GET", "/api/remote", bearer.clone())).await.unwrap();
+        assert_eq!(read_response(&mut ws, "r", "the revoked credential").await.0, 401);
+
+        // Reset link rotates every link credential: a second device's socket and credential end.
+        let second = app.remote.add_link("tablet").unwrap();
+        let second_bearer = json!([["Authorization", format!("Bearer {second}")]]);
+        ws.send(req_frame("ok", "GET", "/api/remote", second_bearer.clone()))
+            .await
+            .unwrap();
+        assert_eq!(read_response(&mut ws, "ok", "the second device").await.0, 200);
+        let key = link_key(app.remote.links_view()[0]["id"].as_str().unwrap());
+        let (status, _) = local(
+            &remote_router(&app, idle_park()),
+            &app,
+            Method::POST,
+            "/api/remote/reset",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            crate::auth::Revocation::watch(&key).is_fired(),
+            "its sockets and streams were told"
+        );
+        assert!(app.remote.links_view().is_empty());
+        let mut ws = next_tunnel(&mut tunnels).await;
+        ws.send(req_frame("old", "GET", "/api/remote", second_bearer)).await.unwrap();
+        assert_eq!(read_response(&mut ws, "old", "the rotated credential").await.0, 401);
+        assert!(std::fs::read_to_string(app.remote.dir.join(LINKS_FILE)).unwrap().trim() == "[]");
+    }
+
+    #[tokio::test]
+    async fn a_link_invite_opens_only_through_the_tunnel_and_is_confirmed_locally() {
+        let (app, router, host, _root) = linked_app().await;
+        let (status, invite) = local(&router, &app, Method::POST, "/api/remote/devices/invites", None).await;
+        assert_eq!(status, StatusCode::OK, "{invite}");
+        let url = invite["url"].as_str().unwrap();
+        let prefix = format!("https://{host}/?pair=");
+        assert!(url.starts_with(&prefix), "{url}");
+        let code = &url[prefix.len()..];
+        assert!(!url.contains(&app.api_token));
+        // Opened anywhere but the link, the invite is spent and opens nothing.
+        let (status, again) = local(&router, &app, Method::POST, "/api/remote/devices/invites", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let lan_code = again["url"].as_str().unwrap()[prefix.len()..].to_string();
+        let lan = Request::builder()
+            .uri(format!("/?pair={lan_code}"))
+            .header(header::HOST, "127.0.0.1:7878")
+            .body(Body::empty())
+            .unwrap();
+        let res = router.clone().oneshot(lan).await.unwrap();
+        assert!(res.headers().get(header::SET_COOKIE).is_none(), "no pairing off the link");
+        // Through the link it opens a pairing: a code on the page, a device secret as a cookie.
+        let res = router
+            .clone()
+            .oneshot(via_tunnel(&host, &format!("/?pair={code}"), &[]))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let pair = res.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let page = String::from_utf8(axum::body::to_bytes(res.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        let (_, view) = local(&router, &app, Method::GET, "/api/remote/devices", None).await;
+        assert_eq!(view["pending"].as_array().unwrap().len(), 1, "{view}");
+        // The phone pane never sees it, and the phone confirm route cannot approve it.
+        let (_, phones) = local(&router, &app, Method::GET, "/api/phone", None).await;
+        assert!(
+            phones
+                .get("pending")
+                .is_none_or(|p| p.as_array().is_none_or(|p| p.is_empty()))
+        );
+        let digits: String = page
+            .split("aria-label=\"Confirmation code\">")
+            .nth(1)
+            .and_then(|rest| rest.split('<').next())
+            .expect("the page shows the code")
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
+        assert_eq!(digits.len(), 6, "{page}");
+        assert!(page.contains("Remote access"), "the page sends the owner to the right pane");
+        // A confirm through the link is refused; the local one approves.
+        let mut through = via_tunnel(
+            &host,
+            "/api/remote/devices/confirm",
+            &[
+                ("authorization", link_bearer(&app)),
+                ("content-type", "application/json".into()),
+            ],
+        );
+        *through.method_mut() = Method::POST;
+        *through.body_mut() = Body::from(json!({ "code": digits }).to_string());
+        assert_eq!(router.clone().oneshot(through).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/devices/confirm",
+            Some(json!({ "code": digits })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        // The claim, through the link, sets the link credential as the browser's cookie.
+        let mut claim = via_tunnel(&host, "/api/phone/claim", &[("cookie", pair)]);
+        *claim.method_mut() = Method::POST;
+        let res = router.clone().oneshot(claim).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let cookie = res
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .find(|v| v.starts_with(&format!("{}=clk_", crate::auth::COOKIE_NAME)))
+            .expect("a link credential cookie");
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        let res = router
+            .clone()
+            .oneshot(via_tunnel(&host, "/api/remote", &[("cookie", cookie)]))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "the handed-over credential signs the browser in"
+        );
+        assert_eq!(app.remote.links_view().len(), 2, "the test's own credential and the new one");
+    }
+
     #[tokio::test]
     async fn a_tunnelled_websocket_reaches_a_real_upgrade() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let mut ws = next_tunnel(&mut tunnels).await;
-        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        let headers = json!([["Authorization", link_bearer(&app)]]);
         ws.send(
             json!({ "t": "ws_open", "id": "w", "path": "/api/stream", "headers": headers })
                 .to_string()
@@ -1966,6 +2809,7 @@ mod tests {
                 enabled: false,
                 install_id: Some(install),
                 host: Some(host),
+                require_github: None,
             })
             .await
             .unwrap();
@@ -2011,13 +2855,30 @@ mod tests {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
-    /// One plain HTTP/1.1 exchange with the local relay under `host`: status, headers, body.
+    /// One plain HTTP/1.1 GET with the local relay under `host`: status, headers, body.
     async fn relay_http(port: u16, path: &str, host: &str, cookie: Option<&str>) -> (u16, Vec<(String, String)>, String) {
+        relay_request(port, "GET", path, host, cookie).await
+    }
+
+    /// [`relay_http`] with any method and no body, sent from the link's own https origin.
+    async fn relay_request(
+        port: u16,
+        method: &str,
+        path: &str,
+        host: &str,
+        cookie: Option<&str>,
+    ) -> (u16, Vec<(String, String)>, String) {
         let mut io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let cookie = cookie.map(|c| format!("cookie: {c}\r\n")).unwrap_or_default();
-        io.write_all(format!("GET {path} HTTP/1.1\r\nhost: {host}\r\n{cookie}connection: close\r\n\r\n").as_bytes())
-            .await
-            .unwrap();
+        let body = if method == "GET" { "" } else { "content-length: 0\r\n" };
+        io.write_all(
+            format!(
+                "{method} {path} HTTP/1.1\r\nhost: {host}\r\norigin: https://{host}\r\n{cookie}{body}connection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
         let mut raw = Vec::new();
         tokio::time::timeout(Duration::from_secs(10), io.read_to_end(&mut raw))
             .await
@@ -2025,6 +2886,23 @@ mod tests {
             .unwrap();
         let raw = String::from_utf8(raw).unwrap();
         let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
+        // A streamed answer arrives chunked: undo the framing.
+        let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+            let mut out = String::new();
+            let mut rest = body;
+            while let Some((size, after)) = rest.split_once("\r\n") {
+                let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+                if size == 0 {
+                    break;
+                }
+                out.push_str(&after[..size]);
+                rest = &after[size + 2..];
+            }
+            out
+        } else {
+            body.to_string()
+        };
+        let body = body.as_str();
         let mut lines = head.lines();
         let status = lines.next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
         let headers = lines
@@ -2098,7 +2976,7 @@ mod tests {
 
         let (status, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
         assert_eq!(status, StatusCode::OK, "{view}");
-        assert_eq!(view, json!({"owner": null, "pending": []}));
+        assert_eq!(view, json!({"owner": null, "pending": [], "require_github": false}));
 
         // The first sign-in parks a code; the local cockpit sees it, with the account behind it.
         let (status, page) = sign_in(port, &host, "4242:alice").await;
@@ -2151,7 +3029,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "a code is single-use");
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": {"github_login": "alice"}, "pending": []}));
+        assert_eq!(
+            view,
+            json!({"owner": {"github_login": "alice"}, "pending": [], "require_github": false})
+        );
 
         // The relay now lets the owner straight through and refuses anyone else.
         let (status, _) = sign_in(port, &host, "4242:alice").await;
@@ -2163,7 +3044,7 @@ mod tests {
         let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
         assert_eq!(status, StatusCode::NO_CONTENT);
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": null, "pending": []}));
+        assert_eq!(view, json!({"owner": null, "pending": [], "require_github": false}));
         let (status, page) = sign_in(port, &host, "4242:alice").await;
         assert_eq!(status, 200, "unbound, the old owner pairs again: {page}");
 
@@ -2214,7 +3095,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND);
 
-        // Reset link also unbinds: the old host's owner is gone, so it pairs anew.
+        // Reset link retires the old install outright (review finding R2): its owner is gone with
+        // it, and its host is unknown to the relay.
         let (_, page) = sign_in(port, &host, "4242:alice").await;
         let code = code_on(&page);
         let (status, _) = local(
@@ -2228,10 +3110,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
         assert_eq!(status, StatusCode::OK);
-        let (status, _) = sign_in(port, &host, "4242:alice").await;
-        assert_eq!(status, 200, "after a reset the old link has no owner left");
+        let (status, _, _) = relay_http(port, "/_auth?next=/", &host, None).await;
+        assert_eq!(status, 404, "after a reset the relay no longer knows the old link");
         let (_, view) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
-        assert_eq!(view, json!({"owner": null, "pending": []}), "the new link starts unowned");
+        assert_eq!(
+            view,
+            json!({"owner": null, "pending": [], "require_github": false}),
+            "the new link starts unowned"
+        );
 
         // Each decision is in the activity log, as its own kind.
         let kinds = activity_kinds(&app).await;
@@ -2240,15 +3126,445 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "remote.unpair").count(), 1);
     }
 
+    /// The owner's relay session cookie (`name=value`) for an install already bound to `account`.
+    async fn owner_session(port: u16, host: &str, account: &str) -> String {
+        let (status, headers, _) = relay_http(port, "/_auth?next=/", host, None).await;
+        assert_eq!(status, 302);
+        let location = &headers.iter().find(|(k, _)| k == "location").unwrap().1;
+        let state = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+        let oauth = headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with("__Host-colonizer_oauth="))
+            .map(|(_, v)| v.split(';').next().unwrap().to_string())
+            .unwrap();
+        let (status, headers, _) = relay_http(
+            port,
+            &format!("/_auth/callback?state={state}&code={account}"),
+            host,
+            Some(&oauth),
+        )
+        .await;
+        assert_eq!(status, 302, "the bound owner's sign-in mints a session");
+        headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with("__Host-colonizer_session="))
+            .map(|(_, v)| v.split(';').next().unwrap().to_string())
+            .expect("a session cookie")
+    }
+
+    /// A browser websocket through the local relay to `path` on `host`, with `cookie` and the
+    /// install's own https origin, as the cockpit page would open it.
+    async fn relay_socket(
+        port: u16,
+        host: &str,
+        path: &str,
+        cookie: &str,
+    ) -> Result<WebSocketStream<tokio::net::TcpStream>, tungstenite::Error> {
+        let io = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut request = format!("ws://{host}{path}").into_client_request().unwrap();
+        request.headers_mut().insert(header::COOKIE, cookie.parse().unwrap());
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, format!("https://{host}").parse().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), tokio_tungstenite::client_async(request, io))
+            .await
+            .expect("the relay answered the upgrade in time")
+            .map(|(ws, _)| ws)
+    }
+
+    /// "Sign in on another device", through the local relay: an invite minted here, opened on the
+    /// link with `cookie` (or none), its six digits confirmed here, and the claim — the answer is the
+    /// link credential's `name=value` the claim set on the link's origin.
+    async fn hand_over(port: u16, router: &Router, app: &Shared, host: &str, cookie: Option<&str>) -> String {
+        let (status, invite) = local(router, app, Method::POST, "/api/remote/devices/invites", None).await;
+        assert_eq!(status, StatusCode::OK, "{invite}");
+        let url = invite["url"].as_str().unwrap();
+        let path = url
+            .strip_prefix(&format!("https://{host}"))
+            .expect("the invite opens on the link");
+        let (status, headers, page) = relay_http(port, path, host, cookie).await;
+        assert_eq!(status, 200, "the invite opens the pairing page: {page}");
+        let pair = headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with(crate::phone::PAIR_COOKIE))
+            .map(|(_, v)| v.clone())
+            .expect("the device secret cookie");
+        assert!(pair.ends_with("; Secure"), "{pair}");
+        let digits: String = page
+            .split("aria-label=\"Confirmation code\">")
+            .nth(1)
+            .and_then(|rest| rest.split('<').next())
+            .unwrap()
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect();
+        // The six digits are confirmed here, on this machine: never through the link.
+        let (status, answer) = local(
+            router,
+            app,
+            Method::POST,
+            "/api/remote/devices/confirm",
+            Some(json!({ "code": digits })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let pair = pair.split(';').next().unwrap();
+        let claim_cookie = cookie.map_or_else(|| pair.to_string(), |c| format!("{c}; {pair}"));
+        let (status, headers, body) = relay_request(port, "POST", "/api/phone/claim", host, Some(&claim_cookie)).await;
+        assert_eq!(status, 200, "{body}");
+        let link = headers
+            .iter()
+            .find(|(k, v)| k == "set-cookie" && v.starts_with(&format!("{}=clk_", crate::auth::COOKIE_NAME)))
+            .map(|(_, v)| v.clone())
+            .expect("the link credential cookie");
+        assert!(link.contains("HttpOnly") && link.ends_with("; Secure"), "{link}");
+        link.split(';').next().unwrap().to_string()
+    }
+
+    /// The relay's own "Pair this device" page (#1086): what a browser with no invite and no
+    /// credential, or a rejected one, gets — never GitHub, never the cockpit.
+    fn is_pair_page(status: u16, headers: &[(String, String)], body: &str) -> bool {
+        status == 401 && body.contains("Pair this device") && !headers.iter().any(|(k, _)| k == "location")
+    }
+
+    /// Whether the relay cleared the cockpit cookie (a dead credential) on this answer.
+    fn clears_token(headers: &[(String, String)]) -> bool {
+        headers.iter().any(|(k, v)| {
+            k == "set-cookie" && v.starts_with(&format!("{}=;", crate::auth::COOKIE_NAME)) && v.contains("Max-Age=0")
+        })
+    }
+
+    /// Waits, bounded, for a held socket to end: any close or error, but no more text frames.
+    async fn ends(
+        socket: &mut WebSocketStream<tokio::net::TcpStream>,
+    ) -> Option<Result<tungstenite::Message, tungstenite::Error>> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(tungstenite::Message::Text(_) | tungstenite::Message::Ping(_) | tungstenite::Message::Pong(_))) => {}
+                    other => return other,
+                }
+            }
+        })
+        .await
+        .expect("the held socket closed")
+    }
+
+    /// The whole link, end to end through the real relay (worker, DO, D1 schema, tunnel) and the
+    /// real tunnel client, with only GitHub stubbed: register, tunnel up, pair a fresh browser with
+    /// the pair code alone (#1086) and load the cockpit and its websocket through the relay, see a
+    /// rejected and a revoked credential land on the pair page, then switch the GitHub gate on and
+    /// run the owner flow of #534 behind it, unpair and reset.
+    #[tokio::test]
+    async fn the_whole_link_round_trips_through_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        tokio::spawn(run(app.clone(), router.clone()));
+
+        // 1. Register and bring the tunnel up, through the cockpit's own switch. A new install pairs
+        //    with the pair code alone: no GitHub gate at the relay.
+        let (status, view) = local(&router, &app, Method::PUT, "/api/remote", Some(json!({"enabled": true}))).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], false);
+        until(&app, |v| v["connected"] == true, "the tunnel never came up").await;
+        let host = app.remote.saved().await.host.unwrap();
+
+        // 2. No invite, no credential: the relay's pair page, never GitHub and never the cockpit; an
+        //    API call and a websocket are refused there too.
+        let (status, headers, body) = relay_http(port, "/", &host, None).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, None).await;
+        assert_eq!(status, 401, "{body}");
+        assert!(body.contains("not paired"), "{body}");
+        assert!(relay_socket(port, &host, "/api/stream", "a=b").await.is_err());
+        // Not even this machine's install token gets past the relay now (R3): it is no credential.
+        let install = format!("{}={}", crate::auth::COOKIE_NAME, app.api_token);
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&install)).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+
+        // 3. A fresh browser pairs with the invite and the six digits alone — no GitHub session.
+        let link = hand_over(port, &router, &app, &host, None).await;
+        let link_token = link.split_once('=').unwrap().1.to_string();
+
+        // 4. The cockpit through the relay on that link credential alone: a GET, the cookies it sets
+        //    (host-only and Secure, R4), and its websocket.
+        let (status, headers, body) = relay_http(port, "/api/remote", &host, Some(&link)).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k == "content-type" && v.contains("application/json"))
+        );
+        assert!(!headers.iter().any(|(k, _)| k == CREDENTIAL_VERDICT));
+        let seen: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(seen["host"], host.as_str());
+        assert_eq!(seen["connected"], true, "the cockpit answered over its own live tunnel");
+        let (status, headers, _) = relay_http(port, "/api/demo", &host, Some(&link)).await;
+        assert_eq!(status, 201);
+        let cookies: Vec<&str> = headers
+            .iter()
+            .filter(|(k, _)| k == "set-cookie")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(cookies, ["one=1; Path=/; HttpOnly; Secure", "two=2; Path=/; Secure"]);
+        let mut socket = relay_socket(port, &host, "/api/stream", &link)
+            .await
+            .expect("the upgrade went through");
+        let first = tokio::time::timeout(Duration::from_secs(10), socket.next())
+            .await
+            .expect("the stream's first frame arrived")
+            .unwrap()
+            .unwrap();
+        let tungstenite::Message::Text(first) = first else {
+            panic!("expected a text frame, got {first:?}")
+        };
+        let first: Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["type"], "sessions", "the cockpit stream's first frame");
+        socket.close(None).await.unwrap();
+        let mut held = relay_socket(port, &host, "/api/stream", &link).await.expect("a held socket");
+
+        // 5. A credential of the right shape that the cockpit does not know: forwarded, rejected, and
+        //    the browser lands on the pair page with the dead cookie cleared. A websocket on it is
+        //    closed 4401, which the relay counts the same way.
+        let forged = format!("{}=clk_{}", crate::auth::COOKIE_NAME, "0".repeat(64));
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&forged)).await;
+        assert!(is_pair_page(status, &headers, &body), "{status} {body}");
+        assert!(clears_token(&headers), "{headers:?}");
+        assert!(!headers.iter().any(|(k, _)| k == CREDENTIAL_VERDICT));
+        let mut rejected = relay_socket(port, &host, "/api/stream", &forged)
+            .await
+            .expect("the relay accepts the upgrade before the cockpit decides");
+        match ends(&mut rejected).await {
+            Some(Ok(tungstenite::Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 4401),
+            other => panic!("expected a 4401 close, got {other:?}"),
+        }
+
+        // 6. Revoking the device signs it out at once: the held socket ends, and its very next page
+        //    load is the pair page.
+        let (_, devices) = local(&router, &app, Method::GET, "/api/remote/devices", None).await;
+        let id = devices["devices"][0]["id"].as_str().unwrap().to_string();
+        let (status, _) = local(&router, &app, Method::DELETE, &format!("/api/remote/devices/{id}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let ended = ends(&mut held).await;
+        assert!(!matches!(ended, Some(Ok(tungstenite::Message::Text(_)))), "{ended:?}");
+        let (status, headers, body) = relay_http(port, "/", &host, Some(&link)).await;
+        assert!(
+            is_pair_page(status, &headers, &body),
+            "a revoked clk_ gets the pair page: {status} {body}"
+        );
+        assert!(clears_token(&headers));
+        assert!(app.remote.authenticate_link(&link_token).is_none());
+
+        // A PUT of the value already set still reaches the relay (it puts the two back in step if
+        // they ever drifted) and records nothing.
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": false})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], false);
+        let (_, pairing) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(pairing["require_github"], false);
+
+        // 7. The GitHub gate, switched on here (local only): the relay sends every browser to sign in
+        //    first, invites and link credentials included, and the owner flow of #534 works as before.
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], true);
+        let (status, headers, _) = relay_http(port, "/api/remote", &host, None).await;
+        assert_eq!(status, 302);
+        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
+        let (_, pairing) = local(&router, &app, Method::GET, "/api/remote/pairing", None).await;
+        assert_eq!(pairing["require_github"], true, "the relay holds the gate: {pairing}");
+        let (status, page) = sign_in(port, &host, "4242:alice").await;
+        assert_eq!(status, 200, "{page}");
+        let code = code_on(&page);
+        let (status, answer) = local(
+            &router,
+            &app,
+            Method::POST,
+            "/api/remote/pairing/confirm",
+            Some(json!({ "code": code })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let session = owner_session(port, &host, "4242:alice").await;
+        // Behind the gate the cockpit's own check still applies: neither the relay session alone
+        // nor this machine's install token gets in (R3).
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&session)).await;
+        assert_eq!(status, 401, "the relay's sign-in alone is not the cockpit's: {body}");
+        let with_install = format!("{session}; {install}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&with_install)).await;
+        assert_eq!(status, 401, "the install token is refused through the link: {body}");
+        let link = hand_over(port, &router, &app, &host, Some(&session)).await;
+        let both = format!("{session}; {link}");
+        let (status, _, body) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+        assert_eq!(status, 200, "{body}");
+        // With the gate on, the link credential alone opens nothing.
+        let (status, _, _) = relay_http(port, "/api/remote", &host, Some(&link)).await;
+        assert_eq!(status, 302);
+        assert!(relay_socket(port, &host, "/api/stream", &link).await.is_err());
+        let mut held = relay_socket(port, &host, "/api/stream", &both).await.expect("a held socket");
+
+        // 8. Unpair: the owner's session dies on its next request, HTTP and websocket alike.
+        let (status, _) = local(&router, &app, Method::DELETE, "/api/remote/owner", None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _, _) = relay_http(port, "/api/remote", &host, Some(&both)).await;
+        assert_eq!(status, 302, "back to sign-in");
+        assert!(relay_socket(port, &host, "/api/stream", &both).await.is_err());
+
+        // 9. Reset: the old link is retired at the relay (R2), the link credential is rotated (R3) —
+        //    the held socket closes — and a new link comes up, keeping the gate it had.
+        let (status, _) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let ended = ends(&mut held).await;
+        assert!(!matches!(ended, Some(Ok(tungstenite::Message::Text(_)))), "{ended:?}");
+        let link_token = link.split_once('=').unwrap().1;
+        assert!(
+            app.remote.authenticate_link(link_token).is_none(),
+            "the old credential is dead"
+        );
+        let (status, _, _) = relay_http(port, "/", &host, None).await;
+        assert_eq!(status, 404, "the old host is unknown");
+        until(
+            &app,
+            |v| v["connected"] == true && v["host"] != host.as_str(),
+            "the new link never came up",
+        )
+        .await;
+        let new_host = app.remote.saved().await.host.unwrap();
+        let (status, headers, _) = relay_http(port, "/", &new_host, None).await;
+        assert_eq!(status, 302, "the new install was registered with the GitHub gate on");
+        assert!(headers.iter().any(|(k, v)| k == "location" && v.starts_with("/_auth")));
+        let kinds = activity_kinds(&app).await;
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.require_github").count(), 1);
+    }
+
+    /// A signed `GET …/pairing` for `install_id` with `key`, straight at the relay: its status.
+    async fn relay_knows(relay: &str, install_id: &str, key: &Ed25519KeyPair) -> StatusCode {
+        signed_call(relay, install_id, key, Method::GET, "/pairing", None)
+            .await
+            .expect("the local relay answers")
+            .0
+    }
+
+    #[tokio::test]
+    async fn a_reset_retires_the_old_install_at_the_real_relay() {
+        let Some((_relay, port)) = spawn_local_relay().await else {
+            return;
+        };
+        let relay = format!("ws://127.0.0.1:{port}");
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(relay.clone()).await;
+        let router = remote_router(&app, idle_park());
+        tokio::spawn(run(app.clone(), router.clone()));
+        set_enabled(&app, true).await.unwrap();
+        until(&app, |v| v["connected"] == true, "the tunnel never connected").await;
+        // What a thief would have copied out of <config>/remote/ before the owner reset the link.
+        let old = app.remote.saved().await.install_id.unwrap();
+        let leaked = read_key(&app.remote.dir).unwrap();
+        assert_eq!(relay_knows(&relay, &old, &leaked).await, StatusCode::OK);
+
+        let (status, view) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        let new = app.remote.saved().await.install_id.unwrap();
+        assert_ne!(new, old);
+
+        // The old install is gone at the relay: the leaked key signs for nothing, its tunnel dial is
+        // a 404, and its host shows the unknown-install page.
+        assert_eq!(relay_knows(&relay, &old, &leaked).await, StatusCode::NOT_FOUND);
+        let dial = format!("{relay}/tunnel/{old}").into_client_request().unwrap();
+        let refused = tokio_tungstenite::connect_async(dial)
+            .await
+            .expect_err("the old install cannot dial");
+        assert!(
+            matches!(&refused, tungstenite::Error::Http(res) if res.status() == StatusCode::NOT_FOUND),
+            "{refused:?}"
+        );
+        let old_host = format!("{old}.my.colonizer.dev");
+        let (status, _, _) = relay_http(port, "/", &old_host, None).await;
+        assert_eq!(status, 404);
+        // The new link is live under the new key.
+        let key = read_key(&app.remote.dir).unwrap();
+        assert_eq!(relay_knows(&relay, &new, &key).await, StatusCode::OK);
+        until(&app, |v| v["connected"] == true, "the new tunnel never connected").await;
+    }
+
+    #[tokio::test]
+    async fn a_reset_the_relay_cannot_hear_keeps_the_old_link() {
+        // A relay that registers but refuses everything signed (here: a fake that answers 503).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut n = 0;
+            loop {
+                let Ok((mut io, _)) = listener.accept().await else { return };
+                let head = read_head(&mut io).await;
+                n += 1;
+                let len: usize = header_of(&head, "content-length").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let mut body = vec![0u8; len];
+                io.read_exact(&mut body).await.unwrap();
+                let answer = if head.starts_with("POST /api/installs ") {
+                    let body =
+                        json!({"install_id": format!("install{n}"), "host": format!("install{n}.my.colonizer.dev")}).to_string();
+                    format!(
+                        "HTTP/1.1 201 Created\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                };
+                io.write_all(answer.as_bytes()).await.unwrap();
+            }
+        });
+        let root = temp_root();
+        let app = test_app(root.path());
+        app.remote.set_relay(format!("ws://127.0.0.1:{port}")).await;
+        let router = remote_router(&app, idle_park());
+        set_enabled(&app, true).await.unwrap();
+        let before = app.remote.saved().await.install_id.unwrap();
+        let key_before = std::fs::read(app.remote.dir.join(KEY_FILE)).unwrap();
+        let (status, answer) = local(&router, &app, Method::POST, "/api/remote/reset", None).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{answer}");
+        assert!(answer.to_string().contains("could not retire the old link"), "{answer}");
+        assert_eq!(app.remote.saved().await.install_id.unwrap(), before, "the old link is kept");
+        assert_eq!(
+            std::fs::read(app.remote.dir.join(KEY_FILE)).unwrap(),
+            key_before,
+            "and its key"
+        );
+    }
+
     #[tokio::test]
     async fn pairing_decisions_are_refused_through_the_tunnel() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let mut ws = next_tunnel(&mut tunnels).await;
         // The owner's own token, through the real tunnel: the guard admits it, the handler does not.
-        let headers = json!([
-            ["Authorization", format!("Bearer {}", app.api_token)],
-            ["Content-Type", "application/json"]
-        ]);
+        let headers = json!([["Authorization", link_bearer(&app)], ["Content-Type", "application/json"]]);
         for (id, method, path) in [
             ("c", "POST", "/api/remote/pairing/confirm"),
             ("r", "POST", "/api/remote/pairing/reject"),
@@ -2262,6 +3578,153 @@ mod tests {
         }
         let kinds = activity_kinds(&app).await;
         assert!(!kinds.iter().any(|k| k.starts_with("remote.pair") || k == "remote.unpair"));
+    }
+
+    /// Whether a tunnelled answer carries the rejected-credential verdict for the relay (#1086).
+    fn verdict(headers: &[Value]) -> Option<String> {
+        headers
+            .iter()
+            .find(|h| {
+                h[0].as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(CREDENTIAL_VERDICT))
+            })
+            .and_then(|h| h[1].as_str().map(str::to_string))
+    }
+
+    #[tokio::test]
+    async fn the_cockpit_tells_the_relay_which_tunnelled_credentials_it_rejected() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let live = app.remote.add_link("test").unwrap();
+        let revoked = app.remote.add_link("gone").unwrap();
+        let id = app.remote.links.read().unwrap().last().unwrap().id.clone();
+        assert!(app.remote.revoke_link(&id));
+        let forged = format!("clk_{}", "0".repeat(64));
+        let phone = format!("cph_{}", "1".repeat(64));
+        let cookie = |token: &str| format!("{}={token}", crate::auth::COOKIE_NAME);
+        let invite = format!("/?pair={}", "f".repeat(64));
+        let cases: Vec<(&str, &str, Value, u16, bool)> = vec![
+            // A live link credential: through, and no verdict.
+            ("a", "/api/remote", json!([["Cookie", cookie(&live)]]), 200, false),
+            // Revoked, forged, an unknown phone: answered 401 as before, and marked for the relay —
+            // on an API call and on a page load alike.
+            ("b", "/api/remote", json!([["Cookie", cookie(&revoked)]]), 401, true),
+            ("c", "/", json!([["Cookie", cookie(&forged)]]), 401, true),
+            (
+                "d",
+                "/api/remote",
+                json!([["Authorization", format!("Bearer {forged}")]]),
+                401,
+                true,
+            ),
+            ("e", "/", json!([["Cookie", cookie(&phone)]]), 401, true),
+            // No credential at all is not a rejected one (the relay never forwards it anyway).
+            ("f", "/api/remote", json!([]), 401, false),
+            // An invite that opens nothing is marked too; an invite that opens shows its page, unmarked.
+            ("g", &invite, json!([]), 401, true),
+        ];
+        for (id, path, headers, want, marked) in cases {
+            ws.send(req_frame(id, "GET", path, headers)).await.unwrap();
+            let (status, headers, _) = read_response(&mut ws, id, path).await;
+            assert_eq!(status, want, "{id} {path}");
+            assert_eq!(verdict(&headers).as_deref(), marked.then_some("rejected"), "{id} {path}");
+        }
+        let code = app.phones.book().mint_link(crate::phone::now_secs()).unwrap();
+        let path = format!("/?pair={code}");
+        ws.send(req_frame("h", "GET", &path, json!([]))).await.unwrap();
+        let (status, headers, _) = read_response(&mut ws, "h", &path).await;
+        assert_eq!(status, 200);
+        assert_eq!(verdict(&headers), None);
+        // A claim whose pairing secret finds nothing is marked; locally the same claim is not.
+        ws.send(req_frame(
+            "i",
+            "POST",
+            "/api/phone/claim",
+            json!([["Cookie", "colonizer_pair=ph_00000000.nope"]]),
+        ))
+        .await
+        .unwrap();
+        ws.send(end_body("i")).await.unwrap();
+        let (status, headers, _) = read_response(&mut ws, "i", "claim").await;
+        assert_eq!(status, 404);
+        assert_eq!(verdict(&headers).as_deref(), Some("rejected"));
+    }
+
+    #[tokio::test]
+    async fn a_tunnelled_websocket_on_a_rejected_credential_closes_4401() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let forged = format!("{}=clk_{}", crate::auth::COOKIE_NAME, "0".repeat(64));
+        let host = app.remote.saved().await.host.unwrap();
+        let open = json!({"t": "ws_open", "id": "w", "path": "/api/stream", "headers": [["Cookie", forged], ["Origin", format!("https://{host}")]]});
+        ws.send(open.to_string().into()).await.unwrap();
+        let frame = next_frame(&mut ws, "the ws_close").await;
+        assert_eq!(frame["t"], "ws_close");
+        assert_eq!(frame["code"], 4401);
+    }
+
+    #[tokio::test]
+    async fn a_relay_that_names_no_gate_at_registration_is_taken_as_gating() {
+        // The fake relay answers like one deployed before #1086: no `require_github` in its answer,
+        // and it gates every install with GitHub whatever was asked. The cockpit must read it so.
+        let root = temp_root();
+        let app = test_app(root.path());
+        let (relay, _tunnels) = spawn_relay().await;
+        app.remote.set_relay(relay).await;
+        assert_eq!(
+            app.remote.view().await["require_github"],
+            false,
+            "a new install asks for no gate"
+        );
+        set_enabled(&app, true).await.unwrap();
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        assert_eq!(app.remote.view().await["require_github"], true);
+    }
+
+    #[test]
+    fn the_github_gate_defaults_to_what_the_install_was_built_with() {
+        // A state file from before the setting: a registered install keeps the gate, a fresh one has none.
+        let old: Saved = serde_json::from_str(r#"{"enabled": true, "install_id": "i", "host": "h"}"#).unwrap();
+        assert!(old.require_github());
+        let fresh: Saved = serde_json::from_str(r#"{"enabled": false, "install_id": null, "host": null}"#).unwrap();
+        assert!(!fresh.require_github());
+        assert!(!Saved::default().require_github());
+        let set: Saved =
+            serde_json::from_str(r#"{"enabled": true, "install_id": "i", "host": "h", "require_github": false}"#).unwrap();
+        assert!(!set.require_github());
+    }
+
+    #[tokio::test]
+    async fn the_github_gate_is_switched_only_here_and_carried_into_the_registration() {
+        let root = temp_root();
+        let app = test_app(root.path());
+        let router = remote_router(&app, idle_park());
+        // Before any link exists the choice is only saved; nothing is called (the relay is unset here).
+        let (status, view) = local(
+            &router,
+            &app,
+            Method::PUT,
+            "/api/remote/require-github",
+            Some(json!({"require_github": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(view["require_github"], true);
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        // Through the tunnel it is refused, like every decision about who may reach the link.
+        let refused = local_only(
+            Some(&Extension(Tunnelled { host: "h".into() })),
+            "change the GitHub sign-in requirement",
+        );
+        assert!(refused.is_err());
+        // Enabling registers with it (the real relay honours it: the whole-link test's reset step).
+        let (relay, _tunnels) = spawn_relay().await;
+        app.remote.set_relay(relay).await;
+        set_enabled(&app, true).await.unwrap();
+        assert_eq!(app.remote.view().await["require_github"], true);
+        assert_eq!(app.remote.saved().await.require_github, Some(true));
+        let kinds = activity_kinds(&app).await;
+        assert_eq!(kinds.iter().filter(|k| *k == "remote.require_github").count(), 1);
     }
 
     #[tokio::test]
@@ -2399,6 +3862,7 @@ mod tests {
                 enabled: true,
                 install_id: Some("i".into()),
                 host: Some(host.into()),
+                require_github: None,
             })
             .await
             .unwrap();
@@ -2427,15 +3891,28 @@ mod tests {
             router.clone().oneshot(request).await.unwrap().status(),
             StatusCode::UNAUTHORIZED
         );
-        let mut request = Request::builder()
-            .method(Method::GET)
-            .uri("/api/remote")
-            .header(header::HOST, host)
-            .header(header::AUTHORIZATION, format!("Bearer {}", app.api_token))
-            .body(Body::empty())
+        // The install token is refused through the tunnel (R3); a link credential is what works.
+        let tunnelled = |auth: String| {
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/remote")
+                .header(header::HOST, host)
+                .header(header::AUTHORIZATION, auth)
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(Tunnelled { host: host.into() });
+            request
+        };
+        let refused = router
+            .clone()
+            .oneshot(tunnelled(format!("Bearer {}", app.api_token)))
+            .await
             .unwrap();
-        request.extensions_mut().insert(Tunnelled { host: host.into() });
-        assert_eq!(router.clone().oneshot(request).await.unwrap().status(), StatusCode::OK);
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            router.clone().oneshot(tunnelled(link_bearer(&app))).await.unwrap().status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -2448,7 +3925,7 @@ mod tests {
         })
         .await;
         let mut ws = next_tunnel(&mut tunnels).await;
-        let token = format!("Bearer {}", app.api_token);
+        let token = link_bearer(&app);
         for i in 1..=33 {
             ws.send(req_frame(
                 &i.to_string(),
@@ -2496,7 +3973,7 @@ mod tests {
     async fn a_large_answer_arrives_in_capped_chunks() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let mut ws = next_tunnel(&mut tunnels).await;
-        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        let headers = json!([["Authorization", link_bearer(&app)]]);
         ws.send(req_frame("big", "GET", "/api/big", headers)).await.unwrap();
         let res = next_frame(&mut ws, "the big res").await;
         assert_eq!(res["status"], 200);
@@ -2527,7 +4004,7 @@ mod tests {
         })
         .await;
         let mut ws = next_tunnel(&mut tunnels).await;
-        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        let headers = json!([["Authorization", link_bearer(&app)]]);
         // Hold one stream open, then present the same id again while it is still live.
         ws.send(req_frame("d", "GET", "/api/park", headers.clone())).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), opened_rx.recv())
@@ -2552,18 +4029,21 @@ mod tests {
     async fn an_oversized_body_is_refused_and_the_tunnel_lives_on() {
         let (app, _router, mut tunnels, _root) = enabled_app().await;
         let mut ws = next_tunnel(&mut tunnels).await;
-        let headers = json!([["Authorization", format!("Bearer {}", app.api_token)]]);
+        let headers = json!([["Authorization", link_bearer(&app)]]);
         ws.send(req_frame("big", "POST", "/api/remote", headers.clone()))
             .await
             .unwrap();
-        let oversized = util::b64_encode(&vec![0x41; MAX_BODY + 1]);
-        ws.send(
-            json!({"t": "body", "id": "big", "chunk": oversized, "end": false})
-                .to_string()
-                .into(),
-        )
-        .await
-        .unwrap();
+        // Full-size chunks, the way a relay streams an upload, until the body passes the cap.
+        let chunk = util::b64_encode(&vec![0x41; CHUNK]);
+        for _ in 0..=MAX_BODY / CHUNK {
+            ws.send(
+                json!({"t": "body", "id": "big", "chunk": chunk, "end": false})
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        }
         let res = next_frame(&mut ws, "the oversized refusal").await;
         assert_eq!(res["t"], "res");
         assert_eq!(res["id"], "big");
@@ -2575,6 +4055,76 @@ mod tests {
         ws.send(end_body("big")).await.unwrap();
         ws.send(req_frame("after", "GET", "/api/remote", headers)).await.unwrap();
         let (status, _, _) = read_response(&mut ws, "after", "the next request").await;
+        assert_eq!(status, 200);
+    }
+
+    // -- Bounded queues (review finding R5) ---------------------------------
+
+    #[tokio::test]
+    async fn a_body_chunk_past_the_cap_is_refused_before_it_is_decoded() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", link_bearer(&app)]]);
+        ws.send(req_frame("fat", "POST", "/api/big", headers.clone())).await.unwrap();
+        // One chunk three bytes past the 48 KiB a relay may send, ending the body.
+        ws.send(body_frame("fat", &vec![0x42; CHUNK + 3])).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "fat", "the fat chunk's refusal").await;
+        assert_eq!(status, 413, "refused on its size, not routed");
+        // A chunk exactly at the cap is fine (the route then refuses the method itself).
+        ws.send(req_frame("ok", "POST", "/api/big", headers)).await.unwrap();
+        ws.send(body_frame("ok", &vec![0x42; CHUNK])).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "ok", "the full chunk").await;
+        assert_eq!(status, 405);
+    }
+
+    #[tokio::test]
+    async fn a_relay_message_past_the_cap_ends_the_tunnel() {
+        let (_app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        // A well-formed ping, padded past the tunnel's message cap: the client must not take it in.
+        let padded = json!({"t": "ping", "pad": "x".repeat(TUNNEL_MESSAGE_MAX)}).to_string();
+        let _ = ws.send(padded.into()).await;
+        let answer = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("the client reacted");
+        assert!(
+            !matches!(&answer, Some(Ok(tungstenite::Message::Text(text))) if text.contains("pong")),
+            "the oversized frame was read and answered: {answer:?}"
+        );
+        // The supervisor redials a fresh tunnel.
+        next_tunnel(&mut tunnels).await;
+    }
+
+    #[tokio::test]
+    async fn a_socket_whose_handler_stops_reading_is_closed_not_queued() {
+        let (app, _router, mut tunnels, _root) = enabled_app().await;
+        let mut ws = next_tunnel(&mut tunnels).await;
+        let headers = json!([["Authorization", link_bearer(&app)]]);
+        ws.send(
+            json!({ "t": "ws_open", "id": "deaf", "path": "/api/deaf", "headers": headers })
+                .to_string()
+                .into(),
+        )
+        .await
+        .unwrap();
+        // Far more than the in-memory pipe and the per-socket queue can hold together.
+        let data = "y".repeat(60 * 1024);
+        for _ in 0..(WS_QUEUE * 2) {
+            ws.send(
+                json!({ "t": "ws_msg", "id": "deaf", "data": data, "binary": false })
+                    .to_string()
+                    .into(),
+            )
+            .await
+            .unwrap();
+        }
+        let close = next_frame(&mut ws, "the overflow close").await;
+        assert_eq!(close["t"], "ws_close");
+        assert_eq!(close["id"], "deaf");
+        assert_eq!(close["code"], 1008);
+        // The tunnel itself is unharmed.
+        ws.send(req_frame("after", "GET", "/api/big", headers)).await.unwrap();
+        let (status, _, _) = read_response(&mut ws, "after", "a request after the overflow").await;
         assert_eq!(status, 200);
     }
 

@@ -92,18 +92,17 @@ export function orgEntries(orgs: OrgInfo[], sessions: Session[]): { visible: Org
 }
 
 /**
- * The one pending org to ask about now, or null. An org already answered this session is skipped —
- * the PUT that answered it has marked it decided server-side, but the 15 s poll may not have
- * confirmed that yet, and its card must not flash back in between. The API carries no timestamp
- * for a pending org, so the rest are asked in name order: stable, and never a wall of cards.
+ * The pending orgs to show as "Added to <org>" notifications, in name order. An org already
+ * answered this session is skipped — the PUT that answered it has marked it decided server-side,
+ * but the 15 s poll may not have confirmed that yet, and its row must not flash back in between.
+ * The API carries no timestamp for a pending org, so name order keeps the list stable; more than
+ * one collapses into a single grouped row, so it is never a wall of rows.
  */
-export function pendingOrgPrompt(orgs: OrgInfo[], answered: ReadonlySet<string>): OrgInfo | null {
+export function pendingOrgPrompts(orgs: OrgInfo[], answered: ReadonlySet<string>): OrgInfo[] {
   const done = new Set([...answered].map((org) => org.toLowerCase()));
-  return (
-    orgs
-      .filter((info) => info.awaiting_decision === true && !done.has(info.org.toLowerCase()))
-      .sort((a, b) => a.org.localeCompare(b.org))[0] ?? null
-  );
+  return orgs
+    .filter((info) => info.awaiting_decision === true && !done.has(info.org.toLowerCase()))
+    .sort((a, b) => a.org.localeCompare(b.org));
 }
 
 // The cockpit's org selection (the rail and the header switcher). The components hold no rules of

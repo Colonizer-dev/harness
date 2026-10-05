@@ -92,7 +92,11 @@ impl Hasher {
 /// neither read nor written. Blocking: the caller runs it in `spawn_blocking`.
 pub(super) fn load_or_create_key(data_dir: &Path) -> Option<Vec<u8>> {
     const KEY_LEN: usize = 32;
-    let dir = data_dir.join(crate::observability::state::DIR);
+    // Spelled out rather than imported: the directory name is shared with the `colonizer-observability`
+    // add-on, which is never linked into this crate, so there is no constant to import. Keep the two
+    // in step — the key file must stay where the exporter already looks for it.
+    const HASH_KEY_DIR: &str = "observability";
+    let dir = data_dir.join(HASH_KEY_DIR);
     let path = dir.join("hash.key");
     if let Ok(bytes) = std::fs::read(&path)
         && bytes.len() == KEY_LEN

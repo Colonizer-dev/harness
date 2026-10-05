@@ -18,9 +18,17 @@ Part of the [Colonizer protocol](../protocol.md).
 | `PUT /api/providers/{id}` | `{name, base_url, auth, wire?, models, api_key?, preset?, model_map?, disabled_tools?}` plus the optional provider fields of §6.5 (`timeout_secs`, `pricing`, `quota`, …): `wire` omitted is `anthropic`; `api_key` omitted keeps the saved key, `""` removes it — and a save that moves `base_url` to another origin is refused with the saved key kept, so it must bring the key again or remove it; `model_map`/`disabled_tools` omitted keep the saved values, an empty one clears (docs/providers.md) |
 | `DELETE /api/providers/{id}` | Remove a provider |
 | `GET /api/providers/{id}/health` | Probes the provider (§6.5, Health) |
+| `POST /api/providers/{id}/test` | Sends a one-token request through the colony's route; answers `{ok, url, status, model, latency_ms, error}` (§6.5, Test request) |
 | `POST /api/providers/{id}/quota-action` | `{action: "switch"\|"wait"\|"stop", model?, scope?, colonies?, org?, remember?}`: answers the provider's out-of-quota card (§6.5, Provider out of quota cards) |
 | `GET /api/attention` | `{quota_cards: [card]}`: the provider-out-of-quota cards (§6.5) |
 | `GET /api/models` | `[{id, label, provider}]` for model pickers: Anthropic aliases plus `<provider>/<model>` for every provider model |
+| `GET /api/models/assignments` | The header model switcher's view (issue #1051): what every model role resolves to install-wide and per org, with where it comes from; the agent modules with their roles; the models on offer with health and quota (below) |
+| `GET /api/models/plans` | `{plans: [plan], checked_at}`: what is known about each plan the model roles use, for the switcher's usage bars (below) |
+| `GET /api/models/profiles` | `{profiles: [profile]}`: the saved model profiles, then the starters this install can run (below) |
+| `POST /api/models/profiles` | `{name, module?, roles: {role: model}}`: saves a profile in the install config; `409` on a taken name |
+| `PUT /api/models/profiles/{id}` | `{name?, module?, roles?}`: renames a profile or replaces its roles; a starter is a `400` |
+| `DELETE /api/models/profiles/{id}` | Deletes a saved profile; a starter is a `400` |
+| `POST /api/models/switch` | `{scope: "install"\|"org", org?, module?, roles: {role: model\|null}, apply?: "new"\|"running", dry_run?}`: switches a scope's agent module and role models in one validated step, optionally restarting the scope's colonies (below) |
 
 Presets: `deepseek` = `https://api.deepseek.com/anthropic`, `x-api-key`, models `deepseek-flash`,
 `deepseek-v4-pro`. `openai` = `https://api.openai.com`, `bearer`, wire `openai`, models `gpt-5.6`, `gpt-5.5`,
@@ -30,6 +38,77 @@ gateway (§6.5), which calls the `base_url` as saved, so a loopback base URL wor
 
 The agent module schema gains `subagent_model` and `background_model` next to `model` (all free-text
 strings; UIs offer `GET /api/models` as suggestions).
+
+**Switching models (issue #1051).** `GET /api/models/assignments` answers
+
+```json
+{"install": {"module": "claude-code",
+             "roles": [{"role": "model", "title": "Orchestrator model", "value": "claude-opus-5-5",
+                        "source": "install", "org_settable": true}]},
+ "orgs": [{"org": "acme", "module": "claude-code", "module_source": "install", "roles": [ … ]}],
+ "modules": [{"id": "codex", "name": "Codex", "roles": [{"role": "model", "title": "…", "org_settable": true}],
+              "blocked": null}],
+ "models": [{"id": "zai/glm-5", "label": "glm-5 · Z.AI", "provider": "zai", "provider_name": "Z.AI",
+             "wire": "anthropic", "failure_pct": 1.5, "rated": true, "degraded": false, "healthy": true,
+             "out_of_quota": false, "reset_at": null, "reset_unix": null}]}
+```
+
+A module's roles are the string settings of its `module.json` schema named `model`, `*_model` or
+`model_*` (`model`, `subagent_model`, `background_model`, `summary_model`, `small_model`,
+`model_low`, `model_high`), orchestrator first. `source` is `org` (the org's override), `install`
+(the install's agent settings, which apply only to the install's own module) or `default` (the
+module's schema default; an empty `value` is the agent's own default) — what boot resolves. An org
+can override `model`, `subagent_model` and `background_model` (`org_settable`); the other roles are
+install-wide only. `blocked` is why a module cannot launch here, in a launch refusal's words (its
+`requires` preflight, or a Claude login it needs); `null` when it can. `models` is `GET /api/models`
+with each provider's usage health, and `out_of_quota` with its reset while the provider's plan (or,
+for Claude's models, the account's cap) is out.
+
+`POST /api/models/switch` takes `scope: "install"` (the install's agent module settings, which
+every org without an override follows) or `scope: "org"` with `org`. `module` changes the scope's
+agent module (omitted keeps it; `""` returns an org to the install's); a module that cannot launch
+is refused. `roles` maps a role to a model, or to `null`/`""` to clear it — an org's override back to
+the install's value, the install's back to the module's default. Everything is checked before
+anything is saved, and a refusal is a `400` that changes nothing: the role must be one the module
+declares, per org one an org can override; the model must be on offer, not out of quota, and fit
+the role by the quota card's rules (a provider's `model_map`, `summary_model` needing an Anthropic
+key). The save goes through `PUT /api/modules/agent` or `PUT /api/orgs/{org}`'s own handler, so it is
+validated and written as a Settings save is. `apply: "new"` (the default) changes new colonies only.
+`apply: "running"` also moves the scope's colonies — live, parked or queued, on the scope's module,
+in the org (install-wide, every org that does not override the role itself) — whose role resolves to
+something else after the switch: their `model_override`/`subagent_model_override` follow the new
+values, and they restart through the quota card's restart path (a live or parked one stopped and
+resumed cold, a queued one simply boots). `dry_run: true` answers the plan and changes nothing; the
+cockpit counts the colonies with it before asking to restart them. The reply is
+`{dry_run, scope, org, module, changes: [change], affected: [id], colonies: [id], failed: [{id, ok: false, error}]}`,
+`changes` in the quota card's `{scope, target, key, was, now}` shape.
+
+`GET /api/models/plans` lists the Claude account (`id: "anthropic"`, `kind: "claude"`) when a role
+runs on a Claude model or its cap is hit. It then lists each provider (`kind: "provider"`) that a
+role routes to or whose plan is out. Each plan is
+`{id, name, kind, used_by, exhausted, reset_at, reset_unix, last_limit, requests, failures, last_request_at, since, balance}`:
+- `used_by` lists the roles in plain words (`orchestrator`, `subagents`, `background`, …).
+- `reset_*` is set only while the plan is exhausted.
+- `last_limit` (`{at, reset_at, reset_unix}`) is the last limit the gateway recorded, even after
+  its reset has passed.
+- `requests`/`failures` are the gateway's counts (`null` for Claude, which it does not proxy).
+- `balance` is the provider's plan-balance probe through the 60 s probe cache:
+  `{remaining, limit, pct_left, error, checked_at}`. `limit` comes from `quota.limit_pointer`, and
+  `pct_left` is derived only when both numbers are known. `balance` is `null` without a probe.
+
+Nothing is estimated.
+
+`GET /api/models/profiles` answers saved profiles (`{id, name, module, roles, created_at, updated_at, builtin: false}`,
+kept in `model-profiles.json` in the config directory) followed by starters (`builtin: true`, ids
+`starter-…`). The starters are derived on each read from what is configured: "Claude only"
+(`opus`/`sonnet`/`haiku`) with a Claude login, and one per provider that lists a model (first
+three), only on the roles an org can override. A starter whose name a saved profile has taken is not
+listed. A profile's `roles` maps a role key (`model`, `*_model`, `model_*`) to a model id, where `""`
+means the module default. The models are checked only when the profile is applied: the cockpit
+loads it into a `POST /api/models/switch`. Names are 1–60 characters and unique regardless of
+case, and an install keeps at most 50 profiles. A profiles file that won't parse is refused, never
+overwritten. Saving, renaming and deleting a profile record `settings.save`/`settings.remove`
+activity. Every `/api/models/*` route is owner-only: a scoped API token gets `403`.
 
 **Org workspaces.** `Session` gains `"org": "<repo owner>"`.
 
@@ -184,13 +263,22 @@ back to an initial. The same record is the seen-set behind the prompt:
 (`pending`). `source` = `{session_id, repo, origin}` or `{user: true}`; a colony's note gains `reviewed: true`
 when approved, or `reviewed: false` when stored with review off.
 
+**Operator vault proposals.** Notes colonies proposed for the operator vault (issue #777, [memory](memory.md#the-operator-vaults-tools-issue-777)). Owner only.
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/vault/proposals` | `{configured, inbox, proposals: [{id, path, title, body, reason, source, created_at}]}`, newest first; `inbox` is the folder an accepted note lands in, relative to the vault |
+| `POST /api/vault/proposals/{id}/accept` | Writes the note as a new file at `<inbox>/<path>` in the vault and drops the proposal: `{ok, path}`. `409` when no vault is configured or the file already exists (nothing is overwritten), `400` when the inbox or path would leave the vault or crosses a symlink; the proposal stays queued on any error |
+| `POST /api/vault/proposals/{id}/reject` | Drops the proposal; the vault is not touched |
+
 **Watchdog.** New module kind `watchdog` (provider `default`, on by default; settings
-`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30) and kind `memory` (provider `files`,
+`stall_minutes` = 15, `max_nudges` = 3, `waiting_minutes` = 30, `provider_retry_max_attempts` = 3,
+`provider_retry_schedule_minutes` = `"1, 5, 15"`) and kind `memory` (provider `files`,
 on by default; setting `require_review` = true; off lets only `repo` notes skip review). `Session`
 gains `last_activity_at` and `attention`:
 
 ```json
-{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error", "since": "…", "nudges": 2, "detail": "…"}}
+{"attention": {"reason": "stalled|waiting_for_answer|nudges_exhausted|autopilot_held|provider_quota_exhausted|hold_timeout|agent_failed|model_error|provider_retry", "since": "…", "nudges": 2, "detail": "…", "cause": "gateway_error|turn_error"}}
 ```
 
 Every minute the mothership checks live colonies. A colony that is `running` with no agent event for
@@ -202,13 +290,34 @@ colony blocked on an exhausted provider is flagged `provider_quota_exhausted` in
 (§6.5, Provider out of quota cards). A question open longer than `waiting_minutes` sets `waiting_for_answer`. An
 autopilot colony whose turn ends with an error (not an interrupt) — or whose completion claim the
 mothership contradicted (Autopilot, below) — is not published and gets
-`autopilot_held`. A flag carries a `detail` when the mothership can say why in one line: a claim
+`autopilot_held`. An error the retry classifier calls transient (a gateway 5xx, 429 or 529, an
+unreachable or overloaded provider, a timeout, a dropped, reset or refused connection, a gateway
+restart) is retried first (issues #980, #1093): the colony parks with `parked.reason` and
+`attention.reason` `provider_retry`, and the queue tick continues it after each wait in
+`provider_retry_schedule_minutes` (default 1, 5, 15; the last entry repeats), re-checking under the
+lifecycle lock that it is still parked for that reason. The retry's attention also carries
+`cause: "gateway_error"`, `summary` ("Stopped on a model gateway error (502, connection to
+Anthropic)"), `detail`, `retry_at`, `attempt` and `max_attempts`; nobody has to act on it. After
+`provider_retry_max_attempts` (0–10, default 3; 0 turns the retry off) it is held as
+`autopilot_held` with `cause: "gateway_error"` and a `detail` naming the error ("Stopped on repeated
+gateway errors (502, connection to Anthropic); 3 automatic retries did not get through"); a clean
+turn end resets the count (`Session.provider_retries`). An error that is not transient holds at
+once with `cause: "turn_error"` and the error's first line as `detail`. A colony the mothership
+reconnected to after its own restart whose first turn end within 15 minutes is a transient gateway
+error is sent one `user_message` to continue instead, with no park and no retry spent. A colony whose Claude account answered 401 or 403 parks
+with reason `waiting_for_account` ahead of all of this (Claude account health, in
+[harness-api.md](harness-api.md#get-apistatus)). On every tick, whether or not the watchdog is
+enabled, a colony that is `waiting_for_answer` with no question actually pending is set back to
+`idle` with a colony log line saying why (issue #981). A flag carries a `detail` when the mothership can say why in one line: a claim
 held as `autopilot_held` names the failing checks and the `out/verify-*.log` their output is in
 (Done-verification, below); the other reasons carry none. Two reasons come from elsewhere: `agent_failed` when the runner never started (§1),
 and `model_error`, set by the gateway when an upstream model call fails (§6.5) and cleared when the
-provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, or a
-watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
-it sets itself. A turn that dies on an exhausted provider parks the colony instead of holding it
+provider answers again. Any new agent progress event (not a `status` change, a `model_changed`, a
+`boundary` event, or a watchdog or judge message) clears `attention`; a disabled watchdog clears only the reasons
+it sets itself. The exception is `control_defeat` (issue #609, docs/boundaries.md "Watchdog
+signatures"): set when the colony's `boundary` events complete a control-defeat signature, it carries
+`signature`, `detail` and the events as `evidence`, the watchdog's tick neither nudges over it nor
+replaces it, and only a person's own `user_message` (or the colony stopping) clears it. A turn that dies on an exhausted provider parks the colony instead of holding it
 (see §6.5 "Quota exhaustion"): `status` `parked` with the worktree kept, and `attention.reason`
 `provider_quota_exhausted` — like `autopilot_held`, set outside the watchdog, so it does not
 announce here either. A hold that waits longer than the sandbox module's `hold_timeout_minutes`
@@ -231,7 +340,7 @@ not finish the turn, and leaves the colony to the stall handling above rather th
 
 **Notify.** New module kind `notify` (provider `default`, issue #119; settings `on_question` = true,
 `on_attention` = true, `on_failed` = true, `on_pull_request` = true, `on_provider` = true,
-`desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
+`on_quota` = true, `on_lifecycle` = false, `desktop` = false, `webhook_url` = ""). Like `autonomy`, it is absent from `modules.json` until first configured: it
 announces colonies to the outside world, so it is off until asked for. Every thirty seconds the
 mothership diffs the session list against what it last saw, seeding new colonies without firing so a
 restart does not replay a backlog, and announces the edges once each: `status` became
@@ -263,13 +372,22 @@ has no colony and no org, so its settings are the notify module's own global one
 not reach it, and `on_provider` has no per-org override — and the announcement carries no repository
 at all: only the id and name the operator chose, plus the counters behind the rate.
 
+A provider that runs out of quota while colonies are blocked on it opens one out-of-quota card
+(§6.5, issue #767), and the same loop announces the card once as the `provider_quota_exhausted` event
+under `on_quota` — `Z.AI is out of quota: 3 colonies are waiting; resets Oct 6, 04:00 UTC` — one line
+per provider, never one per colony. It stays quiet while the card stays open and re-arms when the
+card closes (the plan reset, or every colony moved on). Like a provider crossing, it has no per-org
+override, and it carries only the provider's id and name, its reset time and how many colonies wait.
+A colony's own `provider_quota_exhausted` attention flag is never an event of its own.
+
 The desktop channel runs `osascript -e 'display notification …'` on macOS or `notify-send` on Linux
 under a graphical session, with the text passed as an argument and escaped for AppleScript. Over SSH
 or headless it does nothing, logging the reason once rather than a line a tick. A non-empty
 `webhook_url` POSTs one JSON note per event:
 
 ```json
-{"event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|digest", "at": "2026-09-18T00:00:00+00:00",
+{"version": 1, "id": "evt_3f9c0d1e2a4b5c6d7e8f90a1b2c3d4e5",
+ "event": "question|attention|failed|pull_request|needs_rebase|provider_degraded|provider_quota_exhausted|digest", "at": "2026-09-18T00:00:00+00:00",
  "text": "acme/webshop #42 needs an answer",
  "colony": {"id": "…", "repo": "acme/webshop", "org": "acme", "issue": 42, "status": "waiting_for_answer"},
  "pr_url": null,
@@ -280,18 +398,32 @@ The note carries no repository content — no issue title, no question text, no 
 `pr_url` is the colony's pull request address only on the `pull_request` and `needs_rebase` events, `null` otherwise.
 `provider` is `null` on every colony event; on `provider_degraded` it is the reverse — `colony` and
 `pr_url` are `null` and `provider` carries `{id, name, failure_pct, avg_latency_ms, requests, failure}`
-(`failure` is the code of its most recent failure, or `null`) — so
-a receiver reads one six-key shape either way.
+(`failure` is the code of its most recent failure, or `null`); on `provider_quota_exhausted`
+`provider` is `{id, name, reset_at, colonies}` (`colonies` is a count) — so
+a receiver reads one eight-key shape either way.
+`on_lifecycle` adds the whole colony lifecycle to the webhook — one event per status transition
+(`queued`, `started`, `running`, `idle`, `answered`, `publishing`, `merged`, `closed`,
+`no_changes`, `parked`, `resumed`, `stopped`, plus `cleaned`), webhook only and outside the rate
+limiter (issue #897); every payload also carries `version` (`1`). The full event list and the
+schema are in [Webhooks](webhooks.md).
+`id` is the event's stable id (issue #896): the same event always carries the same one, so a
+receiver can dedupe on it, and it also travels in the `X-Colonizer-Event-Id` header. How it is
+derived, and how to verify a request, is in [Webhooks](webhooks.md).
 Every request carries `X-Colonizer-Timestamp` (unix seconds); when a signing secret is set
 (`config/notify-secret`, mode 0600, or `COLONIZER_NOTIFY_SECRET`) it also carries
 `X-Colonizer-Signature: sha256=<hex>` — HMAC-SHA256 over the exact bytes `"{timestamp}.{body}"` —
-and without one it is sent unsigned. Transport errors and non-2xx answers are logged, never
-retried.
+and without one it is sent unsigned. Transport errors and non-2xx answers are logged and retried
+with exponential backoff and jitter, at most 6 attempts in all, then kept in a persistent dead
+letter the owner can list, replay or discard (issue #898; [Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)).
 
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/notify/secret` | `{has_secret, source}`: whether a webhook signing secret is set (`file` or `env` for `COLONIZER_NOTIFY_SECRET`). Never the secret |
 | `PUT /api/notify/secret` | `{secret}`: save it on the mothership; `null` or an empty string removes it. **400** over 512 characters or with non-printable characters |
+| `GET /api/notify/deliveries` | Webhook deliveries waiting for a retry, the dead letter and the last success ([Webhooks](webhooks.md#delivery-retries-and-the-dead-letter)) |
+| `POST /api/notify/dead-letters/{key}/replay` | Replays one dead letter now: `{delivered, error}`; **404** for an unknown key |
+| `POST /api/notify/dead-letters/replay` | Replays every dead letter once: `{delivered, failed}` |
+| `DELETE /api/notify/dead-letters/{key}` | Discards one dead letter; **404** for an unknown key |
 
 **Autopilot.** When a turn ends, an autopilot colony is published only if the turn ended without an
 error or open question and the agent wrote or updated `/harness/out/pr.md` since the previous turn

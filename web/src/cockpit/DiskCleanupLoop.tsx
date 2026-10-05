@@ -38,21 +38,21 @@ export function DiskCleanupRow({
   const attention = loop.disk_cleanup?.attention;
   return (
     <li className={cx("flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3", !loop.enabled && "opacity-80")} data-loop="disk-cleanup">
-      <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full border border-border text-[13px] text-muted">
+      <span aria-hidden className="grid size-7 shrink-0 place-items-center rounded-full border border-border text-body-sm text-muted">
         ⌫
       </span>
       <div className="min-w-0 flex-1 basis-64">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[14px] font-medium text-text">{loop.name}</span>
-          <span className="truncate font-mono text-[11.5px] text-faint">this host</span>
+          <span className="truncate text-body-lg font-medium text-text">{loop.name}</span>
+          <span className="truncate font-mono text-meta-lg text-faint">this host</span>
         </div>
-        <div className="mt-0.5 truncate text-[12.5px] text-muted" title={loop.last_note ?? undefined}>
+        <div className="mt-0.5 truncate text-small-lg text-muted" title={loop.last_note ?? undefined}>
           {describeDiskCleanup(loop)}
           {loop.enabled && loop.next_run_at ? ` · next ${relative(loop.next_run_at, now)}` : " · off"}
         </div>
-        {attention && <div className="mt-1 text-[12.5px] text-warn">{attention}</div>}
+        {attention && <div className="mt-1 text-small-lg text-warn">{attention}</div>}
       </div>
-      <div className="w-[170px] shrink-0 text-[12.5px]">
+      <div className="w-[170px] shrink-0 text-small-lg">
         {last ? (
           <button type="button" onClick={() => onOpen("history")} className="cursor-pointer border-0 bg-transparent p-0 text-left text-muted hover:text-text">
             {reportSummary(last)} · {relative(last.at, now)}
@@ -83,7 +83,7 @@ export function DiskCleanupRow({
 /** One report — a dry run or a stored run — category by category, with every path and size. */
 export function DiskCleanupReportView({ report }: { report: DiskCleanupReport }): ReactElement {
   return (
-    <div className="space-y-3 text-[13px]">
+    <div className="space-y-3 text-body-sm">
       <p className="font-medium text-text">{report.dry_run ? `A run now ${reportSummary(report)}` : reportSummary(report)}. {report.dry_run ? "Nothing has been removed." : ""}</p>
       {report.categories.map((c) => (
         <section key={c.category} className="rounded-lg border border-border px-3 py-2">
@@ -94,7 +94,7 @@ export function DiskCleanupReportView({ report }: { report: DiskCleanupReport })
           {c.items.length > 0 && (
             <ul className="m-0 mt-1.5 list-none space-y-0.5 p-0">
               {c.items.map((item) => (
-                <li key={item.path} className="flex gap-3 font-mono text-[11.5px] text-muted">
+                <li key={item.path} className="flex gap-3 font-mono text-meta-lg text-muted">
                   <span className="w-14 shrink-0 text-right tabular-nums">{item.bytes == null ? "—" : formatBytes(item.bytes)}</span>
                   <span className="min-w-0 truncate" title={item.path}>
                     {item.path}
@@ -106,18 +106,18 @@ export function DiskCleanupReportView({ report }: { report: DiskCleanupReport })
           {(c.held ?? []).length > 0 && (
             <ul className="m-0 mt-1.5 list-none space-y-0.5 p-0">
               {(c.held ?? []).map((h) => (
-                <li key={`${h.path}:${h.reason}`} className="truncate text-[11.5px] text-faint" title={h.path}>
+                <li key={`${h.path}:${h.reason}`} className="truncate text-meta-lg text-faint" title={h.path}>
                   kept: {h.path} ({heldReason(h.reason)})
                 </li>
               ))}
             </ul>
           )}
           {(c.failed ?? []).map((f) => (
-            <p key={f} className="m-0 mt-1 text-[11.5px] text-err">
+            <p key={f} className="m-0 mt-1 text-meta-lg text-err">
               {f}
             </p>
           ))}
-          {c.note && <p className="m-0 mt-1 text-[11.5px] text-faint">{c.note}</p>}
+          {c.note && <p className="m-0 mt-1 text-meta-lg text-faint">{c.note}</p>}
         </section>
       ))}
       {report.attention && <p className="text-warn">{report.attention}</p>}
@@ -137,9 +137,9 @@ export function DiskCleanupSettingsForm({
   onChange: (s: DiskCleanupSettings) => void;
   onMinutes: (m: number) => void;
 }): ReactElement {
-  const field = "rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none focus:border-border-strong";
+  const field = "rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none focus:border-border-strong";
   return (
-    <div className="space-y-4 text-[13px]">
+    <div className="space-y-4 text-body-sm">
       <label className="flex flex-wrap items-center gap-2">
         Run every
         <input type="number" aria-label="minutes between runs" min={DISK_CLEANUP_MIN_MINUTES} max={10080} value={minutes} onChange={(e) => onMinutes(Number(e.target.value))} className={cx(field, "w-24")} />
@@ -157,7 +157,7 @@ export function DiskCleanupSettingsForm({
             <Switch checked={settings[c.key]} onChange={(on) => onChange({ ...settings, [c.key]: on })} label={c.label} />
             <div className="min-w-0">
               <div className="text-text">{c.label}</div>
-              <div className="text-[12px] text-faint">{c.hint}</div>
+              <div className="text-small text-faint">{c.hint}</div>
             </div>
           </div>
         ))}
@@ -184,7 +184,7 @@ export function DiskCleanupSettingsForm({
             placeholder="/home/you/code"
             className={cx(field, "w-full resize-y font-mono")}
           />
-          <span className="mt-1 block text-[12px] text-faint">
+          <span className="mt-1 block text-small text-faint">
             Only Cargo target/ dirs untouched for {settings.host_min_age_days} days go. Never ~/.cargo, caches, .git or anything outside these paths.
           </span>
         </label>
@@ -239,7 +239,7 @@ export function DiskCleanupDialog({ loop, tab: initialTab, onClose, onSaved }: {
   return (
     <dialog ref={ref} onClose={onClose} aria-labelledby="disk-cleanup-title" className="m-auto w-[min(720px,calc(100vw-24px))] max-w-none overflow-hidden rounded-2xl border border-border bg-panel p-0 text-text shadow-[var(--shadow)] backdrop:bg-black/50">
       <div className="flex items-center gap-3 border-b border-border px-5 py-3">
-        <h2 id="disk-cleanup-title" className="min-w-0 flex-1 text-[16px] font-semibold">
+        <h2 id="disk-cleanup-title" className="min-w-0 flex-1 text-title-sm font-semibold">
           Disk cleanup
         </h2>
         <button type="button" onClick={() => ref.current?.close()} aria-label="Close" className="grid size-8 cursor-pointer place-items-center rounded-lg border-0 bg-transparent text-muted hover:bg-panel-2 hover:text-text">
@@ -259,7 +259,7 @@ export function DiskCleanupDialog({ loop, tab: initialTab, onClose, onSaved }: {
             type="button"
             aria-pressed={tab === key}
             onClick={() => setTab(key)}
-            className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-[12.5px]", tab === key ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
+            className={cx("cursor-pointer rounded-lg border px-2.5 py-1 text-small-lg", tab === key ? "border-accent bg-accent-soft text-text" : "border-border bg-transparent text-muted hover:text-text")}
           >
             {label}
           </button>
@@ -270,19 +270,19 @@ export function DiskCleanupDialog({ loop, tab: initialTab, onClose, onSaved }: {
           (preview ? (
             <DiskCleanupReportView report={preview} />
           ) : (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
+            <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Working out what a run would remove…
             </p>
           ))}
         {tab === "settings" && <DiskCleanupSettingsForm settings={settings} minutes={minutes} onChange={setSettings} onMinutes={setMinutes} />}
         {tab === "history" &&
           (history.length === 0 ? (
-            <p className="text-[13px] text-faint">No runs yet.</p>
+            <p className="text-body-sm text-faint">No runs yet.</p>
           ) : (
             <ul className="m-0 list-none space-y-4 p-0">
               {history.map((r) => (
                 <li key={r.at}>
-                  <div className="mb-1 text-[12px] text-faint">
+                  <div className="mb-1 text-small text-faint">
                     {relative(r.at)} · {r.trigger === "low_disk" ? "low disk" : r.trigger}
                   </div>
                   <DiskCleanupReportView report={r} />

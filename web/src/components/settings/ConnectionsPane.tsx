@@ -20,7 +20,7 @@ function ClaudeHealth({ status, checkedAt }: { status: HarnessStatus["claude"]["
   if (!status) return null;
   const health = CLAUDE_HEALTH[status];
   return (
-    <p className="flex flex-wrap items-center gap-2 text-[12.5px] text-muted">
+    <p className="flex flex-wrap items-center gap-2 text-small-lg text-muted">
       <Badge tone={health.tone}>{health.label}</Badge>
       {checkedAt ? <span>checked {timeAgo(checkedAt)}</span> : null}
     </p>
@@ -55,7 +55,7 @@ export function ConnectionsPane({ status, onStatusChanged, back }: { status: Har
           }
         >
           {github?.connected ? (
-            <details className="text-[13px]">
+            <details className="text-body-sm">
               <summary className="cursor-pointer text-muted hover:text-text">{githubViaToken ? "Replace or remove the token" : "Use a token instead"}</summary>
               <div className="mt-2">
                 <GithubTokenForm onStatusChanged={onStatusChanged} />

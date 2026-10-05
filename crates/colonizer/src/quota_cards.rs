@@ -238,6 +238,48 @@ pub(crate) async fn cards(app: &Shared) -> Vec<Value> {
     )
 }
 
+/// Each exhausted provider's card as the notify loop needs it (issue #767): the provider, its name,
+/// when it resets and the colonies blocked on it — the same derivation as [`build_cards`], without
+/// the picker, so the push names exactly the card the Inbox shows.
+pub(crate) async fn notify_cards(app: &Shared) -> Vec<crate::notify::QuotaCard> {
+    let exhausted: Vec<_> = app
+        .gateway
+        .quota_exhausted()
+        .into_iter()
+        .filter(|(id, _, _)| id != crate::gateway::ACCOUNT_QUOTA_ID)
+        .collect();
+    if exhausted.is_empty() {
+        return Vec::new();
+    }
+    let providers = app.providers();
+    let sessions = app.sessions.read().await.clone();
+    quota_notify_cards(&exhausted, &providers, &sessions, &app.gateway.colony_quota_all())
+}
+
+/// The pure half of [`notify_cards`]: one entry per exhausted provider with at least one affected
+/// colony, in the gateway's order.
+pub(crate) fn quota_notify_cards(
+    exhausted: &[(String, Option<String>, Option<i64>)],
+    providers: &[Provider],
+    sessions: &[Session],
+    hits: &HashMap<String, ColonyQuotaHit>,
+) -> Vec<crate::notify::QuotaCard> {
+    let provider_ids: Vec<String> = providers.iter().map(|p| p.id.clone()).collect();
+    exhausted
+        .iter()
+        .filter_map(|(id, reset_at, _)| {
+            let provider = providers.iter().find(|p| &p.id == id)?;
+            let colonies: Vec<Session> = affected(id, sessions, hits, &provider_ids).into_iter().cloned().collect();
+            (!colonies.is_empty()).then(|| crate::notify::QuotaCard {
+                provider: id.clone(),
+                name: provider.name.clone(),
+                reset_at: reset_at.clone(),
+                colonies,
+            })
+        })
+        .collect()
+}
+
 /// `GET /api/attention`: what needs the maintainer beyond a colony's own question. Today that is
 /// the provider-out-of-quota cards (issue #767).
 pub async fn list(State(app): State<Shared>) -> Json<Value> {
@@ -602,7 +644,7 @@ fn role_models(app: &Shared, modules: &crate::config::ModulesConfig, s: &Session
 /// One setting a switch changed, with what it held before: `scope` is `install` (target: the agent
 /// module), `org` (target: the org), `colony` (target: the colony id) or `provider` (the remembered
 /// fallback), so the cockpit can say "was X, now Y" for each.
-fn change(scope: &str, target: &str, key: &str, was: Option<&str>, now: &str) -> Value {
+pub(crate) fn change(scope: &str, target: &str, key: &str, was: Option<&str>, now: &str) -> Value {
     json!({"scope": scope, "target": target, "key": key, "was": was, "now": now})
 }
 
@@ -676,7 +718,7 @@ async fn apply_overrides(app: &Shared, provider: &str, model: &str, plan: &[Over
 }
 
 /// Restarts every colony on the new model scope ([`restart`]).
-async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
+pub(crate) async fn restart_all(app: &Shared, targets: &[Session]) -> Vec<Value> {
     let mut out = Vec::new();
     for s in targets {
         out.push(outcome(&s.id, restart(app, &s.id).await));
@@ -698,7 +740,7 @@ const INSTALL_ROLES: [&str; 6] = [
 /// whose provider maps its models must map this one (the boot would refuse the launch otherwise),
 /// and `summary_model` on a plain Claude model needs an Anthropic provider or API key — summaries
 /// never use the subscription login.
-fn role_error(app: &Shared, role: &str, model: &str) -> Option<String> {
+pub(crate) fn role_error(app: &Shared, role: &str, model: &str) -> Option<String> {
     if let Some((id, canonical)) = model.split_once('/')
         && let Some(p) = app.providers().into_iter().find(|p| p.id == id)
         && !p.model_map.is_empty()
@@ -794,7 +836,7 @@ fn plan_every_org(
 /// Restarts a colony so its next boot reads its new model settings: a live or parked one is stopped
 /// (its microVM taken down, the worktree kept) and resumed cold; a stopped one is resumed; a queued
 /// one boots with them anyway.
-async fn restart(app: &Shared, id: &str) -> Result<(), String> {
+pub(crate) async fn restart(app: &Shared, id: &str) -> Result<(), String> {
     let Some(s) = app.session(id).await else {
         return Err("no such session".into());
     };

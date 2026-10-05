@@ -3,7 +3,7 @@
 // counts, and the prompt asks for pending orgs one at a time in a stable order.
 import { describe, expect, it } from "vitest";
 
-import { hideEmptyOrgEntries, memoryBadge, orgEnabled, orgEntries, parseHideEmptyOrgs, pendingOrgPrompt, reconcileSelectedOrg, serializeHideEmptyOrgs, toggledOrg, viewAfterOrgSwitch } from "./orgs";
+import { hideEmptyOrgEntries, memoryBadge, orgEnabled, orgEntries, parseHideEmptyOrgs, pendingOrgPrompts, reconcileSelectedOrg, serializeHideEmptyOrgs, toggledOrg, viewAfterOrgSwitch } from "./orgs";
 import type { OrgInfo, Session } from "./types";
 
 function session(overrides: Partial<Session> = {}): Session {
@@ -107,33 +107,33 @@ describe("orgEntries", () => {
   });
 });
 
-describe("pendingOrgPrompt", () => {
-  it("is null when nothing is pending", () => {
-    expect(pendingOrgPrompt([org("acme"), org("octo")], new Set())).toBeNull();
+describe("pendingOrgPrompts", () => {
+  it("is empty when nothing is pending", () => {
+    expect(pendingOrgPrompts([org("acme"), org("octo")], new Set())).toEqual([]);
   });
 
-  it("is null on an old mothership that never sends the field", () => {
+  it("is empty on an old mothership that never sends the field", () => {
     // The field is optional: absent simply means no pending orgs.
-    expect(pendingOrgPrompt([org("acme", { awaiting_decision: undefined }), org("octo")], new Set())).toBeNull();
+    expect(pendingOrgPrompts([org("acme", { awaiting_decision: undefined }), org("octo")], new Set())).toEqual([]);
   });
 
-  it("asks for several pending one at a time, in name order", () => {
+  it("lists several pending in name order", () => {
     const pending = [org("charlie", { awaiting_decision: true }), org("alpha", { awaiting_decision: true }), org("beta", { awaiting_decision: true })];
-    expect(pendingOrgPrompt(pending, new Set())?.org).toBe("alpha");
+    expect(pendingOrgPrompts(pending, new Set()).map((o) => o.org)).toEqual(["alpha", "beta", "charlie"]);
   });
 
   it("skips an org already answered this session and asks the next", () => {
     const pending = [org("alpha", { awaiting_decision: true }), org("beta", { awaiting_decision: true })];
-    expect(pendingOrgPrompt(pending, new Set(["alpha"]))?.org).toBe("beta");
+    expect(pendingOrgPrompts(pending, new Set(["alpha"])).map((o) => o.org)).toEqual(["beta"]);
   });
 
   it("matches an answered org case-insensitively", () => {
     const pending = [org("alpha", { awaiting_decision: true }), org("beta", { awaiting_decision: true })];
-    expect(pendingOrgPrompt(pending, new Set(["ALPHA"]))?.org).toBe("beta");
+    expect(pendingOrgPrompts(pending, new Set(["ALPHA"])).map((o) => o.org)).toEqual(["beta"]);
   });
 
-  it("is null once the last pending org has been answered", () => {
-    expect(pendingOrgPrompt([org("alpha", { awaiting_decision: true })], new Set(["alpha"]))).toBeNull();
+  it("is empty once the last pending org has been answered", () => {
+    expect(pendingOrgPrompts([org("alpha", { awaiting_decision: true })], new Set(["alpha"]))).toEqual([]);
   });
 });
 

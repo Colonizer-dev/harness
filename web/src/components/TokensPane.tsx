@@ -114,7 +114,7 @@ function createdDay(createdAt: string): string {
 }
 
 function Code({ children }: { children: ReactNode }) {
-  return <code className="rounded bg-panel-3 px-1 font-mono text-[11.5px]">{children}</code>;
+  return <code className="rounded bg-panel-3 px-1 font-mono text-meta-lg">{children}</code>;
 }
 
 /** One labelled field of the create form: label above, control, then the control's one-line hint.
@@ -123,12 +123,12 @@ function Code({ children }: { children: ReactNode }) {
 function Field({ id, label, hint, children }: { id: string; label: string; hint?: string; children: ReactElement<any> }) {
   return (
     <div className="space-y-1">
-      <label htmlFor={id} className="text-[12.5px] font-medium">
+      <label htmlFor={id} className="text-small-lg font-medium">
         {label}
       </label>
       {cloneElement(children, { id, "aria-describedby": hint ? `${id}-hint` : undefined })}
       {hint && (
-        <p className="text-[11.5px] text-faint" id={`${id}-hint`}>
+        <p className="text-meta-lg text-faint" id={`${id}-hint`}>
           {hint}
         </p>
       )}
@@ -143,13 +143,13 @@ export function TokenRow({ token, actions }: { token: ApiTokenMeta; actions?: Re
     <div className="flex items-center gap-3 border-b border-border px-3.5 py-2.5 last:border-b-0">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[13px] font-medium">{token.name}</span>
+          <span className="truncate text-body-sm font-medium">{token.name}</span>
           <Badge tone={SCOPE_TONE[token.scope]}>{token.scope}</Badge>
         </div>
-        <div className="truncate text-[11.5px] text-faint">
+        <div className="truncate text-meta-lg text-faint">
           {limitsText(token)} · {capsText(token)}
         </div>
-        <div className="truncate text-[11.5px] text-faint">
+        <div className="truncate text-meta-lg text-faint">
           created {createdDay(token.created_at)} · {token.last_used_at ? `last used ${usedText(token)}` : "never used"}
         </div>
       </div>
@@ -171,14 +171,14 @@ export function SecretReveal({
 }): ReactElement {
   return (
     <div className="space-y-2 rounded-xl border border-border bg-panel-2 px-3.5 py-3">
-      <p className="text-[13px] font-semibold">Token “{created.name}” created</p>
+      <p className="text-body-sm font-semibold">Token “{created.name}” created</p>
       <code
-        className="block w-full break-all rounded-lg border border-border bg-panel px-3 py-2 font-mono text-[12.5px] select-all"
+        className="block w-full break-all rounded-lg border border-border bg-panel px-3 py-2 font-mono text-small-lg select-all"
         aria-label={`The ${created.name} token`}
       >
         {created.token}
       </code>
-      <p className="text-[12.5px] text-warn">This is the only time it is shown — copy it now. Nothing can read it back.</p>
+      <p className="text-small-lg text-warn">This is the only time it is shown — copy it now. Nothing can read it back.</p>
       <div className="flex gap-2">
         {onCopy && (
           <Button size="sm" onClick={onCopy}>
@@ -301,15 +301,15 @@ export function TokensPane({ back }: { back?: () => void }): ReactElement {
         {created && <SecretReveal created={created} onCopy={() => void copySecret()} onDone={() => setCreated(null)} />}
 
         <div>
-          <h4 className="mb-1.5 text-[12.5px] font-semibold">Tokens</h4>
+          <h4 className="mb-1.5 text-small-lg font-semibold">Tokens</h4>
           {!tokens && !error && (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
+            <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Loading…
             </p>
           )}
-          {error && <p className="text-[12.5px] text-warn">Couldn’t read the tokens: {error}</p>}
+          {error && <p className="text-small-lg text-warn">Couldn’t read the tokens: {error}</p>}
           {tokens !== null && tokens.length === 0 && (
-            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">
+            <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">
               No tokens yet. One lets a script or a CI job watch or drive this install without holding the owner token —
               what <Code>colonizer token create</Code> does, from here.
             </p>
@@ -323,7 +323,7 @@ export function TokensPane({ back }: { back?: () => void }): ReactElement {
                   actions={
                     confirming === token.id ? (
                       <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-                        <span className="text-[12.5px] text-muted">Revoke {token.name}?</span>
+                        <span className="text-small-lg text-muted">Revoke {token.name}?</span>
                         <Button size="sm" variant="danger" disabled={busy !== null} onClick={() => void revoke(token)}>
                           {busy === token.id && <Spinner className="size-3" />}
                           Confirm
@@ -345,7 +345,7 @@ export function TokensPane({ back }: { back?: () => void }): ReactElement {
         </div>
 
         <div className="border-t border-border pt-4">
-          <h4 className="mb-1 text-[12.5px] font-semibold">Create a token</h4>
+          <h4 className="mb-1 text-small-lg font-semibold">Create a token</h4>
           <form className="space-y-3" onSubmit={(event) => void create(event)}>
             <div className="grid gap-3 sm:grid-cols-2">
               <Field id="token-name" label="Name">
@@ -378,7 +378,7 @@ export function TokensPane({ back }: { back?: () => void }): ReactElement {
               </Field>
             </div>
             {createError && (
-              <p role="alert" className="text-[12.5px] text-err">
+              <p role="alert" className="text-small-lg text-err">
                 {createError}
               </p>
             )}

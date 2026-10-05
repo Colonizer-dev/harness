@@ -2,7 +2,8 @@
 
 The `observability` module sends the harness's logs, traces and metrics to a backend you choose,
 over OpenTelemetry's OTLP protocol, or writes them to capped files under the data directory. It is
-**off until you configure it**, and it reads no environment variable of its own.
+**off until you configure it**. The standard `OTEL_*` variables override its fields, but never turn
+it on by themselves; see [Observability](../observability.md#configuration).
 
 ## Turning it on
 
@@ -40,18 +41,19 @@ Both providers share the second table.
 | :--- | :--- | :--- |
 | Operational logs | on | Boots, parks, quota pauses, watchdog nudges. |
 | Colony activity | on | Stages, tool use and status changes. |
-| Traces | on | One trace per colony turn. |
+| Traces | on | One trace per colony: its turns, tool calls and subagents as spans ([Traces](traces.md)). |
 | Metrics | on | Counters and durations. |
 | Conversation content | off | The words you and the agent exchanged. Turning it on needs the same save to carry `"confirm_content": true`. |
 | Agent thinking | off | The agent's reasoning. Turning it on needs the same save to carry `"confirm_content": true`. |
-| Trace sample ratio | `1` | 0 to 1; the share of turns traced. |
+| Trace sample ratio | `1` | 0 to 1; the share of colonies traced, chosen per colony so a trace is always whole. Logs and metrics are never sampled. |
 | Max attribute size (bytes) | `1024` | 128 to 8192. |
 | Max content size (bytes) | `32768` | 1024 to 196608. |
-| Max trace size (bytes) | `4194304` | A trace longer than this is truncated. |
+| Max trace size (bytes) | `4194304` | One colony trace's budget, under Tempo's 5 MB per trace: past 90 % of it, detail spans are counted instead of sent ([Traces](traces.md#long-colonies-and-tempo-limits)). |
 | Repository names | `plain` | `plain` sends `owner/repo`; `hashed` sends a salted hash instead. |
 | Expose Prometheus metrics | off | Serve the metrics for scraping on the harness's own endpoint, too. |
 | Max backlog (days) | `7` | Older events are dropped rather than exported late; `0` keeps everything. |
 | Max read rate (MiB/s) | `8` | A ceiling so the exporter never crowds a running colony. |
+| Start from | `now` | Where a new endpoint starts: `now` sends only what is written from then on; `backlog` also sends what the ledgers hold, back to Max backlog. Settled once per endpoint. |
 
 ## What is sent, and what is never sent
 
@@ -69,5 +71,5 @@ Both providers share the second table.
 ## Turning it off
 
 Switch the module off in **Settings → Modules → Observability** (or `PUT /api/modules/observability`
-with `"enabled": false`). Nothing is exported while it is off. Environment switches, a full reset,
-and the exact retention of the local files are added by later issues.
+with `"enabled": false`). Nothing is exported while it is off. `OTEL_SDK_DISABLED=true` turns it off too, whatever the module
+says. A full reset of the exporter's state is added by a later issue.

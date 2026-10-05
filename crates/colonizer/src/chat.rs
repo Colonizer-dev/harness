@@ -900,7 +900,7 @@ async fn build_attachments(app: &Shared, attachments: &[Attachment]) -> Result<B
         match a {
             Attachment::Colony { id } => {
                 let s = app.session(id).await.ok_or_else(|| bad(format!("no colony {id}")))?;
-                let recent = crate::autonomy::event_context(&app.session_dir(&s.id).join("events.jsonl")).await;
+                let recent = crate::autonomy::event_context(app.store(), &s.id).await;
                 let summary = s.summary.clone().unwrap_or_else(|| s.issue_title.clone());
                 out.system.push_str(&format!(
                     "\n\nContext — colony {} on {} ({}{}): {}\nRecent activity:\n{}",

@@ -31,6 +31,21 @@ export interface StatusQuota {
    * builds, which the banner derives from `providers` instead (see `quotaPauseKind`).
    */
   kind?: "account" | "provider" | null;
+  /**
+   * Each exhausted plan's display name and the roles routed to it, e.g.
+   * `{ id: "byteplus", name: "BytePlus", used_by: ["subagents", "background"] }`; an account pause
+   * carries one `anthropic` entry named "Claude". Absent from older mothership builds, which the
+   * banner covers by looking the ids up in the provider catalog.
+   */
+  provider_details?: QuotaProviderDetail[];
+}
+
+/** One exhausted plan in GET /api/status `quota.provider_details`. */
+export interface QuotaProviderDetail {
+  id: string;
+  name: string;
+  /** Plain-word roles that route here: `orchestrator`, `subagents`, `background`, `small tasks`, … */
+  used_by: string[];
 }
 
 /**
@@ -50,6 +65,34 @@ export interface AccountAlert {
   since: string;
   /** How many colonies are waiting on this account. */
   waiting: number;
+}
+
+/**
+ * GET /api/status `github_pause` and GET /api/github/status (issue #1074): the GitHub account's
+ * circuit breaker. While GitHub refuses the account, launches, publishes, merges and GitHub writes
+ * wait, and a slow probe resumes them once GitHub works again. `{ paused: false }` when all is well.
+ */
+export interface GitHubPause {
+  paused: boolean;
+  cause?: "suspended" | "token_revoked" | "secondary_rate_limit";
+  /** The cause in words, e.g. "GitHub account suspended". */
+  message?: string;
+  /** What a person does next, e.g. "contact GitHub support". */
+  next_step?: string;
+  since?: string;
+  /** When the probe asks GitHub again (RFC3339). */
+  next_probe_at?: string;
+  probes?: number;
+  /** What GitHub last said, truncated. */
+  detail?: string;
+  /** Colonies waiting in the queue. */
+  queued?: number;
+  /** Autopilot publishes waiting to go out. */
+  held_publishes?: number;
+  /** Calls refused without reaching GitHub while paused. */
+  refused_calls?: number;
+  /** Secondary rate limits in the last ten minutes, while not paused. */
+  secondary_limits_recent?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +138,8 @@ export interface ProviderQuotaProbe {
   url: string;
   /** Non-empty RFC 6901 JSON pointer naming the remaining-token number in the answer, like `/data/remaining`. */
   pointer: string;
+  /** Optional RFC 6901 pointer naming the plan's total in the same answer, so used vs. limit can be drawn. */
+  limit_pointer?: string;
 }
 
 export interface ModelProvider extends ProviderLimits {
@@ -238,6 +283,19 @@ export interface ProviderHealth {
   /** The plan balance the provider's quota probe read; absent when the provider has no probe configured. */
   quota?: { remaining: number | null; error: string | null } | null;
   checked_at: string;
+}
+
+/** `POST /api/providers/{id}/test`: a one-token request through the colony's own route (issue #1018). */
+export interface ProviderTestResult {
+  ok: boolean;
+  /** The URL the request hit, redacted (no userinfo, no query); null when none was sent. */
+  url: string | null;
+  /** The upstream's HTTP status; null when no response arrived. */
+  status: number | null;
+  /** The model it tested with: the provider's first listed one. */
+  model: string | null;
+  latency_ms: number | null;
+  error: string | null;
 }
 
 export interface ModelOption {

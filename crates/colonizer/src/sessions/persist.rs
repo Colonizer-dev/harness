@@ -17,8 +17,9 @@ fn session_contents_equal(before: &Session, after: &Session) -> bool {
 }
 
 impl App {
+    /// The index's path in the local working copy (`crate::store::local_index`).
     pub fn sessions_file(&self) -> PathBuf {
-        self.cfg.data_dir.join("sessions.json")
+        crate::store::local_index(&self.cfg.data_dir)
     }
 
     /// Every per-task model routing decision, one JSON line each. Kept in the data dir rather than a
@@ -56,8 +57,12 @@ impl App {
         self.cfg.data_dir.join("decisions.jsonl")
     }
 
+    /// A session's directory in the local working copy (`crate::store::local_session_dir`): for
+    /// what the store API cannot carry — the microVM's mounts (`vm/`, `out/`, `transcripts/`), a
+    /// file handed to a subprocess by path, a disk measurement. Reads and writes of the session's
+    /// records go through [`App::store`].
     pub fn session_dir(&self, id: &str) -> PathBuf {
-        self.cfg.data_dir.join("sessions").join(id)
+        crate::store::local_session_dir(&self.cfg.data_dir, id)
     }
 
     pub async fn session(&self, id: &str) -> Option<Session> {
@@ -126,7 +131,7 @@ impl App {
             // just finished, so the spawned task's whole error path is a printout.
             let data_dir = self.cfg.data_dir.clone();
             let mothership = crate::runtime::host_id(self);
-            crate::archive::spawn_on_end(data_dir, session.clone(), mothership);
+            crate::archive::spawn_on_end(self.store.clone(), data_dir, session.clone(), mothership);
         }
         Some((session, result))
     }
@@ -185,11 +190,14 @@ impl App {
     }
 
     pub async fn runtime(&self, id: &str) -> Arc<Runtime> {
-        let mut runtimes = self.runtimes.lock().await;
-        runtimes
-            .entry(id.to_string())
-            .or_insert_with(|| Arc::new(Runtime::load(&self.session_dir(id))))
-            .clone()
+        if let Some(rt) = self.runtimes.lock().await.get(id) {
+            return rt.clone();
+        }
+        // Read through the store outside the map's lock, then insert: two first callers racing both
+        // build one, and the first insert wins, so every caller still shares a single runtime.
+        let saved = SavedLogs::read(self.store(), id).await;
+        let built = Arc::new(Runtime::from_saved(saved, &self.session_dir(id).join("out")));
+        self.runtimes.lock().await.entry(id.to_string()).or_insert(built).clone()
     }
 
     /// The colony log, stamped `system`: the host's own bookkeeping. A subsystem that speaks in its
@@ -221,7 +229,7 @@ impl App {
             // Recorded here, not by calling session_log again — that would recurse — and outside
             // the guard, as in handle_agent_event. The frame still reaches every open browser
             // below; the console and the app alert keep the gap.
-            eprintln!("sessions: could not append to {}: {e:#}", rt.logs_path.display());
+            eprintln!("sessions: could not append to colony {id}'s harness.jsonl: {e:#}");
             self.storage_failed("append to the harness log", &e).await;
         }
         let mut logs = rt.logs.lock().await;

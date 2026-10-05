@@ -732,7 +732,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "merge_train_overrides": {"type": "string", "title": "Merge train per repository", "format": "merge-train-overrides", "description": "Comma-separated `owner=on|off` or `owner/repo=on|off` entries that switch the train per organization or per repository; a repository entry wins over an organization entry, and either wins over the switch above. Example: `acme=on, acme/widget=off`.", "default": ""},
                 "merge_train_deny_orgs": {"type": "string", "title": "Organizations the train never merges in", "description": "Comma-separated organization or owner names the train never merges in, whatever the switch above or the overrides say.", "default": ""},
                 "merge_train_authors": {"type": "string", "title": "Allowed commit authors", "description": "Comma-separated GitHub logins or email addresses that a pull request's commits may be authored by; a pull request carrying any other author is left open. Empty means the identity this mothership publishes as: the `gh` login and its noreply email, the author of every publish and catch-up commit. Compared case-insensitively.", "default": ""},
-                "merge_train_forbid": {"type": "string", "title": "Refuse commit messages containing", "description": "Comma-separated, case-insensitive substrings; a pull request any of whose commit messages contains one is never merged. For example `Co-Authored-By: Claude`.", "default": ""}
+                "merge_train_forbid": {"type": "string", "title": "Refuse commit messages containing", "description": "Comma-separated, case-insensitive substrings; a pull request any of whose commit messages contains one is never merged. For example `Co-Authored-By: Claude`.", "default": ""},
+                "merge_train_quiet_minutes": {"type": "integer", "title": "Quiet period before a merge (minutes)", "description": "The merge train and its loop merge a pull request only once its head has been unchanged this long, counted from the later of the head commit's time and the first check started on it, and only on checks that ran on that exact head. A push during the merge makes GitHub refuse it, and a branch that gets commits after the merged head is kept and raised as \"commits not merged\". 0 merges as soon as the head's checks are green.", "minimum": 0, "maximum": 1440, "default": 10}
             }}),
         )],
         "memory" => vec![
@@ -764,7 +765,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "stall_minutes": {"type": "integer", "title": "Nudge after minutes without progress", "minimum": 1, "maximum": 1440, "default": 15},
                 "max_nudges": {"type": "integer", "title": "Nudges before flagging", "minimum": 0, "maximum": 20, "default": 3},
                 "waiting_minutes": {"type": "integer", "title": "Flag unanswered questions after minutes", "minimum": 1, "maximum": 10080, "default": 30},
-                "provider_retry_max_attempts": {"type": "integer", "title": "Automatic retries for a provider error before holding", "minimum": 0, "maximum": 4, "default": 4}
+                "provider_retry_max_attempts": {"type": "integer", "title": "Automatic retries for a provider error before holding", "description": "A turn that ends on a model gateway error (a 5xx or 529, a dropped connection, a gateway restart) is continued automatically this many times before the colony is held for you. 0 turns the automatic retry off.", "minimum": 0, "maximum": 10, "default": 3},
+                "provider_retry_schedule_minutes": {"type": "string", "title": "Wait before each automatic retry (minutes)", "description": "Comma-separated, one wait per retry; retries past the end of the list wait its last entry.", "default": "1, 5, 15"}
             }}),
         )],
         "resume" => vec![p(
@@ -819,6 +821,8 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "on_failed": {"type": "boolean", "title": "When a colony fails", "default": true},
                 "on_pull_request": {"type": "boolean", "title": "When a colony opens a pull request", "default": true},
                 "on_provider": {"type": "boolean", "title": "When a model provider starts failing", "description": "A provider failing under fan-out does not look like a failing provider — it looks like every colony running slowly, because they all wait on it at once. One line when a provider's failure rate reaches 10% of its requests; announced once, and again only after the rate clearly recovers", "default": true},
+                "on_quota": {"type": "boolean", "title": "When a provider runs out of quota", "description": "One line per provider whose plan ran out while colonies wait on it — its name, how many colonies wait and when it resets — not one per colony. Opens the Inbox card that switches, waits or stops them", "default": true},
+                "on_lifecycle": {"type": "boolean", "title": "Send every colony lifecycle event to the webhook", "description": "One webhook event per status change — queued, started, running, idle, answered, publishing, merged, closed, no changes, parked, resumed, stopped, cleaned — besides the ones above. Webhook only, never the desktop or a phone, and never rate-limited, so a receiver can keep an exact record", "default": false},
                 "desktop": {"type": "boolean", "title": "Desktop notifications", "description": "Notify the desktop the mothership runs on. Does nothing over SSH or on a headless machine, and says so once in the log", "default": false},
                 "webhook_url": {"type": "string", "title": "Webhook URL", "description": "POSTs a short JSON note per event to an address outside this machine. It carries no repository content — the event, the time, and the colony or provider counters behind it — and it is unsigned unless a signing secret is set in Settings", "default": ""}
             }}),
@@ -836,7 +840,7 @@ pub fn providers(kind: &str, agents: &[AgentModule]) -> Vec<Provider> {
                 "spend_usd_per_colony": {"type": "number", "title": "Estimated spend per colony (USD)", "description": "What one bug-hunt colony roughly burns, used to pace launches across the window", "minimum": 0.5, "default": 5},
                 "max_live": {"type": "integer", "title": "Concurrent live burn-down colonies", "description": "Cap on how many burn-down colonies run at once", "minimum": 1, "maximum": 8, "default": 2},
                 "repos": {"type": "string", "title": "Repositories to hunt in", "description": "Comma-separated owner/repo list. Empty means burn-down is not configured and launches nothing", "default": ""},
-                "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt is used", "default": ""}
+                "instructions": {"type": "string", "title": "Custom hunt instructions", "description": "When empty, a built-in bug-hunt prompt focused on the next area this repository has not hunted yet (error handling, concurrency, input validation, resource leaks, auth, core flows, silent failures, API contracts) is used", "default": ""}
             }}),
         )],
         "voice" => crate::voice::module_providers()

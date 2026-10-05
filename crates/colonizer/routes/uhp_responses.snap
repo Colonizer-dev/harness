@@ -1,0 +1,4 @@
+/uhp/v1/responses                                    POST   unauth=401    token=launch           activity=-
+/uhp/v1/responses/{response_id}                      GET    unauth=401    token=response>=read   activity=-
+/uhp/v1/responses/{response_id}/cancel               POST   unauth=401    token=response>=operate activity=-
+/uhp/v1/sessions/{id}/cancel                         POST   unauth=401    token=session>=operate activity=colony.stop

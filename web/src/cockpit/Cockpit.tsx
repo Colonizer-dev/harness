@@ -14,7 +14,7 @@ import { COCKPIT_VIEWS, LAUNCH_PARAMS, holdingSession, sharedIssueFromUrl, viewF
 import { canQueue, droppedText, sendOrQueue, useOutbox } from "../outbox";
 import { needsYou } from "../notifications";
 import { memoryBadge, orgEntries, viewAfterOrgSwitch } from "../orgs";
-import { colonyFromUrl } from "../push";
+import { colonyFromUrl, pushTarget } from "../push";
 import { sortSessions } from "../sessionOrder";
 import { sessionCost, sumCosts } from "../spend";
 import { buildThread, useSessionStream } from "../sessionStream";
@@ -23,6 +23,7 @@ import type { LiveConnection } from "../liveStream";
 import { ColonizeProvider } from "./Colonize";
 import { Composer } from "./Composer";
 import { Header } from "./Header";
+import { ModelSwitcher } from "./ModelSwitcher";
 import { HostView } from "./HostView";
 import { recordHost } from "./hostHistory";
 import { NavRail, type CockpitView } from "./NavRail";
@@ -30,9 +31,12 @@ import { MobileTabBar } from "./MobileTabBar";
 import { HistoryView } from "./HistoryView";
 import { LoopsView } from "./LoopsView";
 import { focusTurn } from "./turnFocus";
+import { UpdateBanner, restartOnNewVersion } from "./UpdateBanner";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
+import { runDecisionAnswer, runPrAction } from "./DecisionCards";
+import { decisionsCount, useDecisions } from "./decisions";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
@@ -44,8 +48,10 @@ import { BookmarkPrompt } from "../components/BookmarkPrompt";
 import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { AccountBanner } from "./AccountBanner";
+import { GitHubBanner } from "./GitHubBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
+import { GATEWAY_RETRY_MESSAGE } from "./questions";
 
 // The Chat view (and its highlighter, which it loads later still) stays out of the main bundle.
 const ChatView = lazy(() => import("./ChatView").then((m) => ({ default: m.ChatView })));
@@ -77,7 +83,7 @@ function storedTheme(): "light" | "dark" | null {
 }
 
 /** The toast for a failed inspector action: what failed, on which colony, and why. */
-export function actionError(action: "stop" | "resume", colony: string, error: unknown): string {
+export function actionError(action: "stop" | "resume" | "retry", colony: string, error: unknown): string {
   return `Couldn't ${action} ${colony}: ${errorMessage(error)}`;
 }
 
@@ -98,6 +104,7 @@ export function Cockpit({
   liveConnection,
   liveStorage = null,
   update,
+  onUpdateChanged,
   autopilotDefault,
   launchRequests,
   settingsRequests,
@@ -115,6 +122,7 @@ export function Cockpit({
   onInspectorShown,
   colony,
   memory,
+  notice = null,
 }: {
   /** Every colony the mothership knows; the cockpit filters to the chosen workspace itself. */
   sessions: Session[];
@@ -141,6 +149,8 @@ export function Cockpit({
   /** A storage frame the stream pushed; the overview's storage panel shows it (issue #446). */
   liveStorage?: StorageSummary | null;
   update: UpdateStatus | null;
+  /** Takes a fresh update status after the banner restarted colonies on the new version (issue #1097). */
+  onUpdateChanged?: (update: UpdateStatus) => void;
   autopilotDefault: boolean;
   /** Bumped by Setup's launch row, which lives in the settings body App owns. */
   launchRequests: number;
@@ -169,6 +179,9 @@ export function Cockpit({
   /** The open colony's own pane, wired by App (chat, terminal, publish). */
   colony: ReactNode;
   memory: ReactNode;
+  /** A phone-only card in the page flow (the live-map prompt): at the top of the Nest and of the
+   *  Inbox list, where it pushes the content down instead of covering it. App passes it below `sm` only. */
+  notice?: ReactNode;
 }) {
   const api = useApi();
   const toast = useToast();
@@ -293,7 +306,10 @@ export function Cockpit({
   // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
   // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
   // spend, which are this workspace's.
-  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  // The decisions inbox (issue #1036) joins the same count: one number for everything that needs you.
+  const decisions = useDecisions(api);
+  const decisionCount = useMemo(() => decisionsCount(decisions.view, sessions), [decisions.view, sessions]);
+  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0) + decisionCount, [needByOrg, decisionCount]);
   const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
@@ -415,8 +431,10 @@ export function Cockpit({
       if (event.origin !== window.location.origin) return;
       const data = event.data as { type?: string; url?: unknown } | null;
       if (data?.type !== "colonizer:open" || typeof data.url !== "string") return;
-      const id = colonyFromUrl(data.url);
-      if (id) setDeeplink(id);
+      // A colony push opens the colony; the out-of-quota push (issue #767) opens the Inbox card.
+      const target = pushTarget(data.url);
+      if (target && "colony" in target) setDeeplink(target.colony);
+      else if (target) setView(target.view);
     };
     navigator.serviceWorker.addEventListener("message", onMessage);
     return () => navigator.serviceWorker.removeEventListener("message", onMessage);
@@ -494,6 +512,22 @@ export function Cockpit({
       }
     },
     [onSessionChanged, sessions, toast],
+  );
+
+  // Retry on a colony stopped on a model gateway error (issue #1093): one backing off an automatic
+  // retry is parked, so Retry now resumes it; one held after the retries ran out is still live, so
+  // Retry sends its agent on again.
+  const retry = useCallback(
+    async (id: string) => {
+      const target = sessions.find((s) => s.id === id);
+      if (target?.status === "parked") return act(id, "resume", (x) => api.resumeSession(x));
+      try {
+        await api.messageSession(id, GATEWAY_RETRY_MESSAGE);
+      } catch (error) {
+        toast(actionError("retry", target ? `${target.repo}#${target.issue}` : id, error), "error");
+      }
+    },
+    [act, api, sessions, toast],
   );
 
   // The global quota banner's keyed dismissal: dismissing hides this pause, and a new reset (or a
@@ -590,7 +624,7 @@ export function Cockpit({
       case "chat":
         return (
           <Page width="full">
-            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[13px] text-muted">Loading chat…</div>}>
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-body-sm text-muted">Loading chat…</div>}>
               <ChatView
                 org={selectedOrg}
                 repos={repos}
@@ -627,12 +661,20 @@ export function Cockpit({
       case "inbox":
         return (
           <InboxView
+            notice={notice}
             sessions={sessions}
             onOpenColony={openColonyById}
             onOpenNotificationSettings={() => onOpenSettings("notifications")}
             quotaCards={status?.quota_cards ?? []}
             onQuotaAction={(provider, body) =>
               runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
+            }
+            decisions={decisions.view}
+            onAnswerDecision={(body) =>
+              runDecisionAnswer(api.answerDecision, (message, tone) => toast(message, tone), body).finally(() => void decisions.refresh())
+            }
+            onDecisionPrAction={(card, action) =>
+              runPrAction(api.decisionPrAction, (message, tone) => toast(message, tone), card, action, (id) => api.publishSession(id)).finally(() => void decisions.refresh())
             }
           />
         );
@@ -728,6 +770,7 @@ export function Cockpit({
         judge={judge}
         onOpenRemote={() => onOpenSettings("remote")}
         onOpenCockpit={() => onOpenSettings("cockpit")}
+        models={<ModelSwitcher selectedOrg={selectedOrg} />}
         user={{
           login: status?.github.connected ? (status.github.login ?? null) : null,
           name: status?.github.name ?? null,
@@ -740,6 +783,7 @@ export function Cockpit({
           onOpenColony: openColonyById,
           onOpenInbox: () => navigate("inbox"),
           onOpenNotificationSettings: () => onOpenSettings("notifications"),
+          decisionCount,
         }}
       />
       {/* The mobile tab bar (below `sm`) covers the foot of the screen, so the content it overlays
@@ -759,6 +803,19 @@ export function Cockpit({
               plan), the cockpit banners it above every view, like the quota banner. `Sign in` opens
               the Accounts page — the Connections settings section. Absent on an older mothership. */}
           <AccountBanner alerts={status?.account_alerts} onSignIn={() => onOpenSettings("connections")} />
+          {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
+              secondary limits), one banner above every view names the cause and the next step. */}
+          <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
+          {/* Issue #1097: a release whose notes flag a critical or fixes-running fix is a banner
+              above every view, with how many colonies its probe found affected here; after the
+              update, the affected colonies still on the previous version are offered a restart. */}
+          <UpdateBanner
+            update={update}
+            onOpenUpdates={() => onOpenSettings("updates")}
+            onRestart={(ids) =>
+              void restartOnNewVersion(api, { ids }, (message, tone) => toast(message, tone ?? "info"), onUpdateChanged)
+            }
+          />
           {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
               so above every view, like the quota banner. It clears itself when the drain finishes,
               so there is nothing to dismiss. Absent on a mothership from before the drain. */}
@@ -766,12 +823,15 @@ export function Cockpit({
             <div className="px-6 pt-4">
               <div
                 role="status"
-                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+                className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-warn bg-warn-soft px-3 py-2 text-small-lg text-warn"
               >
                 Draining for an update or restart: new colonies stay queued until it finishes.
               </div>
             </div>
           ) : null}
+          {/* The Nest is a full-bleed canvas with no scroll root, so its phone notice sits above it
+              in the flow, shrinking the canvas rather than covering it. */}
+          {notice && view === "home" ? <div className="shrink-0 px-3 pt-3 sm:hidden">{notice}</div> : null}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             {body()}
             {/* The way back into the dashboard once it has been hidden: a small pill parked above
@@ -781,7 +841,7 @@ export function Cockpit({
               <button
                 type="button"
                 onClick={() => setDashOpen(true)}
-                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-[12.5px] text-muted transition-colors hover:text-text"
+                className="absolute right-6 top-5 z-[6] cursor-pointer rounded-lg border border-border px-2.5 py-1 text-small-lg text-muted transition-colors hover:text-text"
               >
                 Dashboard
               </button>
@@ -830,6 +890,7 @@ export function Cockpit({
             onOpenColony={openColonyById}
             onStop={(id) => void act(id, "stop", (x) => api.stopSession(x))}
             onResume={(id) => void act(id, "resume", (x) => api.resumeSession(x))}
+            onRetry={(id) => void retry(id)}
             onLaunch={() => setView("launch")}
             onOpenSettings={(section) => onOpenSettings(section)}
           />

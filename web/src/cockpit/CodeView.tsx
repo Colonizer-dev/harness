@@ -77,7 +77,7 @@ function LanguageBar({ rows, height = 8 }: { rows: { name: string; percent: numb
 
 function LanguageLegend({ rows, limit = 4 }: { rows: { name: string; percent: number }[]; limit?: number }): ReactElement {
   return (
-    <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11.5px] text-muted">
+    <div className="flex flex-wrap gap-x-3 gap-y-1 text-meta-lg text-muted">
       {rows.slice(0, limit).map((r) => (
         <span key={r.name} className="inline-flex items-center gap-1.5">
           <span aria-hidden="true" className="size-2 rounded-full" style={{ background: languageColor(r.name) }} />
@@ -120,8 +120,8 @@ function CoveragePill({ coverage }: { coverage: RepoCoverage | null | undefined 
 function Stat({ label, children }: { label: string; children: React.ReactNode }): ReactElement {
   return (
     <div className="min-w-0">
-      <div className="text-[11px] uppercase tracking-wide text-faint">{label}</div>
-      <div className="truncate text-[14px] text-text">{children}</div>
+      <div className="text-meta uppercase tracking-wide text-faint">{label}</div>
+      <div className="truncate text-body-lg text-text">{children}</div>
     </div>
   );
 }
@@ -142,9 +142,9 @@ function RepoCodeTable({ repos, facts, sessions, onOpen }: { repos: string[]; fa
   const th = "py-2 pr-4 font-normal";
   return (
     <div className="mt-6 overflow-x-auto rounded-xl border border-border bg-panel">
-      <table className="w-full min-w-[860px] border-collapse text-[13px]">
+      <table className="w-full min-w-[860px] border-collapse text-body-sm">
         <thead>
-          <tr className="border-b border-border text-left text-[12px] text-muted">
+          <tr className="border-b border-border text-left text-small text-muted">
             <th className={cx(th, "pl-4")}>Repository</th>
             <th className={cx(th, "w-40")}>Languages</th>
             <th className={cx(th, "text-right")}>Lines</th>
@@ -166,15 +166,15 @@ function RepoCodeTable({ repos, facts, sessions, onOpen }: { repos: string[]; fa
               <tr key={repo} className="border-b border-border/60 last:border-b-0 hover:bg-panel-2">
                 <td className="max-w-[18rem] py-2.5 pl-4 pr-4 @min-[1600px]:max-w-[32rem]">
                   <div className="flex items-center gap-2">
-                    <span className="truncate font-mono text-[13px] font-semibold text-text">{repo.split("/")[1]}</span>
-                    {live > 0 && <span className="shrink-0 text-[11.5px] text-accent">{live} live</span>}
+                    <span className="truncate font-mono text-body-sm font-semibold text-text">{repo.split("/")[1]}</span>
+                    {live > 0 && <span className="shrink-0 text-meta-lg text-accent">{live} live</span>}
                   </div>
-                  <div className="truncate text-[12px] text-muted">{f?.meta?.description ?? (f ? "No description" : "Loading…")}</div>
+                  <div className="truncate text-small text-muted">{f?.meta?.description ?? (f ? "No description" : "Loading…")}</div>
                 </td>
                 <td className="py-2.5 pr-4">
                   <LanguageBar rows={langRows} height={6} />
                   {langRows[0] && (
-                    <div className="mt-1 truncate text-[11.5px] text-muted">
+                    <div className="mt-1 truncate text-meta-lg text-muted">
                       {langRows[0].name} {langRows[0].percent}%
                     </div>
                   )}
@@ -186,10 +186,10 @@ function RepoCodeTable({ repos, facts, sessions, onOpen }: { repos: string[]; fa
                 <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.meta ? (f.meta.stats_pending ? "counting…" : yearCommits) : "…"}</td>
                 <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.git?.branches ?? "…"}</td>
                 <td className="py-2.5 pr-4 text-right tabular-nums text-text">{f?.git ? (f.git.open_prs ?? "—") : "…"}</td>
-                <td className="max-w-[9rem] truncate py-2.5 pr-4 font-mono text-[12px] text-muted">{f?.git ? (release ?? "none") : "…"}</td>
-                <td className="whitespace-nowrap py-2.5 pr-4 text-[12px] text-faint">{f?.meta?.pushed_at ? timeAgo(f.meta.pushed_at) : "—"}</td>
+                <td className="max-w-[9rem] truncate py-2.5 pr-4 font-mono text-small text-muted">{f?.git ? (release ?? "none") : "…"}</td>
+                <td className="whitespace-nowrap py-2.5 pr-4 text-small text-faint">{f?.meta?.pushed_at ? timeAgo(f.meta.pushed_at) : "—"}</td>
                 <td className="py-2.5 pr-4 text-right">
-                  <button type="button" onClick={() => onOpen(repo)} className="cursor-pointer whitespace-nowrap rounded-lg border border-border-strong bg-panel-2 px-2.5 py-1 text-[12px] font-medium text-text hover:bg-panel-3">
+                  <button type="button" onClick={() => onOpen(repo)} className="cursor-pointer whitespace-nowrap rounded-lg border border-border-strong bg-panel-2 px-2.5 py-1 text-small font-medium text-text hover:bg-panel-3">
                     Open editor
                   </button>
                 </td>
@@ -209,10 +209,10 @@ function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: Repo
     <article className="flex flex-col gap-3 rounded-xl border border-border bg-panel p-4">
       <header className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="m-0 truncate font-mono text-[14px] font-semibold text-text">{name}</h3>
-          <p className="m-0 mt-0.5 line-clamp-2 text-[12.5px] text-muted">{facts?.meta?.description ?? (facts ? "No description" : "Loading…")}</p>
+          <h3 className="m-0 truncate font-mono text-body-lg font-semibold text-text">{name}</h3>
+          <p className="m-0 mt-0.5 line-clamp-2 text-small-lg text-muted">{facts?.meta?.description ?? (facts ? "No description" : "Loading…")}</p>
         </div>
-        <button type="button" onClick={onOpen} className="shrink-0 cursor-pointer rounded-lg border border-border-strong bg-panel-2 px-3 py-1.5 text-[12.5px] font-medium text-text hover:bg-panel-3">
+        <button type="button" onClick={onOpen} className="shrink-0 cursor-pointer rounded-lg border border-border-strong bg-panel-2 px-3 py-1.5 text-small-lg font-medium text-text hover:bg-panel-3">
           Open editor
         </button>
       </header>
@@ -229,7 +229,7 @@ function RepoCodeCard({ repo, facts, live, onOpen }: { repo: string; facts: Repo
         <Stat label="Release">{facts?.git ? (release ?? "none") : "…"}</Stat>
       </div>
       <CommitBars weeks={commits} />
-      <footer className="flex items-center gap-2 text-[11.5px] text-faint">
+      <footer className="flex items-center gap-2 text-meta-lg text-faint">
         <span className="flex -space-x-1.5">
           {(facts?.meta?.contributors ?? []).slice(0, 5).map((c) => (
             <Avatar key={c.login} name={c.login} src={c.avatar_url || undefined} size={20} rounded="full" title={`${c.login} · ${c.contributions} commits`} className="border border-panel" />
@@ -292,7 +292,7 @@ export function CodeView({
       <Page width="full">
         <Suspense
           fallback={
-            <div className="flex flex-1 items-center justify-center gap-2 text-[13px] text-muted">
+            <div className="flex flex-1 items-center justify-center gap-2 text-body-sm text-muted">
               <Spinner /> Loading the editor…
             </div>
           }
@@ -316,8 +316,8 @@ export function CodeView({
   if (!selectedOrg || !org) {
     return (
       <Page>
-        <h1 className="m-0 text-[30px] font-semibold tracking-[-0.035em] text-text">Code</h1>
-        <p className="mt-2 text-[14px] text-muted">The Code page is per workspace. Pick one:</p>
+        <h1 className="m-0 text-display-xl font-semibold tracking-[-0.035em] text-text">Code</h1>
+        <p className="mt-2 text-body-lg text-muted">The Code page is per workspace. Pick one:</p>
         <div className="mt-5 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
           {orgs
             .filter((o) => !o.awaiting_decision)
@@ -325,8 +325,8 @@ export function CodeView({
               <button key={o.org} type="button" onClick={() => onSelectOrg(o.org)} className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-border bg-panel px-3 py-2 text-left hover:bg-panel-2">
                 <Avatar name={o.org} src={o.avatar_url} size={24} rounded="md" />
                 <span className="min-w-0">
-                  <span className="block truncate text-[13.5px] text-text">{o.org}</span>
-                  {o.description && <span className="block truncate text-[11.5px] text-faint">{o.description}</span>}
+                  <span className="block truncate text-body text-text">{o.org}</span>
+                  {o.description && <span className="block truncate text-meta-lg text-faint">{o.description}</span>}
                 </span>
               </button>
             ))}
@@ -341,8 +341,8 @@ export function CodeView({
       <header className="flex flex-wrap items-start gap-4">
         <Avatar name={org.org} src={org.avatar_url} size={44} rounded="xl" />
         <div className="min-w-0 flex-1">
-          <h1 className="m-0 text-[30px] font-semibold leading-tight tracking-[-0.035em] text-text">Code · {org.org}</h1>
-          {org.description && <p className="m-0 mt-1 text-[14px] text-muted">{org.description}</p>}
+          <h1 className="m-0 text-display-xl font-semibold leading-tight tracking-[-0.035em] text-text">Code · {org.org}</h1>
+          {org.description && <p className="m-0 mt-1 text-body-lg text-muted">{org.description}</p>}
         </div>
         {orgRepos.length > 0 && (
           <Segmented
@@ -366,7 +366,7 @@ export function CodeView({
         </div>
       </section>
       {orgRepos.length === 0 ? (
-        <p className="mt-6 text-[13px] text-faint">No repositories in {org.org} that this GitHub login can see.</p>
+        <p className="mt-6 text-body-sm text-faint">No repositories in {org.org} that this GitHub login can see.</p>
       ) : layout === "list" ? (
         <RepoCodeTable repos={orgRepos} facts={facts} sessions={sessions} onOpen={setEditing} />
       ) : (

@@ -19,7 +19,7 @@
 //! [`record_for_session`] and [`reconcile_session`] are the production wrappers over the harness's
 //! hardened host git ([`App::git`]).
 
-use crate::{App, util::write_atomic};
+use crate::App;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -335,18 +335,16 @@ static FILE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Reads a colony's links: absent is empty, unparsable is an error (never overwritten blind).
 pub async fn load(app: &App, id: &str) -> Result<CommitLinks> {
-    let path = app.session_dir(id).join(FILE);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| format!("could not parse {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(CommitLinks::default()),
-        Err(e) => Err(e).with_context(|| format!("could not read {}", path.display())),
+    match app.store().read_file(id, FILE).await {
+        Ok(Some(bytes)) => serde_json::from_slice(&bytes).with_context(|| format!("could not parse colony {id}'s {FILE}")),
+        Ok(None) => Ok(CommitLinks::default()),
+        Err(e) => Err(e).with_context(|| format!("could not read colony {id}'s {FILE}")),
     }
 }
 
 async fn save(app: &App, id: &str, links: &CommitLinks) -> Result<()> {
-    let dir = app.session_dir(id);
-    tokio::fs::create_dir_all(&dir).await?;
-    write_atomic(&dir.join(FILE), &serde_json::to_vec_pretty(links)?).await
+    // Through the session store: a whole, atomic replace, as `write_atomic` gave the direct write.
+    Ok(app.store().write_file(id, FILE, &serde_json::to_vec_pretty(links)?).await?)
 }
 
 /// Publish time: reconcile what the colony recorded before against the branch as it now stands (a
@@ -484,8 +482,8 @@ async fn place(app: &App, id: &str) -> Option<Place> {
 
 /// Whether a colony has any links on disk, without parsing them: the cheap filter every trigger
 /// runs first.
-fn has_links(app: &App, id: &str) -> bool {
-    app.session_dir(id).join(FILE).is_file()
+async fn has_links(app: &App, id: &str) -> bool {
+    matches!(app.store().stat(id, FILE).await, Ok(Some(_)))
 }
 
 /// The PR's head moved to `head` (issue #765, the watcher's or the merge train's reading): fetch
@@ -493,7 +491,7 @@ fn has_links(app: &App, id: &str) -> bool {
 /// against it. `None` when there was nothing to do — no links, the head is the one already
 /// reconciled, or a fetch or git failure (said in the colony's log; the links stay untouched).
 pub async fn on_pr_head(app: &App, id: &str, head: &str) -> Option<Reconciled> {
-    if !has_links(app, id) {
+    if !has_links(app, id).await {
         return None;
     }
     let p = place(app, id).await?;
@@ -547,7 +545,8 @@ fn head_is_news(id: &str, head: &str) -> bool {
 /// last one seen, and the colony has links, the fetch and reconcile run off the caller's tick.
 pub fn head_seen(app: &crate::Shared, id: &str, head: Option<&str>) {
     let Some(head) = head.filter(|h| !h.is_empty()) else { return };
-    if !head_is_news(id, head) || !has_links(app, id) {
+    // The links check is `on_pr_head`'s first step, on the spawned task: it reads the store.
+    if !head_is_news(id, head) {
         return;
     }
     let (app, id, head) = (app.clone(), id.to_string(), head.to_string());
@@ -568,8 +567,10 @@ pub async fn after_sync(app: &App, repo: &str) {
                 s.status,
                 crate::sessions::SessionStatus::Merged | crate::sessions::SessionStatus::Closed
             )
-            && has_links(app, &s.id)
     }) {
+        if !has_links(app, &s.id).await {
+            continue;
+        }
         let Some(p) = place(app, &s.id).await else { continue };
         let git = || app.git(&p.bare);
         let Ok(tip) = resolve(&git, &p.branch_ref).await else {

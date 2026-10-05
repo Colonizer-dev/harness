@@ -73,16 +73,30 @@ copy of the ACP module's), both kept byte-identical by `test/memory.test.mjs`, w
 the real Pi against a stand-in model endpoint to check the tools reach the model and the prompt
 carries no note. `COLONIZER_DISABLED_TOOLS` can exclude them like any other Pi tool.
 
+## Loop tools
+
+A loop colony (the mothership sets `COLONIZER_LOOP=true`) also gets the loop tools (issue #643,
+[loops.md](../../../docs/loops.md)): the runner starts a loopback loop bridge, passes its URL and
+token into Pi's environment, and loads `loop-extension.mjs` by explicit path. The extension
+registers `loop_stop`, and `loop_next` when `COLONIZER_LOOP_SELF_PACED=true`; each call is clamped
+(15 minutes to 24 hours) and POSTed to the bridge, which emits a `loop_next` or `loop_stop` event,
+the wire the codex, grok-build and hermes modules use. The logic is `loop-tools.mjs`, a copy of the
+ACP module's kept byte-identical by `test/loop.test.mjs`, which also drives the real Pi against a
+stand-in model endpoint to check the model is offered the tools and its `loop_next` call leaves as
+an event. `module.json` declares `"loop_tools": true`, so a self-paced loop is briefed with
+`loop_next` instead of running every 24 hours.
+
 ## What does not apply from the Claude Code module
 
 Pi has no subagents, so `subagent_model`, `background_model` and `delegate` have no counterpart, and
 neither does model tier routing (`route_per_task` with `model_low`/`model_high`): the `model` setting
 is the only model. Pi has no way to ask a question — `answer` commands warn, and the appended system
 prompt tells the model to choose and say so — and of the in-process MCP tools only shared memory's
-read tools exist (below): `memory_propose`, the findings tool and `wait` do not. Briefs that name
+read tools and, in a loop colony, the loop tools exist (above): `memory_propose`, the findings tool
+and `wait` do not. Briefs that name
 them ask for the equivalent work done directly. The [exec policy](../claude-code/README.md#exec-policy) is
 not applied either: the harness refuses to launch a Pi colony while one is set (the install's
-`exec_policy` setting, or a repo `.colonizer/exec-policy.json`).
+`exec_policy` setting, the org's exec policy, or a repo `.colonizer/exec-policy.json`).
 
 ## Develop
 

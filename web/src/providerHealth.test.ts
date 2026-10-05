@@ -2,7 +2,7 @@
 // recomputed — `degraded` and `rated` are taken as given, at and around the 10% boundary included.
 import { describe, expect, it } from "vitest";
 
-import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, lastFailureText, quotaExhaustedText, quotaTone, usageHealthTone } from "./providerHealth";
+import { avgLatencyText, failureRateText, formatAvgLatency, formatFailureRate, formatSince, lastFailureText, providerTestToast, quotaExhaustedText, quotaTone, usageHealthTone } from "./providerHealth";
 import type { ProviderUsageHealth } from "./types";
 
 const NOW = Date.parse("2026-09-19T08:12:00Z");
@@ -131,5 +131,36 @@ describe("quotaExhaustedText", () => {
     expect(quotaExhaustedText({ reset_at: null, reset_unix: null })).toBe("quota exhausted");
     expect(quotaExhaustedText(null)).toBeNull();
     expect(quotaExhaustedText(undefined)).toBeNull();
+  });
+});
+
+describe("providerTestToast (issue #1018)", () => {
+  const result = { ok: true, url: "https://ark.example.com/api/coding/v3/chat/completions", status: 200, model: "ark-code", latency_ms: 300, error: null };
+
+  it("names the URL and status of a passing test", () => {
+    const toast = providerTestToast("BytePlus", result);
+    expect(toast.kind).toBe("success");
+    expect(toast.title).toBe("BytePlus answered 200");
+    expect(toast.body).toContain("https://ark.example.com/api/coding/v3/chat/completions");
+  });
+
+  it("warns with the status and URL when the base path is wrong", () => {
+    const url = "https://ark.example.com/api/coding/v1/chat/completions";
+    const toast = providerTestToast("BytePlus", { ...result, ok: false, url, status: 404, error: "HTTP 404" });
+    expect(toast.kind).toBe("warn");
+    expect(toast.title).toBe("BytePlus answered 404");
+    expect(toast.body).toBe(`HTTP 404 — POST ${url}`);
+  });
+
+  it("does not repeat a URL the error already names", () => {
+    const url = "https://h/v1/chat/completions";
+    const error = `HTTP 404 (upstream answered 404 at ${url}; check the provider's base URL)`;
+    expect(providerTestToast("X", { ...result, ok: false, url, status: 404, error }).body).toBe(error);
+  });
+
+  it("reports a request that never got an answer", () => {
+    const toast = providerTestToast("X", { ...result, ok: false, url: null, status: null, model: null, error: "list at least one model to test with" });
+    expect(toast.title).toBe("Test request failed");
+    expect(toast.body).toBe("list at least one model to test with");
   });
 });

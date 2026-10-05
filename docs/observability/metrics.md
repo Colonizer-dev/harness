@@ -8,6 +8,9 @@ This page covers the catalogue, how to scrape it, what a series is allowed to na
 read it. The wire contract is in [the protocol page](../protocol/observability.md); the design
 decisions are in [the ADR](../design/observability.md).
 
+This is the pull endpoint, and it is not the metric set the exporter pushes: it needs no exporter,
+no collector and no configuration, and nothing leaves the machine unless something scrapes it.
+
 ## Turning it on
 
 The `prometheus` setting of any `observability` module (`otlp` or `file` — it is one of the

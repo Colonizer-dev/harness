@@ -15,8 +15,8 @@ export function UpdatePrompt() {
   if (!ready || dismissed === token) return null;
   return (
     <div role="status" className="rounded-2xl border border-border bg-panel p-4 shadow-[var(--shadow)]">
-      <p className="text-[14px] font-semibold">Colonizer updated</p>
-      <p className="mt-1.5 text-[12.5px] text-muted">A new build is ready. This one keeps working until you reload.</p>
+      <p className="text-body-lg font-semibold">Colonizer updated</p>
+      <p className="mt-1.5 text-small-lg text-muted">A new build is ready. This one keeps working until you reload.</p>
       <div className="mt-3 flex justify-end gap-2">
         <Button size="sm" onClick={() => setDismissed(token)}>
           Later

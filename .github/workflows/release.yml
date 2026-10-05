@@ -245,7 +245,7 @@ jobs:
 
       - name: Check the tag against the crate versions
         run: |
-          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml; do
+          for manifest in crates/colonizer/Cargo.toml crates/colonizer-agentd/Cargo.toml crates/colonizer-redact/Cargo.toml; do
             crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$manifest" | head -1)
             [ "$TAG" = "v$crate" ] || { echo "tag $TAG does not match $manifest version $crate" >&2; exit 1; }
           done
@@ -267,12 +267,18 @@ jobs:
           cd release
           sha256sum colonizer-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
-          # A shipped, per-release notes file (docs/release-notes/<tag>.md, if the tagged commit has
-          # one) goes at the top of the body, above the generic text every release carries below.
-          if [ -f "../docs/release-notes/$TAG.md" ]; then
-            cat "../docs/release-notes/$TAG.md"
-            echo
-          fi > notes.md
+          # Issue #1097: the critical and fixes-running notices come first, as a visible list and a
+          # block `/api/update` reads (it carries the notices of the releases just before, too), so a
+          # mothership hears why the update matters. Nothing is printed when there are none. Then a
+          # shipped, per-release notes file (docs/release-notes/<tag>.md, if the tagged commit has
+          # one), above the generic text every release carries below.
+          {
+            node ../scripts/changelog.mjs notices --release "$TAG"
+            if [ -f "../docs/release-notes/$TAG.md" ]; then
+              cat "../docs/release-notes/$TAG.md"
+              echo
+            fi
+          } > notes.md
           {
             echo "Prebuilt Colonizer for Linux x86_64 (with KVM) and Apple Silicon Macs, built from ${{ github.sha }}."
             echo
@@ -337,7 +343,7 @@ jobs:
         id: pending
         run: |
           pending=""
-          for crate in colonizer-agentd colonizer-harness; do
+          for crate in colonizer-redact colonizer-agentd colonizer-harness; do
             version=$(cargo metadata --no-deps --format-version 1 |
               jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
             status=$(curl -s -o /dev/null -w '%{http_code}' -A "Colonizer-dev/harness release (contact@colonizer.dev)" \
@@ -360,7 +366,9 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           CRATES: ${{ steps.pending.outputs.crates }}
         run: |
-          # colonizer-agentd first: nothing depends on it, but the harness README links to it.
+          # colonizer-redact first: colonizer-harness depends on it, and cargo publish waits for it to
+          # reach the index before the next one. Then colonizer-agentd: nothing depends on it, but the
+          # harness README links to it.
           for crate in $CRATES; do
             cargo publish --locked -p "$crate"
           done

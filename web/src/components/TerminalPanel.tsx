@@ -160,7 +160,7 @@ export function TerminalPanel({
         </Overlay>
       )}
       {enabled && state === "connecting" && (
-        <div className="pointer-events-none absolute right-3 top-2 flex items-center gap-1.5 text-[12px] text-[var(--term-fg)] opacity-70">
+        <div className="pointer-events-none absolute right-3 top-2 flex items-center gap-1.5 text-small text-[var(--term-fg)] opacity-70">
           <Spinner /> Connecting…
         </div>
       )}
@@ -179,7 +179,7 @@ export function TerminalPanel({
 function Overlay({ children }: { children: React.ReactNode }) {
   return (
     <div className="absolute inset-0 grid place-items-center bg-[color-mix(in_srgb,var(--term-bg)_82%,transparent)] p-4 text-center">
-      <div className="flex flex-col items-center gap-3 text-[13px] text-[var(--term-fg)]">{children}</div>
+      <div className="flex flex-col items-center gap-3 text-body-sm text-[var(--term-fg)]">{children}</div>
     </div>
   );
 }

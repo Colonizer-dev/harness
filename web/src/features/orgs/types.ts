@@ -42,6 +42,12 @@ export interface OrgSettings {
    * module settings, point by point.
    */
   jev?: boolean | null;
+  /**
+   * The org layer of the exec policy (issue #924): JSON text shaped like the install's `exec_policy`
+   * module setting and a repository's `.colonizer/exec-policy.json`. It sits between the two, and
+   * layers only narrow. Absent, null or blank adds no org layer.
+   */
+  exec_policy?: string | null;
 }
 
 export interface OrgInfo {
@@ -155,6 +161,9 @@ export type ActivityKind =
   | "remote.pair"
   | "remote.pair_reject"
   | "remote.unpair"
+  | "remote.device_approve"
+  | "remote.device_revoke"
+  | "remote.require_github"
   | "workspace.enable"
   | "workspace.disable"
   | "workspace.settings"

@@ -1,7 +1,7 @@
 //! Supersession (issue #673): when a colony's pull request merges, other open colonies of the same
 //! repository whose work it covers are marked `superseded` — kept out of the queue and the resume
-//! route until the operator keeps them — and a second live colony for one supply-chain target is
-//! refused at launch, the way a second colony on one issue is.
+//! route until the operator keeps them. Refusing a second live colony for one supply-chain target
+//! at launch is the shared duplicates service's job (duplicates.rs, issue #832).
 
 use crate::sessions::{Session, SessionStatus};
 use crate::util::exec_within;
@@ -113,9 +113,9 @@ pub fn overlap(merged: &Session, other: &Session) -> Option<OverlapReason> {
     if merged.id == other.id || merged.org != other.org || merged.repo != other.repo {
         return None;
     }
-    if let (Some(merged_target), Some(other_target)) = (&merged.supply_chain, &other.supply_chain)
-        && merged_target == other_target
-    {
+    // The supply-chain rule is the launch refusal's (duplicates.rs, issue #832): the same package and
+    // advisory, a side naming no advisory covering every advisory of its package.
+    if crate::duplicates::supply_chain_overlap(merged, other) {
         return Some(OverlapReason::SupplyChain);
     }
     if merged.issue.is_some() && merged.issue == other.issue {
@@ -192,47 +192,6 @@ pub fn blocked_message(superseded: &Supersession) -> String {
         "superseded by {}: {} — this colony's work was covered; Keep it first to start it anyway",
         superseded.pr_url, superseded.reason
     )
-}
-
-/// The 409 message for a second colony on a supply-chain target another colony holds: the holder,
-/// where its work stands, and the way out. One function, so the pre-check, the in-lock re-check and
-/// the tests refuse with the same words.
-pub fn refusal_message(holder: &Session, target: &SupplyChainTarget) -> String {
-    let where_it_is = match holder.pr_url.as_deref() {
-        Some(url) => format!("its pull request is open at {url}"),
-        None => format!("it is {}", holder.status.as_str()),
-    };
-    format!(
-        "colony {} is already on this supply-chain target ({} / {}) and {where_it_is}. Starting a \
-         second one duplicates its work: read that colony first, or pass allow_duplicate \
-         (`colonizer launch --allow-duplicate`) to start another anyway.",
-        holder.id, target.package, target.advisory
-    )
-}
-
-/// The colony effectively holding `target` in `repo`: a live or published one for the same target —
-/// the same statuses that hold an issue. Picked the way `issue_held_by` picks an issue's holder:
-/// the first holder that is not a `claim_wait` waiter, else the oldest holder, so a fresh launch is
-/// never refused in favor of a waiter that arrived later. Pure, so the launch pre-check and the
-/// authoritative in-lock re-check read the same holder.
-pub fn supply_chain_held_by<'a>(sessions: &'a [Session], repo: &str, target: &SupplyChainTarget) -> Option<&'a Session> {
-    let holding = |s: &Session| {
-        s.repo == repo && s.supply_chain.as_ref().is_some_and(|held| held == target) && crate::sessions::holds_issue(s)
-    };
-    sessions
-        .iter()
-        .find(|s| holding(s) && !s.claim_wait)
-        .or_else(|| sessions.iter().filter(|s| holding(s)).min_by_key(|s| s.created_at))
-}
-
-/// The launch gate for supply-chain targets (issue #673): `Some(message)` when a colony of `repo`
-/// still holds `target`. Unlike an issue hold, a same-target launch is refused, not queued behind
-/// the holder — a supply-chain fix is not a queue — and `allow_duplicate` overrides the refusal.
-pub fn launch_refusal(sessions: &[Session], repo: &str, target: &SupplyChainTarget, allow_duplicate: bool) -> Option<String> {
-    if allow_duplicate {
-        return None;
-    }
-    supply_chain_held_by(sessions, repo, target).map(|holder| refusal_message(holder, target))
 }
 
 /// The merged colony's title, as the supersession record keeps it.
@@ -408,6 +367,19 @@ mod tests {
         s.id = id.into();
         s.repo = repo.into();
         s
+    }
+
+    /// The launch-time answer for one target, through the shared duplicates service (issue #832).
+    fn launch_refusal(sessions: &[Session], repo: &str, target: &SupplyChainTarget, allow_duplicate: bool) -> Option<String> {
+        let work = crate::duplicates::Work {
+            repo: repo.into(),
+            supply_chain: vec![target.clone()],
+            ..Default::default()
+        };
+        match crate::duplicates::check(sessions, &[], &work, allow_duplicate, false) {
+            crate::duplicates::Verdict::Refuse(refusal) => Some(refusal.message),
+            _ => None,
+        }
     }
 
     fn with_target(s: &mut Session, package: &str, advisory: &str) {

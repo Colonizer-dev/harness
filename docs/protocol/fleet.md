@@ -85,17 +85,24 @@ the same six-digit confirmation code, a human approving what they see. The full 
 `fleet` trust scope, the mesh ACL and the security notes are in [fleet.md](../fleet.md); the state
 lives in `<config_dir>/fleet.json` (0600). The cockpit-facing routes are owner-only (a scoped token
 gets **403**); the `peer` routes are how the other machine drives its side of the pairing, and the
-first two are unauthenticated — the invite code, then the joiner's nonce, are the whole credential.
+first two and the refresh are unauthenticated — the invite code, the joiner's nonce, and the
+member's refresh credential are each the whole credential.
 The table above names each one; the shapes:
 
 - `POST /api/fleet/peer/redeem` `{code, nonce, name, url?}` answers `{pairing_id, confirm_code}` —
   or the one **404** an invalid, expired and already-redeemed code all share, indistinguishably. The
   first redeem consumes the code.
 - `POST /api/fleet/peer/pairings/{id}` `{nonce}` answers `pending` until the owner decides, then
-  `{status: "approved", token, member_id}` exactly once (a second poll reads **404**), or the
-  rejection. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
+  `{status: "approved", token, member_id, refresh}` exactly once (a second poll reads **404**), or
+  the rejection. `refresh` is the member's refresh credential (64 hex characters, stored hashed on
+  the owner): what trades a fleet token the owner stopped accepting for a fresh one. `token` is the member's `fleet`-scoped credential — the lowest scope, admitted only on
   `GET /api/hosts`, `POST /api/fleet/peer/leave` and the history push's two ingest routes (below),
   never minted by `POST /api/tokens`, and never the member's local cockpit token.
+- `POST /api/fleet/peer/refresh` `{member_id, refresh}` (issue #762) answers `{token}`: a fresh
+  `fleet` token for that member, and the token it held before is revoked, so only one is ever live.
+  **401** when the credential does not match (or the member joined before refresh existed);
+  **403** when the member was removed — its tombstone is never refreshable — or left, or was never
+  a member, or when this mothership is itself a member and owns no fleet.
 - `POST /api/fleet/peer/leave` ends the membership from the member's side (**204**): the token is
   revoked, the owner's mesh policy is updated, and the member keeps its local data. The mesh itself
   enrolls no member yet — that waits for outposts ([#298](https://github.com/Colonizer-dev/harness/issues/298)); see [fleet.md](../fleet.md).
@@ -131,9 +138,12 @@ owner.
   member splits such a batch to find the row that caused it. A refusal may name the row itself
   with a top-level `"row": id`.
 
-The member reads the other answers as states: **401** stops the drain and asks for attention,
-**403** stops syncing (removed from the fleet), and **429**/**503** wait out `Retry-After`
-(seconds or an HTTP date).
+The member reads the other answers as states. A **401** refreshes the token once per drain
+(`POST /api/fleet/peer/refresh`, above), stores the new one in the membership and retries the
+request; a second **401**, a refused refresh or no refresh credential stops the drain as
+`unauthorized` and asks for attention. **403** stops syncing (removed from the fleet) and never
+refreshes — and a refresh the owner answers 403 is read as the same removal. **429**/**503** wait
+out `Retry-After` (seconds or an HTTP date).
 
 A removed member's token keeps a tombstone on the owner (its SHA-256, kept in
 `<config_dir>/fleet.json` after the token itself is revoked), so every API request presenting it

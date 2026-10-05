@@ -47,7 +47,7 @@ crossed boundary is a stop.
 
 ## Watchdog signatures
 
-The watchdog (`decide()` in `crates/colonizer/src/watchdog.rs`) keys on two signatures:
+The watchdog (`decide()` in `crates/colonizer/src/watchdog.rs`) keys on three signatures:
 
 - **Hint-loop** — consecutive errored `tool_result` events carrying a `denial`, with no successful
   (non-errored) tool result in between, count as *not progress*: from two in a row the watchdog
@@ -57,7 +57,55 @@ The watchdog (`decide()` in `crates/colonizer/src/watchdog.rs`) keys on two sign
   still ends it. A successful result ends the loop, and so does anything that is a real break in it —
   a person's message, a question, a turn end — which count as progress as before.
 - **Genuine stall** — no events at all: the existing nudge-then-flag behaviour, unchanged.
+- **Control-defeat** ([#609](https://github.com/Colonizer-dev/harness/issues/609)) — read off
+  `boundary` events, below.
 
-**Control-defeat is not built.** Stopping a colony at once on a boundary event that shows a control
-was bypassed needs such an event to reach the mothership; none does today (an audit record, a
-publish rewrite or a sandbox event is not on the wire), so there is nothing for the watchdog to read.
+### Boundary events
+
+A `boundary` event is the typed record that a control refused something
+(`docs/agent-events.schema.json`, `#/$defs/boundary`): its `kind`, the `control` or rule that
+decided, a one-line `detail` (redacted, at most 300 characters), the `target` host or path when the
+reporter can name one, and `at`, when the control decided. It is reporting only — the control has
+already decided, and the event grants nothing. Each lands in the colony's `events.jsonl` and shows in
+the chat as a muted row after the message it followed (`web/src/components/BoundaryRow.tsx`).
+
+| Kind | Control | Emitted by |
+| :--- | :--- | :--- |
+| `exec_policy_deny` | `exec_policy:<rule>` | The runner, when a rule denies a command, or when a person (or the judge) refuses a rule's ask — the Claude Code PreToolUse hook and `askColony`, the ACP permission flow (`modules/agents/*/boundary.mjs`) |
+| `exec_policy_ask_bypass_attempt` | `exec_policy:<rule>` | The runner, when a rule whose ask was refused earlier in the run asks again, however the command was rephrased |
+| `egress_denied` | `egress` | The Claude Code runner, after a tool result the denial layer classes as `egress`; the target is the host the output or the call names |
+| `sandbox_denied` | `read_only_mount` | The Claude Code runner, after a tool result classed `read_only` (a read-only mount refused a write) |
+| `path_policy_unbound` | `path_policy:masked` / `protected` | agentd, beside its warn line when it could not bind a policy path that appeared mid-session (`crates/colonizer-agentd/src/watch.rs`) |
+| `path_policy_denied` | `path_policy:masked` / `protected` | The mothership, on the first `path_policy` report of each (access, path) (`crates/colonizer/src/path_policy.rs`, `on_attempt`) |
+| `publish_rewrite_refused` | `gitfile`, `pr_redaction` | The mothership at publish, when the worktree's `.git` is not the gitfile it recorded (a directory, a symlink, another gitdir, removed) and it rewrites it, or when `pr.md` held a credential it redacts (`crates/colonizer/src/github.rs`, `publish`) |
+
+Not reported: a seccomp denial is an `EPERM` the agent sees like any other, logged only to the guest
+kernel's audit stream, so nothing on the wire tells it from an ordinary permission error; a nested
+`.git` stripped at publish is logged but routine (tests and vendored checkouts leave them); a refusal
+by the delegation gate (`tool_disabled`) is guidance-shaped and hit in normal work; and the runners
+other than Claude Code and ACP apply no exec policy and classify no denials.
+
+### The control-defeat signature
+
+`note_boundary` and `note_reach_result` in `crates/colonizer/src/watchdog.rs` fold each boundary
+event into the colony's trail, timed on the mothership's own receive clock, and fire on:
+
+| Signature | Fires when |
+| :--- | :--- |
+| `repeated_denial` | 3 (`REPEATED_DENIALS`) events of the same kind and control within 10 minutes (`CONTROL_DEFEAT_WINDOW_MINUTES`) — a refused action retried with trivial variations matches the same rule each time. One denial, or one retry, is a wall the colony works around and fires nothing |
+| `ask_bypass` | Any `exec_policy_ask_bypass_attempt`: a rule a person refused, asking again |
+| `deny_then_reach` | A tool call whose input names a target a control refused within the last 30 minutes (`REACH_WINDOW_MINUTES`) — a host as `://host` or `@host`, a path as a whole path token — returns a successful result: the egress-denied host reached another way, the refused write target written through another tool, a path agentd could not bind read anyway. An errored result is the wall holding again |
+| `publish_rewrite` | Any `publish_rewrite_refused`: colony output that crossed the publish wall |
+
+A `path_policy_unbound` alone fires nothing — off Linux every nested checkout produces one — but its
+target joins the deny-then-reach watch. The events a signature used are spent, so the same evidence
+never flags twice. The trail is in memory, capped at 64 events, and a restart forgets it.
+
+**Response: attention and a log line, not a stop.** A signature sets the colony's attention to
+`control_defeat`, carrying `signature`, a one-sentence `detail` and the boundary events as
+`evidence`; the colony's log gets an error line naming the signature; the cockpit's attention
+banner lists the evidence; and an attention notification goes out if they are on. The watchdog does
+not nudge over the flag or replace it with a stall flag, the colony carrying on does not lift it,
+and only a person's own message (or the colony stopping) clears it. It does not stop the colony:
+"Defeated a control" above is a stop once a person has confirmed the boundary failed, and a
+signature is a pattern that says where to look, not that proof. Stopping is the person's call.

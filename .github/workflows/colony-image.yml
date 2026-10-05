@@ -14,9 +14,11 @@
 # toolbox test against every image, produces a CycloneDX SBOM and scans colony-node with Grype.
 #
 # Only a push to main or a manual dispatch publishes, as ghcr.io/colonizer-dev/colony-node:24-bookworm
-# and ghcr.io/colonizer-dev/colony-<preset>:<tag> for linux/amd64 and linux/arm64; each pushed index
-# digest is printed to the job summary for the follow-up that pins it in images.lock and switches the
-# preset. This workflow never edits the lock or the preset itself.
+# and ghcr.io/colonizer-dev/colony-<preset>:<tag> for linux/amd64 and linux/arm64, each with a signed
+# build-provenance attestation pushed beside it. Each pushed index digest is printed to the job summary
+# with whether it can be pulled anonymously (images/anonymous-pull.sh) — colonies pull that way, so a
+# private package must be made public before the follow-up pins the digest in images.lock and switches
+# the preset. This workflow never edits the lock or the preset itself.
 name: Colony image
 
 on:
@@ -25,6 +27,7 @@ on:
       - images/colony-node/**
       - images/colony-toolbox/**
       - images/toolbox-test.sh
+      - images/anonymous-pull.sh
       - .github/workflows/colony-image.yml
       # The base digest is checked against this file, so a change to it (a runtime-pin update) must
       # run the drift check on its pull request. Only the PR trigger carries it: a lock-only merge to
@@ -36,6 +39,7 @@ on:
       - images/colony-node/**
       - images/colony-toolbox/**
       - images/toolbox-test.sh
+      - images/anonymous-pull.sh
       - .github/workflows/colony-image.yml
   workflow_dispatch:
 
@@ -158,9 +162,14 @@ jobs:
     needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # packages: write pushes the image; id-token, attestations and artifact-metadata are what the
+    # build-provenance attestation needs, the same three release.yml grants its tarballs'.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -188,16 +197,41 @@ jobs:
           # follow-up pins in images.lock.
           echo "digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")" >> "$GITHUB_OUTPUT"
 
+      # Signed build provenance (SLSA, through Sigstore) for the pushed index, stored beside it in the
+      # registry, as release.yml attests the release tarballs: `gh attestation verify
+      # oci://ghcr.io/colonizer-dev/colony-node@<digest> --repo Colonizer-dev/harness` checks it.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/colonizer-dev/colony-node
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # Colonies pull their image anonymously, and a new GHCR package starts private, so a pushed
+      # digest is only safe to pin in images.lock once anyone can pull it. GITHUB_TOKEN cannot change
+      # a package's visibility (an org owner does, in the package settings), so this reports it
+      # rather than failing a publish that worked.
+      - name: Check anonymous pull
+        id: public
+        env:
+          REPO: colonizer-dev/colony-node
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: sh images/anonymous-pull.sh "$REPO" "$DIGEST" >> "$GITHUB_OUTPUT"
+
       - name: Summarise
         run: |
           {
             echo "### Published colony-node"
             echo
-            echo "Pushed \`ghcr.io/colonizer-dev/colony-node:24-bookworm\` for linux/amd64 and linux/arm64."
+            echo "Pushed \`ghcr.io/colonizer-dev/colony-node:24-bookworm\` for linux/amd64 and linux/arm64, with a build-provenance attestation."
             echo
             echo "Index digest: \`${{ steps.push.outputs.digest }}\`"
             echo
-            echo "A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the node preset to this image. This workflow does not edit the lock."
+            if [ "${{ steps.public.outputs.public }}" = true ]; then
+              echo "Anyone can pull it. A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the node preset to this image. This workflow does not edit the lock."
+            else
+              echo "**Not pullable anonymously** (the package is private), so colonies cannot boot it yet. An org owner makes \`colony-node\` public in its package settings; then a follow-up pins this digest in \`crates/colonizer/images.lock\`. This workflow does not edit the lock."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The toolbox images for the other presets (#753): one generic Dockerfile built once per preset,
@@ -246,9 +280,14 @@ jobs:
     needs: toolbox
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # packages: write pushes the image; id-token, attestations and artifact-metadata are what the
+    # build-provenance attestation needs, the same three release.yml grants its tarballs'.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     strategy:
       fail-fast: false
       matrix:
@@ -289,14 +328,32 @@ jobs:
             --push images/colony-toolbox
           echo "digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/metadata.json")" >> "$GITHUB_OUTPUT"
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/colonizer-dev/colony-${{ matrix.preset }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Check anonymous pull
+        id: public
+        env:
+          REPO: colonizer-dev/colony-${{ matrix.preset }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: sh images/anonymous-pull.sh "$REPO" "$DIGEST" >> "$GITHUB_OUTPUT"
+
       - name: Summarise
         run: |
           {
             echo "### Published colony-${{ matrix.preset }}"
             echo
-            echo "Pushed \`ghcr.io/colonizer-dev/colony-${{ matrix.preset }}:${{ steps.base.outputs.tag }}\` for linux/amd64 and linux/arm64."
+            echo "Pushed \`ghcr.io/colonizer-dev/colony-${{ matrix.preset }}:${{ steps.base.outputs.tag }}\` for linux/amd64 and linux/arm64, with a build-provenance attestation."
             echo
             echo "Index digest: \`${{ steps.push.outputs.digest }}\`"
             echo
-            echo "A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the preset to this image. This workflow does not edit the lock."
+            if [ "${{ steps.public.outputs.public }}" = true ]; then
+              echo "Anyone can pull it. A follow-up pins this digest in \`crates/colonizer/images.lock\` and switches the preset to this image. This workflow does not edit the lock."
+            else
+              echo "**Not pullable anonymously** (the package is private), so colonies cannot boot it yet. An org owner makes \`colony-${{ matrix.preset }}\` public in its package settings; then a follow-up pins this digest in \`crates/colonizer/images.lock\`. This workflow does not edit the lock."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

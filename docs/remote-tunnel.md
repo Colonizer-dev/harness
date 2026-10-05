@@ -6,17 +6,26 @@ mothership dials out to a relay on colonizer.dev over a WebSocket; the relay for
 that connection, and turning the feature off closes the link immediately. Each install gets its own
 subdomain rather than a path under one shared domain: with paths, every user's cockpit would share
 one browser origin, and cookies and storage could leak between users. The link is an address, not a
-key — the relay demands the owner's sign-in before forwarding anything, and the cockpit's own auth
-still applies behind it.
+key — the relay forwards nothing but a pairing invite or a paired device's credential, and the
+cockpit decides both (#1086); with the optional GitHub gate on, it demands the owner's GitHub
+sign-in first (#534). The cockpit's own auth applies behind it either way.
 
 **Status.** This is the pinned v1 wire contract for issue #531. It was written before the code.
 Both halves now exist on `main`: the relay (`services/relay`, #532/#534, PR #555), the mothership
 tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558), the cockpit
 switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, described in
 [Pairing and the owner](#pairing-and-the-owner)), and the security review
-([remote-access-review.md](remote-access-review.md), #536). The relay is not deployed, and the
-feature does not work end to end yet: the two halves do not follow this contract in several
-places, listed in [Where the code differs today](#where-the-code-differs-today). The client as
+([remote-access-review.md](remote-access-review.md), #536). The relay is deployed at
+my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Every finding of
+the review is fixed (R1 in #659, R2–R5 in #1030); the deployed Worker carries the relay-side
+fixes once it is redeployed. The whole link is verified end to end against the real relay code
+run locally — register, tunnel, pairing a fresh browser with the pair code alone and no GitHub
+session, a cockpit GET and websocket through the relay on its link credential, a rejected and a
+revoked credential landing on the pair page, then the GitHub gate switched on with owner pairing,
+unpair and reset (`the_whole_link_round_trips_through_the_real_relay` in
+`crates/colonizer/src/remote.rs`, over `services/relay/scripts/local-relay.mjs`). The feature is
+off by default. The two halves do not follow this contract in several places, listed in
+[Where the code differs today](#where-the-code-differs-today). The client as
 built is described in [protocol.md §6.10](protocol.md#610-remote-access-tunnel). Where this
 document pins something the issue text did not have — the `ready` frame, the `cancel` frame, the
 close codes, the header pair format, the 101 accept — it says so.
@@ -215,10 +224,22 @@ the mothership never sees relay credentials. It adds no client-identifying heade
 - Its per-request log holds: the method, a path template (query string dropped, id-like path
   segments replaced by `:id`), the status, byte counts in and out, and the duration.
 - A tunnel that is offline gets a `502` from the relay with a short "this cockpit is offline" page.
-- A visitor who has not signed in gets the relay's owner sign-in (#534) and is never forwarded to.
-  The relay serves `<install_id>.my.colonizer.dev` only after that sign-in; its session cookie is
-  `__Host-`-prefixed (the exact name is #534's choice) with `Secure; HttpOnly; SameSite=Lax;
-  Path=/`, which scopes it to that one host.
+- By default (#1086, `require_github` off) a visitor is forwarded only with one of three things,
+  none of which the relay trusts: a pairing invite (`GET /?pair=<invite>`), that invite page's
+  claim poll (`POST /api/phone/claim` with its pairing cookie), or a link (`clk_…`) or phone
+  (`cph_…`) credential as the `colonizer_token` cookie or a bearer. Each is checked by the
+  mothership, not the relay. Every other request gets the relay's own "Pair this device" page
+  (`401`) and never reaches the tunnel. The relay throttles the pass-through in D1, per install and
+  per client (an HMAC of the IP, never the IP): every invite open counts, and so does every
+  forwarded credential the mothership rejected, which it reports with the response header
+  `x-colonizer-credential: rejected` (stripped before the browser) or, for a websocket, a `4401`
+  close. A page load on a rejected credential gets the pair page at once, with the dead cookie
+  cleared. Past a limit the relay answers `429` and forwards nothing until the window ends.
+- With `require_github` on, a visitor who has not signed in gets the relay's owner sign-in (#534)
+  and is never forwarded to. The relay serves `<install_id>.my.colonizer.dev` only after that
+  sign-in; its session cookie is `__Host-`-prefixed (the exact name is #534's choice) with
+  `Secure; HttpOnly; SameSite=Lax; Path=/`, which scopes it to that one host. In either mode a
+  bound owner's GitHub session is forwarded, and never throttled: it is the recovery path.
 
 ### Mothership
 
@@ -228,10 +249,25 @@ rejects any `Host` that is not `localhost`, `127.0.0.1`, `[::1]`, the bind host 
 as `Authorization: Bearer` or the `colonizer_token` cookie (or a scoped `col_…` API token, Bearer
 only); cookie-authenticated writes and WebSocket upgrades must also carry an `Origin` that matches
 the `Host` header (#375, `server.rs`). The cookie is `HttpOnly; SameSite=Strict; Path=/` with a
-one-year `Max-Age`, host-only, and carries no `Secure` today (`auth.rs:197-199`).
+one-year `Max-Age`, host-only, and carries no `Secure` on localhost and the LAN, which are plain
+`http://`; the tunnel client adds `Secure` to every cookie it sends back through the tunnel.
 
 Tunnelled requests are dispatched in-process into the same axum router, so `host_guard` and the
-cockpit auth run unchanged; the relay does not bypass either. The tunnel client marks each request
+cockpit auth run on them; the relay does not bypass either. One thing differs (review finding R3):
+the install token is never accepted on a tunnelled request — not as a bearer, not as the
+`colonizer_token` cookie, not as the `?token=` sign-in link — so it never has to cross the relay.
+The owner's browser elsewhere signs in with a **link credential** (`clk_…`), and a link credential
+authenticates nothing that did not come through the tunnel. It carries the owner's full reach
+through the link (pairing confirms stay local-only, as below), is stored only as a hash in
+`<config_dir>/remote/links.json`, and is handed over the way a phone pairs: Settings → Remote
+access → *Sign in on another device* mints a single-use, five-minute invite
+(`POST /api/remote/devices/invites` answers `https://<host>/?pair=<invite>`), which opens only
+through the tunnel; the page there shows six digits, typed into the local cockpit
+(`POST /api/remote/devices/confirm`, local-only); the browser's poll (`POST /api/phone/claim`)
+then sets the credential as its `colonizer_token` cookie on the link's origin. `GET
+/api/remote/devices` lists them and `DELETE /api/remote/devices/{id}` signs one out; Reset link
+rotates them all. Either way their in-flight requests, streams and sockets end at once (the
+revocation phones use). Paired phones (`cph_…`) work through the link as before. The tunnel client marks each request
 with a request extension that only it can set, and the fence exemption keys off that marker, never
 off the `Host` header alone — a local process can send any `Host` header to `127.0.0.1`. With the
 marker, and only while remote access is on (checked per request, not at connect time),
@@ -240,7 +276,8 @@ marker, and only while remote access is on (checked per request, not at connect 
 
 Turning remote access off closes the tunnel and fails any in-flight tunnelled streams. The
 `colonizer_token` cookie set through the tunnel lands on the tunnel host only (a host-only cookie),
-separate from the localhost one; over the tunnel it MUST also carry `Secure`.
+separate from the localhost one; over the tunnel it also carries `Secure` (review finding R4,
+fixed: the tunnel client adds it, and the relay drops any `Domain` attribute).
 
 ## Cockpit API
 
@@ -283,8 +320,17 @@ details (`crates/colonizer/src/remote.rs:161-172`, `:1377-1382`).
 
 ## Pairing and the owner
 
-The relay forwards a browser only when its GitHub sign-in is the install's bound owner (#534). The
-first sign-in on an unowned `<install_id>.my.colonizer.dev` gets a six-digit code instead: random,
+There are two pairings, and since #1086 only the first is required. **Devices** pair with this
+machine's pair code: a single-use, five-minute invite minted in Settings → Remote access → *Sign in
+on another device* (or Add your phone), opened on the device, which shows six digits that are typed
+into the **local** cockpit; the device then holds a hashed, revocable link or phone credential
+([Mothership](#mothership) above). The **owner** binding below is the GitHub gate of #534, now the
+optional `require_github` setting: off by default for a new install, kept on for an install
+registered before it, switched by the mothership with a signed `PUT /api/installs/<id>/settings
+{"require_github": bool}` (`PUT /api/remote/require-github`, local-only).
+
+With the gate on, the relay forwards a browser only when its GitHub sign-in is the install's bound
+owner. The first sign-in on an unowned `<install_id>.my.colonizer.dev` gets a six-digit code instead: random,
 valid for 10 minutes, and single-use. The code does nothing by itself. It binds only when the
 **local** cockpit confirms it, so the machine decides who owns its link, not whoever signed in first.
 
@@ -300,6 +346,7 @@ URL path the relay receives; `body` is the exact request body, empty for none).
 | `POST /api/installs/<id>/pairing/confirm {"code"}` | `POST /api/remote/pairing/confirm {"code"}` | `200 {"owner": {"github_login"}}`. `400` not six digits, `404` unknown, expired or already used, `409` an owner is already bound. A confirm deletes every pending code of the install. |
 | `POST /api/installs/<id>/pairing/reject {"code"}` | `POST /api/remote/pairing/reject {"code"}` | `200 {"github_login"}`: that one code is gone. `400`, `404` as for confirm. Added with #599. |
 | `DELETE /api/installs/<id>/owner` | `DELETE /api/remote/owner` | `204`: the owner and every pending code are gone. The owner's relay sessions fail their next request, because each one re-checks the current owner. |
+| `PUT /api/installs/<id>/settings {"require_github"}` | `PUT /api/remote/require-github {"require_github"}` | `200 {"require_github"}`: the GitHub gate on or off for this install (#1086). `400` unless a boolean. The owner and pending codes are untouched. |
 
 The mothership routes are owner-only: a scoped `col_…` API token gets `403` on all four
 (`api_tokens::classify`). Confirm, reject and unbind are also **local-only**. A request that
@@ -310,9 +357,11 @@ code that is not six digits with `400`, and answers `409` when remote access has
 switched on (there is no install to pair). A relay answer outside the table — a `401` for a key the
 relay does not accept, a `404` for an install it does not know — becomes a `502` naming it.
 
-**Reset link** (`POST /api/remote/reset`) unbinds too: after the new key registers, the mothership
-sends the old install a signed `DELETE …/owner` with the old key, best effort, before it replaces the
-key file. The new install starts unowned.
+**Reset link** (`POST /api/remote/reset`) retires the old install: after the new key registers,
+the mothership sends a signed `DELETE /api/installs/<old id>` with the old key, before it replaces
+the key file. The relay deletes the install with its owner and pending pairings and closes its
+tunnel `4404`, so the old host, its sessions and any copy of the old key reach nothing. If the relay
+cannot be told, the reset fails `502` and keeps the old link. The new install starts unowned.
 
 Confirm, reject and unbind are recorded in the activity log as `remote.pair`, `remote.pair_reject`
 and `remote.unpair`, with the GitHub login as the target where the relay names one.
@@ -401,9 +450,11 @@ amendment to the contract; none is decided here.
   included, so subprotocols cannot be negotiated (`remote.rs:1323-1347`; review note L4).
 - Neither side closes the tunnel on an oversized chunk or text frame. The relay fails just that
   stream when a body chunk decodes to more than 49152 bytes, and closes the browser socket `1009`
-  on an oversized binary `ws_msg`; text `ws_msg` has no size check on either side, and the client
-  keeps tungstenite's default 64 MiB message limit (review finding R5). The client caps a whole
-  request body at 10 MiB (`413`) and waits at most 60 s per body frame (`408`).
+  on an oversized binary `ws_msg` from the mothership or any browser message over 128 KiB. The
+  client takes no tunnel message over 1 MiB (a bigger one ends the tunnel), refuses a body chunk
+  longer than base64 of 48 KiB with `413`, caps a whole request body at 10 MiB (`413`), waits at
+  most 60 s per body frame (`408`), and closes a tunnelled websocket `1008` when its cockpit
+  handler falls 64 frames behind (review finding R5, fixed).
 - When the tunnel closes, the relay closes browser WebSockets with `1012`, not `1001`
   (`tunnel.js:136`).
 - The relay also limits each install to a 120-request burst refilled at 20 per second, answering
@@ -412,11 +463,8 @@ amendment to the contract; none is decided here.
 
 **Headers**
 
-- The relay does not strip `Domain` from `set-cookie` (review finding R4).
 - The mothership never answers `400` for a wrong or repeated `host`: it drops whatever `host` the
   relay sent and sets its own tunnel host (`remote.rs:1082`, `:1343`).
-- The `colonizer_token` cookie set through the tunnel carries no `Secure` (`auth.rs:197-199`;
-  review finding R4).
 
 ## What is not colony work
 

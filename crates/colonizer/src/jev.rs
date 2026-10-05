@@ -74,15 +74,19 @@ fn body_bucket(chars: usize) -> &'static str {
     }
 }
 
-/// Strips tokens that look like credentials before text leaves the boot path: each whitespace-
-/// separated token over 20 characters is redacted when it starts with a known secret prefix, or when
-/// it is otherwise a long unbroken run of the characters a base64 or URL-safe token is made of.
+/// Strips tokens that look like credentials before text leaves the boot path for Jev, a third
+/// party. Two passes: a deliberately coarse one of its own — each whitespace-separated token over
+/// 20 characters is dropped when it starts with a known secret prefix, or when it is otherwise a
+/// long unbroken run of the characters a base64 or URL-safe token is made of — then the shared
+/// redactor every writer uses (#761), which knows the shapes the coarse pass cannot see: a JWT, a
+/// password inside a connection string, a `KEY=value` pair, a PEM block.
 fn redact(input: &str) -> String {
-    input
+    let coarse = input
         .split_whitespace()
         .map(|token| if looks_like_a_secret(token) { "[redacted]" } else { token })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    crate::redact::redact_text(&coarse).into_owned()
 }
 
 fn looks_like_a_secret(token: &str) -> bool {
@@ -466,6 +470,17 @@ mod tests {
         let long_token = "a".repeat(21) + "Zz09_-+/=";
         let text = format!("value {long_token} end");
         assert_eq!(redact(&text), "value [redacted] end");
+    }
+
+    /// #761: what the coarse pass cannot see, the shared redactor catches: a password inside a
+    /// connection string and a secret-named `KEY=value` with a short value.
+    #[test]
+    fn redact_also_runs_the_shared_redactor() {
+        let out = redact("db at postgres://app:hunter2pass@db.internal:5432/app and API_KEY=s3cr3t-v4lue");
+        assert!(!out.contains("hunter2pass"), "{out}");
+        assert!(!out.contains("s3cr3t-v4lue"), "{out}");
+        assert!(out.contains("db.internal"), "the host stays: {out}");
+        assert_eq!(redact("fix the flaky login test"), "fix the flaky login test");
     }
 
     #[test]

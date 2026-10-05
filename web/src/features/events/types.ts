@@ -34,6 +34,34 @@ export const ORIGINS = [
 ] as const;
 export type Origin = (typeof ORIGINS)[number];
 
+/** The closed vocabulary of `boundary.kind` (docs/agent-events.schema.json, issue #609). */
+export type BoundaryKind =
+  | "exec_policy_deny"
+  | "exec_policy_ask_bypass_attempt"
+  | "path_policy_denied"
+  | "path_policy_unbound"
+  | "egress_denied"
+  | "publish_rewrite_refused"
+  | "sandbox_denied";
+
+/**
+ * A control refused something (issue #609): the typed record the watchdog's control-defeat signature
+ * reads. Reporting only — the control decided before it was written. The runner, agentd or the
+ * mothership itself appends it; the chat shows each one as a muted row where it happened.
+ */
+export interface BoundaryRecord {
+  type: "boundary";
+  kind: BoundaryKind;
+  /** The control or rule that decided: `exec_policy:<rule>`, `egress`, `path_policy:masked`, `gitfile`, … */
+  control: string;
+  /** What was refused, one redacted line. */
+  detail: string;
+  /** The host or path refused, when the reporter could name one. */
+  target?: string;
+  /** When the control decided, on the reporter's clock. */
+  at: string;
+}
+
 interface Sequenced {
   seq?: number;
   ts?: string;
@@ -108,6 +136,8 @@ export type AgentEventBody =
    * nothing of its own.
    */
   | { type: "path_policy"; access: "read" | "write"; policy: "masked" | "protected"; path: string; tool?: string }
+  /** A control refused something (issue #609); a muted row in the chat timeline. */
+  | BoundaryRecord
   /**
    * The mothership's independent verdict on a completion claim (§6.3, Autopilot): tests re-run in a
    * fresh checkout and the git state read directly, never the agent's own account. Host-generated,

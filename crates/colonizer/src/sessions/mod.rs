@@ -13,7 +13,7 @@ use crate::{
     protocol::{Origin, QuestionRisk},
     restack, spend,
     stack::Stacked,
-    util::{append_line, read_trimmed, short_id, truncate, valid_repo},
+    util::{append_line, short_id, truncate, valid_repo},
     watchdog::Activity,
 };
 // The boot sequence itself lives in boot.rs; re-exported here because lifecycle and queue reach
@@ -71,7 +71,7 @@ pub(crate) use agentd::*;
 pub(crate) use api::routes;
 pub use api::*;
 // The shared answer path, callable in-process by the push-answer route (issue #742).
-pub(crate) use api::{AnswerCommand, AnswerError, submit_answer};
+pub(crate) use api::{AnswerCommand, AnswerError, MessageError, submit_answer, submit_message};
 pub(crate) use attention::*;
 // The colony-visibility guard, shared with `transcript.rs` (the files module's
 // own paths keep `crate::sessions::files::…`).

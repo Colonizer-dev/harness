@@ -1,16 +1,19 @@
 # Sandbox network policy
 
 This page states what a colony's network policy allows and denies. It covers microsandbox (`msb`)
-0.7.3 as the harness drives it (the pin since
+0.7.6 as the harness drives it (the pin since
+[#1096](https://github.com/Colonizer-dev/harness/issues/1096); 0.7.x since
 [#639](https://github.com/Colonizer-dev/harness/issues/639)). The source claims below were read at the
 v0.6.18 tag, commit [`fa3e439`][tag]; the behaviour they describe was re-verified against the
-pinned v0.7.3 binaries. [#303](https://github.com/Colonizer-dev/harness/issues/303) and
+v0.7.3 binaries. 0.7.4 to 0.7.6 change no flag the harness passes; their two secret-policy changes
+are under [Secret scanning since 0.7.4](#secret-scanning-since-074).
+[#303](https://github.com/Colonizer-dev/harness/issues/303) and
 [#304](https://github.com/Colonizer-dev/harness/issues/304) build on it.
 
-- **Provenance.** `vendor/vendor.lock:5-7` pins prebuilt v0.7.3 release tarballs by sha256, not
+- **Provenance.** `vendor/vendor.lock:5-7` pins prebuilt v0.7.6 release tarballs by sha256, not
   source. Nobody has verified that those binaries were built from `fa3e439`.
 - **Which `msb` runs.** `COLONIZER_MSB` wins, then the vendored binary, then a host install, then
-  `msb` on `PATH` (`crates/colonizer/src/config.rs:60-67`). This page describes the 0.7.3 pin.
+  `msb` on `PATH` (`crates/colonizer/src/config.rs:60-67`). This page describes the 0.7.6 pin.
 - **Verified or inferred.** Claims read from source are stated plainly. Claims reasoned from source
   but not tested on a running colony are marked **(inferred)**.
 
@@ -246,6 +249,24 @@ group, so in the default `open` egress mode no extra `--net-rule` is added for t
 adds an explicit `allow@<host>:tcp:443`, see [Egress policy](#egress-policy-303) below). Private, loopback and link-local destinations
 stay behind the default deny, which is why the API refuses `localhost`, IP literals and internal
 names such as `*.internal` or `*.local` rather than accepting a host the colony could never reach.
+
+### Secret scanning since 0.7.4
+
+msb blocks a request that carries a secret's placeholder where it may not go, and logs `secret
+violation` in the sandbox's `runtime.log` (`$MSB_HOME/sandboxes/<name>/logs/runtime.log`). Two
+upstream changes after 0.7.3 matter to colonies:
+
+- **Header and body are scanned apart** ([microsandbox#1666], in 0.7.4). 0.7.3 scanned a
+  Content-Length request whole, so a `%` or `\u` early in the body made it decode the
+  Authorization header's placeholder as a body match (`location=body match_form=percent_decoded`).
+  The connection closed and the colony saw `UND_ERR_SOCKET` on every turn of that conversation
+  ([#1096](https://github.com/Colonizer-dev/harness/issues/1096)).
+- **A placeholder is allowed on its own hosts** ([microsandbox#1700], in 0.7.5). On a host the
+  secret is for, after the TLS identity check, an unsubstituted placeholder (in a body, say) is
+  forwarded unchanged instead of blocked. Every other host still blocks it.
+
+A sandbox keeps the `msb` it was started with, so a running colony gets both only after a stop and
+resume.
 
 ## Egress policy (#303)
 
@@ -553,3 +574,5 @@ Still open, all **(inferred)** and untested:
 [ts-socks-auth]: https://github.com/tailscale/tailscale/blob/v1.102.4/net/socks5/socks5.go#L158-L172
 [rfc6052]: https://www.rfc-editor.org/rfc/rfc6052#section-3.1
 [rfc8215]: https://www.rfc-editor.org/rfc/rfc8215#section-5
+[microsandbox#1666]: https://github.com/superradcompany/microsandbox/pull/1666
+[microsandbox#1700]: https://github.com/superradcompany/microsandbox/pull/1700

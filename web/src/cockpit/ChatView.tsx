@@ -787,7 +787,7 @@ export function ChatView({
                   if (e.key === "Escape") setRenamingTitle(null);
                 }}
                 aria-label="conversation title"
-                className="min-w-0 max-w-[420px] flex-1 rounded-md border border-accent bg-panel px-2 py-1 text-[14px] font-medium text-text outline-none"
+                className="min-w-0 max-w-[420px] flex-1 rounded-md border border-accent bg-panel px-2 py-1 text-body-lg font-medium text-text outline-none"
               />
             ) : (
               <button
@@ -795,7 +795,7 @@ export function ChatView({
                 disabled={!current}
                 onClick={() => current && setRenamingTitle(current.title)}
                 title={current ? "Rename" : undefined}
-                className="min-w-0 cursor-pointer truncate rounded-md border-0 bg-transparent px-1 py-0.5 text-left text-[14px] font-medium text-text hover:bg-panel-2 disabled:cursor-default disabled:hover:bg-transparent"
+                className="min-w-0 cursor-pointer truncate rounded-md border-0 bg-transparent px-1 py-0.5 text-left text-body-lg font-medium text-text hover:bg-panel-2 disabled:cursor-default disabled:hover:bg-transparent"
               >
                 {current?.title || FALLBACK_TITLE}
               </button>
@@ -805,7 +805,7 @@ export function ChatView({
                 type="button"
                 onClick={() => void open(current.forked_from!.chat)}
                 title="Open the conversation this branched from"
-                className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-[11px] text-faint hover:text-text"
+                className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded-full border border-border bg-transparent px-2 py-0.5 text-meta text-faint hover:text-text"
               >
                 <IconBranch size={11} /> branch
               </button>
@@ -847,7 +847,7 @@ export function ChatView({
               >
                 <IconDownload size={15} />
               </a>
-              <span className="hidden pl-1 text-[11.5px] tabular-nums text-faint md:inline" title="This conversation's tokens and cost so far">
+              <span className="hidden pl-1 text-meta-lg tabular-nums text-faint md:inline" title="This conversation's tokens and cost so far">
                 {formatTokens(tokens)} tok{cost > 0 ? ` · ${formatCost(cost)}` : ""}
               </span>
             </>
@@ -888,9 +888,9 @@ export function ChatView({
               }}
               placeholder="Search this conversation"
               aria-label="search in conversation"
-              className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-text outline-none placeholder:text-faint"
+              className="min-w-0 flex-1 border-0 bg-transparent text-body-sm text-text outline-none placeholder:text-faint"
             />
-            <span className="text-[11.5px] tabular-nums text-faint">{search.query ? (hits.length ? `${hitIndex + 1} of ${hits.length}` : "no matches") : ""}</span>
+            <span className="text-meta-lg tabular-nums text-faint">{search.query ? (hits.length ? `${hitIndex + 1} of ${hits.length}` : "no matches") : ""}</span>
             <Button size="sm" variant="ghost" disabled={hits.length < 2} onClick={() => setSearch((s) => s && { ...s, index: s.index - 1 })} aria-label="previous match">
               ↑
             </Button>
@@ -907,8 +907,8 @@ export function ChatView({
           <div className="scroll-thin flex min-h-0 flex-1 flex-col overflow-y-auto px-4">
             <div className="m-auto flex w-full max-w-[760px] flex-col items-center py-10">
               <LogoMark size={44} />
-              <h2 className="m-0 mt-5 text-center text-[28px] font-semibold tracking-[-0.03em] text-text">What do you want to know?</h2>
-              <p className="m-0 mt-2 max-w-[520px] text-center text-[13.5px] text-muted">
+              <h2 className="m-0 mt-5 text-center text-display-lg font-semibold tracking-[-0.03em] text-text">What do you want to know?</h2>
+              <p className="m-0 mt-2 max-w-[520px] text-center text-body text-muted">
                 Ask about your code, colonies and plans. Conversations stay on this mothership; only the model you pick sees them.
               </p>
               <div className="mt-7 w-full">{composer}</div>
@@ -925,8 +925,8 @@ export function ChatView({
                     }}
                     className="flex cursor-pointer flex-col gap-0.5 rounded-xl border border-border bg-panel/60 px-3.5 py-3 text-left transition-colors hover:border-border-strong hover:bg-panel"
                   >
-                    <span className="text-[13px] font-medium leading-snug text-text">{s.title}</span>
-                    <span className="truncate text-[11.5px] text-faint">{s.detail}</span>
+                    <span className="text-body-sm font-medium leading-snug text-text">{s.title}</span>
+                    <span className="truncate text-meta-lg text-faint">{s.detail}</span>
                   </button>
                 ))}
               </div>
@@ -1062,9 +1062,9 @@ function Advanced({
     <div className="flex flex-col gap-3 p-4">
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2">
-          <span className="flex-1 text-[12.5px] font-medium text-muted">System prompt</span>
+          <span className="flex-1 text-small-lg font-medium text-muted">System prompt</span>
           {persona && persona.id !== "plain" && text !== persona.system && (
-            <button type="button" onClick={() => onSavePreset(persona, text)} className="cursor-pointer border-0 bg-transparent p-0 text-[11.5px] text-accent hover:underline">
+            <button type="button" onClick={() => onSavePreset(persona, text)} className="cursor-pointer border-0 bg-transparent p-0 text-meta-lg text-accent hover:underline">
               Save to “{persona.name}”
             </button>
           )}
@@ -1077,13 +1077,13 @@ function Advanced({
           rows={7}
           placeholder="How the model should behave in this conversation…"
           aria-label="system prompt"
-          className="scroll-thin resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-[13px] text-text outline-none placeholder:text-faint focus:border-accent"
+          className="scroll-thin resize-y rounded-lg border border-border bg-transparent px-2.5 py-1.5 text-body-sm text-text outline-none placeholder:text-faint focus:border-accent"
         />
       </div>
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-center gap-2 text-[12.5px] text-muted">
+        <div className="flex items-center gap-2 text-small-lg text-muted">
           <span className="flex-1 font-medium">Temperature</span>
-          <label className="flex items-center gap-1.5 text-[12px]">
+          <label className="flex items-center gap-1.5 text-small">
             <input
               type="checkbox"
               checked={temp === null}
@@ -1111,7 +1111,7 @@ function Advanced({
           className="accent-[var(--color-accent)] disabled:opacity-40"
         />
       </div>
-      <label className="flex items-center gap-2 text-[12.5px] text-muted">
+      <label className="flex items-center gap-2 text-small-lg text-muted">
         <span className="flex-1 font-medium">Max tokens per reply</span>
         <input
           type="number"
@@ -1126,7 +1126,7 @@ function Advanced({
             else setMax(String(maxTokens));
           }}
           aria-label="max tokens"
-          className="w-24 rounded-lg border border-border bg-transparent px-2 py-1 text-right text-[13px] tabular-nums text-text outline-none focus:border-accent"
+          className="w-24 rounded-lg border border-border bg-transparent px-2 py-1 text-right text-body-sm tabular-nums text-text outline-none focus:border-accent"
         />
       </label>
     </div>

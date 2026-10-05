@@ -11,8 +11,8 @@ import { QrCode, RemoteAccessPane, connectionText, expiryText, formatPairingCode
 
 const wrap = (node: React.ReactNode) => renderToStaticMarkup(<ApiContext.Provider value={{} as Api}>{node}</ApiContext.Provider>);
 
-const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false };
-const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00", replaced: false };
+const off: RemoteStatus = { enabled: false, host: null, connected: false, since: null, replaced: false, require_github: false };
+const onConnected: RemoteStatus = { enabled: true, host: "h4xk2q7mzt5pw3nd6vrc.my.colonizer.dev", connected: true, since: "2026-09-25T00:16:11+00:00", replaced: false, require_github: false };
 const onOffline: RemoteStatus = { ...onConnected, connected: false, since: null };
 const onReplaced: RemoteStatus = { ...onConnected, connected: false, since: null, replaced: true };
 const pendingPairing: RemotePairing = {
@@ -30,7 +30,7 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain("Allow remote access"); // the switch row, distinct from the pane title
     expect(html).toContain("dials out an encrypted tunnel");
     expect(html).toContain("nothing else on this machine");
-    expect(html).toContain("access token"); // the cockpit's own sign-in still applies behind the link
+    expect(html).toContain("access token is never accepted through the link"); // R3: link sign-in, not the install token
     expect(html).toContain("public key"); // what the relay does store
     expect(html).toContain('aria-checked="false"');
     expect(html).not.toContain("https://");
@@ -53,6 +53,17 @@ describe("RemoteAccessPane", () => {
     expect(html).toContain(">Reject</button>");
     expect(html).toContain("same code");
     expect(html).not.toContain(">Unbind</button>"); // no owner yet
+  });
+
+  it("offers the GitHub gate as an optional switch, off for a new link, and says what each way means (#1086)", () => {
+    const html = pane(off);
+    expect(html).toContain("Ask for GitHub sign-in first");
+    expect(html).toContain("pair code alone is enough");
+    expect(html).toContain("gets a page telling it how to pair");
+    expect(html).not.toContain("also asks for a GitHub sign-in");
+    const gated = pane({ ...onConnected, require_github: true });
+    expect(gated).toContain("also asks for a GitHub sign-in");
+    expect(gated).toMatch(/id="remote-github"[^>]*aria-checked="true"|aria-checked="true"[^>]*id="remote-github"/);
   });
 
   it("says the tunnel is offline — reconnecting while enabled but not connected", () => {
@@ -115,5 +126,21 @@ describe("remote helpers", () => {
     expect(expiryText(Math.floor(now / 1000) + 7 * 60, now)).toBe("expires in 7 min");
     expect(expiryText(Math.floor(now / 1000) + 90 * 60, now)).toMatch(/^expires at /);
     expect(expiryText(Math.floor(now / 1000) - 60, now)).toBe("expires now");
+  });
+
+  it("offers to sign in another device while on, and lists the browsers signed in to the link", () => {
+    const html = wrap(
+      <RemoteAccessPane
+        remote={onConnected}
+        onChanged={() => {}}
+        initialPairing={pendingPairing}
+        initialDevices={{ devices: [{ id: "lnk_1", label: "Browser", paired_at: "2026-10-05T10:00:00Z" }], pending: [] }}
+      />,
+    );
+    expect(html).toContain(">Sign in on another device</button>");
+    expect(html).toContain("Browser");
+    expect(html).toContain(">Sign out</button>");
+    expect(html).toContain("Reset link signs every");
+    expect(pane(off)).not.toContain("Sign in on another device</button>");
   });
 });

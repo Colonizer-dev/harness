@@ -23,6 +23,7 @@ import type { CommitLink, FindingRecord, HarnessStatus, Question, Session, Sessi
 import { bootMedians, bootView } from "./bootTiming";
 import { CommitLinks } from "./CommitLinks";
 import { chains, type FindingChain } from "./findings";
+import { autoRetrying, expectsAnswer, gatewayHeld, needsYouLine, retryLine } from "./questions";
 
 const TONE_VAR: Record<Tone, string> = {
   neutral: "var(--faint)",
@@ -66,8 +67,8 @@ type AskUserCardProps = Parameters<typeof AskUserCard>[0];
 function Fact({ label, value, className, title }: { label: string; value: string; className?: string; title?: string }): ReactElement {
   return (
     <div className={cx("bg-bg px-3 py-2.5", className)} title={title}>
-      <div className="text-[12px] text-muted lowercase first-letter:uppercase">{label}</div>
-      <div className="mt-0.5 truncate text-[15px] font-semibold tracking-[-0.01em] text-text tabular-nums">{value}</div>
+      <div className="text-small text-muted lowercase first-letter:uppercase">{label}</div>
+      <div className="mt-0.5 truncate text-lead font-semibold tracking-[-0.01em] text-text tabular-nums">{value}</div>
     </div>
   );
 }
@@ -75,7 +76,7 @@ function Fact({ label, value, className, title }: { label: string; value: string
 function Section({ title, children }: { title: string; children: ReactElement | ReactElement[] }): ReactElement {
   return (
     <div>
-      <div className="mb-2 text-[13px] font-medium text-text lowercase first-letter:uppercase">{title}</div>
+      <div className="mb-2 text-body-sm font-medium text-text lowercase first-letter:uppercase">{title}</div>
       {children}
     </div>
   );
@@ -105,7 +106,7 @@ function PrFiles({ files }: { files: SessionDiffFile[] }): ReactElement {
     <div className="flex flex-col gap-1">
       <div id={listId} className="flex flex-col gap-1">
         {shown.map((file) => (
-          <div key={file.path} className="flex items-baseline gap-2 font-mono text-[11px]">
+          <div key={file.path} className="flex items-baseline gap-2 font-mono text-meta">
             <span className="min-w-0 flex-1 truncate text-muted" title={file.path}>
               {file.path}
             </span>
@@ -120,7 +121,7 @@ function PrFiles({ files }: { files: SessionDiffFile[] }): ReactElement {
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
           aria-controls={listId}
-          className="cursor-pointer self-start text-[11.5px] font-semibold text-accent hover:underline"
+          className="cursor-pointer self-start text-meta-lg font-semibold text-accent hover:underline"
         >
           {expanded ? "show fewer" : `+${hidden} more`}
         </button>
@@ -209,19 +210,19 @@ function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
   ];
   return (
     <div className="rounded-md bg-panel-2 px-3 py-2">
-      <div className="text-[12.5px] font-semibold leading-snug" title={chain.title}>
+      <div className="text-small-lg font-semibold leading-snug" title={chain.title}>
         {chain.title}
       </div>
       <div className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
         {stages.map((stage, i) => (
           <span key={`${i}-${stage.label}`} className="flex items-center gap-1.5">
             {i > 0 && (
-              <span aria-hidden="true" className="font-mono text-[10px] text-faint">
+              <span aria-hidden="true" className="font-mono text-micro-lg text-faint">
                 →
               </span>
             )}
             <span
-              className="rounded-[5px] border border-border px-1.5 py-px font-mono text-[10px] tracking-wide"
+              className="rounded-[5px] border border-border px-1.5 py-px font-mono text-micro-lg tracking-wide"
               style={{ color: TONE_VAR[stage.tone] }}
             >
               {stage.label}
@@ -230,7 +231,7 @@ function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
         ))}
       </div>
       {note && (
-        <div className={`mt-1.5 text-[11px] leading-snug ${note.tone === "err" ? "text-err" : "text-warn"}`}>
+        <div className={`mt-1.5 text-meta leading-snug ${note.tone === "err" ? "text-err" : "text-warn"}`}>
           {note.href ? (
             <a href={note.href} target="_blank" rel="noreferrer" className="no-underline hover:underline">
               duplicate of {note.href}
@@ -248,7 +249,7 @@ function FindingRow({ chain }: { chain: FindingChain }): ReactElement {
               href={link.href}
               target="_blank"
               rel="noreferrer"
-              className="text-[11.5px] font-semibold text-accent no-underline hover:underline"
+              className="text-meta-lg font-semibold text-accent no-underline hover:underline"
             >
               {link.label} ↗
             </a>
@@ -277,6 +278,7 @@ export function Inspector({
   onOpenColony,
   onStop,
   onResume,
+  onRetry,
   onLaunch,
   onOpenSettings,
 }: {
@@ -304,6 +306,12 @@ export function Inspector({
   onOpenColony: (id: string) => void;
   onStop: (id: string) => void;
   onResume: (id: string) => void;
+  /**
+   * Retry a colony stopped on a model gateway error (issue #1093): resume it now when an automatic
+   * retry is backing off, or send it on again once the retries are spent. Without it the pane falls
+   * back to `onResume`, which covers the backing-off case.
+   */
+  onRetry?: (id: string) => void;
   onLaunch: () => void;
   onOpenSettings: (section: SectionId) => void;
 }): ReactElement {
@@ -316,8 +324,8 @@ export function Inspector({
       >
         <div className="flex items-center gap-3 border-b border-border px-4 pb-3 pt-4">
           <div className="min-w-0 flex-1">
-            <div className="font-mono text-[11.5px] text-muted">inspector</div>
-            <div className="mt-0.5 text-[15px] font-semibold tracking-[-0.01em] leading-tight">nothing selected</div>
+            <div className="font-mono text-meta-lg text-muted">inspector</div>
+            <div className="mt-0.5 text-lead font-semibold tracking-[-0.01em] leading-tight">nothing selected</div>
           </div>
           <button
             type="button"
@@ -330,7 +338,7 @@ export function Inspector({
             </svg>
           </button>
         </div>
-        <div className="grid flex-1 place-items-center px-8 text-center text-[12.5px] leading-relaxed text-muted">
+        <div className="grid flex-1 place-items-center px-8 text-center text-small-lg leading-relaxed text-muted">
           pick a chamber in the nest and its question, status and cost land here.
         </div>
       </aside>
@@ -453,10 +461,10 @@ export function Inspector({
           session && <Avatar name={session.repo.split("/")[0]} src={avatarUrl} size={34} rounded="lg" />
         )}
         <div className="min-w-0 flex-1">
-          <div className="truncate font-mono text-[11.5px] text-muted">
+          <div className="truncate font-mono text-meta-lg text-muted">
             {mothership ? "mothership" : `${session?.repo}${session?.issue != null ? `#${session.issue}` : ""}`}
           </div>
-          <div className="mt-0.5 text-[15px] font-semibold tracking-[-0.01em] leading-tight text-pretty">
+          <div className="mt-0.5 text-lead font-semibold tracking-[-0.01em] leading-tight text-pretty">
             {mothership ? "the colonizer app on this machine" : session?.issue_title || "no title yet"}
           </div>
         </div>
@@ -490,7 +498,7 @@ export function Inspector({
                       key={row.label}
                       type="button"
                       onClick={() => onOpenSettings(row.section)}
-                      className="flex cursor-pointer items-center gap-2.5 rounded-md bg-panel-2 px-2.5 py-2 text-left font-mono text-[12px] text-muted hover:text-text"
+                      className="flex cursor-pointer items-center gap-2.5 rounded-md bg-panel-2 px-2.5 py-2 text-left font-mono text-small text-muted hover:text-text"
                     >
                       <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full" style={{ background: row.dot }} />
                       <span className="flex-1 truncate">{row.label}</span>
@@ -511,14 +519,14 @@ export function Inspector({
                   {medianBoot.rows.map((row) => (
                     <div
                       key={row.name}
-                      className={cx("flex gap-2.5 text-[12px]", row.slowest ? "font-semibold text-text" : "text-muted")}
+                      className={cx("flex gap-2.5 text-small", row.slowest ? "font-semibold text-text" : "text-muted")}
                     >
-                      <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{row.name}</span>
-                      {row.slowest && <span className="font-mono text-[10px] tracking-[0.1em] text-warn">SLOWEST</span>}
-                      <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
+                      <span className="min-w-0 flex-1 truncate font-mono text-meta">{row.name}</span>
+                      {row.slowest && <span className="font-mono text-micro-lg tracking-[0.1em] text-warn">SLOWEST</span>}
+                      <span className="shrink-0 font-mono text-meta tabular-nums">{row.duration}</span>
                     </div>
                   ))}
-                  <div className="text-[12px] text-faint">{medianBoot.summary}</div>
+                  <div className="text-small text-faint">{medianBoot.summary}</div>
                 </div>
               </Section>
             )}
@@ -532,29 +540,59 @@ export function Inspector({
                 }`}
               >
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[13px] font-semibold">colonizer {update.installed.version}</span>
-                  <span className="block truncate text-[12px] text-muted">
+                  <span className="block text-body-sm font-semibold">colonizer {update.installed.version}</span>
+                  <span className="block truncate text-small text-muted">
                     {update.available && update.latest ? `${update.latest.version} is out` : "up to date"}
                   </span>
                 </span>
-                <span className="text-[12.5px] font-semibold text-accent">{update.available ? "update" : "about"}</span>
+                <span className="text-small-lg font-semibold text-accent">{update.available ? "update" : "about"}</span>
               </button>
             )}
           </>
         ) : (
           session ? (
             <>
-              <div className="flex items-center gap-2 font-mono text-[11px] tracking-[0.1em]" style={{ color: edge }}>
+              <div className="flex items-center gap-2 font-mono text-meta tracking-[0.1em]" style={{ color: edge }}>
                 <span aria-hidden="true" className="h-[7px] w-[7px] rounded-full" style={{ background: edge }} />
                 {statusText}
                 <span className="tracking-normal text-faint">· {timeAgo(session.created_at)}</span>
               </div>
 
+              {autoRetrying(session) && session.attention && (
+                // An automatic retry is still pending (issue #1093): nothing waits on you, so this is
+                // no "Waiting on you" card — it names the error and offers to go now instead.
+                <div className="border-y border-border border-l-2 border-l-accent bg-panel-2 px-3.5 py-3">
+                  <div className="text-small-lg font-medium text-muted">Retrying automatically</div>
+                  <div className="mt-1.5 text-body font-semibold [overflow-wrap:anywhere]">{retryLine(session.attention)}</div>
+                  {session.attention.attempt != null && session.attention.max_attempts != null && (
+                    <div className="mt-1 text-small text-muted">
+                      attempt {session.attention.attempt} of {session.attention.max_attempts}
+                    </div>
+                  )}
+                  <div className="mt-2.5 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => (onRetry ?? onResume)(session.id)}
+                      className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
+                    >
+                      Retry now
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(session.id)}
+                      className="flex-1 cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm font-medium hover:bg-bg"
+                    >
+                      Open colony
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {needsYou(session) && (
                 <div className="border-y border-border border-l-2 border-l-warn bg-panel-2 px-3.5 py-3">
-                  <div className="text-[12.5px] font-medium text-warn">Waiting on you</div>
-                  <div className="mt-1.5 text-[13.5px] font-semibold">
-                    {session.attention ? "the watchdog flagged this colony" : "the colony is waiting on your answer"}
+                  <div className="text-small-lg font-medium text-warn">Waiting on you</div>
+                  <div className="mt-1.5 text-body font-semibold [overflow-wrap:anywhere]">
+                    {needsYouLine(session, "the colony is waiting on your answer")}
                   </div>
 
                   {/* The question itself, answered from the pane. The frame's `ts` is when it was asked;
@@ -566,7 +604,7 @@ export function Inspector({
                           q.asked_at ?? (session.attention?.reason === "waiting_for_answer" ? session.attention.since : null);
                         return (
                           <div key={q.id} className="flex flex-col gap-1.5">
-                            <div className="text-[11.5px] text-muted">
+                            <div className="text-meta-lg text-muted">
                               {askedAt ? `asked ${timeAgo(askedAt)}` : "waiting for your answer"}
                             </div>
                             <QuestionActionsContext.Provider value={questionActions}>
@@ -582,20 +620,41 @@ export function Inspector({
 
                   {/* The list says this colony needs you but the stream has not shown the question yet (or
                       anymore): name what is happening instead of leaving the box blank. */}
-                  {pendingQuestions.length === 0 && (
-                    <div className="mt-3 rounded-md border border-border bg-bg px-3 py-2.5 text-[12.5px] text-muted">
+                  {/* Only where a question is expected: a colony held on an error has none, and saying
+                      so beside "answer" contradicts itself (issue #1093). */}
+                  {pendingQuestions.length === 0 && expectsAnswer(session) && (
+                    <div className="mt-3 rounded-md border border-border bg-bg px-3 py-2.5 text-small-lg text-muted">
                       {questionActions.blockedBy === "disconnected" ? "loading the question…" : "this colony has no pending question"}
                     </div>
                   )}
 
-                  {/* The full chat is still the deeper answer: the card is the quick one. */}
-                  <button
-                    type="button"
-                    onClick={() => onOpenColony(session.id)}
-                    className="mt-2.5 w-full cursor-pointer rounded-md bg-text px-3 py-2 text-left text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
-                  >
-                    open the colony and answer →
-                  </button>
+                  {gatewayHeld(session) ? (
+                    <div className="mt-2.5 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => (onRetry ?? onResume)(session.id)}
+                        className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
+                      >
+                        Retry
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onOpenColony(session.id)}
+                        className="flex-1 cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm font-medium hover:bg-bg"
+                      >
+                        Open colony
+                      </button>
+                    </div>
+                  ) : (
+                    // The full chat is still the deeper answer: the card is the quick one.
+                    <button
+                      type="button"
+                      onClick={() => onOpenColony(session.id)}
+                      className="mt-2.5 w-full cursor-pointer rounded-md bg-text px-3 py-2 text-left text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
+                    >
+                      {pendingQuestions.length > 0 || expectsAnswer(session) ? "open the colony and answer →" : "open the colony →"}
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -604,7 +663,7 @@ export function Inspector({
                 <Section title="STATUS">
                   <div
                     role="status"
-                    className="rounded-md bg-panel-2 px-3 py-2 text-[12.5px] leading-snug [overflow-wrap:anywhere]"
+                    className="rounded-md bg-panel-2 px-3 py-2 text-small-lg leading-snug [overflow-wrap:anywhere]"
                   >
                     {diagnosis.text}
                   </div>
@@ -614,13 +673,13 @@ export function Inspector({
               {recentEvents.length > 0 && (
                 <Section title="RECENT EVENTS">
                   <details className="rounded-md bg-panel-2 px-3 py-2">
-                    <summary className="cursor-pointer text-[12px] font-semibold text-muted">
+                    <summary className="cursor-pointer text-small font-semibold text-muted">
                       {recentEvents.length} recent event{recentEvents.length === 1 ? "" : "s"}
                     </summary>
                     <ol className="mt-1.5 flex flex-col gap-1">
                       {recentEvents.map((event) => (
-                        <li key={event.seq} className="text-[12px] leading-snug [overflow-wrap:anywhere]">
-                          <span className="font-mono text-[11px] text-faint">{event.type}</span>{" "}
+                        <li key={event.seq} className="text-small leading-snug [overflow-wrap:anywhere]">
+                          <span className="font-mono text-meta text-faint">{event.type}</span>{" "}
                           <span className="text-muted">{event.summary}</span>
                         </li>
                       ))}
@@ -665,16 +724,16 @@ export function Inspector({
                 // once fetched; the branch and link render regardless.
                 <div className="flex flex-col gap-1.5 border-y border-border px-0 py-3">
                   <div className="flex items-center justify-between gap-2.5">
-                    <span className="text-[12.5px] font-medium text-ok">Pull request</span>
-                    <span className="font-mono text-[11px] text-faint">
+                    <span className="text-small-lg font-medium text-ok">Pull request</span>
+                    <span className="font-mono text-meta text-faint">
                       {[prNumber(session.pr_url), session.publish_stage ? STAGE[session.publish_stage] : null]
                         .filter(Boolean)
                         .join(" · ")}
                     </span>
                   </div>
-                  <div className="text-[13.5px] font-semibold leading-snug">{session.issue_title || "no title yet"}</div>
-                  {session.summary && session.summary !== session.issue_title && <div className="mt-0.5 text-[12.5px] leading-snug text-muted">{session.summary}</div>}
-                  <div className="truncate font-mono text-[11.5px] text-muted">
+                  <div className="text-body font-semibold leading-snug">{session.issue_title || "no title yet"}</div>
+                  {session.summary && session.summary !== session.issue_title && <div className="mt-0.5 text-small-lg leading-snug text-muted">{session.summary}</div>}
+                  <div className="truncate font-mono text-meta-lg text-muted">
                     {session.branch}
                     {session.base ? ` → ${session.base}` : ""}
                     {session.base && typeof behind === "number" && behind > 0 ? ` · behind by ${behind}` : ""}
@@ -685,7 +744,7 @@ export function Inspector({
                     href={session.pr_url}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-[12.5px] font-semibold text-accent no-underline hover:underline"
+                    className="text-small-lg font-semibold text-accent no-underline hover:underline"
                   >
                     open on github ↗
                   </a>
@@ -707,12 +766,12 @@ export function Inspector({
                           <AntAvatar state={settler.state} role={settler.role} size={32} phase={i} ground={false} framed={false} />
                         </span>
                         <span className="min-w-0">
-                          <span className="block text-[12.5px] font-semibold text-accent">{settler.name}</span>
-                          <span className="block truncate font-mono text-[11px] text-muted">
+                          <span className="block text-small-lg font-semibold text-accent">{settler.name}</span>
+                          <span className="block truncate font-mono text-meta text-muted">
                             {settler.current?.name ?? settler.last?.name ?? "—"}
                           </span>
                         </span>
-                        <span className="whitespace-nowrap font-mono text-[10px] text-faint tabular-nums">
+                        <span className="whitespace-nowrap font-mono text-micro-lg text-faint tabular-nums">
                           {settler.steps} steps
                         </span>
                       </div>
@@ -723,17 +782,17 @@ export function Inspector({
 
               <Section title="TIMELINE">
                 <div className="flex flex-col gap-1.5">
-                  <div className="flex gap-2.5 text-[12px] text-muted">
-                    <span className="w-14 shrink-0 font-mono text-[11px] text-faint">started</span>
+                  <div className="flex gap-2.5 text-small text-muted">
+                    <span className="w-14 shrink-0 font-mono text-meta text-faint">started</span>
                     <span className="min-w-0">{timeAgo(session.created_at)}</span>
                   </div>
-                  <div className="flex gap-2.5 text-[12px] text-muted">
-                    <span className="w-14 shrink-0 font-mono text-[11px] text-faint">last move</span>
+                  <div className="flex gap-2.5 text-small text-muted">
+                    <span className="w-14 shrink-0 font-mono text-meta text-faint">last move</span>
                     <span className="min-w-0">{timeAgo(session.last_activity_at ?? session.updated_at)}</span>
                   </div>
                   {session.error && (
-                    <div className="flex gap-2.5 text-[12px] text-err">
-                      <span className="w-14 shrink-0 font-mono text-[11px]">error</span>
+                    <div className="flex gap-2.5 text-small text-err">
+                      <span className="w-14 shrink-0 font-mono text-meta">error</span>
                       <span className="min-w-0 [overflow-wrap:anywhere]">{session.error}</span>
                     </div>
                   )}
@@ -748,14 +807,14 @@ export function Inspector({
                     {boot.rows.map((row, i) => (
                       <div
                         key={`${i}:${row.name}`}
-                        className={cx("flex gap-2.5 text-[12px]", row.slowest ? "font-semibold text-text" : "text-muted")}
+                        className={cx("flex gap-2.5 text-small", row.slowest ? "font-semibold text-text" : "text-muted")}
                       >
-                        <span className="min-w-0 flex-1 truncate font-mono text-[11px]">{row.name}</span>
-                        {row.slowest && <span className="font-mono text-[10px] tracking-[0.1em] text-warn">SLOWEST</span>}
-                        <span className="shrink-0 font-mono text-[11px] tabular-nums">{row.duration}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-meta">{row.name}</span>
+                        {row.slowest && <span className="font-mono text-micro-lg tracking-[0.1em] text-warn">SLOWEST</span>}
+                        <span className="shrink-0 font-mono text-meta tabular-nums">{row.duration}</span>
                       </div>
                     ))}
-                    <div className={cx("text-[12px] text-faint", boot.rows.length === 0 && "rounded-md bg-panel-2 px-3 py-2")}>
+                    <div className={cx("text-small text-faint", boot.rows.length === 0 && "rounded-md bg-panel-2 px-3 py-2")}>
                       {boot.summary}
                     </div>
                   </div>
@@ -769,7 +828,7 @@ export function Inspector({
               <Section title="FINDINGS">
                 <div className="flex flex-col gap-2">
                   {findings.length === 0 ? (
-                    <div className="rounded-md bg-panel-2 px-3 py-2 text-[12px] text-faint">
+                    <div className="rounded-md bg-panel-2 px-3 py-2 text-small text-faint">
                       nothing validated into findings yet
                     </div>
                   ) : (
@@ -779,7 +838,7 @@ export function Inspector({
               </Section>
             </>
           ) : (
-            <div className="grid flex-1 place-items-center px-8 text-center text-[12.5px] leading-relaxed text-muted">
+            <div className="grid flex-1 place-items-center px-8 text-center text-small-lg leading-relaxed text-muted">
               a target the cockpit doesn't know — nothing to show here yet.
             </div>
           )
@@ -792,14 +851,14 @@ export function Inspector({
             <button
               type="button"
               onClick={onLaunch}
-              className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+              className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
             >
               launch a colony
             </button>
             <button
               type="button"
               onClick={() => onOpenSettings("setup")}
-              className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong"
+              className="cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm transition-colors hover:border-border-strong"
             >
               settings
             </button>
@@ -810,7 +869,7 @@ export function Inspector({
               <button
                 type="button"
                 onClick={() => onOpenColony(session.id)}
-                className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-[13px] font-medium text-bg transition-opacity hover:opacity-85"
+                className="flex-1 cursor-pointer rounded-md bg-text px-3 py-2 text-body-sm font-medium text-bg transition-opacity hover:opacity-85"
               >
                 open colony
               </button>
@@ -819,7 +878,7 @@ export function Inspector({
                   type="button"
                   onClick={() => onStop(session.id)}
                   title="stop the microvm; the worktree is kept"
-                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors text-muted hover:border-border-strong hover:text-text"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm transition-colors text-muted hover:border-border-strong hover:text-text"
                 >
                   stop
                 </button>
@@ -830,7 +889,7 @@ export function Inspector({
                 <button
                   type="button"
                   onClick={() => onResume(session.id)}
-                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm transition-colors hover:border-border-strong"
                 >
                   resume
                 </button>
@@ -840,7 +899,7 @@ export function Inspector({
                   href={session.pr_url}
                   target="_blank"
                   rel="noreferrer"
-                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-[13px] transition-colors hover:border-border-strong font-medium no-underline"
+                  className="cursor-pointer rounded-md border border-border px-3 py-2 text-body-sm transition-colors hover:border-border-strong font-medium no-underline"
                 >
                   pr ↗
                 </a>

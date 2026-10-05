@@ -25,7 +25,7 @@ use chrono::{DateTime, Utc};
 use ring::hmac;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, collections::BTreeSet, collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 /// The most characters one notification carries: repository, issue number and a few words. A desktop
 /// popup has no use for more, and neither does a webhook note.
@@ -42,6 +42,13 @@ pub struct NotifySettings {
     /// Whether a model provider crossing its failure threshold announces. Providers are not
     /// org-scoped, so no org overrides this.
     pub on_provider: bool,
+    /// Whether a provider running out of quota with colonies blocked on it announces (issue #767):
+    /// one line per provider, never one per colony. A card spans orgs, so no org overrides this.
+    pub on_quota: bool,
+    /// Whether the webhook receives the whole colony lifecycle (issue #897): one event per status
+    /// transition, plus `cleaned`. Webhook only — never the desktop or a phone — and off by default,
+    /// so a webhook that only wants the events a person must act on keeps getting just those.
+    pub on_lifecycle: bool,
     pub desktop: bool,
     pub webhook_url: String,
 }
@@ -69,9 +76,131 @@ pub enum Event {
     /// behind its base is gone, so nothing is left running that will ever rebase it or clear the
     /// flag itself — a person has to.
     NeedsRebase,
+    /// One colony lifecycle transition (issue #897), named as [`LIFECYCLE_EVENTS`] lists. Exactly
+    /// one per status change, whichever switches are on, plus `cleaned` when the colony's worktree
+    /// is reclaimed; it goes to webhooks only, never through the anti-spam ledger, because it is
+    /// for a machine keeping a record, not for a person to read.
+    Lifecycle(&'static str),
+}
+
+/// The version of the webhook payload's shape, sent as `version` in every payload. It changes only
+/// when a key changes meaning or goes away; a new event name or a new key does not change it, since
+/// receivers ignore what they do not know (issue #897).
+pub const SCHEMA_VERSION: u64 = 1;
+
+/// Every lifecycle event name, one per status a colony can enter plus `cleaned` (issue #897).
+/// `question`, `pull_request` and `failed` are also the names of the events a person is told about,
+/// and carry the same id either way.
+pub const LIFECYCLE_EVENTS: &[&str] = &[
+    "queued",
+    "started",
+    "running",
+    "idle",
+    "question",
+    "answered",
+    "publishing",
+    "pull_request",
+    "merged",
+    "closed",
+    "no_changes",
+    "parked",
+    "resumed",
+    "stopped",
+    "failed",
+    "cleaned",
+];
+
+/// Every `event` a webhook payload can carry: the lifecycle, the events a person is told about,
+/// and the host-level ones. `docs/webhook-events.schema.json` enumerates the same list.
+pub const EVENT_NAMES: &[&str] = &[
+    "queued",
+    "started",
+    "running",
+    "idle",
+    "question",
+    "answered",
+    "publishing",
+    "pull_request",
+    "merged",
+    "closed",
+    "no_changes",
+    "parked",
+    "resumed",
+    "stopped",
+    "failed",
+    "cleaned",
+    "attention",
+    "needs_rebase",
+    "provider_degraded",
+    "judge_degraded",
+    "provider_quota_exhausted",
+    "account_needs_sign_in",
+    "account_resolved",
+    "ci_unavailable",
+    "digest",
+];
+
+/// The lifecycle event a status change is (issue #897): exactly one per change, `None` when the
+/// status held. Coming back from a parked, stopped or failed state is `resumed`, and leaving a
+/// question is `answered`, so a receiver sees why the colony is moving again.
+pub fn transition(last: SessionStatus, now: SessionStatus) -> Option<&'static str> {
+    use SessionStatus::*;
+    if last == now {
+        return None;
+    }
+    let back = matches!(last, Parked | Stopped | Failed);
+    Some(match now {
+        Queued | Starting | Running if back => "resumed",
+        Running | Idle if last == WaitingForAnswer => "answered",
+        Queued => "queued",
+        Starting => "started",
+        Running => "running",
+        Idle => "idle",
+        WaitingForAnswer => "question",
+        Publishing => "publishing",
+        PrOpened => "pull_request",
+        Merged => "merged",
+        Closed => "closed",
+        NoChanges => "no_changes",
+        Parked => "parked",
+        Stopped => "stopped",
+        Failed => "failed",
+    })
+}
+
+/// The lifecycle events a colony's change since it was last seen calls for: its status transition,
+/// and `cleaned` when its worktree was reclaimed. Seeds like [`decide`] — a colony seen for the
+/// first time announces nothing — and nothing while the module, or the colony's org, is off.
+pub fn lifecycle(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec<Event> {
+    let Some(last) = last.filter(|_| settings.enabled) else {
+        return Vec::new();
+    };
+    let mut events: Vec<Event> = transition(last.status, now.status)
+        .map(Event::Lifecycle)
+        .into_iter()
+        .collect();
+    if now.cleaned && !last.cleaned {
+        events.push(Event::Lifecycle("cleaned"));
+    }
+    events
 }
 
 impl Event {
+    /// Whether this is a status transition a person is also told about — the webhook gets it once,
+    /// from the lifecycle stream, when [`NotifySettings::on_lifecycle`] is on.
+    fn is_transition(self) -> bool {
+        matches!(self, Event::Question | Event::Failed | Event::PullRequest)
+    }
+
+    /// What tells two events of one colony apart in its [`event_id`]: the name, and for an
+    /// attention event the reason too — a stall and an out-of-nudges are two different events.
+    fn id_kind(self) -> String {
+        match self {
+            Event::Attention(reason) => format!("attention:{reason}"),
+            _ => self.name().to_string(),
+        }
+    }
+
     /// The event's name in the webhook payload.
     pub fn name(self) -> &'static str {
         match self {
@@ -82,6 +211,7 @@ impl Event {
             Event::ProviderDegraded => "provider_degraded",
             Event::JudgeDegraded => "judge_degraded",
             Event::NeedsRebase => "needs_rebase",
+            Event::Lifecycle(name) => name,
         }
     }
 
@@ -91,11 +221,13 @@ impl Event {
         let what = match self {
             Event::Question => "needs an answer",
             Event::Attention("nudges_exhausted") => "is out of nudges",
+            Event::Attention(crate::watchdog::CONTROL_DEFEAT_REASON) => "may have got past one of its controls",
             Event::Attention(crate::queue::HOLD_UNANSWERED_REASON) => "is parked on a question too risky to answer on its own",
             Event::Attention(_) => "has stalled",
             Event::Failed => "failed",
             Event::PullRequest => "opened a pull request",
             Event::NeedsRebase => "fell behind its base, but the colony behind it is gone",
+            Event::Lifecycle(name) => lifecycle_text(name),
             // A provider names no colony, so this session-shaped path is never called with the
             // provider event; its line is [`Event::provider_text`]'s to build.
             Event::ProviderDegraded => {
@@ -134,6 +266,29 @@ impl Event {
     }
 }
 
+/// The words a lifecycle event's line ends with.
+fn lifecycle_text(name: &str) -> &'static str {
+    match name {
+        "queued" => "is queued",
+        "started" => "started",
+        "running" => "is running",
+        "idle" => "is idle, waiting for a message",
+        "question" => "needs an answer",
+        "answered" => "got its answer and is running again",
+        "publishing" => "is publishing",
+        "pull_request" => "opened a pull request",
+        "merged" => "had its pull request merged",
+        "closed" => "had its pull request closed",
+        "no_changes" => "finished with no changes",
+        "parked" => "is parked",
+        "resumed" => "resumed",
+        "stopped" => "stopped",
+        "failed" => "failed",
+        "cleaned" => "was cleaned up",
+        _ => "changed",
+    }
+}
+
 /// What was last seen of a colony: the whole of what edge detection needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Seen {
@@ -142,6 +297,8 @@ pub struct Seen {
     /// Mirrors [`Session::rebase_orphaned`]: set once nothing is left running to clear
     /// `needs_rebase` on its own.
     pub rebase_orphaned: bool,
+    /// Mirrors [`Session::cleaned_up`], for the `cleaned` lifecycle event.
+    pub cleaned: bool,
 }
 
 impl Seen {
@@ -154,6 +311,7 @@ impl Seen {
                 .and_then(|a| a["reason"].as_str())
                 .map(String::from),
             rebase_orphaned: session.rebase_orphaned,
+            cleaned: session.cleaned_up,
         }
     }
 }
@@ -172,7 +330,12 @@ pub fn decide(settings: &NotifySettings, last: Option<&Seen>, now: &Seen) -> Vec
         events.push(Event::Question);
     }
     if settings.on_attention {
-        for reason in ["stalled", "nudges_exhausted", crate::queue::HOLD_UNANSWERED_REASON] {
+        for reason in [
+            "stalled",
+            "nudges_exhausted",
+            crate::queue::HOLD_UNANSWERED_REASON,
+            crate::watchdog::CONTROL_DEFEAT_REASON,
+        ] {
             if now.attention.as_deref() == Some(reason) && last.attention.as_deref() != Some(reason) {
                 events.push(Event::Attention(reason));
             }
@@ -285,6 +448,74 @@ pub fn account_edges(
     (edges, next)
 }
 
+/// One provider-out-of-quota card as the notify loop sees it (issue #767): the provider, the name
+/// the operator gave it, when its plan resets, and every colony blocked on it. Built by
+/// [`crate::quota_cards::notify_cards`] from the same derivation as the Inbox card.
+#[derive(Clone, Debug)]
+pub struct QuotaCard {
+    pub provider: String,
+    pub name: String,
+    pub reset_at: Option<String>,
+    pub colonies: Vec<Session>,
+}
+
+/// The one line an out-of-quota card announces: the provider's name, how many colonies it holds and
+/// when it resets. Labels only — no colony's question, issue title or output.
+pub fn quota_text(name: &str, reset_at: Option<&str>, colonies: usize) -> String {
+    let held = if colonies == 1 {
+        "1 colony is waiting".to_string()
+    } else {
+        format!("{colonies} colonies are waiting")
+    };
+    let reset = reset_at.map(|r| format!("; resets {r}")).unwrap_or_default();
+    truncate(&format!("{name} is out of quota: {held}{reset}"), MAX_TEXT)
+}
+
+/// The out-of-quota cards to announce this tick, and the providers to remember as announced. Pure,
+/// like [`account_edges`]: a card that appears announces once — however many colonies it holds —
+/// a card still open is silent, and a card that closed (the plan reset, or every colony moved on)
+/// re-arms, so the next exhaustion announces again. With the module or [`NotifySettings::on_quota`]
+/// off nothing announces, and only cards already announced stay spent: a card that opened while the
+/// event was off announces when it is switched back on, as a provider crossing does.
+pub fn quota_edges<'a>(
+    settings: &NotifySettings,
+    announced: &BTreeSet<String>,
+    cards: &'a [QuotaCard],
+) -> (Vec<&'a QuotaCard>, BTreeSet<String>) {
+    let on = settings.enabled && settings.on_quota;
+    let mut next = BTreeSet::new();
+    let mut edges = Vec::new();
+    for card in cards {
+        if announced.contains(&card.provider) {
+            next.insert(card.provider.clone());
+        } else if on {
+            edges.push(card);
+            next.insert(card.provider.clone());
+        }
+    }
+    (edges, next)
+}
+
+/// The webhook payload for an out-of-quota card: the eight-key shape, `colony` and `pr_url` null, and
+/// `provider` the id, name, reset time and how many colonies wait — nothing of any repository.
+pub fn quota_payload(card: &QuotaCard, at: DateTime<Utc>) -> Value {
+    json!({
+        "version": SCHEMA_VERSION,
+        "id": host_event_id(&format!("quota:{}", card.provider), crate::push_prefs::QUOTA, at),
+        "event": crate::push_prefs::QUOTA,
+        "at": at.to_rfc3339(),
+        "text": quota_text(&card.name, card.reset_at.as_deref(), card.colonies.len()),
+        "colony": None::<Value>,
+        "pr_url": None::<Value>,
+        "provider": {
+        "id": card.provider,
+            "name": card.name,
+            "reset_at": card.reset_at,
+            "colonies": card.colonies.len(),
+        },
+    })
+}
+
 /// Diffs the session list against what was last seen: the events to announce, and the state to keep.
 /// Entries for colonies that are gone are simply not carried over, so the map cannot grow forever.
 fn diff<'a>(
@@ -296,7 +527,12 @@ fn diff<'a>(
     let mut events = Vec::new();
     for session in sessions {
         let now = Seen::of(session);
-        for event in decide(&settings_for(session), seen.get(&session.id), &now) {
+        let settings = settings_for(session);
+        let last = seen.get(&session.id);
+        for event in decide(&settings, last, &now)
+            .into_iter()
+            .chain(lifecycle(&settings, last, &now))
+        {
             events.push((session, event));
         }
         next.insert(session.id.clone(), now);
@@ -462,16 +698,48 @@ async fn notify_desktop(tool: Tool, text: &str) -> Option<String> {
 // The webhook channel
 // ---------------------------------------------------------------------------
 
+/// The header that carries a payload's `id`, so a receiver can dedupe before it parses the body.
+pub const EVENT_ID_HEADER: &str = "X-Colonizer-Event-Id";
+
+/// An event's stable id (issue #896): `evt_` and the first 32 hex digits of SHA-256 over what the
+/// event is about (`source`: a colony id, or a host-level topic such as `provider:zai`), what
+/// happened to it (`kind`), and where in that source's history it happened (`sequence`: the
+/// colony's `updated_at` when the edge was seen, or the moment a host-level edge was detected).
+/// Deterministic, so the same event always carries the same id — every delivery of it, and every
+/// payload built from the same edge — and receivers can dedupe on it. It names nothing: a hash, not
+/// the repository or the colony's words.
+pub fn event_id(source: &str, kind: &str, sequence: &str) -> String {
+    let mut input = String::with_capacity(source.len() + kind.len() + sequence.len() + 2);
+    for (i, part) in [source, kind, sequence].into_iter().enumerate() {
+        if i > 0 {
+            // A separator no id, name or timestamp contains, so ("a", "bc") and ("ab", "c") differ.
+            input.push('\u{1f}');
+        }
+        input.push_str(part);
+    }
+    let digest = ring::digest::digest(&ring::digest::SHA256, input.as_bytes());
+    format!("evt_{}", &hex(digest.as_ref())[..32])
+}
+
+/// The id of a host-level event — one with no colony behind it — detected at `at`.
+fn host_event_id(topic: &str, event: &str, at: DateTime<Utc>) -> String {
+    event_id(topic, event, &at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+}
+
 /// The whole of what a webhook receives. No issue title, no question text, no branch, no error, no
 /// diff: repository content can carry instructions, so nothing of it is sent to an address outside
 /// this machine.
 pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
+    // Keyed on the colony's own history, not on `at`: the same edge rebuilt later is the same id.
+    let sequence = session.updated_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     json!({
+        "version": SCHEMA_VERSION,
+        "id": event_id(&session.id, &event.id_kind(), &sequence),
         "event": event.name(),
         "at": at.to_rfc3339(),
         "text": event.text(&session.repo, session.issue),
         "colony": {
-            "id": session.id.clone(),
+        "id": session.id.clone(),
             "repo": session.repo.clone(),
             "org": session.org.clone(),
             "issue": session.issue,
@@ -491,13 +759,15 @@ pub fn payload(event: Event, at: DateTime<Utc>, session: &Session) -> Value {
 /// counters behind the announcement — still nothing of any repository.
 pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealth, at: DateTime<Utc>) -> Value {
     json!({
+        "version": SCHEMA_VERSION,
+        "id": host_event_id(&format!("provider:{id}"), Event::ProviderDegraded.name(), at),
         "event": Event::ProviderDegraded.name(),
         "at": at.to_rfc3339(),
         "text": Event::provider_text(name, health.failure_pct, health.last_failure.as_deref()),
         "colony": None::<Value>,
         "pr_url": None::<Value>,
         "provider": {
-            "id": id,
+        "id": id,
             "name": name,
             "failure_pct": health.failure_pct,
             "avg_latency_ms": health.avg_latency_ms,
@@ -512,6 +782,8 @@ pub fn provider_payload(id: &str, name: &str, requests: u64, health: &UsageHealt
 /// is the provider's words or a transport reason — never repository content.
 pub fn judge_payload(provider: &str, kind: &str, status: Option<u16>, message: &str, at: DateTime<Utc>) -> Value {
     json!({
+        "version": SCHEMA_VERSION,
+        "id": host_event_id(&format!("judge:{provider}"), Event::JudgeDegraded.name(), at),
         "event": Event::JudgeDegraded.name(),
         "at": at.to_rfc3339(),
         "text": Event::judge_text(provider, message),
@@ -543,14 +815,15 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// POSTs one signed body. No retries: the next event tries again, and a webhook that answers 500 is
-/// the receiver's problem to describe, not ours to fix.
-async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, body: &str) -> Result<()> {
+/// POSTs one signed body, its event id in [`EVENT_ID_HEADER`] as well as in the body. One attempt:
+/// a failed one is the outbox's to retry ([`outbox`], issue #898), with the same body.
+async fn post(client: &reqwest::Client, url: &str, secret: Option<&str>, event_id: &str, body: &str) -> Result<()> {
     let timestamp = Utc::now().timestamp().to_string();
     let mut request = client
         .post(url)
         .header("content-type", "application/json")
         .header("X-Colonizer-Timestamp", &timestamp)
+        .header(EVENT_ID_HEADER, event_id)
         .body(body.to_string());
     if let Some(secret) = secret {
         request = request.header(
@@ -646,6 +919,9 @@ pub async fn run(app: Shared) {
     // Per Claude account: its last-seen trouble state, so an account that entered, changed or left
     // trouble announces once (issue #984).
     let mut account_states: BTreeMap<String, crate::account_health::State> = BTreeMap::new();
+    // The providers whose out-of-quota card has been announced (issue #767), so a card is one push
+    // however many colonies it holds and however many ticks it stays open.
+    let mut quota_announced: BTreeSet<String> = BTreeSet::new();
     let mut reasons = Reasons::default();
     loop {
         tick.tick().await;
@@ -654,6 +930,7 @@ pub async fn run(app: Shared) {
             seen.clear();
             degraded.clear();
             account_states.clear();
+            quota_announced.clear();
             continue;
         }
         let sessions = app.sessions.read().await.clone();
@@ -667,7 +944,7 @@ pub async fn run(app: Shared) {
         seen = next;
         for (session, event) in events {
             let Some(settings) = per_org.get(&session.org) else { continue };
-            announce(&app, client.as_ref(), session, event, settings, &mut reasons).await;
+            dispatch(&app, client.as_ref(), session, event, settings, &mut reasons).await;
         }
         // A provider is not org-scoped — no colony, no org to resolve — so its settings are the
         // notify module's own global choice. `effective_notify` with a default org is exactly that:
@@ -702,20 +979,33 @@ pub async fn run(app: Shared) {
         for edge in &account_edges {
             announce_account(&app, client.as_ref(), edge, &settings, &mut reasons).await;
         }
+        // Out-of-quota cards (issue #767): one announcement per provider whose card opened, naming
+        // the provider and its reset, never the colonies' own words.
+        let cards = crate::quota_cards::notify_cards(&app).await;
+        let (quota, next_quota) = quota_edges(&settings, &quota_announced, &cards);
+        quota_announced = next_quota;
+        for card in quota {
+            announce_quota(&app, client.as_ref(), card, &settings, &mut reasons).await;
+        }
         // The digest (issue #311): what the soft layers held, one line an hour at most, no identities,
         // down the same channels as any announcement — and the counts it carried are subtracted only
         // once a channel actually took it, so candidates held while it was in flight stay due.
         if let Some((summary, held)) = app.ledger.digest_due(Utc::now()) {
             let at = Utc::now();
             let payload = json!({
-                "event": "digest",
-                "at": at.to_rfc3339(),
-                "text": summary,
-                // The same six-key shape every webhook payload carries, with nothing to name here.
-                "colony": None::<Value>,
-                "pr_url": None::<Value>,
-                "provider": None::<Value>,
-            });
+                    "version": SCHEMA_VERSION,
+            "id": host_event_id("digest", "digest", at),
+                    "event": "digest",
+                    "at": at.to_rfc3339(),
+                    "text": summary,
+                    // The same eight-key shape every webhook payload carries, with nothing to name here.
+                    "colony": None::<Value>,
+                    "pr_url": None::<Value>,
+                    "provider": None::<Value>,
+                });
+            if let Some(client) = client.as_ref() {
+                subscriptions::fan_out(&app, client, &payload, None).await;
+            }
             if deliver(&app, client.as_ref(), &summary, &payload, None, &settings, &mut reasons).await {
                 app.ledger.commit_digest(&held, at).await;
             }
@@ -739,7 +1029,12 @@ fn fact_key(event: Event, session: &str, open_question: Option<&str>) -> Option<
     match event {
         Event::Attention(reason) => Some(format!("attention:{reason}:{session}")),
         Event::Question => open_question.map(|id| format!("question:{session}:{id}")),
-        Event::Failed | Event::PullRequest | Event::NeedsRebase | Event::ProviderDegraded | Event::JudgeDegraded => None,
+        Event::Failed
+        | Event::PullRequest
+        | Event::NeedsRebase
+        | Event::ProviderDegraded
+        | Event::JudgeDegraded
+        | Event::Lifecycle(_) => None,
     }
 }
 
@@ -779,6 +1074,18 @@ async fn announce(
     }
     let text = event.text(&session.repo, session.issue);
     let payload = payload(event, Utc::now(), session);
+    // With the lifecycle on, the webhook already gets this transition from the lifecycle stream —
+    // once, with the same id — so the person's channels carry it here and the webhook does not.
+    let human_only;
+    let settings = if settings.on_lifecycle && event.is_transition() {
+        human_only = NotifySettings {
+            webhook_url: String::new(),
+            ..settings.clone()
+        };
+        &human_only
+    } else {
+        settings
+    };
     if deliver(app, client, &text, &payload, Some(session), settings, reasons).await {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
     } else {
@@ -788,6 +1095,51 @@ async fn announce(
             .record(&candidate, &ledger::Verdict::Drop("undelivered"), Utc::now())
             .await;
     }
+}
+
+/// Sends one colony event where it goes: a lifecycle event to the webhook alone, anything else down
+/// every channel through the ledger.
+async fn dispatch(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    session: &Session,
+    event: Event,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    // Webhook subscriptions (issue #899) take a colony's transitions from the lifecycle stream —
+    // each once, whatever the owner's switches — plus the watchdog's flags, which are not
+    // transitions. Outside the ledger, like the lifecycle: a subscriber is a machine keeping a
+    // record, and each one chose its own events.
+    if let Some(client) = client
+        && (matches!(event, Event::Lifecycle(_)) || !event.is_transition())
+    {
+        subscriptions::fan_out(app, client, &payload(event, Utc::now(), session), Some(session)).await;
+    }
+    if let Event::Lifecycle(_) = event {
+        announce_lifecycle(app, client, session, event, settings, reasons).await;
+    } else {
+        announce(app, client, session, event, settings, reasons).await;
+    }
+}
+
+/// Sends one lifecycle event (issue #897) to the webhook, when [`NotifySettings::on_lifecycle`] is
+/// on. Webhook only and outside the anti-spam ledger: the lifecycle is a record for a machine, one
+/// event per transition, and a rate limit that dropped some would make it a wrong record.
+async fn announce_lifecycle(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    session: &Session,
+    event: Event,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let Some(client) = client else { return };
+    if !settings.on_lifecycle {
+        return;
+    }
+    let payload = payload(event, Utc::now(), session);
+    post_webhook(app, client, &payload, Some(session), settings, reasons).await;
 }
 
 /// The shared tail of a host-level announcement — a provider's, the judge's or a Claude account's
@@ -802,13 +1154,44 @@ async fn announce_host(
     settings: &NotifySettings,
     reasons: &mut Reasons,
 ) {
+    announce_routed(
+        app,
+        client,
+        candidate,
+        text,
+        payload,
+        settings,
+        reasons,
+        PushRoute::Event(None),
+    )
+    .await;
+}
+
+/// [`announce_host`] with the push channel's route spelled out: the out-of-quota card (issue #767)
+/// pushes once per provider to the devices whose scope holds any of its colonies.
+#[allow(clippy::too_many_arguments)]
+async fn announce_routed(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    candidate: ledger::Candidate,
+    text: String,
+    payload: Value,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+    route: PushRoute<'_>,
+) {
+    // The owner's webhook subscriptions (issue #899) get every host-level event, outside the
+    // ledger as colony events are; a scoped token's never do, since no host event is in its scope.
+    if let Some(client) = client {
+        subscriptions::fan_out(app, client, &payload, None).await;
+    }
     let verdict = app.ledger.check(&candidate, Utc::now());
     if verdict != ledger::Verdict::Deliver {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
         return;
     }
     let text = truncate(&text, MAX_TEXT);
-    if deliver(app, client, &text, &payload, None, settings, reasons).await {
+    if deliver_routed(app, client, &text, &payload, settings, reasons, route).await {
         app.ledger.record(&candidate, &verdict, Utc::now()).await;
     } else {
         app.ledger
@@ -899,15 +1282,45 @@ async fn announce_account(
         colony: None,
         priority: false,
     };
+    let at = Utc::now();
     let payload = json!({
+        "version": SCHEMA_VERSION,
+        "id": host_event_id(&format!("account:{account}"), event, at),
         "event": event,
-        "at": Utc::now().to_rfc3339(),
+        "at": at.to_rfc3339(),
         "text": text,
         "colony": None::<Value>,
         "pr_url": None::<Value>,
         "provider": None::<Value>,
     });
     announce_host(app, client, candidate, text, payload, settings, reasons).await;
+}
+
+/// Announces one out-of-quota card (issue #767) down the same channels and ledger as a provider
+/// event. The fact key names the provider and its reset, so a card that flaps closed and open again
+/// inside the dedup window for the same reset is one line, not two.
+async fn announce_quota(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    card: &QuotaCard,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+) {
+    let candidate = ledger::Candidate {
+        kind: ledger::Kind::Notify,
+        topic: format!("quota:{}", card.provider),
+        class: crate::push_prefs::QUOTA.to_string(),
+        fact: Some(format!("quota:{}:{}", card.provider, card.reset_at.as_deref().unwrap_or("-"))),
+        colony: None,
+        priority: false,
+    };
+    let text = quota_text(&card.name, card.reset_at.as_deref(), card.colonies.len());
+    let payload = quota_payload(card, Utc::now());
+    let route = PushRoute::Quota {
+        provider: &card.provider,
+        colonies: &card.colonies,
+    };
+    announce_routed(app, client, candidate, text, payload, settings, reasons, route).await;
 }
 
 /// A host-level line from another module (issue #972: the merge-train loop's CI-unavailable edges),
@@ -935,9 +1348,12 @@ pub(crate) async fn announce_line(app: &App, event: &str, topic: String, line: &
         priority: false,
     };
     let text = truncate(line, MAX_TEXT);
+    let at = Utc::now();
     let payload = json!({
+        "version": SCHEMA_VERSION,
+        "id": host_event_id(&candidate.topic, event, at),
         "event": event,
-        "at": Utc::now().to_rfc3339(),
+        "at": at.to_rfc3339(),
         "text": text,
         "colony": None::<Value>,
         "pr_url": None::<Value>,
@@ -970,6 +1386,33 @@ async fn deliver(
     settings: &NotifySettings,
     reasons: &mut Reasons,
 ) -> bool {
+    deliver_routed(app, client, text, payload, settings, reasons, PushRoute::Event(session)).await
+}
+
+/// Who the push channel speaks to for one announcement.
+#[derive(Clone, Copy)]
+enum PushRoute<'a> {
+    /// The ordinary event: about one colony, or about none.
+    Event(Option<&'a Session>),
+    /// An out-of-quota card (issue #767): one push per provider, reaching a device when any of the
+    /// card's colonies is in its scope.
+    Quota { provider: &'a str, colonies: &'a [Session] },
+}
+
+/// [`deliver`], with the push route explicit.
+async fn deliver_routed(
+    app: &App,
+    client: Option<&reqwest::Client>,
+    text: &str,
+    payload: &Value,
+    settings: &NotifySettings,
+    reasons: &mut Reasons,
+    route: PushRoute<'_>,
+) -> bool {
+    let session = match route {
+        PushRoute::Event(session) => session,
+        PushRoute::Quota { .. } => None,
+    };
     let mut sent = false;
     if settings.desktop {
         match desktop_tool(&DesktopEnv::this_host()) {
@@ -994,7 +1437,13 @@ async fn deliver(
     }
     // Push carries the same event name and the same one line the other channels do, and each
     // device's own preferences decide whether it wants this event, repo and hour.
-    if push::deliver(app, client, payload["event"].as_str().unwrap_or("notify"), text, session).await {
+    let pushed = match route {
+        PushRoute::Event(session) => {
+            push::deliver(app, client, payload["event"].as_str().unwrap_or("notify"), text, session).await
+        }
+        PushRoute::Quota { provider, colonies } => push::deliver_quota(app, client, provider, text, colonies).await,
+    };
+    if pushed {
         sent = true;
     }
     sent
@@ -1027,19 +1476,25 @@ async fn post_webhook(
     let Ok(body) = serde_json::to_string(payload) else {
         return false;
     };
-    // Read where it is used, so saving or removing the secret takes effect without a restart.
-    let signing = secret(app);
-    match post(
-        client,
+    // The signing secret is read where each attempt is made, so saving or removing it takes effect
+    // without a restart, and a retry signs with whatever is set by then.
+    let delivery = outbox::Delivery::new(
+        outbox::OWNER,
         &settings.webhook_url,
-        signing.as_ref().map(|(value, _)| value.as_str()),
-        &body,
-    )
-    .await
-    {
+        payload,
+        body,
+        session.map(|s| s.id.clone()),
+    );
+    match outbox::send(app, client, delivery).await {
         Ok(()) => true,
-        Err(e) => {
-            report_failure(app, session, format!("notify: the webhook failed ({e:#})")).await;
+        Err((error, failed)) => {
+            let next = match failed {
+                outbox::Failed::Retrying { attempt } => {
+                    format!("attempt {attempt} of {}; it will be retried", outbox::MAX_ATTEMPTS)
+                }
+                outbox::Failed::DeadLettered => "it is in the dead letter, where Settings can replay it".to_string(),
+            };
+            report_failure(app, session, format!("notify: the webhook failed ({error}); {next}")).await;
             false
         }
     }
@@ -1058,740 +1513,24 @@ async fn report_failure(app: &App, session: Option<&Session>, what: String) {
 /// This module's background work, started once by `server::start_tasks` when the mothership serves.
 pub(crate) fn start_tasks(app: &crate::Shared) {
     tokio::spawn(run(app.clone()));
+    // Retries run whether or not the module is on now: what is waiting was announced while it was.
+    tokio::spawn(outbox::run(app.clone()));
 }
 
 /// The API routes this module serves. `server::api_routes` merges them into the cockpit's router,
 /// behind the activity log's route layer and `host_guard`.
 pub(crate) fn routes() -> axum::Router<crate::Shared> {
     use axum::routing;
-    axum::Router::new().route("/api/notify/secret", routing::get(secret_status).put(put_secret))
+    axum::Router::new()
+        .route("/api/notify/secret", routing::get(secret_status).put(put_secret))
+        .route("/api/notify/deliveries", routing::get(outbox::deliveries))
+        .route("/api/notify/dead-letters/replay", routing::post(outbox::replay_all))
+        .route("/api/notify/dead-letters/{key}/replay", routing::post(outbox::replay_one))
+        .route("/api/notify/dead-letters/{key}", routing::delete(outbox::discard))
 }
+
+pub(crate) mod outbox;
+pub(crate) mod subscriptions;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::{Map, json};
-
-    fn settings() -> NotifySettings {
-        NotifySettings {
-            enabled: true,
-            on_question: true,
-            on_attention: true,
-            on_failed: true,
-            on_pull_request: true,
-            on_provider: true,
-            desktop: false,
-            webhook_url: String::new(),
-        }
-    }
-
-    /// A provider as `providers.json` holds one: an id and name the operator chose, plus defaults.
-    fn provider(id: &str, name: &str) -> Provider {
-        Provider {
-            id: id.into(),
-            name: name.into(),
-            base_url: "https://provider.test/v1".into(),
-            auth: "x-api-key".into(),
-            wire: Default::default(),
-            models: Vec::new(),
-            preset: String::new(),
-            timeout_secs: None,
-            max_concurrent: None,
-            queue_timeout_secs: None,
-            context_tokens: None,
-            fallback_model: None,
-            pricing: None,
-            model_map: Default::default(),
-            disabled_tools: Vec::new(),
-            quota: None,
-            normalize_cache_ttl: false,
-            trusted: false,
-            vetted: false,
-            vendor: None,
-        }
-    }
-
-    /// Enough requests for the rule to speak: `failures/requests` at the named rate.
-    fn usage(requests: u64, failures: u64) -> ProviderUsage {
-        ProviderUsage {
-            requests,
-            failures,
-            duration_ms: requests * 100,
-            ..Default::default()
-        }
-    }
-
-    fn seen(status: SessionStatus, attention: Option<&str>) -> Seen {
-        Seen {
-            status,
-            attention: attention.map(String::from),
-            rebase_orphaned: false,
-        }
-    }
-
-    /// A colony with nothing worth announcing, as the loop would see it between ticks.
-    fn colony(id: &str, status: SessionStatus) -> Session {
-        serde_json::from_value(json!({
-            "id": id,
-            "repo": "acme/webshop",
-            "org": "acme",
-            "issue": 42,
-            "issue_title": "SENTINEL-issue-title",
-            "status": status,
-            "branch": "colonizer/SENTINEL-branch",
-            "worktree": "/colonizer/worktrees/wt",
-            "sandbox": "colonizer-abc123",
-            "agent": "claude",
-            "pr_url": "https://github.com/acme/webshop/pull/7",
-            "error": "SENTINEL-error",
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-        }))
-        .unwrap()
-    }
-
-    fn fired(settings: &NotifySettings, was: SessionStatus, is: SessionStatus) -> Vec<Event> {
-        decide(settings, Some(&seen(was, None)), &seen(is, None))
-    }
-
-    #[test]
-    fn each_event_fires_once_on_its_edge_and_not_while_it_holds() {
-        for (event, status) in [
-            (Event::Question, SessionStatus::WaitingForAnswer),
-            (Event::Failed, SessionStatus::Failed),
-            (Event::PullRequest, SessionStatus::PrOpened),
-        ] {
-            let s = settings();
-            assert_eq!(fired(&s, SessionStatus::Running, status), vec![event]);
-            assert!(fired(&s, status, status).is_empty(), "held {:?} is not an edge", status);
-            assert!(
-                fired(&s, status, SessionStatus::Running).is_empty(),
-                "leaving {:?} announces nothing",
-                status
-            );
-            // Leaving and coming back is a new edge, and it fires once again.
-            assert!(fired(&s, status, SessionStatus::Running).is_empty());
-            assert_eq!(fired(&s, SessionStatus::Running, status), vec![event]);
-        }
-    }
-
-    #[test]
-    fn attention_fires_for_the_watchdogs_reasons_only() {
-        let s = settings();
-        let edge = |was: Option<&str>, now: Option<&str>| {
-            decide(
-                &s,
-                Some(&seen(SessionStatus::Running, was)),
-                &seen(SessionStatus::Running, now),
-            )
-        };
-        assert_eq!(edge(None, Some("stalled")), vec![Event::Attention("stalled")]);
-        assert_eq!(
-            edge(Some("stalled"), Some("nudges_exhausted")),
-            vec![Event::Attention("nudges_exhausted")],
-            "out of nudges is a second edge after the stall"
-        );
-        // Held states are not edges.
-        assert!(edge(Some("stalled"), Some("stalled")).is_empty());
-        assert!(
-            edge(None, Some("waiting_for_answer")).is_empty(),
-            "the watchdog's waiting flag is this module's question event, not an attention one"
-        );
-        assert!(
-            edge(None, Some("autopilot_held")).is_empty(),
-            "autopilot's flag is not the watchdog's"
-        );
-        assert!(edge(Some("autopilot_held"), None).is_empty(), "clearing announces nothing");
-    }
-
-    /// An above-ceiling hold-parked colony announces exactly once (issue #876): the reason change is
-    /// the edge a person hears about — held, it stays quiet, and clearing it announces nothing.
-    #[test]
-    fn a_park_too_risky_to_answer_announces_once() {
-        let s = settings();
-        let parked = seen(SessionStatus::Parked, Some(crate::queue::HOLD_TIMEOUT_REASON));
-        let raised = seen(SessionStatus::Parked, Some(crate::queue::HOLD_UNANSWERED_REASON));
-        assert_eq!(
-            decide(&s, Some(&parked), &raised),
-            vec![Event::Attention(crate::queue::HOLD_UNANSWERED_REASON)],
-            "the raised reason is the edge"
-        );
-        assert!(decide(&s, Some(&raised), &raised).is_empty(), "held, it does not repeat");
-        assert!(decide(&s, Some(&raised), &parked).is_empty(), "clearing announces nothing");
-    }
-
-    #[test]
-    fn rebase_orphaned_becoming_true_fires_once_and_only_with_on_attention() {
-        let s = settings();
-        let orphaned = |rebase_orphaned: bool| Seen {
-            status: SessionStatus::PrOpened,
-            attention: None,
-            rebase_orphaned,
-        };
-        assert_eq!(
-            decide(&s, Some(&orphaned(false)), &orphaned(true)),
-            vec![Event::NeedsRebase],
-            "becoming orphaned is the edge"
-        );
-        assert!(
-            decide(&s, Some(&orphaned(true)), &orphaned(true)).is_empty(),
-            "held orphaned is not an edge"
-        );
-        assert!(
-            decide(&s, Some(&orphaned(true)), &orphaned(false)).is_empty(),
-            "clearing announces nothing"
-        );
-        let mut off = s.clone();
-        off.on_attention = false;
-        assert!(
-            decide(&off, Some(&orphaned(false)), &orphaned(true)).is_empty(),
-            "gated by the same switch as attention"
-        );
-    }
-
-    #[test]
-    fn the_event_switches_decide_what_fires() {
-        let mut s = settings();
-        s.on_question = false;
-        assert!(fired(&s, SessionStatus::Running, SessionStatus::WaitingForAnswer).is_empty());
-        assert_eq!(fired(&s, SessionStatus::Running, SessionStatus::Failed), vec![Event::Failed]);
-        s = settings();
-        s.on_pull_request = false;
-        assert!(fired(&s, SessionStatus::Running, SessionStatus::PrOpened).is_empty());
-    }
-
-    #[test]
-    fn disabled_notify_decides_nothing_and_first_sight_only_seeds() {
-        let mut s = settings();
-        s.enabled = false;
-        assert!(decide(&s, None, &seen(SessionStatus::Failed, Some("stalled"))).is_empty());
-        assert!(
-            decide(
-                &s,
-                Some(&seen(SessionStatus::Running, None)),
-                &seen(SessionStatus::Failed, None)
-            )
-            .is_empty()
-        );
-        assert!(
-            decide(&settings(), None, &seen(SessionStatus::Failed, Some("stalled"))).is_empty(),
-            "a colony seen for the first time seeds the state instead of announcing a backlog"
-        );
-    }
-
-    #[test]
-    fn the_text_names_the_repo_and_issue_without_repository_content() {
-        assert_eq!(
-            Event::Question.text("acme/webshop", Some(42)),
-            "acme/webshop #42 needs an answer"
-        );
-        assert_eq!(
-            Event::Attention("stalled").text("acme/webshop", Some(42)),
-            "acme/webshop #42 has stalled"
-        );
-        assert_eq!(
-            Event::Attention("nudges_exhausted").text("acme/webshop", Some(42)),
-            "acme/webshop #42 is out of nudges"
-        );
-        assert_eq!(Event::Failed.text("acme/webshop", None), "acme/webshop failed");
-        assert_eq!(
-            Event::PullRequest.text("acme/webshop", None),
-            "acme/webshop opened a pull request",
-            "a colony with no issue is just the repository"
-        );
-        let long: String = "r".repeat(MAX_TEXT + 50);
-        assert_eq!(
-            Event::Failed.text(&long, None).chars().count(),
-            MAX_TEXT + 1,
-            "capped, ellipsis included"
-        );
-    }
-
-    #[test]
-    fn the_desktop_decision_answers_from_its_inputs_not_the_machine() {
-        let linux = DesktopEnv {
-            os: "linux",
-            notify_send_on_path: true,
-            display: Some(":0".into()),
-            ..Default::default()
-        };
-        assert_eq!(desktop_tool(&linux), Ok(Tool::NotifySend));
-        let wayland = DesktopEnv {
-            os: "linux",
-            notify_send_on_path: true,
-            wayland_display: Some("wayland-0".into()),
-            ..Default::default()
-        };
-        assert_eq!(desktop_tool(&wayland), Ok(Tool::NotifySend));
-        let headless = DesktopEnv {
-            os: "linux",
-            notify_send_on_path: true,
-            ..Default::default()
-        };
-        assert!(
-            desktop_tool(&headless).is_err(),
-            "no DISPLAY and no WAYLAND_DISPLAY is no desktop"
-        );
-        let macos = DesktopEnv {
-            os: "macos",
-            osascript_on_path: true,
-            ..Default::default()
-        };
-        assert_eq!(desktop_tool(&macos), Ok(Tool::Osascript));
-        for mut over_ssh in [linux.clone(), macos.clone()] {
-            over_ssh.ssh_connection = Some("203.0.113.7 5222 192.168.0.2 22".into());
-            assert!(desktop_tool(&over_ssh).is_err(), "over SSH there is no desktop to notify");
-        }
-        let no_binary = DesktopEnv {
-            os: "linux",
-            display: Some(":0".into()),
-            ..Default::default()
-        };
-        assert!(desktop_tool(&no_binary).is_err(), "the tool has to be on the PATH");
-        let no_mac_binary = DesktopEnv {
-            os: "macos",
-            ..Default::default()
-        };
-        assert!(desktop_tool(&no_mac_binary).is_err());
-        assert!(
-            desktop_tool(&DesktopEnv {
-                os: "windows",
-                ..Default::default()
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn applescript_escaping_survives_quotes_and_drops_control_characters() {
-        assert_eq!(applescript_string("plain"), "plain");
-        assert_eq!(applescript_string(r#"he said "hi""#), r#"he said \"hi\""#);
-        assert_eq!(applescript_string("back\\slash"), "back\\\\slash");
-        assert_eq!(applescript_string("two\nlines\r\there"), "twolineshere");
-        assert_eq!(applescript_string("nul\u{0}byte"), "nulbyte");
-    }
-
-    #[test]
-    fn the_webhook_payload_carries_no_repository_content() {
-        let at = DateTime::from_timestamp(1_789_000_000, 0).unwrap();
-        for (event, status) in [
-            (Event::Question, SessionStatus::WaitingForAnswer),
-            (Event::Attention("stalled"), SessionStatus::Running),
-            (Event::Failed, SessionStatus::Failed),
-            (Event::PullRequest, SessionStatus::PrOpened),
-            (Event::NeedsRebase, SessionStatus::PrOpened),
-        ] {
-            let session = colony("abc123", status);
-            let body = serde_json::to_string(&payload(event, at, &session)).unwrap();
-            for sentinel in ["SENTINEL-issue-title", "SENTINEL-branch", "SENTINEL-error"] {
-                assert!(!body.contains(sentinel), "{event:?} leaked {sentinel}: {body}");
-            }
-            let value: Value = serde_json::from_str(&body).unwrap();
-            let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
-            keys.sort_unstable();
-            assert_eq!(
-                keys,
-                ["at", "colony", "event", "pr_url", "provider", "text"],
-                "the payload is exactly six keys, one shape for receivers"
-            );
-            let mut colony_keys: Vec<&str> = value["colony"].as_object().unwrap().keys().map(String::as_str).collect();
-            colony_keys.sort_unstable();
-            assert_eq!(colony_keys, ["id", "issue", "org", "repo", "status"]);
-            assert_eq!(value["event"], json!(event.name()));
-            assert_eq!(value["colony"]["status"], json!(status));
-            assert!(
-                value["provider"].is_null(),
-                "a session event is never about a provider: {body}"
-            );
-            if matches!(event, Event::PullRequest | Event::NeedsRebase) {
-                assert_eq!(
-                    value["pr_url"],
-                    json!("https://github.com/acme/webshop/pull/7"),
-                    "events about a pull request carry its address"
-                );
-            } else {
-                assert!(value["pr_url"].is_null(), "{event:?} carries no pr_url: {body}");
-            }
-        }
-    }
-
-    #[test]
-    fn the_webhook_signature_is_pinned() {
-        // Computed once with an independent implementation. Pins the whole scheme: HMAC-SHA256 over
-        // `"{timestamp}.{body}"`, lowercase hex, wrapped as `sha256=<hex>` by the sender.
-        assert_eq!(
-            signature("a-signing-secret-for-tests", "1789000000", r#"{"event":"failed"}"#),
-            "4f3fc4526050244f4333184258c3b34374cfa8f9ede75b3e94c321fce6d76712"
-        );
-        // A different timestamp or body signs differently, so both really are covered by the MAC.
-        assert_ne!(
-            signature("a-signing-secret-for-tests", "1789000001", r#"{"event":"failed"}"#),
-            "4f3fc4526050244f4333184258c3b34374cfa8f9ede75b3e94c321fce6d76712"
-        );
-    }
-
-    #[test]
-    fn a_webhook_url_must_be_http_or_https_and_empty_means_off() {
-        assert!(webhook_valid("https://example.com/hook"));
-        assert!(webhook_valid("http://127.0.0.1:9000/hook"));
-        assert!(!webhook_valid(""), "empty is off, which is not the same as invalid");
-        assert!(!webhook_valid("file:///etc/passwd"));
-        assert!(!webhook_valid("ftp://example.com"));
-        assert!(!webhook_valid("example.com/hook"));
-    }
-
-    #[test]
-    fn diff_seeds_new_colonies_announces_edges_and_prunes_gone_ones() {
-        let s = settings();
-        let known = colony("abc123", SessionStatus::Failed);
-        let fresh = colony("def456", SessionStatus::Queued);
-        let mut seen = HashMap::new();
-        seen.insert(
-            known.id.clone(),
-            Seen {
-                status: SessionStatus::Running,
-                attention: None,
-                rebase_orphaned: false,
-            },
-        );
-        // The known colony failed: an edge. The fresh one is seen for the first time: not.
-        let list = [known.clone(), fresh.clone()];
-        let (events, next) = diff(&list, &seen, |_| s.clone());
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0.id, known.id);
-        assert_eq!(events[0].1, Event::Failed);
-        assert_eq!(next.len(), 2, "the fresh colony is seeded, not announced");
-        assert!(next.contains_key(&fresh.id));
-
-        // A colony no longer in the list leaves the map, so it cannot grow forever.
-        let remainder = [fresh];
-        let (events, next) = diff(&remainder, &next, |_| s.clone());
-        assert!(events.is_empty(), "a held state is not an edge");
-        assert_eq!(next.len(), 1);
-        assert!(!next.contains_key(&known.id));
-    }
-
-    #[test]
-    fn a_degraded_provider_announces_once_and_rearms_only_below_the_clear_line() {
-        let s = settings();
-        let degraded = UsageHealth {
-            failure_pct: 29.4,
-            avg_latency_ms: 1_200,
-            rated: true,
-            degraded: true,
-            last_failure: None,
-        };
-        let ok = UsageHealth {
-            failure_pct: 3.2,
-            avg_latency_ms: 900,
-            rated: true,
-            degraded: false,
-            last_failure: None,
-        };
-        // A provider seen for the first time only seeds, whatever its rate: a restart must not
-        // announce every provider that was already failing before it.
-        assert_eq!(decide_provider(&s, None, &degraded), (false, true));
-        // Holding is not an edge; the crossing announces once.
-        assert_eq!(decide_provider(&s, Some(true), &degraded), (false, true));
-        assert_eq!(decide_provider(&s, Some(false), &degraded), (true, true));
-        assert_eq!(decide_provider(&s, Some(false), &ok), (false, false));
-        // Between the lines is not recovered: 9% is under the degraded line but the announcement
-        // stays spent, so a rate hovering at the line does not flap.
-        let hovering = UsageHealth {
-            failure_pct: 9.0,
-            avg_latency_ms: 900,
-            rated: true,
-            degraded: false,
-            last_failure: None,
-        };
-        assert_eq!(decide_provider(&s, Some(true), &hovering), (false, true));
-        assert_eq!(decide_provider(&s, Some(false), &hovering), (false, false));
-        // Clearly under 8% re-arms, so the next crossing announces again.
-        let recovered = UsageHealth {
-            failure_pct: 7.9,
-            avg_latency_ms: 900,
-            rated: true,
-            degraded: false,
-            last_failure: None,
-        };
-        assert_eq!(decide_provider(&s, Some(true), &recovered), (false, false));
-        assert_eq!(decide_provider(&s, Some(false), &degraded), (true, true));
-    }
-
-    #[test]
-    fn provider_events_respect_the_switches_and_an_unrated_provider_is_never_degraded() {
-        let degraded = UsageHealth {
-            failure_pct: 29.4,
-            avg_latency_ms: 1_200,
-            rated: true,
-            degraded: true,
-            last_failure: None,
-        };
-        let mut s = settings();
-        s.enabled = false;
-        assert!(!decide_provider(&s, Some(false), &degraded).0);
-        assert_eq!(
-            decide_provider(&s, Some(true), &degraded),
-            (false, true),
-            "the state is carried through untouched, so re-enabling announces no backlog"
-        );
-        s = settings();
-        s.on_provider = false;
-        assert!(!decide_provider(&s, Some(false), &degraded).0);
-        // A provider with too few requests to judge is noise, never a degraded one.
-        let unrated = UsageHealth {
-            failure_pct: 40.0,
-            avg_latency_ms: 800,
-            rated: false,
-            degraded: false,
-            last_failure: None,
-        };
-        for was in [None, Some(false), Some(true)] {
-            assert_eq!(decide_provider(&settings(), was, &unrated), (false, false));
-        }
-    }
-
-    #[test]
-    fn diff_providers_seeds_new_ones_announces_crossings_and_prunes_gone_ones() {
-        let s = settings();
-        let zai = provider("zai", "zai");
-        let local = provider("local", "Local model");
-        let failing = usage(100, 30);
-        let healthy = usage(100, 1);
-        let table =
-            |zai_usage: ProviderUsage| HashMap::from([("zai".to_string(), zai_usage), ("local".to_string(), healthy.clone())]);
-        let read = |table: HashMap<String, ProviderUsage>| move |p: &Provider| table[&p.id].clone();
-
-        // First sight of both: nothing announces, both are seeded with their current state.
-        let (events, next) = diff_providers(
-            &[zai.clone(), local.clone()],
-            &HashMap::new(),
-            &s,
-            read(table(failing.clone())),
-        );
-        assert!(events.is_empty(), "first sight only seeds");
-        assert_eq!(next, HashMap::from([("zai".to_string(), true), ("local".to_string(), false)]));
-
-        // Holding is not an edge.
-        let (events, _) = diff_providers(&[zai.clone(), local.clone()], &next, &s, read(table(failing.clone())));
-        assert!(events.is_empty());
-
-        // Clearly recovered re-arms; the next crossing announces once, about the right provider.
-        let (_, armed) = diff_providers(&[zai.clone(), local.clone()], &next, &s, read(table(usage(100, 5))));
-        assert!(!armed["zai"]);
-        let (events, _) = diff_providers(&[zai.clone(), local.clone()], &armed, &s, read(table(failing.clone())));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].provider.id, "zai");
-        assert_eq!(events[0].provider.name, "zai");
-        assert_eq!(events[0].health.failure_pct, 30.0);
-        assert_eq!(events[0].usage.requests, 100);
-
-        // A provider no longer in providers.json leaves the map, so it cannot grow forever.
-        let (_, next) = diff_providers(std::slice::from_ref(&local), &armed, &s, read(table(failing.clone())));
-        assert!(!next.contains_key("zai"));
-    }
-
-    #[test]
-    fn the_provider_text_and_payload_carry_no_repository_content() {
-        assert_eq!(
-            Event::provider_text("zai", 29.4, None),
-            "zai is failing 29.4% of its requests"
-        );
-        assert_eq!(
-            Event::provider_text("zai", 29.4, Some("quota_exhausted")),
-            "zai is failing 29.4% of its requests; last failure quota_exhausted"
-        );
-        let long_name: String = "z".repeat(MAX_TEXT + 50);
-        assert_eq!(
-            Event::provider_text(&long_name, 29.4, None).chars().count(),
-            MAX_TEXT + 1,
-            "capped, ellipsis included, like the session text"
-        );
-
-        let at = DateTime::from_timestamp(1_789_000_000, 0).unwrap();
-        let tallies = ProviderUsage {
-            requests: 1_000,
-            failures: 294,
-            duration_ms: 48_000_000,
-            ..Default::default()
-        };
-        let verdict = health(&tallies);
-        let body = serde_json::to_string(&provider_payload("zai", "zai", tallies.requests, &verdict, at)).unwrap();
-        assert_eq!(
-            Event::provider_text("zai", verdict.failure_pct, verdict.last_failure.as_deref()),
-            "zai is failing 29.4% of its requests"
-        );
-        assert!(!body.contains("acme"), "a provider event carries no repository: {body}");
-        let value: Value = serde_json::from_str(&body).unwrap();
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            ["at", "colony", "event", "pr_url", "provider", "text"],
-            "one shape with the session payload"
-        );
-        assert!(value["colony"].is_null(), "no colony behind a provider event: {body}");
-        assert!(value["pr_url"].is_null());
-        assert_eq!(value["event"], "provider_degraded");
-        let mut provider_keys: Vec<&str> = value["provider"].as_object().unwrap().keys().map(String::as_str).collect();
-        provider_keys.sort_unstable();
-        assert_eq!(
-            provider_keys,
-            ["avg_latency_ms", "failure", "failure_pct", "id", "name", "requests"]
-        );
-        assert_eq!(
-            value["provider"],
-            json!({
-                "id": "zai", "name": "zai", "failure_pct": 29.4, "avg_latency_ms": 48_000, "requests": 1_000,
-                "failure": null
-            })
-        );
-
-        // A provider the gateway has seen fail names the code it last failed with.
-        let mut last = verdict.clone();
-        last.last_failure = Some("unreachable".into());
-        let payload = provider_payload("zai", "zai", tallies.requests, &last, at);
-        assert_eq!(payload["provider"]["failure"], "unreachable");
-        assert_eq!(
-            payload["text"],
-            "zai is failing 29.4% of its requests; last failure unreachable"
-        );
-    }
-
-    #[test]
-    fn the_notify_module_schema_defaults_to_every_event_and_no_channel() {
-        let schema = crate::modules::providers("notify", &[]).remove(0).schema;
-        for key in ["on_question", "on_attention", "on_failed", "on_pull_request", "on_provider"] {
-            assert_eq!(schema["properties"][key]["default"], json!(true), "{key} is on by default");
-        }
-        assert_eq!(schema["properties"]["desktop"]["default"], json!(false));
-        assert_eq!(schema["properties"]["webhook_url"]["default"], json!(""));
-        assert!(
-            schema["properties"]["webhook_url"]["description"]
-                .as_str()
-                .is_some_and(|d| d.contains("no repository content")),
-            "the description says what the webhook carries"
-        );
-    }
-
-    #[test]
-    fn notify_settings_survive_a_round_trip_through_the_module_choice() {
-        let mut choice = crate::config::ModuleChoice {
-            provider: "default".into(),
-            enabled: true,
-            settings: Map::new(),
-        };
-        choice.settings.insert("desktop".into(), json!(true));
-        let schema = crate::modules::schema_for("notify", "default", &[]);
-        let flag = |key: &str| {
-            crate::config::setting(&choice, &schema, key)
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        };
-        assert!(flag("desktop"), "an explicit setting wins");
-        assert!(flag("on_failed"), "a missing setting falls back to the schema default");
-    }
-
-    /// A notify candidate as `announce` builds one, for the fact-key rules.
-    fn notify_candidate(event: Event, session: &str, open_question: Option<&str>) -> ledger::Candidate {
-        ledger::Candidate {
-            kind: ledger::Kind::Notify,
-            topic: format!("{}:{session}", event.name()),
-            class: event.name().to_string(),
-            fact: fact_key(event, session, open_question),
-            colony: Some(session.to_string()),
-            priority: matches!(event, Event::Question),
-        }
-    }
-
-    #[test]
-    fn a_stall_and_an_out_of_nudges_are_two_facts_so_both_announce_within_the_hour() {
-        let limits = ledger::Limits::for_kind(ledger::Kind::Notify);
-        let t0 = DateTime::from_timestamp(1_789_000_000, 0).unwrap();
-        let stalled = notify_candidate(Event::Attention("stalled"), "abc123", None);
-        let nudged = notify_candidate(Event::Attention("nudges_exhausted"), "abc123", None);
-        assert_ne!(stalled.fact, nudged.fact, "two reasons are two facts, even for one colony");
-        let mut st = ledger::LedgerState::default();
-        assert_eq!(ledger::check(&st, &limits, &stalled, t0), ledger::Verdict::Deliver);
-        ledger::record(&mut st, &stalled, &ledger::Verdict::Deliver, t0);
-        // The class-only key would have dropped this as a duplicate of the stall; past the topic
-        // cooldown, the second reason announces too — nothing was consumed by the first edge.
-        assert_eq!(
-            ledger::check(&st, &limits, &nudged, t0 + chrono::Duration::minutes(15)),
-            ledger::Verdict::Deliver
-        );
-    }
-
-    #[test]
-    fn the_fact_key_names_the_question_or_nothing_and_never_the_class_alone() {
-        assert_eq!(
-            fact_key(Event::Question, "abc123", Some("q7")).as_deref(),
-            Some("question:abc123:q7")
-        );
-        assert_eq!(
-            fact_key(Event::Question, "abc123", None),
-            None,
-            "no question to name claims nothing"
-        );
-        assert_eq!(
-            fact_key(Event::Attention("stalled"), "abc123", None).as_deref(),
-            Some("attention:stalled:abc123")
-        );
-        for event in [Event::Failed, Event::PullRequest, Event::NeedsRebase, Event::ProviderDegraded] {
-            assert_eq!(
-                fact_key(event, "abc123", Some("q7")),
-                None,
-                "{event:?} claims nothing: the edge fires once"
-            );
-        }
-    }
-
-    /// Issue #984: an account entering trouble is one notification however many colonies are on it,
-    /// a repeat is quiet, and clearing announces the resolution once.
-    #[test]
-    fn an_account_entering_trouble_announces_once_per_state_change() {
-        let trouble = |state| crate::account_health::Trouble {
-            state,
-            class: "auth".into(),
-            status: 401,
-            since: Utc::now(),
-            cred_stamp: None,
-        };
-        let now = vec![("default".to_string(), trouble(crate::account_health::State::NeedsSignIn))];
-        let (edges, states) = account_edges(&BTreeMap::new(), &now, |_| 10);
-        assert_eq!(
-            edges,
-            vec![AccountEdge::Entered {
-                account: "default".into(),
-                state: crate::account_health::State::NeedsSignIn,
-                waiting: 10,
-            }],
-            "ten colonies on one account is one line"
-        );
-        let (again, states) = account_edges(&states, &now, |_| 10);
-        assert!(again.is_empty(), "the same state is not an edge");
-        let (cleared, _) = account_edges(&states, &[], |_| 0);
-        assert_eq!(
-            cleared,
-            vec![AccountEdge::Cleared {
-                account: "default".into()
-            }]
-        );
-    }
-
-    /// Issue #984: the per-colony path stays quiet for a colony parked waiting on an account — the
-    /// host-level account edge is the one line, so ten waiting colonies are not ten notifications.
-    #[test]
-    fn a_colony_waiting_on_an_account_does_not_notify_per_colony() {
-        let s = settings();
-        assert!(
-            decide(
-                &s,
-                Some(&seen(SessionStatus::Running, None)),
-                &seen(SessionStatus::Parked, Some(crate::account_health::WAITING_FOR_ACCOUNT_REASON)),
-            )
-            .is_empty(),
-            "the account wait is announced once, host-level, not per colony"
-        );
-    }
-}
+mod tests;

@@ -1,0 +1,47 @@
+[package]
+name = "colonizer-observability"
+# Versioned with colonizer-harness: the mothership checks the add-on's version before it spawns it
+# (docs/design/observability.md, Contract). Not published to crates.io; it ships as its own release
+# tarball, so the mothership never links OpenTelemetry or protobuf code.
+version = "0.2.7"
+edition = "2024"
+description = "Colonizer's observability add-on: OTLP export of a mothership's logs, traces and metrics"
+license = "MIT"
+repository = "https://github.com/Colonizer-dev/harness"
+homepage = "https://colonizer.dev"
+publish = false
+
+[lib]
+name = "colonizer_observability"
+
+# The add-on the mothership spawns (docs/design/observability.md, Supervision).
+[[bin]]
+name = "colonizer-observability"
+path = "src/main.rs"
+
+[dependencies]
+colonizer-redact = { version = "0.2.7", path = "../colonizer-redact" }
+# gzip for OTLP/HTTP `Content-Encoding: gzip`.
+flate2 = "1"
+# The OTLP messages only: no SDK, no tonic client (`gen-tonic-messages` is prost structs alone).
+# `with-serde` gives the OTLP/JSON mapping (hex ids, string 64-bit integers); encode.rs fixes the rest.
+opentelemetry-proto = { version = "0.33", default-features = false, features = ["gen-tonic-messages", "logs", "trace", "metrics", "with-serde"] }
+# The same major opentelemetry-proto 0.33 generates against; used to encode and size messages.
+prost = "0.14"
+# RFC 3339 `ts` stamps on the ledger lines; the mothership's own version.
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+# OTLP/HTTP transport: the mothership's own version and features, so no second TLS stack or major.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
+# HMAC-SHA256 for `repo_names = hashed` and the key's randomness; the mothership's own version.
+ring = "0.17.14"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "io-std", "io-util", "sync"] }
+
+[dev-dependencies]
+# The fake OTLP collector the exporter's tests send to, on 127.0.0.1.
+axum = "0.8.9"
+# The secret-canary test kit looks for a canary's base64 forms too.
+base64 = "0.23"
+# A paused clock for the tailer's rate-limit test.
+tokio = { version = "1.53.1", features = ["test-util"] }

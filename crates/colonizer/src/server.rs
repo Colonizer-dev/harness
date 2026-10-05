@@ -66,14 +66,38 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     // a missing `Origin` is rejected rather than trusted (see #375), and only an authenticated
     // request passes at all.
     let upgrade = req.headers().contains_key(header::UPGRADE);
-    let bearer_ok = auth::bearer_token(req.headers()).is_some_and(|token| auth::tokens_match(&token, &app.api_token));
+    // The install token never authenticates a request that came through the tunnel (review finding
+    // R3): it would cross the relay in cleartext and outlive every reset. Through the tunnel the
+    // owner signs in with a link credential instead (remote.rs), which Reset link rotates; a link
+    // credential, in turn, authenticates nothing that did not come through the tunnel.
+    let bearer = auth::bearer_token(req.headers());
     let cookie = auth::cookie_token(req.headers());
-    let cookie_ok = cookie
+    let install_bearer = bearer
         .as_deref()
         .is_some_and(|token| auth::tokens_match(token, &app.api_token));
+    let install_cookie = cookie
+        .as_deref()
+        .is_some_and(|token| auth::tokens_match(token, &app.api_token));
+    if tunnelled && (install_bearer || install_cookie) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "this machine's API token is not accepted through the remote link; sign this browser in from Settings → Remote access",
+        )
+            .into_response();
+    }
+    let bearer_ok = install_bearer;
+    let cookie_ok = install_cookie;
+    let (link, link_bearer) = if tunnelled {
+        match bearer.as_deref().and_then(|token| app.remote.authenticate_link(token)) {
+            Some(link) => (Some(link), true),
+            None => (cookie.as_deref().and_then(|token| app.remote.authenticate_link(token)), false),
+        }
+    } else {
+        (None, false)
+    };
     // A paired phone's own cookie (phone.rs, issue #746): the cockpit like the owner's cookie, minus
     // the routes that mint, approve or revoke access. Revoking the phone ends it on the next request.
-    let phone = match (bearer_ok || cookie_ok, cookie.as_deref()) {
+    let phone = match (bearer_ok || cookie_ok || link.is_some(), cookie.as_deref()) {
         (false, Some(token)) => app.phones.authenticate(token),
         _ => None,
     };
@@ -84,10 +108,11 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         )
             .into_response();
     }
-    if bearer_ok || cookie_ok || phone.is_some() {
+    if bearer_ok || cookie_ok || link.is_some() || phone.is_some() {
         // Cookie-authenticated writes and upgrades keep the same-origin requirement; header
         // authentication already proves a non-browser caller.
-        if !bearer_ok && (req.method() != Method::GET || upgrade) {
+        let header_auth = bearer_ok || link_bearer;
+        if !header_auth && (req.method() != Method::GET || upgrade) {
             let same_origin = if tunnelled {
                 // Through the tunnel the cockpit is served from https://<host>, and nothing else.
                 req.headers().get(header::ORIGIN).and_then(|o| o.to_str().ok()) == Some(format!("https://{host}").as_str())
@@ -104,7 +129,13 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         req.extensions_mut().insert(auth::Authenticated(true));
         // Who the activity log says acted: the browser (cookie) or a token holder (the CLI, a script).
         req.extensions_mut()
-            .insert(if bearer_ok { auth::Via::Api } else { auth::Via::Cockpit });
+            .insert(if header_auth { auth::Via::Api } else { auth::Via::Cockpit });
+        if let Some(link) = link {
+            // The owner, through the link: revocable as one device, and all at once by a reset.
+            let key = link.revocation_key();
+            req.extensions_mut().insert(link);
+            return run_revocable(&key, req, next).await;
+        }
         if let Some(phone) = phone {
             let key = phone.revocation_key();
             req.extensions_mut().insert(phone);
@@ -135,6 +166,10 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     }
     // No valid token: the reduced status, the sign-in link's cookie, or how to sign in.
     let path = req.uri().path().to_string();
+    // A tunnelled request whose link or phone credential did not authenticate (revoked, rotated by a
+    // reset, or never real) is answered as before, but marked, so the relay counts it toward its
+    // throttle and sends that browser to its pair page (#1086). The open doors below still serve it.
+    let stale_credential = tunnelled && remote::presents_credential(req.headers());
     // The UHP surface answers its own refusals as envelopes, not pages (issue #650). Discovery is
     // how a client finds out this is a UHP server at all, so it is served before any credential
     // check; every other `/uhp` path gets the envelope's authentication error.
@@ -151,10 +186,15 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
-        // The fleet pairing's two open doors (fleet_members.rs): their whole authentication is
+        // The fleet pairing's three open doors (fleet_members.rs): their whole authentication is
         // what the body carries — a single-use invite code, a pairing id plus the nonce only its
-        // joiner holds — so a request with no token is admitted to exactly those two.
-        if req.method() == Method::POST && (path == "/api/fleet/peer/redeem" || path.starts_with("/api/fleet/peer/pairings/")) {
+        // joiner holds, a member id plus the refresh credential approval minted (#762) — so a
+        // request with no token is admitted to exactly those three.
+        if req.method() == Method::POST
+            && (path == "/api/fleet/peer/redeem"
+                || path == "/api/fleet/peer/refresh"
+                || path.starts_with("/api/fleet/peer/pairings/"))
+        {
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
@@ -178,7 +218,8 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         {
             return crate::client_error(StatusCode::FORBIDDEN, "removed from the fleet").into_response();
         }
-        return (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+        let res = (StatusCode::UNAUTHORIZED, auth::UNAUTHORIZED_BODY).into_response();
+        return if stale_credential { remote::mark_rejected(res) } else { res };
     }
     // The Prometheus endpoint (issue #852) is scraped by a machine, not a browser: a request with
     // no token is a plain 401, never the sign-in page, so a scraper's error says what to do.
@@ -192,6 +233,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
         return next.run(req).await;
     }
     if req.method() == Method::GET
+        && !tunnelled
         && let Some(token) = auth::query_token(req.uri().query())
         && auth::tokens_match(&token, &app.api_token)
     {
@@ -209,7 +251,9 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     // presentation, which binds the pairing to this browser and shows the code to confirm in the
     // local cockpit; no credential is handed over yet. A wrong, spent or expired invite falls
     // through to the locked page, saying nothing about why, and counts against the rate limit.
-    // Already-authenticated requests never reach this, so they never spend an invite.
+    // Already-authenticated requests never reach this, so they never spend an invite. Through the
+    // tunnel, an invite that opens nothing is marked like a rejected credential (#1086).
+    let mut rejected = stale_credential;
     if req.method() == Method::GET
         && let Some(code) = auth::query_param(req.uri().query(), "pair")
     {
@@ -218,9 +262,9 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
-        match app.phones.open(&code, user_agent) {
+        match app.phones.open(&code, user_agent, tunnelled) {
             Ok(Some(opened)) => return crate::phone::pairing_response(&opened),
-            Ok(None) => {}
+            Ok(None) => rejected |= tunnelled,
             Err(crate::phone::Limited) => {
                 return (
                     StatusCode::TOO_MANY_REQUESTS,
@@ -233,7 +277,7 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
     let mut res = (StatusCode::UNAUTHORIZED, Html(auth::locked_page())).into_response();
     res.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    res
+    if rejected { remote::mark_rejected(res) } else { res }
 }
 
 /// Runs a request a revocable credential authenticated — a paired phone or a scoped API token —
@@ -367,6 +411,7 @@ pub(crate) fn api_routes() -> Router<Shared> {
         .merge(crate::merge_train::routes())
         .merge(crate::modules::routes())
         .merge(crate::notify::routes())
+        .merge(crate::observability::routes())
         .merge(crate::orgs::routes())
         .merge(crate::packages::routes())
         .merge(crate::phone::routes())
@@ -435,6 +480,7 @@ async fn start_tasks(app: &Shared, router: &Router) {
     crate::merge_train::start_tasks(app);
     crate::mesh::start_tasks(app).await;
     crate::notify::start_tasks(app);
+    crate::observability::start_tasks(app);
     crate::publish::start_tasks(app);
     crate::queue::start_tasks(app);
     crate::reclaim::start_tasks(app);
@@ -473,13 +519,20 @@ pub(crate) async fn serve() -> Result<()> {
         }
         Err(e) => return Err(e).with_context(|| format!("cannot bind {}", cfg.bind)),
     };
-    for dir in ["sessions", "repos", "worktrees", "memory", "plugins"] {
+    for dir in ["repos", "worktrees", "memory", "plugins"] {
         std::fs::create_dir_all(cfg.data_dir.join(dir))?;
     }
-    // The one store this run reads and writes through (docs/session-store.md): built once here and
-    // threaded into startup and the `App`, so every later save and append answers by the same name.
-    let store: Arc<dyn crate::store::SessionStore> = Arc::new(crate::store::LocalDirStore::new(cfg.data_dir.clone()));
-    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &cfg.data_dir.join("sessions.json")).await?;
+    // The one store this run reads and writes through (docs/session-store.md): the backend
+    // `session-store.json` names (the local disk under the data dir when there is none), opened once
+    // here and threaded into startup and the `App`, so every later save and append answers by the
+    // same name. Its local root holds the session directories a microVM mounts.
+    std::fs::create_dir_all(crate::store::local_sessions_root(&cfg.data_dir))?;
+    let backend = crate::store_config::load(&cfg.config_dir)?;
+    let store = backend.open(&cfg).await?;
+    if backend != crate::store_config::Backend::default() {
+        println!("sessions: using {}", backend.describe(&cfg.data_dir));
+    }
+    let (mut sessions, corrupt) = load_sessions(store.as_ref(), &crate::store::local_index(&cfg.data_dir)).await?;
     for s in &mut sessions {
         if s.org.is_empty() {
             s.org = s.repo.split('/').next().unwrap_or_default().to_string();
@@ -1199,6 +1252,7 @@ mod tests {
                 owner_url: "http://owner.example:7878".into(),
                 member_id: "mem_1".into(),
                 token: "col_secret_member_token".into(),
+                refresh: None,
             }))
             .await;
         let member = auth_router(&app)

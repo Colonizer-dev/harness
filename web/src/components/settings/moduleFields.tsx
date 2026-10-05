@@ -106,7 +106,7 @@ const megabytes = (bytes: number) => `${Math.round(bytes / 1048576)} MB`;
 /** Shown in the agent pane while Headroom is switched on, or while its download runs or has failed. */
 export function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadroom> }) {
   const { status, error, start } = headroom;
-  const box = "flex flex-wrap items-center gap-2 rounded-xl border border-border px-3.5 py-2.5 text-[12.5px]";
+  const box = "flex flex-wrap items-center gap-2 rounded-xl border border-border px-3.5 py-2.5 text-small-lg";
 
   if (error) {
     return (
@@ -132,7 +132,7 @@ export function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadr
     case "unpacking": {
       const pct = status.total ? Math.min(100, Math.round((status.bytes * 100) / status.total)) : null;
       return (
-        <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-muted">
+        <div className="rounded-xl border border-border px-3.5 py-2.5 text-small-lg text-muted">
           <div className="mb-1.5 flex flex-wrap items-center gap-2">
             <Spinner />
             <span>
@@ -182,7 +182,7 @@ export function HeadroomRow({ headroom }: { headroom: ReturnType<typeof useHeadr
 /** Shown in the agent pane while Jev compaction is switched on: the data-egress and cost warning. */
 export function JevCompactionNotice() {
   return (
-    <div className="rounded-xl border border-border px-3.5 py-2.5 text-[12.5px] text-warn">
+    <div className="rounded-xl border border-border px-3.5 py-2.5 text-small-lg text-warn">
       Sends this colony&apos;s conversation and tool-call history — file paths, command output — to TypeSafe
       (api.typesafe.ai) at each compaction. TypeSafe bills it directly: the cost isn&apos;t tracked by the
       Colonizer gateway or shown in colony cost. Read TypeSafe&apos;s data terms before using it on private repos.
@@ -227,10 +227,10 @@ export function VoiceKeyRow({ provider, name }: { provider: string; name: string
 
   return (
     <div className="space-y-2 py-2.5">
-      <label htmlFor={id} className="block text-[13px] font-medium">
+      <label htmlFor={id} className="block text-body-sm font-medium">
         {name} API key
       </label>
-      <p className="text-[12.5px] text-muted">{state} It stays on the Mothership: the browser sends audio there, never the key.</p>
+      <p className="text-small-lg text-muted">{state} It stays on the Mothership: the browser sends audio there, never the key.</p>
       <form
         className="flex flex-wrap gap-2"
         onSubmit={(e) => {
@@ -298,7 +298,7 @@ export function VoiceTestRow({ unsaved }: { unsaved: boolean }) {
         <Button disabled={busy || unsaved || !canRecord()} onClick={() => void run()}>
           {busy && <Spinner />} Test microphone
         </Button>
-        <span className="text-[12.5px] text-muted">
+        <span className="text-small-lg text-muted">
           {unsaved
             ? "Save first: the test uses the saved service."
             : state.phase === "recording"
@@ -311,12 +311,12 @@ export function VoiceTestRow({ unsaved }: { unsaved: boolean }) {
         </span>
       </div>
       {state.phase === "done" && (
-        <p role="status" className="text-[13px] text-ok">
+        <p role="status" className="text-body-sm text-ok">
           {state.text ? `Heard: “${state.text}”` : "The service answered, but heard nothing."}
         </p>
       )}
       {state.phase === "failed" && (
-        <p role="status" className="text-[12.5px] text-err">
+        <p role="status" className="text-small-lg text-err">
           {state.error}
         </p>
       )}
@@ -358,7 +358,7 @@ export function SettingField({
           type="text"
           defaultValue={entries.join(", ")}
           onBlur={(e) => onChange(e.target.value.split(",").map((entry) => entry.trim()).filter(Boolean))}
-          className={cx(inputClass, "font-mono text-[13px]")}
+          className={cx(inputClass, "font-mono text-body-sm")}
         />
       </Row>
     );
@@ -420,7 +420,7 @@ export function SettingField({
             if (!numeric) onChange(raw);
             else onChange(raw === "" ? undefined : field.type === "integer" ? Math.trunc(Number(raw)) : Number(raw));
           }}
-          className={cx(inputClass, numeric ? "w-32" : "font-mono text-[13px]")}
+          className={cx(inputClass, numeric ? "w-32" : "font-mono text-body-sm")}
         />
       )}
     </Row>

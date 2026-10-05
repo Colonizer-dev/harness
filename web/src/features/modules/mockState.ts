@@ -57,7 +57,7 @@ export function installModulesMockState(ms: MockState): void {
       provider: "claude-code",
       providers: [{ id: "claude-code", name: "Claude Code", description: "Claude Agent SDK runner", loop_tools: true }],
       enabled: true,
-      settings: { model: "", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
+      settings: { model: "claude-opus-5-5", subagent_model: "", background_model: "", plugins: "ecc", caveman: false, caveman_level: "full", headroom: false, rtk: false, jev_compaction: false },
       schema: {
         type: "object",
         properties: {
@@ -261,7 +261,7 @@ export function installModulesMockState(ms: MockState): void {
           spend_usd_per_colony: { type: "number", title: "Estimated spend per colony (USD)", minimum: 0.5, default: 5, description: "What one bug-hunt colony roughly burns, used to pace launches across the window" },
           max_live: { type: "integer", title: "Concurrent live burn-down colonies", minimum: 1, maximum: 8, default: 2, description: "Cap on how many burn-down colonies run at once" },
           repos: { type: "string", title: "Repositories to hunt in", default: "", description: "Comma-separated owner/repo list. Empty means burn-down is not configured and launches nothing" },
-          instructions: { type: "string", title: "Custom hunt instructions", default: "", description: "When empty, a built-in bug-hunt prompt is used" },
+          instructions: { type: "string", title: "Custom hunt instructions", default: "", description: "When empty, a built-in bug-hunt prompt focused on the next area this repository has not hunted yet (error handling, concurrency, input validation, resource leaks, auth, core flows, silent failures, API contracts) is used" },
         },
       },
     },

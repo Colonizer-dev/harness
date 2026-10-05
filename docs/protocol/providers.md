@@ -171,8 +171,9 @@ because a fallback request goes to the API as is — or, for quota exhaustion on
 configured provider that lists the model and speaks the same wire, which the gateway retries itself; see Quota
 exhaustion below. A cross-wire, unknown-provider, own-provider or unlisted fallback is a `400` on save, and only a
 Claude fallback reaches the colony's route, so only it covers an unreachable, timed-out or full connection). `quota` is where to read what is left in a prepaid token
-plan: `{url, pointer}` — a `GET` the health check makes with the provider's own credential, and a non-empty
-RFC 6901 JSON pointer starting with `/` into its answer — so `url` must sit on the base URL's origin (scheme,
+plan: `{url, pointer, limit_pointer?}` — a `GET` the health check makes with the provider's own credential, a non-empty
+RFC 6901 JSON pointer starting with `/` into its answer for the remaining count, and optionally a second
+pointer to the plan's total (answered as `quota.limit`) — so `url` must sit on the base URL's origin (scheme,
 host and port, since the credential is sent there) and is refused at save time anywhere
 else. `PUT /api/providers/{id}` with `quota` omitted keeps the saved probe, like `pricing`; an empty `url`
 clears it. The origin rule reaches the base URL itself: a save that moves a keyed provider to another
@@ -289,11 +290,17 @@ tried, and the original answer (without `x-colonizer-fallback`) stands. Failover
 provider's `fallback_model`, or everything at once with `COLONIZER_QUOTA_FALLBACK=0`.
 `GET /api/providers` carries `quota_exhausted` (`{reset_at, reset_unix}`, null while healthy) per
 provider, and there a quota-exhausted provider reads `health.degraded: true` whatever its failure rate
-says (the status poll's `model_providers` applies the plain rate rule only). `GET /api/status` carries `quota`: `{paused, kind, reason, reset_at, reset_unix, providers}` —
+says (the status poll's `model_providers` applies the plain rate rule only). `GET /api/status` carries `quota`: `{paused, kind, reason, reset_at, reset_unix, providers, provider_details}` —
 `paused` when every routable provider (every `used_by` non-empty one, or every provider when none
 is used) is exhausted — `kind: "provider"` — or when the Claude account itself hit a session,
-weekly, hourly or Opus limit — `kind: "account"`, with or without providers — with the earliest reset and the queue holder's own `reason`. A paused queue
-admits nothing; the overview banners the reason. A colony whose turn dies on an exhausted provider
+weekly, hourly or Opus limit — `kind: "account"`, with or without providers — with the earliest reset and the queue holder's own `reason`, which names providers by their display
+name. `provider_details` lists each exhausted plan as `{id, name, used_by}` — `used_by` in plain words
+(`orchestrator`, `subagents`, `background`, `small model`, `small tasks`, `large tasks`); an account
+pause carries one `anthropic` entry named `Claude` with the roles still on Claude models. A paused
+queue admits nothing; the cockpit banners it in its own words: the plan by name ("BytePlus plan
+limit reached" — only the Claude account itself is ever called Claude), the roles it affects, the
+reset as a local time and a countdown, and a parked-colony count and Resume all only when a colony
+is parked. A colony whose turn dies on an exhausted provider
 is parked ([#213]): `status` `parked` with a `parked` record (see `Session` above), the worktree
 kept, its slot released and `attention.reason` `provider_quota_exhausted`. The queue's 5 s tick
 resumes parked colonies whose provider recovered — reset passed, or the provider deleted — requeueing
@@ -386,6 +393,21 @@ configured (see **Provider fields**) gets `quota: {remaining, error}` on the sam
 URL is fetched with the provider's credential alongside the models check, and whatever goes wrong with
 it (`remaining: null`, the reason in `error`) never changes `reachable`: reading a plan balance is not
 a health check. No probe configured, no `quota` field.
+
+**Test request.** `POST /api/providers/{id}/test` sends a one-token request (`max_tokens: 1`, the
+provider's first listed model) through the route a colony's turn takes — `/v1/messages` on the
+anthropic wire, the translated `/v1/chat/completions` on the openai wire — joined to `base_url` as the
+gateway joins it, with the provider's credential and connection policy, and a 30 s timeout:
+
+```json
+{"ok": false, "url": "https://ark.example.com/api/coding/v1/chat/completions", "status": 404, "model": "ark-code", "latency_ms": 41, "error": "HTTP 404 (upstream answered 404 at …; check the provider's base URL)"}
+```
+
+`url` is the URL the request hit with userinfo and query removed. Settings → Providers runs it when a
+provider is added, or its base URL, wire or key changes, and shows the URL and status, so a base path
+that misses the provider's API root shows at setup ([#1018]). A provider with no listed model answers
+`ok: false` with nothing sent. On the gateway's own routes, an upstream `404` or `405` is logged with
+the same redacted URL, and on a translated route reaches the colony as `not_found_error` naming it.
 
 At colony start the mothership probes every used provider: each unreachable one logs a warning, or
 refuses the launch when the route has no fallback model.

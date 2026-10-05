@@ -74,11 +74,11 @@ export function DownloadableRow({
     <div className="flex items-start gap-3 px-3 py-2.5" data-download-state={item.state}>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[13.5px] font-medium">{item.name}</span>
+          <span className="text-body font-medium">{item.name}</span>
           <Badge tone="neutral">downloadable</Badge>
         </div>
-        {DOWNLOADABLE_ABOUT[item.name] && <div className="mt-0.5 line-clamp-2 text-[12px] text-muted">{DOWNLOADABLE_ABOUT[item.name]}</div>}
-        {line && <div className={`mt-0.5 text-[12px] ${item.state === "failed" ? "text-err" : "text-faint"}`}>{line}</div>}
+        {DOWNLOADABLE_ABOUT[item.name] && <div className="mt-0.5 line-clamp-2 text-small text-muted">{DOWNLOADABLE_ABOUT[item.name]}</div>}
+        {line && <div className={`mt-0.5 text-small ${item.state === "failed" ? "text-err" : "text-faint"}`}>{line}</div>}
         {share !== null && (
           <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-panel-3" role="progressbar" aria-valuenow={Math.round(share)} aria-valuemin={0} aria-valuemax={100}>
             <div className="h-full rounded-full bg-accent transition-[width] duration-500" style={{ width: `${share}%` }} />
@@ -203,7 +203,7 @@ export function SkillsetField({
   return (
     <div className="space-y-2.5 py-3">
       <div className="flex items-center gap-1">
-        <span className="text-[13.5px] font-medium">{label}</span>
+        <span className="text-body font-medium">{label}</span>
         {description && (
           <InfoButton label={label}>
             <p>{description}</p>
@@ -220,10 +220,10 @@ export function SkillsetField({
             aria-label={`${label}, comma-separated names`}
             className={inputClass}
           />
-          <span className="block text-[12px] text-err">Couldn't list skillsets ({error}); edit the names directly.</span>
+          <span className="block text-small text-err">Couldn't list skillsets ({error}); edit the names directly.</span>
         </div>
       ) : !listing ? (
-        <div className="flex h-9 items-center gap-2 text-[12.5px] text-muted">
+        <div className="flex h-9 items-center gap-2 text-small-lg text-muted">
           <Spinner /> Listing skillsets…
         </div>
       ) : (
@@ -240,23 +240,23 @@ export function SkillsetField({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-[13.5px] font-medium">{plugin.name}</span>
+                    <span className="text-body font-medium">{plugin.name}</span>
                     <PluginBadges
                       plugin={plugin}
                       downloaded={listing.downloadable?.some((d) => d.name === plugin.name && d.state === "installed") ?? false}
                     />
                   </div>
-                  {plugin.description && <div className="mt-0.5 line-clamp-2 text-[12px] text-muted">{plugin.description}</div>}
-                  <div className="mt-0.5 text-[12px] text-faint">{pluginCost(plugin)}</div>
+                  {plugin.description && <div className="mt-0.5 line-clamp-2 text-small text-muted">{plugin.description}</div>}
+                  <div className="mt-0.5 text-small text-faint">{pluginCost(plugin)}</div>
                 </div>
               </div>
             ))}
             {missing.map((name) => (
               <div key={name} className="flex items-center gap-3 px-3 py-2.5">
                 <Badge tone="err">missing</Badge>
-                <div className="min-w-0 flex-1 text-[13px]">
+                <div className="min-w-0 flex-1 text-body-sm">
                   <span className="font-medium [overflow-wrap:anywhere]">{name}</span>
-                  <span className="block text-[12px] text-muted">Not installed: a colony loading it fails to boot.</span>
+                  <span className="block text-small text-muted">Not installed: a colony loading it fails to boot.</span>
                 </div>
                 <Button size="sm" variant="ghost" onClick={() => toggle(name, false)}>
                   Remove
@@ -264,16 +264,16 @@ export function SkillsetField({
               </div>
             ))}
             {listing.plugins.length === 0 && missing.length === 0 && (
-              <p className="px-3 py-2.5 text-[12.5px] text-muted">No skillsets are installed.</p>
+              <p className="px-3 py-2.5 text-small-lg text-muted">No skillsets are installed.</p>
             )}
             {/* Offered for download until it is on disk; then it is a row above like any other. */}
             {graft.status && graft.status.state !== "installed" && !(graft.status.state === "local" && known.has("graft")) && (
               <DownloadableRow item={graft.status} onDownload={graft.start} starting={graft.starting} />
             )}
           </div>
-          <p className="text-[12px] text-faint">
+          <p className="text-small text-faint">
             Add your own by putting a Claude Code plugin directory in{" "}
-            <code className="font-mono text-[11.5px] [overflow-wrap:anywhere]">{listing.local_root}</code>.
+            <code className="font-mono text-meta-lg [overflow-wrap:anywhere]">{listing.local_root}</code>.
           </p>
         </>
       )}

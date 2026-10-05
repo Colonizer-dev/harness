@@ -47,25 +47,25 @@ export function DesktopPane({ back }: { back?: () => void }) {
     <Pane title="Desktop" subtitle="The cockpit as an app, and the mothership always there" back={back}>
       <div className="space-y-5">
         <section className="space-y-2">
-          <h4 className="text-[12.5px] font-semibold">Install the cockpit as an app</h4>
+          <h4 className="text-small-lg font-semibold">Install the cockpit as an app</h4>
           {standalone ? (
-            <p className="text-[12.5px] text-muted">You are using the installed app.</p>
+            <p className="text-small-lg text-muted">You are using the installed app.</p>
           ) : available ? (
             <div className="flex flex-wrap items-center gap-3">
               <Button variant="primary" onClick={() => void install()}>
                 Install app
               </Button>
-              <span className="text-[12.5px] text-muted">Its own window and Dock/taskbar icon; same cockpit, same sign-in.</span>
+              <span className="text-small-lg text-muted">Its own window and Dock/taskbar icon; same cockpit, same sign-in.</span>
             </div>
           ) : showIosInstallHint() ? (
             // On iOS the install and the push story are the same story: Add to Home Screen.
             <IosHomeScreenSheet />
           ) : isSafari() ? (
-            <p className="text-[12.5px] text-muted">
+            <p className="text-small-lg text-muted">
               In Safari: <Code>File → Add to Dock</Code>. It opens in its own window with the Colonizer icon.
             </p>
           ) : (
-            <p className="text-[12.5px] text-muted">
+            <p className="text-small-lg text-muted">
               Your browser has not offered to install yet. In Chrome or Edge use the install icon in the address bar (or{" "}
               <Code>⋮ → Cast, save and share → Install page as app</Code>); in Safari, <Code>File → Add to Dock</Code>.
             </p>
@@ -73,15 +73,15 @@ export function DesktopPane({ back }: { back?: () => void }) {
         </section>
 
         <section className="space-y-2">
-          <h4 className="text-[12.5px] font-semibold">Start at login</h4>
+          <h4 className="text-small-lg font-semibold">Start at login</h4>
           {loginError ? (
-            <p className="text-[12.5px] text-err">{loginError}</p>
+            <p className="text-small-lg text-err">{loginError}</p>
           ) : !login ? (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
+            <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Loading…
             </p>
           ) : login.platform === "unsupported" ? (
-            <p className="text-[12.5px] text-muted">Start at login is available on macOS and Linux.</p>
+            <p className="text-small-lg text-muted">Start at login is available on macOS and Linux.</p>
           ) : (
             <>
               <Row id="login-item-switch" label="Start Colonizer at login" inline>
@@ -94,13 +94,13 @@ export function DesktopPane({ back }: { back?: () => void }) {
                   onChange={(checked) => void setEnabled(checked)}
                 />
               </Row>
-              <p className="text-[12.5px] text-muted">
+              <p className="text-small-lg text-muted">
                 {login.platform === "macos" ? "A LaunchAgent" : "A systemd user unit"} runs <Code>{login.binary}</Code> when you log in and
                 restarts it only if it crashes; it logs to <Code>{login.log}</Code>.{" "}
                 {login.pid ? `Running now as pid ${login.pid}.` : ""} Turning it off never stops the running mothership or its colonies.
                 Same as <Code>colonizer login-item enable|disable</Code>.
               </p>
-              {login.note && <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-[12.5px] text-muted">{login.note}</p>}
+              {login.note && <p className="rounded-xl border border-border bg-panel-2 px-3.5 py-2.5 text-small-lg text-muted">{login.note}</p>}
             </>
           )}
         </section>

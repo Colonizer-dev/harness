@@ -467,7 +467,8 @@ fn range_of(sessions: &[Session]) -> (Option<DateTime<Utc>>, Option<DateTime<Utc
 
 /// The colony records from the data dir's `sessions.json`; missing on a fresh install means none.
 pub(crate) fn read_sessions(data_dir: &Path) -> anyhow::Result<Vec<Session>> {
-    match std::fs::read(data_dir.join("sessions.json")) {
+    // The local working copy's index: a local command with no mothership reads the disk directly.
+    match std::fs::read(crate::store::local_index(data_dir)) {
         Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e.into()),
@@ -481,7 +482,7 @@ fn collect_session_logs(data_dir: &Path, s: &Session, staged: &mut Vec<Staged>) 
     if !is_safe_segment(&s.id) {
         return Ok(());
     }
-    let dir = data_dir.join("sessions").join(&s.id);
+    let dir = crate::store::local_session_dir(data_dir, &s.id);
     let mut taken: Vec<String> = Vec::new();
     for name in LOG_BASENAMES {
         match std::fs::read(dir.join(name)) {

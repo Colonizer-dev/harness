@@ -124,6 +124,7 @@ async fn a_pull_request_whose_ci_ran_and_failed_is_never_merged_by_this_path() {
             },
             dry: false,
             calls: 0,
+            quiet: Duration::from_secs(600),
         }
         .plan(&pending),
         Plan::WaitCi

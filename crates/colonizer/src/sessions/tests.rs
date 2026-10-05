@@ -77,6 +77,7 @@ pub(crate) fn colony(org: &str, status: SessionStatus) -> Session {
         resume_note: None,
         prewarm: None,
         supply_chain: None,
+        supply_chain_targets: Vec::new(),
         superseded: None,
         was_suspended: false,
         last_activity_at: None,
@@ -168,7 +169,11 @@ pub(crate) use crate::tests::test_app;
 
 /// A throwaway App with one colony in it, over a temp directory (as in memory.rs).
 pub(crate) async fn app_with_colony(id: &str, status: SessionStatus) -> (Shared, PathBuf) {
+    // Resolved with realpath: on macOS the temp dir is under /var, a symlink to /private/var, and
+    // git reports worktree paths resolved, so an unresolved root fails `create_worktree`'s check.
     let root = std::env::temp_dir().join(format!("colonizer-sessions-{}", short_id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
     let app = test_app(&root);
     let mut s = colony("acme", status);
     s.id = id.to_string();

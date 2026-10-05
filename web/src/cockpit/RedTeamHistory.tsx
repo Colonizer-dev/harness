@@ -138,10 +138,10 @@ export function HistoryBody({
     <div className="flex max-h-[calc(100dvh-24px)] flex-col">
       <div className="flex shrink-0 items-start gap-3 border-b border-border px-5 py-4">
         <div className="min-w-0 flex-1">
-          <h2 id="redteam-history-title" className="text-[16px] font-semibold">
+          <h2 id="redteam-history-title" className="text-title-sm font-semibold">
             Red-team history · {org}
           </h2>
-          <p className="mt-0.5 text-[12.5px] tabular-nums text-muted">
+          <p className="mt-0.5 text-small-lg tabular-nums text-muted">
             {mine.length} {mine.length === 1 ? "run" : "runs"} · {live} live · {formatCost(spent)} spent
           </p>
         </div>
@@ -155,25 +155,25 @@ export function HistoryBody({
 
       <div className="scroll-thin min-h-0 flex-1 space-y-6 overflow-y-auto px-5 py-4">
         <section aria-label="schedules">
-          <h3 className="mb-2 text-[11.5px] font-semibold uppercase tracking-wide text-faint">Schedules</h3>
+          <h3 className="mb-2 text-meta-lg font-semibold uppercase tracking-wide text-faint">Schedules</h3>
           {schedules === null ? (
-            <p className="flex items-center gap-2 text-[13px] text-muted">
+            <p className="flex items-center gap-2 text-body-sm text-muted">
               <Spinner /> Loading…
             </p>
           ) : schedules.length === 0 ? (
-            <p className="text-[13px] text-muted">No schedules. Pick Weekly or Monthly in the wizard to add one.</p>
+            <p className="text-body-sm text-muted">No schedules. Pick Weekly or Monthly in the wizard to add one.</p>
           ) : (
             <ul className="divide-y divide-border rounded-xl border border-border">
               {schedules.map((s) => (
                 <li key={s.id} className={cx("flex flex-wrap items-center gap-x-4 gap-y-1 px-3.5 py-3", !s.enabled && "opacity-60")}>
                   <div className="min-w-0 flex-1 basis-60">
-                    <div className="text-[13.5px] font-medium">{describeCadence(s.cadence)}</div>
-                    <div className="truncate text-[12px] text-muted">
+                    <div className="text-body font-medium">{describeCadence(s.cadence)}</div>
+                    <div className="truncate text-small text-muted">
                       {s.repos.map((r) => r.split("/")[1]).join(", ")} · {s.swarm_size} hunters{s.model ? ` · ${s.model}` : ""}
                       {s.autofix ? " · autofix" : ""}
                       {presetOf(s) === "security" ? " · security" : ""}
                     </div>
-                    <div className="text-[12px] text-faint">
+                    <div className="text-small text-faint">
                       {s.enabled ? `Next ${new Date(s.next_run_at).toLocaleString()}` : "Paused"}
                       {s.last_run_at ? ` · last ${new Date(s.last_run_at).toLocaleDateString()}` : ""}
                       {s.last_result ? ` · ${s.last_result}` : ""}
@@ -192,9 +192,9 @@ export function HistoryBody({
         </section>
 
         <section aria-label="runs">
-          <h3 className="mb-2 text-[11.5px] font-semibold uppercase tracking-wide text-faint">Runs</h3>
+          <h3 className="mb-2 text-meta-lg font-semibold uppercase tracking-wide text-faint">Runs</h3>
           {mine.length === 0 ? (
-            <p className="text-[13px] text-muted">No red-team runs for {org} yet.</p>
+            <p className="text-body-sm text-muted">No red-team runs for {org} yet.</p>
           ) : (
             <ul className="divide-y divide-border rounded-xl border border-border">
               {mine.map((r) => {
@@ -205,13 +205,13 @@ export function HistoryBody({
                 return (
                   <li key={r.id} className="px-3.5 py-3">
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                      <span className="text-[13.5px] font-medium">{r.repo.split("/")[1] ?? r.repo}</span>
-                      <span className={cx("rounded-full px-2 py-px text-[11px] font-medium", active ? "bg-accent-soft text-accent" : r.state === "done" ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{r.state}</span>
-                      {presetOf(r) === "security" && <span className="rounded-full bg-err/15 px-2 py-px text-[11px] font-medium text-err">security</span>}
-                      {r.schedule_id && <span className="text-[11.5px] text-faint">scheduled</span>}
-                      <span className="ml-auto text-[12px] tabular-nums text-muted">{new Date(r.created_at).toLocaleString()}</span>
+                      <span className="text-body font-medium">{r.repo.split("/")[1] ?? r.repo}</span>
+                      <span className={cx("rounded-full px-2 py-px text-meta font-medium", active ? "bg-accent-soft text-accent" : r.state === "done" ? "bg-ok/15 text-ok" : "bg-panel-3 text-muted")}>{r.state}</span>
+                      {presetOf(r) === "security" && <span className="rounded-full bg-err/15 px-2 py-px text-meta font-medium text-err">security</span>}
+                      {r.schedule_id && <span className="text-meta-lg text-faint">scheduled</span>}
+                      <span className="ml-auto text-small tabular-nums text-muted">{new Date(r.created_at).toLocaleString()}</span>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] tabular-nums text-muted">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-small tabular-nums text-muted">
                       <span>{r.hunter === "swarm" || !r.hunter ? "Colony swarm" : r.hunter} · {r.hunters.length || r.swarm_size} hunters</span>
                       {(r.model || r.subagent_model) && <span>{[r.model, r.subagent_model].filter(Boolean).join(" / ")}</span>}
                       <span>
@@ -231,7 +231,7 @@ export function HistoryBody({
                               onOpenColony(h.session_id);
                             }}
                             title={h.focus}
-                            className="cursor-pointer rounded-full border border-border bg-transparent px-2 py-0.5 text-[11.5px] text-muted hover:text-text"
+                            className="cursor-pointer rounded-full border border-border bg-transparent px-2 py-0.5 text-meta-lg text-muted hover:text-text"
                           >
                             hunter {i + 1}
                           </button>
@@ -245,8 +245,8 @@ export function HistoryBody({
                     )}
                     {r.prescan && <SecurityReport prescan={r.prescan} />}
                     {synth && (
-                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
-                        <span className={cx("rounded-full px-2 py-px text-[11px] font-medium", TONE_PILL[RED_TEAM_SYNTHESIS[synth.state].tone])}>{RED_TEAM_SYNTHESIS[synth.state].label}</span>
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-small text-muted">
+                        <span className={cx("rounded-full px-2 py-px text-meta font-medium", TONE_PILL[RED_TEAM_SYNTHESIS[synth.state].tone])}>{RED_TEAM_SYNTHESIS[synth.state].label}</span>
                         {synth.state === "failed" && synth.reason && <span className="text-warn">{synth.reason}</span>}
                         {synthSession && (
                           <button
@@ -256,7 +256,7 @@ export function HistoryBody({
                               onOpenColony(synthSession);
                             }}
                             title="The colony that merged the hunters' findings"
-                            className="cursor-pointer rounded-full border border-border bg-transparent px-2 py-0.5 text-[11.5px] text-muted hover:text-text"
+                            className="cursor-pointer rounded-full border border-border bg-transparent px-2 py-0.5 text-meta-lg text-muted hover:text-text"
                           >
                             synthesis colony
                           </button>
@@ -274,7 +274,7 @@ export function HistoryBody({
             </ul>
           )}
           {mine.length > 0 && (
-            <ul className="mt-2 space-y-0.5 text-[11.5px] text-faint">
+            <ul className="mt-2 space-y-0.5 text-meta-lg text-faint">
               <li>found — raw findings summed across hunters; a defect two hunters report counts twice</li>
               <li>merged — distinct defects after the synthesis step deduplicates across hunters</li>
               <li>validated / rejected — the validator verdicts on hunter findings</li>
@@ -297,7 +297,7 @@ export function SecurityReport({ prescan }: { prescan: PreScan }) {
     prescan.secret_scanner === "gitleaks" ? "secrets by gitleaks" : prescan.secret_scanner === "builtin" ? "secrets by the built-in fallback" : "not run";
   return (
     <div className="mt-2 space-y-2">
-      <details className="rounded-lg border border-border px-3 py-2 text-[12px]" open={prescan.leads.length > 0 && prescan.leads.length <= 5}>
+      <details className="rounded-lg border border-border px-3 py-2 text-small" open={prescan.leads.length > 0 && prescan.leads.length <= 5}>
         <summary className="cursor-pointer font-medium text-text">
           Pre-scan leads · {prescan.leads.length} · {scanner}
         </summary>
@@ -327,7 +327,7 @@ export function SecurityReport({ prescan }: { prescan: PreScan }) {
           </ul>
         )}
       </details>
-      <section aria-label="operator checklist" className="rounded-lg border border-border px-3 py-2 text-[12px]">
+      <section aria-label="operator checklist" className="rounded-lg border border-border px-3 py-2 text-small">
         <h4 className="font-medium text-text">Operator checklist</h4>
         <p className="text-faint">What the code cannot prove. Check each one yourself; none is marked done here.</p>
         <ul className="mt-1.5 space-y-1">
@@ -336,7 +336,7 @@ export function SecurityReport({ prescan }: { prescan: PreScan }) {
               <input type="checkbox" disabled aria-label={item.title} className="mt-0.5" />
               <span className="min-w-0">
                 <span className="text-text">{item.title}</span>{" "}
-                <span className={cx("rounded-full px-1.5 py-px text-[10.5px]", item.status === "needs_review" ? "bg-warn/15 text-warn" : "bg-panel-3 text-muted")}>
+                <span className={cx("rounded-full px-1.5 py-px text-meta-sm", item.status === "needs_review" ? "bg-warn/15 text-warn" : "bg-panel-3 text-muted")}>
                   {CHECKLIST_LABEL[item.status]}
                 </span>
                 <span className="block text-muted">{item.evidence}</span>

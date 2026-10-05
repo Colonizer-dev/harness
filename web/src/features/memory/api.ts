@@ -1,7 +1,7 @@
 // Memory, secrets & voice API — split out of src/api.ts (issue #827).
 // The root `Api` interface composes this with the other features.
 import { del, enc, post, put, request } from "../../http";
-import type { ColonySecretRequest, Mem0Check, Mem0Status, MemoryListing, MemoryNote, MemoryProposal, MemoryScope, NewNoteRequest, SecretRow, SecretsListing, VoiceStatus } from "./types";
+import type { ColonySecretRequest, Mem0Check, Mem0Status, MemoryListing, MemoryNote, MemoryProposal, MemoryScope, NewNoteRequest, SecretRow, SecretsListing, VaultProposalListing, VoiceStatus } from "./types";
 
 export interface MemoryApi {
   /** GET /api/secrets: every saved secret and where it lives; values never leave the mothership. */
@@ -20,6 +20,11 @@ export interface MemoryApi {
   rejectProposal(id: string): Promise<unknown>;
   createNote(body: NewNoteRequest): Promise<MemoryNote>;
   deleteNote(note: Pick<MemoryNote, "id" | "scope" | "key">): Promise<unknown>;
+  /** GET /api/vault/proposals: notes colonies proposed for the operator vault (issue #777). */
+  vaultProposals(): Promise<VaultProposalListing>;
+  /** Writes the note into the vault's inbox folder as a new file; never overwrites one. */
+  acceptVaultProposal(id: string): Promise<{ ok: true; path: string }>;
+  rejectVaultProposal(id: string): Promise<unknown>;
   mem0Status(): Promise<Mem0Status>;
   /** Saves the key on the Mothership; an empty string removes it. */
   saveMem0Key(apiKey: string): Promise<Mem0Status>;
@@ -45,6 +50,9 @@ export const memoryHttp: MemoryApi = {
   rejectProposal: (id) => post(`/api/memory/proposals/${enc(id)}/reject`),
   createNote: (body) => post("/api/memory/notes", body),
   deleteNote: ({ id, scope, key }) => del(`/api/memory/notes/${enc(id)}?scope=${enc(scope)}&key=${enc(key)}`),
+  vaultProposals: () => request("/api/vault/proposals"),
+  acceptVaultProposal: (id) => post(`/api/vault/proposals/${enc(id)}/accept`),
+  rejectVaultProposal: (id) => post(`/api/vault/proposals/${enc(id)}/reject`),
   mem0Status: () => request("/api/memory/mem0"),
   saveMem0Key: (apiKey) => put("/api/memory/mem0", { api_key: apiKey }),
   checkMem0: () => post("/api/memory/mem0/check"),

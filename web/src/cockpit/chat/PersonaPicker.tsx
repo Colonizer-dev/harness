@@ -44,7 +44,7 @@ export function PersonaPicker({ personas, value, onPick }: { personas: readonly 
             open();
           }
         }}
-        className="persona-ant-host flex min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel py-0.5 pl-1 pr-2 text-left text-[12.5px] text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none"
+        className="persona-ant-host flex min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-border bg-panel py-0.5 pl-1 pr-2 text-left text-small-lg text-text hover:border-border-strong focus-visible:border-accent focus-visible:outline-none"
       >
         {shown && (
           <span className="grid size-6 place-items-center rounded-full" style={tint(shown)}>
@@ -106,8 +106,8 @@ export function PersonaList({ personas, selected, onPick }: { personas: readonly
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-border px-3.5 pb-2 pt-3">
-        <div className="text-[13px] font-semibold text-text">Who answers?</div>
-        <div className="text-[11.5px] text-faint">Each ant brings its own system prompt to this conversation.</div>
+        <div className="text-body-sm font-semibold text-text">Who answers?</div>
+        <div className="text-meta-lg text-faint">Each ant brings its own system prompt to this conversation.</div>
       </div>
       <div
         ref={list}
@@ -147,13 +147,13 @@ export function PersonaList({ personas, selected, onPick }: { personas: readonly
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline gap-2">
-                    <span className="text-[13.5px] font-semibold text-text">{p.ant}</span>
-                    <span className="truncate text-[11px] text-faint">{p.species}</span>
+                    <span className="text-body font-semibold text-text">{p.ant}</span>
+                    <span className="truncate text-meta text-faint">{p.species}</span>
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5">
-                    <span className="rounded-full border border-border px-1.5 text-[10.5px] font-medium uppercase tracking-wide text-muted">{p.name}</span>
+                    <span className="rounded-full border border-border px-1.5 text-meta-sm font-medium uppercase tracking-wide text-muted">{p.name}</span>
                   </span>
-                  <span className="mt-1 block text-[12px] leading-snug text-muted">{p.blurb}</span>
+                  <span className="mt-1 block text-small leading-snug text-muted">{p.blurb}</span>
                 </span>
                 {isSelected && <IconCheck size={15} className="shrink-0 self-start text-accent" aria-label="selected" />}
               </div>
@@ -164,14 +164,14 @@ export function PersonaList({ personas, selected, onPick }: { personas: readonly
                     tabIndex={-1}
                     aria-expanded={open}
                     onClick={() => setExpanded(open ? null : p.id)}
-                    className="mb-1.5 ml-[64px] inline-flex cursor-pointer items-center gap-1 rounded border-0 bg-transparent p-0 text-[11px] text-faint hover:text-text"
+                    className="mb-1.5 ml-[64px] inline-flex cursor-pointer items-center gap-1 rounded border-0 bg-transparent p-0 text-meta text-faint hover:text-text"
                   >
                     <IconChevronDown size={12} className={cx("transition-transform duration-150", open ? "rotate-0" : "-rotate-90")} />
                     {open ? "Hide the prompt" : "Show the prompt"}
                   </button>
                   <div className="persona-prompt" data-open={open ? "true" : "false"}>
                     <div>
-                      <p className="m-0 mx-2.5 mb-2.5 rounded-lg border border-border bg-bg/60 px-2.5 py-2 font-mono text-[11px] leading-relaxed text-muted">{p.system}</p>
+                      <p className="m-0 mx-2.5 mb-2.5 rounded-lg border border-border bg-bg/60 px-2.5 py-2 font-mono text-meta leading-relaxed text-muted">{p.system}</p>
                     </div>
                   </div>
                 </>
@@ -180,7 +180,7 @@ export function PersonaList({ personas, selected, onPick }: { personas: readonly
           );
         })}
       </div>
-      <div className="border-t border-border px-3.5 py-2 text-[11px] text-faint">Tweak an ant's prompt under the sliders; save it back to make it stick.</div>
+      <div className="border-t border-border px-3.5 py-2 text-meta text-faint">Tweak an ant's prompt under the sliders; save it back to make it stick.</div>
     </div>
   );
 }

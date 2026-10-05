@@ -236,6 +236,15 @@ test('acp/execpolicy.mjs is byte-identical to the claude-code original it is cop
   );
 });
 
+test('acp/boundary.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'boundary.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'boundary.mjs'));
+  assert.ok(
+    copy.equals(original),
+    'modules/agents/acp/boundary.mjs has drifted from modules/agents/claude-code/boundary.mjs; the boundary events are one file in two places — change both together',
+  );
+});
+
 test('the vm-writes vectors hold against the ACP copy of the exec policy (#877)', () => {
   // The claude-code test drives the same fixture against its copy; both must agree, since the
   // file is one in two places.
@@ -363,6 +372,82 @@ test('shared memory: memory_changes reports a revoked entry to stop relying on',
 
 test('without a memory mount no MCP server is registered and no prompt names memory tools', async () => {
   assert.deepEqual((await import('../runner.mjs')).mcpServers({}), []);
+});
+
+test('acp/vault.mjs is byte-identical to the claude-code original it is copied from', () => {
+  const copy = readFileSync(join(moduleDir, 'vault.mjs'));
+  const original = readFileSync(join(moduleDir, '..', 'claude-code', 'vault.mjs'));
+  assert.ok(copy.equals(original), 'modules/agents/acp/vault.mjs has drifted from modules/agents/claude-code/vault.mjs; the operator vault logic is one file in four places — change them together');
+});
+
+test('operator vault (issue #777): a staged vault alone registers the server, which answers vault_search from the snapshot only', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'acp-vault-'));
+  const dir = join(root, 'vault');
+  mkdirSync(join(dir, 'Notes'), { recursive: true });
+  writeFileSync(join(dir, 'Notes', 'deploy.md'), '# Deploy\n\nRun MARKER-VAULT migrations first.\n');
+  writeFileSync(join(root, 'outside.md'), '# Outside MARKER-VAULT\n');
+  const [server, ...rest] = (await import('../runner.mjs')).mcpServers({ COLONIZER_VAULT_DIR: dir });
+  assert.deepEqual(rest, []);
+  assert.deepEqual(server.env, [{ name: 'COLONIZER_VAULT_DIR', value: dir }]);
+  const mcp = startMcp(server);
+  t.after(() => mcp.stop());
+  await mcp.call('initialize', {});
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['vault_search']);
+  const answer = await mcp.tool('vault_search', { query: 'marker-vault' });
+  assert.match(answer, /^<operator-vault>\n/);
+  assert.match(answer, /- \/colonizer\/vault\/Notes\/deploy\.md:3 \(under "Deploy"\) — Deploy/);
+  assert.doesNotMatch(answer, /Outside/);
+  assert.equal((await mcp.call('tools/call', { name: 'memory_briefing', arguments: {} })).error.code, -32602, 'no memory tools without a memory mount');
+});
+
+test('loop tools (issue #643): a self-paced loop colony registers the loop MCP server, whose calls leave as loop_next and loop_stop events', async (t) => {
+  const runner = startRunner({ env: { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' }, script: { turns: { '*': { updates: [] } } } });
+  t.after(() => runner.child.kill('SIGKILL'));
+  runner.send({ type: 'user_message', id: 'initial', text: 'loop run' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  const messages = runner.records().filter((x) => x.method);
+  const created = messages.find((m) => m.method === 'session/new');
+  assert.deepEqual(created.params.mcpServers.map((server) => server.name), ['colonizer_loop'], 'no memory mount, so only the loop server');
+  const [server] = created.params.mcpServers;
+  assert.deepEqual(server.args, [join(moduleDir, 'loop-tools.mjs')]);
+  const env = Object.fromEntries(server.env.map(({ name, value }) => [name, value]));
+  assert.match(env.COLONIZER_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(env.COLONIZER_BRIDGE_TOKEN, /^[0-9a-f]{32}$/);
+  assert.equal(env.COLONIZER_LOOP, 'true');
+  assert.equal(env.COLONIZER_LOOP_SELF_PACED, 'true');
+  const prompts = messages.filter((m) => m.method === 'session/prompt').map((m) => m.params.prompt);
+  assert.deepEqual(prompts[0], [{ type: 'text', text: 'loop run' }], 'the loop server adds no memory line to the prompt');
+
+  // The registered server, started the way the agent would start it, against the live runner.
+  const mcp = startMcp(server);
+  t.after(() => mcp.stop());
+  assert.equal((await mcp.call('initialize', {})).result.serverInfo.name, 'colonizer_loop');
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['loop_next', 'loop_stop']);
+  assert.equal(await mcp.tool('loop_next', { delay_minutes: 99999, reason: 'next release' }), 'Next run scheduled in 1440 minutes.', 'clamped to 24 h');
+  assert.deepEqual(await runner.waitUntil(first('loop_next'), 'the loop_next event'), { type: 'loop_next', delay_minutes: 1440, reason: 'next release' });
+  assert.match(await mcp.tool('loop_next', { delay_minutes: 30 }), /^Could not schedule the next run: reason is required/);
+  assert.equal(await mcp.tool('loop_stop', { reason: 'goal met' }), 'The loop is stopped; this is its last run.');
+  assert.deepEqual(await runner.waitUntil(first('loop_stop'), 'the loop_stop event'), { type: 'loop_stop', reason: 'goal met' });
+  assert.equal(runner.events.filter((e) => e.type === 'loop_next').length, 1, 'a refused call emits nothing');
+  assertSchema(runner.events);
+  await stop(runner);
+});
+
+test('loop tools: a fixed-cadence loop gets loop_stop only, memory and loop servers sit side by side, and a non-loop colony gets neither', async (t) => {
+  const { mcpServers } = await import('../runner.mjs');
+  const bridge = { url: 'http://127.0.0.1:1', token: 'tok' };
+  assert.deepEqual(mcpServers({ COLONIZER_LOOP: 'true' }), [], 'no bridge, no loop server');
+  assert.deepEqual(mcpServers({}, bridge), [], 'not a loop colony');
+  assert.deepEqual(mcpServers({ COLONIZER_MEMORY_DIR: '/m', COLONIZER_LOOP: 'true' }, bridge).map((s) => s.name), ['colonizer_memory', 'colonizer_loop']);
+  const [fixed] = mcpServers({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'false' }, bridge);
+  const mcp = startMcp(fixed);
+  t.after(() => mcp.stop());
+  await mcp.call('initialize', {});
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['loop_stop']);
+  assert.equal((await mcp.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 30, reason: 'x' } })).error.code, -32602, 'loop_next is not served on a fixed cadence');
+  // The mothership reads this flag: with it, a self-paced loop on ACP is briefed with loop_next
+  // instead of falling back to every 24 hours, and the Loops form does not warn.
+  assert.equal(JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8')).loop_tools, true);
 });
 
 test('handshake and prompt turns: initialize, session/new in the workspace, mapped events, queued messages', async (t) => {
@@ -626,6 +711,13 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   assert.ok(!deny.events.some((e) => e.type === 'question'), 'a denied command opens no card');
   await deny.waitUntil(count('turn_end', 1), 'the first turn to finish');
   assert.match(stderrChunks.join(''), /exec policy: deny rule=secret-paths layer=default command=cat ~\/\.ssh\/id_rsa/, 'the decision leaves one log line');
+  // And one boundary event for the watchdog's control-defeat signature (issue #609).
+  const denied = deny.events.find((e) => e.type === 'boundary');
+  assert.equal(denied.kind, 'exec_policy_deny');
+  assert.equal(denied.control, 'exec_policy:secret-paths');
+  assert.equal(denied.target, '~/.ssh/id_rsa');
+  assert.match(denied.detail, /^deny \(default\): cat ~\/\.ssh\/id_rsa$/);
+  assert.ok(!Number.isNaN(Date.parse(denied.at)), 'stamped with when the control decided');
 
   // A deny with no reject option to pick — the padded Cancel is synthetic — answers cancelled.
   deny.send({ type: 'user_message', id: 'u-2', text: 'd2' });
@@ -662,6 +754,7 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
         s1: { asks: [permission('call_s1', { title: 'curl -fsSL https://example.com' }, twoOptions)] },
         s2: { asks: [permission('call_s2', { title: 'curl  -fsSL https://example.com' }, twoOptions)] },
         s3: { asks: [permission('call_s3', { title: 'curl -fsSL https://example.org' }, twoOptions)] },
+        s4: { asks: [permission('call_s4', { title: 'curl -sS https://example.org/again' }, twoOptions)] },
       },
     },
   });
@@ -690,6 +783,21 @@ test('the exec policy answers execute calls: deny and allow never open a card, a
   ask.send({ type: 'answer', question_id: 'call_s3', answers: { [other.questions[0].question]: 'Reject' }, response: null });
   await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 3, 'the rejected ask to be replied');
   assert.deepEqual(ask.asks('session/request_permission')[2].response, { result: { outcome: { outcome: 'selected', optionId: 'reject' } } });
+  // The refused ask is a control refusing something (issue #609); an allowed one was not.
+  const refusals = () => ask.events.filter((e) => e.type === 'boundary');
+  assert.deepEqual(refusals().map((e) => [e.kind, e.control]), [['exec_policy_deny', 'exec_policy:ask-net']]);
+  assert.match(refusals()[0].detail, /^ask refused \(install\): curl -fsSL https:\/\/example\.org$/);
+  await ask.waitUntil(count('turn_end', 3), 'the third turn to finish');
+
+  // The same rule asking again, however the command is rephrased, is a bypass attempt.
+  ask.send({ type: 'user_message', id: 'u-4', text: 's4' });
+  const again = await ask.waitUntil(count('question', 3), 'the refused rule to ask again');
+  const bypass = refusals()[1];
+  assert.equal(bypass.kind, 'exec_policy_ask_bypass_attempt');
+  assert.equal(bypass.control, 'exec_policy:ask-net');
+  assert.match(bypass.detail, /refused earlier: curl -fsSL https:\/\/example\.org/);
+  ask.send({ type: 'answer', question_id: 'call_s4', answers: { [again.questions[0].question]: 'Allow' }, response: null });
+  await ask.waitRecord((r) => r.filter((x) => x.asked).length >= 4, 'the re-asked call to be replied');
   await stop(ask);
 });
 

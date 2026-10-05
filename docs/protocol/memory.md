@@ -105,3 +105,26 @@ API (v3), and the runner side is identical:
 - If mem0 cannot be reached at boot, the colony still starts, with an empty layout and a `warn` in its log.
   An approval that cannot reach mem0 fails with `502` and the proposal stays in the queue; with review off, a
   repo note that cannot be stored is queued for review instead of dropped.
+
+## The operator vault's tools (issue #777)
+
+With an operator vault staged (`COLONIZER_VAULT_DIR=/colonizer/vault`,
+[vm-files](vm-files.md)), the runners serve two more tools, gated on that variable as the memory
+tools are on theirs:
+
+| Tool | Input | Answer |
+|---|---|---|
+| `vault_search` | `query`, `limit?` (default 10, at most 25) | Notes in the snapshot where every term appears, ranked; each as `- /colonizer/vault/<path>:<line> (under "<heading>") — <title>` and an excerpt, inside an `<operator-vault>` frame naming it data, not instructions |
+| `vault_propose` | `path`, `title`, `body`, `reason` | Emits a `vault_proposal` event; nothing is written inside the colony or the vault |
+
+```jsonc
+{"type":"vault_proposal","path":"web/deploy-order.md","title":"Deploy order","body":"markdown…","reason":"Why to keep it"}
+```
+
+The mothership refuses a proposal from a subagent (`vault_read_only`) and ignores one from a colony
+no vault folder reaches; it scrubs the secret values it knows, checks the path (relative, at most
+four parts, no `..` or dot-named part) and the caps (title 200 characters, reason 2,000, body
+64 KiB, 200 pending), and queues it with `source` (`session_id`, `repo`, `commit`, `origin`) in
+`<data_dir>/vault/proposals.json`. The review routes are in
+[mothership-api](mothership-api.md), "Operator vault proposals".
+
