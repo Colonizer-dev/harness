@@ -95,6 +95,36 @@ describe("demo build", () => {
     expect(touched).toEqual([]);
   });
 
+  it("renders the decisions inbox's demo cards with the real components and answers one without the network", async () => {
+    vi.useFakeTimers();
+    const api = await demoLoadApi();
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { InboxView } = await import("./cockpit/InboxView");
+    const read = async () => {
+      const pending = api.decisions();
+      await vi.advanceTimersByTimeAsync(500);
+      return pending;
+    };
+    const decisions = await read();
+    expect(decisions.decisions.length).toBeGreaterThan(0);
+    expect(new Set(decisions.prs.map((p) => p.reason))).toEqual(new Set(["policy_hold", "conflicted", "red_ci", "review_requested"]));
+    const html = renderToStaticMarkup(
+      createElement(InboxView, { sessions: [], onOpenColony: () => {}, onOpenNotificationSettings: () => {}, decisions }),
+    );
+    expect(html).toContain(">Decisions<");
+    expect(html).toContain(decisions.decisions[0].question);
+    expect(html).toContain("Re-run failed jobs");
+    expect(html).toContain("Dispatch redo colony");
+    expect(html).toContain(`${decisions.count} need you`);
+
+    const answered = api.answerDecision({ id: decisions.decisions[0].id, choice: decisions.decisions[0].options[0] });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await answered).comment.startsWith("Decision (maintainer): ")).toBe(true);
+    expect((await read()).decisions.map((d) => d.id)).not.toContain(decisions.decisions[0].id);
+    expect(touched).toEqual([]);
+  });
+
   it("answers the demo colony's question once its intro gets to it", async () => {
     vi.useFakeTimers();
     const api = await demoLoadApi();

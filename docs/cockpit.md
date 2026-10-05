@@ -378,6 +378,52 @@ colony's chat, so you answer there.
 How you get told when the tab is not in front is set in Settings, Notifications
 ([Notifications and Web Push](#notifications-and-web-push)).
 
+### Decisions
+
+Some things only a person can settle: a product question on an issue, a pull request that needs a
+review, a conflict the merge train cannot redo by itself. They show in the Inbox under their own
+**Decisions** header, below the colonies that wait on you, and count in the same "need you" number
+as the badge on the rail, the phone tab and the bell. They are not colony questions; nothing here
+reaches a colony.
+
+**Repo decisions.** An open issue labelled `needs-decision`, or whose body or latest comment has a
+line starting `Open decision:` or `Decision needed:`, gets a card in the same style as a colony's
+question. The options are the list under an `Options:` line, if the issue has one:
+
+```markdown
+Open decision: Should saved carts live in the session store or in Postgres?
+
+Options:
+- Session store
+- Postgres
+```
+
+Without options the card takes free text. Pick an option (or **Other…**), add a note if you like and
+press **Post decision**: the mothership posts one comment, `Decision (maintainer): <your choice>`
+with the note under it, and removes the `needs-decision` label. Nothing is posted until you press
+the button.
+
+**Pull requests that need you.** Each card says why and links to the pull request:
+
+- **Held by policy**: the watchdog flagged a control-defeat signature, the autopilot is holding the
+  publish because a secret was redacted from the description, or the publish was refused. **Open
+  colony** takes you to it.
+- **Needs a redo** and **Conflicted**: the merge train's mechanical rebase conflicted, its resolve
+  colony gave up, or the auto-rebase could not finish. **Dispatch redo colony** sends the merge
+  train's own redo colony, once per pull request.
+- **CI red**: a check failed and it is not a known flake the merge-train loop is already re-running.
+  **Re-run failed jobs** re-runs the failed jobs on GitHub.
+- **Review requested**: someone asked you for a review.
+- **Waiting for a merge**: CI is green, and the merge train does not drive the repository.
+
+**Open on GitHub** is on every card that has a pull request.
+
+**Which orgs.** An org is in when it is switched on as a workspace and already has colonies; switch
+an org in or out with `PUT /api/decisions/orgs/{org}` ([protocol](protocol/decisions.md)). GitHub is
+read gently: one search per org at most every five minutes, conditional requests, and a pause of 15
+minutes and more whenever GitHub pushes back. With `COLONIZER_NO_EXTERNAL_EFFECTS` set the cards
+still show, but answering and the actions are off and say why.
+
 ## Packages
 
 **Overview → a workspace → Repositories | Packages → Packages.**
