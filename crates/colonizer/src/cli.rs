@@ -1580,6 +1580,12 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
             let status = if parked { Some("parked".to_string()) } else { status };
             client_command(cli, move |machine| async move {
                 let sessions = machine.get("/api/sessions").await?;
+                // Issue #984: an account that is in trouble is holding colonies, so the warning
+                // leads the rows. A failed status poll simply prints none — the list still works.
+                let account_status = machine.get("/api/status").await.unwrap_or(Value::Null);
+                for line in account_alert_lines(&account_status) {
+                    eprintln!("{line}");
+                }
                 let filtered = filter_sessions(
                     sessions.as_array().cloned().unwrap_or_default(),
                     org.as_deref(),
@@ -1627,6 +1633,13 @@ async fn dispatch(cli: &Cli, command: Command) -> i32 {
                     ("cost", format!("${:.2}", detail["cost_usd"].as_f64().unwrap_or(0.0))),
                 ] {
                     println!("{label:<9} {value}");
+                }
+                if let Some(reason) = detail["attention"]["reason"].as_str() {
+                    println!(
+                        "{:<9} {}",
+                        "attention",
+                        attention_line(reason, detail["claude_account"].as_str())
+                    );
                 }
                 if let Some(diagnosis) = detail["diagnosis"]["text"].as_str() {
                     println!("{:<9} {}", "now", diagnosis);
@@ -2865,6 +2878,34 @@ fn filter_sessions(sessions: Vec<Value>, org: Option<&str>, status: Option<&str>
             Some(status) => s["status"].as_str().is_some_and(|s| s.eq_ignore_ascii_case(status)),
         })
         .collect()
+}
+
+/// The leading `!` warning lines for the Claude accounts in trouble (issue #984), read from the
+/// status poll's `account_alerts`. Empty when all is well, so `colonizer list` prints nothing extra.
+fn account_alert_lines(status: &Value) -> Vec<String> {
+    status["account_alerts"]
+        .as_array()
+        .map(|alerts| {
+            alerts
+                .iter()
+                .map(|a| {
+                    let account = a["account"].as_str().unwrap_or("?");
+                    let waiting = a["waiting"].as_u64().unwrap_or(0);
+                    let colony = if waiting == 1 { "colony" } else { "colonies" };
+                    format!("! Claude account `{account}` needs sign-in again — {waiting} {colony} waiting (cockpit → Accounts)")
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// One attention flag as a line for `colonizer status`. The account-waiting reason names the Claude
+/// account the colony is blocked on (issue #984); every other reason reads as its own words.
+fn attention_line(reason: &str, account: Option<&str>) -> String {
+    if reason == crate::account_health::WAITING_FOR_ACCOUNT_REASON {
+        return format!("waiting for Claude account `{}` to work again", account.unwrap_or("default"));
+    }
+    reason.replace('_', " ")
 }
 
 /// One recent event as one compact line: `42  2026-09-25T10:32:01  status  Working on the parser`.

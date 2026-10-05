@@ -18,6 +18,111 @@ Entries for the next release are not written here. Each pull request adds its ow
 [`changelog.d/`](changelog.d/README.md), and cutting a release folds them in with
 `node scripts/changelog.mjs assemble`, so parallel pull requests never collide in this file.
 
+## [v0.2.6] - 2026-10-05
+
+### Added
+
+- **A second autonomy setting, Full autonomy (YOLO), answers every question with no answer limit.**
+  Where the judge stops after `max_answers` (5 by default) and hands the colony back to you, Full
+  autonomy is the judge with no cap: every `ask` question at or below its `risk_ceiling` is
+  answered for as long as the colony runs. Everything else still holds — it only ever picks among
+  the options the agent offered, never overrides a deny, leaves anything above the ceiling for you,
+  and the sandbox, egress and path policies are unchanged. It needs a model from a Model provider
+  (the Claude login still cannot be used); saving it, or either autonomy provider, with no model is
+  refused outright, and the cockpit now warns in the pane and asks once before saving a ceiling
+  above `workspace_write`. ([#776])
+- **An operator can stage a Markdown vault read-only into every colony.**
+  Point Colonizer at a local vault (an Obsidian vault, say) in `colonizer.toml` and allowlist the
+  folders to stage, each with a scope (`all`, an org, or one repository, as colony secrets use). At
+  each boot (and resume) the mothership copies a filtered, secret-scrubbed snapshot of the in-scope
+  folders into the colony, where the guest reads it at `/colonizer/vault/` with an `INDEX.md` of
+  titles, tags, status, links and backlinks; `COLONIZER_VAULT_DIR` carries the path. Off by default.
+  Only `*.md` files are copied, dot-named files and directories (`.obsidian/`, `.trash/`, `.git/`)
+  and attachments are left out, a note whose frontmatter says `colonizer: false` is skipped, and
+  symlinks are never followed. Each note is scrubbed of every secret value the mothership knows
+  before it is written — the same scrub the transcript index uses, so base64- or percent-encoded
+  forms are not caught — with a 256 KiB per-note and 8 MiB per-snapshot cap. ([#777])
+- **The groundwork for exporting telemetry over OTLP, with a privacy policy no exported string can
+  skip.** A new library crate, `colonizer-observability`, holds the OTLP log, trace and metric
+  types and encodes them as protobuf or OTLP/JSON, optionally gzipped. It packs records into
+  requests of at most 2000 items and 1 MiB by default (never more than 4 MiB). A record too big to
+  fit is cut to fit, or dropped and counted if it cannot be. Every value goes through one export
+  policy, in this order. Keys must be on that record's allowlist. Prompts, outputs and other
+  content are dropped while the content gate is closed, which it always is for now, and never go
+  onto a span. Images and base64 payloads become placeholders. Every string is redacted again.
+  Strings are capped with a `…(N more bytes)` marker and a `colonizer.truncated` flag. Under
+  `repo_names = hashed`, names are replaced by a keyed hash, with the key at
+  `<data>/observability/hash.key`. Nothing sends telemetry yet, and the mothership does not link
+  the crate; CI fails if any of the OTLP stack reaches it. A test kit of freshly generated fake
+  credentials checks that none survives in any encoding. See
+  [the export policy](docs/observability/export-policy.md). ([#844])
+- **Health-check every Claude account, and show the result on the Connections page.** The
+  Mothership now runs a cheap Anthropic check against each configured Claude account every few
+  minutes and caches the verdict, so the Claude card in Settings → Connections shows whether the
+  account is reachable, its token was rejected, or the check could not reach Anthropic — with when
+  it last ran — instead of only the account identity. `GET /api/claude-accounts` carries each
+  account's `health_status` and `health_checked_at` too. ([#983])
+- **A Claude account whose sign-in expired now holds its colonies and tells you once.** When a
+  subscription account's sign-in expires or is revoked (a 401/403 from Anthropic), the account is
+  marked and every colony routed to it is parked in a new `waiting_for_account` state — releasing its
+  slot and burning no autopilot retries, instead of each one landing in attention as
+  `autopilot_held`. The owner gets a single notification per account and state change,
+  `GET /api/status` carries `account_alerts`, and `colonizer list` prints a leading warning line. The
+  colonies resume automatically once the account works again — a re-sign-in is noticed from the
+  credential file's timestamp, never its contents. The cockpit shows a banner built against the same
+  `account_alerts` shape. Usage limits (429) are unchanged: they keep the existing retry and quota
+  pause, which already parks account-wide with a reset time ([#984]).
+
+### Changed
+
+- **Vendored plugins are refreshed.** `ecc` moves from v2.2.1 to v2.2.3 (293 skills: adds
+  `operator-approval-loop`, `counterparty-channel-discipline`, `esign-field-placement`, `i18n-sync`,
+  `master-agreement-generator`, `rails-patterns`, `taste-application` and `taste-distillation`, and
+  drops `motion-ui`), `caveman` from v2.7.0 to v3.1.0, vendored `google-skills` from `f566651` to
+  `1d77046` (adds `cloud/bigquery-optimization` and `cloud/bigquery-troubleshooting`; the staged
+  catalog is now 149), and `archify` from `9e35d2b` to `3a5e785` (no skill changed). Run
+  `scripts/fetch-vendor.sh` (or install a release) to restage. ([#712])
+- **The protocol reference is one page per area, and the loops reference one page per built-in loop.**
+  `docs/protocol.md` and `docs/loops.md` were single long pages; each is now an index over a
+  directory — `docs/protocol/*.md`, one file per area (the runner contract, the agentd and harness
+  APIs, fleet, duplicates, secrets, UHP and the like), and `docs/loops/*.md`, one page per built-in
+  loop. Links to the old pages still land: a `protocol.md#…` or `loops.md#…` link resolves through
+  the anchors the index pages keep. The area and loop lists are generated by
+  `node scripts/doc-index.mjs write` (and `check` fails one left stale), and the docs loop's
+  route-drift check reads `docs/protocol.md` plus `docs/protocol/*.md`, so a route mentioned in any
+  area file still counts. ([#826])
+
+### Fixed
+
+- **A colony that dies on a transient provider blip is retried automatically instead of held.** When
+  a turn ended with an error the retry classifier calls transient — a gateway 5xx, 429 or 529, an
+  "unreachable" provider, an overloaded upstream, a timeout, a dropped or refused connection —
+  autopilot used to flag the colony `autopilot_held` and wait for a person to press Create PR, so a
+  colony could sit idle for hours over a failure with no work behind it. It now schedules an automatic
+  continue with exponential backoff (2, 5, 10 then 20 minutes), releasing the parallel slot while it
+  backs off, and logs an origin-tagged `provider_retry` line. Only after the attempts run out (a new
+  watchdog setting, `provider_retry_max_attempts`, four by default, zero to turn the retry off) is the
+  colony held — and then the message names the provider's own error rather than telling you to press
+  Create PR. A turn that ends cleanly resets the sequence, so a later, unrelated error starts fresh.
+  ([#980])
+- **A colony no longer sticks on "waiting for an answer" after a subagent's question is answered.** A
+  colony asked to approve something — most often a subagent's exec-policy `ask` — could keep showing
+  `waiting_for_answer` with the old question text long after the answer had come back, while
+  `colonizer ask` and `colonizer answer` reported nothing pending and `resume` refused to touch it.
+  Three things are fixed: an answer to a question other than the one the mothership is tracking no
+  longer closes the tracked question (the record kept only the latest, so an earlier answer could take
+  a still-open subagent question with it); the watchdog now reconciles a `waiting_for_answer` record
+  that has no question actually pending back to `idle`, logging why, on every tick; and the diagnosis
+  the cockpit reads no longer names a question whose matching `question_answered` is already in its
+  event tail. `ask` now sees the subagent-raised question the cockpit was showing. ([#981])
+- **A colony stacked on a paused or failed parent waits or moves up the stack instead of failing.** A
+  colony created with `after` used to be retired the moment its parent paused (stopped or parked) or
+  failed, cascading the failure down every colony stacked behind it. Now a paused parent makes the
+  child wait — the parent may be resumed — and a failed parent re-parents the child onto that parent's
+  own parent (the grandparent), one rung per 5 s tick, until it reaches a colony that can lend a
+  branch. A failed parent with nothing above it leaves the child queued rather than failing; only a
+  parent whose record is gone, or one that made no changes, still retires the child. ([#982])
+
 ## [v0.2.5] - 2026-10-04
 
 ### Added
@@ -2374,6 +2479,7 @@ Macs. ([#74])
 [#702]: https://github.com/Colonizer-dev/harness/issues/702
 [#704]: https://github.com/Colonizer-dev/harness/issues/704
 [#707]: https://github.com/Colonizer-dev/harness/issues/707
+[#712]: https://github.com/Colonizer-dev/harness/issues/712
 [#728]: https://github.com/Colonizer-dev/harness/issues/728
 [#736]: https://github.com/Colonizer-dev/harness/issues/736
 [#737]: https://github.com/Colonizer-dev/harness/issues/737
@@ -2397,16 +2503,20 @@ Macs. ([#74])
 [#766]: https://github.com/Colonizer-dev/harness/issues/766
 [#767]: https://github.com/Colonizer-dev/harness/issues/767
 [#774]: https://github.com/Colonizer-dev/harness/issues/774
+[#776]: https://github.com/Colonizer-dev/harness/issues/776
+[#777]: https://github.com/Colonizer-dev/harness/issues/777
 [#778]: https://github.com/Colonizer-dev/harness/issues/778
 [#780]: https://github.com/Colonizer-dev/harness/issues/780
 [#807]: https://github.com/Colonizer-dev/harness/issues/807
 [#818]: https://github.com/Colonizer-dev/harness/issues/818
 [#820]: https://github.com/Colonizer-dev/harness/issues/820
+[#826]: https://github.com/Colonizer-dev/harness/issues/826
 [#829]: https://github.com/Colonizer-dev/harness/issues/829
 [#830]: https://github.com/Colonizer-dev/harness/issues/830
 [#831]: https://github.com/Colonizer-dev/harness/issues/831
 [#834]: https://github.com/Colonizer-dev/harness/issues/834
 [#840]: https://github.com/Colonizer-dev/harness/issues/840
+[#844]: https://github.com/Colonizer-dev/harness/issues/844
 [#867]: https://github.com/Colonizer-dev/harness/issues/867
 [#875]: https://github.com/Colonizer-dev/harness/issues/875
 [#876]: https://github.com/Colonizer-dev/harness/issues/876
@@ -2430,8 +2540,13 @@ Macs. ([#74])
 [#968]: https://github.com/Colonizer-dev/harness/issues/968
 [#969]: https://github.com/Colonizer-dev/harness/issues/969
 [#972]: https://github.com/Colonizer-dev/harness/issues/972
+[#980]: https://github.com/Colonizer-dev/harness/issues/980
+[#981]: https://github.com/Colonizer-dev/harness/issues/981
+[#982]: https://github.com/Colonizer-dev/harness/issues/982
 [#983]: https://github.com/Colonizer-dev/harness/issues/983
+[#984]: https://github.com/Colonizer-dev/harness/issues/984
 [#1001]: https://github.com/Colonizer-dev/harness/issues/1001
+[v0.2.6]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.6
 [v0.2.5]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.5
 [v0.2.4]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.4
 [v0.2.3]: https://github.com/Colonizer-dev/harness/releases/tag/v0.2.3

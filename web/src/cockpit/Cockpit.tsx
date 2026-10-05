@@ -43,6 +43,7 @@ import { PhoneWelcomeSheet } from "../components/PhoneWelcomeSheet";
 import { BookmarkPrompt } from "../components/BookmarkPrompt";
 import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
+import { AccountBanner } from "./AccountBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
 
@@ -754,6 +755,10 @@ export function Cockpit({
               onDismiss={() => setDismissedQuota((dismissed) => dismissQuotaBanner(dismissed, quotaBanner))}
             />
           ) : null}
+          {/* Issue #984: while a Claude account needs the owner (a rejected sign-in or an exhausted
+              plan), the cockpit banners it above every view, like the quota banner. `Sign in` opens
+              the Accounts page — the Connections settings section. Absent on an older mothership. */}
+          <AccountBanner alerts={status?.account_alerts} onSignIn={() => onOpenSettings("connections")} />
           {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
               so above every view, like the quota banner. It clears itself when the drain finishes,
               so there is nothing to dismiss. Absent on a mothership from before the drain. */}

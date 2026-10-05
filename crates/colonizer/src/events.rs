@@ -378,9 +378,19 @@ pub(crate) async fn handle_agent_event(app: &Shared, id: &str, rt: &Arc<Runtime>
     // Router upstream failures and fallbacks reach the mothership's own output too (#983): they were
     // only in the colony's event log, so a run of "Anthropic is unreachable" left nothing to read there.
     if event["type"] == "log" && event["source"] == "model_router" {
-        let account = app.session(id).await.and_then(|s| s.claude_account.clone());
-        if let Some(line) = model_router_line(id, account.as_deref(), &event) {
+        let account = app
+            .session(id)
+            .await
+            .map(|s| crate::account_health::account_of(&s))
+            .unwrap_or_else(|| "default".into());
+        if let Some(line) = model_router_line(id, Some(&account), &event) {
             eprintln!("{line}");
+        }
+        // Issue #984: an upstream failure on the account's own Anthropic path marks the account, so
+        // its colonies wait on it (finish_turn below) and the owner is told once. Gateway-routed
+        // requests name their provider and are not this account's traffic.
+        if let Some((status, _)) = crate::account_health::router_failure(&event) {
+            crate::account_health::record_failure(app, &account, status).await;
         }
     }
 
@@ -672,6 +682,17 @@ pub(crate) async fn finish_turn(
         };
         let interrupted = rt.interrupted.swap(false, Ordering::SeqCst);
         let errored = is_error;
+        // Issue #984: a turn that died because the colony's Claude account is unusable — the account
+        // is already marked, or the result names a 401/403 sign-in failure — waits on the account
+        // instead of being held or retried. The slot is released and no `provider_retries` are spent;
+        // the queue resumes the colony once the account works again.
+        if errored
+            && s.status.is_live()
+            && let Some(account) = crate::account_health::unusable_account(app, &s, result.as_deref()).await
+        {
+            crate::account_health::park_waiting(app, &s, &account).await;
+            return;
+        }
         // Issue #980: a turn that died on a blip the retry classifier calls transient is retried
         // automatically rather than held. Anything else keeps the old hold. The turn's own free-text
         // result carries the provider's message ("API Error: 502 model router: ...").
