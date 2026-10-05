@@ -54,6 +54,13 @@ pub async fn publish_session(app: Shared, id: String, grant: Option<crate::autho
         app.update_session(&id, |x| x.error = Some(message)).await;
         return;
     }
+    // Issue #1074: GitHub refuses the account, so nothing is torn down for a push that cannot land.
+    if let Some(open) = crate::github_breaker::paused(&app) {
+        let message = crate::github_breaker::pause_message(&open);
+        app.session_log(&id, "error", format!("not publishing: {message}")).await;
+        app.update_session(&id, |x| x.error = Some(message)).await;
+        return;
+    }
     // The claim captures whether a microVM was live, because the status it leaves behind is `publishing`.
     let Some((s, (claimed, was_live))) = app.update_session(&id, claim_publish).await else {
         return;
@@ -1032,6 +1039,12 @@ pub async fn publish(
         .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such session"))?;
     if crate::authority::external_writes_blocked() {
         return Err(client_error(StatusCode::CONFLICT, BLOCKED));
+    }
+    if let Some(open) = crate::github_breaker::paused(&app) {
+        return Err(client_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &crate::github_breaker::pause_message(&open),
+        ));
     }
     if !can_publish(s.status, s.cleaned_up, s.git_admin_dir.is_some()) || s.suspended.is_some() {
         return Err(client_error(

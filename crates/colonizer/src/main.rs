@@ -65,6 +65,7 @@ mod fleet_sync;
 mod gateway;
 mod gateway_audit;
 mod github;
+mod github_breaker;
 mod graft;
 mod handoff;
 mod headroom;

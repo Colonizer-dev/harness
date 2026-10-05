@@ -47,6 +47,7 @@ import { BookmarkPrompt } from "../components/BookmarkPrompt";
 import { DEMO } from "../demo";
 import { QuotaBanner, dismissQuotaBanner, resumeQuotaParkedSessions, visibleQuotaBanner } from "./QuotaBanner";
 import { AccountBanner } from "./AccountBanner";
+import { GitHubBanner } from "./GitHubBanner";
 import { needCountByOrg } from "./feed";
 import { providerSnapshots } from "./dash";
 
@@ -776,6 +777,9 @@ export function Cockpit({
               plan), the cockpit banners it above every view, like the quota banner. `Sign in` opens
               the Accounts page — the Connections settings section. Absent on an older mothership. */}
           <AccountBanner alerts={status?.account_alerts} onSignIn={() => onOpenSettings("connections")} />
+          {/* Issue #1074: while GitHub refuses the account (suspended, a revoked token, repeated
+              secondary limits), one banner above every view names the cause and the next step. */}
+          <GitHubBanner pause={status?.github_pause} onReconnect={() => onOpenSettings("connections")} />
           {/* Issue #880: while a drain holds the queue for an update or a restart, the cockpit says
               so above every view, like the quota banner. It clears itself when the drain finishes,
               so there is nothing to dismiss. Absent on a mothership from before the drain. */}

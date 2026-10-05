@@ -520,7 +520,10 @@ pub(crate) async fn start_queued(app: &Shared) {
     // that can never start still retires below, so the queue head never sticks on the hold. This
     // snapshot only skips work the tick can already see is pointless; the drain is read again under
     // the admission lock below, where the claim actually happens.
-    let held = paused || app.drain.draining();
+    // Issue #1074: while GitHub refuses the account (suspended, a revoked token, secondary limits
+    // that keep coming), nothing boots either — each boot would only fail against the refusal and
+    // add one more call. Queued colonies keep their place and move once the breaker closes.
+    let held = paused || app.drain.draining() || crate::github_breaker::paused(app).is_some();
     let max_parallel = orgs::global_max_parallel(&modules) as usize;
     // Issue #321: a waiter whose holder changed says so. `queued_behind` follows whoever
     // effectively holds its issue now, so the second waiter shows it is queued behind the first
@@ -617,7 +620,10 @@ pub(crate) async fn start_queued(app: &Shared) {
                     // The drain is re-read here, under the lock, beside `room`: one that began
                     // between the tick's snapshot and this claim must not let the boot through
                     // (issue #880). The colony keeps its place for the next tick.
-                    Gate::Admit => claim_queued(s, room && !app.drain.draining()),
+                    Gate::Admit => claim_queued(
+                        s,
+                        room && !app.drain.draining() && crate::github_breaker::paused(app).is_none(),
+                    ),
                     // `next_queued` filters `Hold` out of its result, so a held colony never reaches here.
                     Gate::Hold => unreachable!("next_queued never returns a held colony"),
                 }

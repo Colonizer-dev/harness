@@ -18,6 +18,7 @@ read by the mothership when it starts.
 - [Suspending a colony that waits for you](#suspending-a-colony-that-waits-for-you)
 - [Stop, resume and delete](#stop-resume-and-delete)
 - [Recovering on its own](#recovering-on-its-own)
+- [GitHub failures](#github-failures)
 - [Budgets and plan balance](#budgets-and-plan-balance)
 - [What a colony cost](#what-a-colony-cost)
 - [Verifying "done"](#verifying-done)
@@ -499,6 +500,41 @@ The records live in the colony's session directory on the host, mounted into the
 `/colonizer/services`, so they survive the suspension like the worktree and transcript do. A resume
 waits each service out to readiness or its `timeout_secs`, and reports one that never answers as
 not ready, naming the log it wrote to.
+
+## GitHub failures
+
+Every call the mothership makes to GitHub — `gh` and the network half of `git` (fetch, push,
+`ls-remote`, clone) — goes through one circuit breaker per GitHub identity (the saved token, the
+`GH_TOKEN`/`GITHUB_TOKEN` environment, or the `gh` CLI login). A failed call is classified as one of:
+
+| Class | What GitHub said | Effect |
+|---|---|---|
+| Suspended | a 403 whose body says the account is suspended | opens the breaker |
+| Token revoked | a 401, "Bad credentials", git's refused token | opens the breaker |
+| Missing scope | the refusal names a scope the token lacks | that action fails, with what to add |
+| Secondary rate limit | a 403/429 naming a secondary limit, or carrying `Retry-After` | opens the breaker at the third within 10 minutes |
+| Transient | a 5xx, a 429, the primary rate limit, a network failure | retried where the caller retries |
+| Other | a 404, a validation error, a permission on one repository | that action fails |
+
+While the breaker is open:
+
+- **Nothing calls GitHub.** A `gh` or network `git` command fails at once with the cause instead
+  of reaching GitHub, so no call is spent against a refused account.
+- **Launches wait.** Queued colonies stay queued, in order; nothing is re-dispatched in a loop.
+- **Publishes are held.** Running colonies keep working locally. An autopilot publish is held, as
+  `COLONIZER_NO_EXTERNAL_EFFECTS` holds it, and a Create PR click is refused with the cause.
+- **Merges, claim and comment writes and the decisions inbox skip their ticks.**
+- **One banner** above every cockpit view names the cause and the next step: "GitHub account
+  suspended: contact GitHub support", "Token revoked: reconnect GitHub in Settings → Connections",
+  or a secondary limit to wait out. `GET /api/github/status` (and `github_pause` in
+  `GET /api/status`) carries the same: `paused`, `cause`, `message`, `next_step`, `since`,
+  `next_probe_at`, `detail`, `queued`, `held_publishes` and `refused_calls`.
+
+A slow probe makes the only call: one `GET /user` every 30 minutes for a suspension or a revoked
+token, and for secondary limits after 5 minutes, doubling up to 30. When it succeeds the breaker
+closes, the queue moves on its next tick, and the held publishes go out one at a time, each verified
+first. Reconnecting GitHub with another token is a new identity, so the breaker closes at once.
+The breaker lives in memory: after a restart, the first refused call opens it again.
 
 ## Budgets and plan balance
 
