@@ -59,7 +59,7 @@ const env = {
     idFromName: (name) => name,
     get(id) {
       if (!dos.has(id)) {
-        dos.set(id, makeDo({ helloTimeoutMs: 10000, responseTimeoutMs: 60000, idleTimeoutMs: 120000, pingMs: 5000 }));
+        dos.set(id, makeDo({ env, helloTimeoutMs: 10000, responseTimeoutMs: 60000, idleTimeoutMs: 120000, pingMs: 5000 }));
       }
       const made = dos.get(id);
       return { fetch: (request) => made.relay.fetch(request) };

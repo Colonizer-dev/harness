@@ -12,8 +12,12 @@ The identity is an Ed25519 key pair, generated on first use and kept at `<config
 (PKCS#8, mode 0600, never logged) beside the switch state at `<config>/remote/state.json`:
 
 ```json
-{"enabled": false, "install_id": null, "host": null}
+{"enabled": false, "install_id": null, "host": null, "require_github": false}
 ```
+
+`require_github` is whether the relay asks for GitHub sign-in before anything else (#1086, below).
+A state file written before the setting existed has no such field: an install already registered
+then reads as `true`, which is what the relay keeps for it, and one never registered as `false`.
 
 `install_id` and `host` are what the relay answers at registration:
 `POST https://my.colonizer.dev/api/installs` with `{"public_key": "<base64 of the raw 32 bytes>"}`
@@ -28,19 +32,19 @@ plaintext relay is refused before anything is sent, and the supervisor will not 
 ## `GET /api/remote`
 
 ```json
-{"enabled": true, "host": "c1c9215b.my.colonizer.dev", "connected": true, "since": "2026-09-25T00:16:11+00:00", "replaced": false}
+{"enabled": true, "host": "c1c9215b.my.colonizer.dev", "connected": true, "since": "2026-09-25T00:16:11+00:00", "replaced": false, "require_github": false}
 ```
 
 `connected` is true only while the switch is on *and* the tunnel's handshake has succeeded; a
 stale status after a disable never reads as a live link. `since` is when the current tunnel came
 up. `replaced` is true only while the switch is on and the relay has parked the tunnel because a
 newer one took this install over (a second mothership on the same key); a re-enable, a reset or a
-fresh connect clears it.
+fresh connect clears it. `require_github` is the GitHub gate below.
 
 ## `PUT /api/remote {"enabled": bool}`
 
 Enabling mints the key if this install has no key file yet, registers it if the state names no
-`install_id` yet, persists and wakes the supervisor. If the relay refuses or misses the
+`install_id` yet (the registration carries `require_github`), persists and wakes the supervisor. If the relay refuses or misses the
 registration the answer is **502** and the switch stays off; if a key file exists but cannot be
 read or parsed, the answer is **500** naming `POST /api/remote/reset` as the way out — the key is
 never silently replaced, since the registered `install_id` still names the old key. Disabling
@@ -59,9 +63,35 @@ view. Before the old key is replaced, the old install is retired at the relay: a
 old link and key stay, and the install registered a moment earlier is withdrawn again, best effort.
 Only an old key that can no longer be read is replaced regardless, since nothing can sign for it.
 A relay older than the retire endpoint gets the old owner unbound instead (`DELETE …/owner`).
+The new install is registered with the old one's `require_github`, so a reset never drops the gate.
 
 The three switches record `remote.enable`, `remote.disable` and `remote.reset` in the activity
 log (§6.9), with actor `you`, but only when the state actually changes.
+
+## `PUT /api/remote/require-github {"require_github": bool}`
+
+Whether the relay sends every browser through GitHub sign-in before anything reaches this cockpit
+(#1086). **Off**, the default for a new link, a device pairs with this machine's pair code alone: the
+relay forwards only a pairing invite (`GET /?pair=<invite>`), its claim poll
+(`POST /api/phone/claim` with the pairing cookie) and requests carrying a link (`clk_…`) or phone
+(`cph_…`) credential, all of which this cockpit checks itself, and answers everything else with its
+own "Pair this device" page. **On**, the GitHub owner gate of #534 comes first, as it always did, and
+the owner flow below works as before. An install registered before the setting keeps it on until it
+is switched here.
+
+Local only (**403** through the link). With a link registered, the relay is told first with a signed
+`PUT /api/installs/<id>/settings`; if it refuses, cannot be reached, or predates the setting (its
+catch-all `404 not found`), the answer is **502** and nothing changes. Before the first enable the
+choice is only saved, and the registration carries it; what is saved then is the gate the relay's
+registration answer names (`require_github`), and a relay that names none (one older than the
+setting, which always gates) is taken as on. With a link registered, even a PUT of the value already
+set is sent to the relay, so the two are put back in step if they ever drifted; it records nothing.
+A change records `remote.require_github` with target `on` or `off`. The answer is the view.
+
+Either way, a tunnelled request that carried an invite, pairing secret or link/phone credential the
+cockpit turned down is answered as before but with the header `x-colonizer-credential: rejected`,
+and a tunnelled websocket on such a credential is closed `4401` instead of `1014`; the relay counts
+both toward its throttle and strips the header, so a browser never sees it.
 
 ## Signing a browser in on the link: `/api/remote/devices`
 
@@ -87,15 +117,18 @@ mothership keeps only its SHA-256 hash, in `<config>/remote/links.json` (0600).
 
 ## Pairing: `GET /api/remote/pairing`, `POST /api/remote/pairing/confirm`, `POST /api/remote/pairing/reject`, `DELETE /api/remote/owner`
 
-The relay forwards only the install's bound owner. The first GitHub sign-in on the link gets a
-six-digit, single-use code that expires after 10 minutes, and the local cockpit confirms it (#534,
-#599). Each route is one signed call to the relay's `…/api/installs/<install_id>/…` endpoint:
+With the GitHub gate on (`require_github`, above), the relay forwards only the install's bound
+owner. The first GitHub sign-in on the link gets a six-digit, single-use code that expires after 10
+minutes, and the local cockpit confirms it (#534, #599). With it off, the owner binding is optional:
+it still works the same way, and a bound owner's GitHub session is still forwarded, but it is not
+needed to reach the cockpit. Each route is one signed call to the relay's `…/api/installs/<install_id>/…` endpoint:
 `x-colonizer-ts` in Unix seconds and `x-colonizer-sig`, Ed25519 by the install key over
 `METHOD\npath\nts\nbody`, standard base64. [remote-tunnel.md](../remote-tunnel.md#pairing-and-the-owner)
 has the relay side.
 
 - `GET /api/remote/pairing` answers the relay's view as is:
-  `{"owner": {"github_login": "octocat"} | null, "pending": [{"code": "481516", "github_login": "octocat", "expires_at": 1790000600}]}`.
+  `{"owner": {"github_login": "octocat"} | null, "pending": [{"code": "481516", "github_login": "octocat", "expires_at": 1790000600}], "require_github": false}`
+  (`require_github` is the relay's own record of the gate; a relay deployed before #1086 omits it).
 - `POST /api/remote/pairing/confirm {"code": "481516"}` binds that code's GitHub account and answers
   `{"owner": {"github_login": "octocat"}}`. **400** unless six digits, **404** for an unknown,
   expired or already-used code, **409** when an owner is already bound. Records `remote.pair`.

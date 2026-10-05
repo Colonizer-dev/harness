@@ -88,6 +88,8 @@ export interface RemoteStatus {
   since: string | null;
   /** True when the relay closed the tunnel because a newer one took this link over; it stays that way until a re-enable or reset dials again. */
   replaced: boolean;
+  /** Whether the relay sends every browser through GitHub sign-in before anything reaches this cockpit (#534). Off — the default for a new link (#1086) — a device pairs with the one-time link and six digits alone. */
+  require_github: boolean;
 }
 
 /** One pairing code waiting at the relay (services/relay/src/worker.js `pairingView`). */
@@ -103,6 +105,8 @@ export interface RemotePairingRequest {
 export interface RemotePairing {
   owner: { github_login: string } | null;
   pending: RemotePairingRequest[];
+  /** The relay's own record of the GitHub gate; absent from a relay deployed before #1086. */
+  require_github?: boolean;
 }
 
 /** A browser signed in to the remote link with a link credential of its own (review finding R3). */

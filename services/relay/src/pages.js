@@ -1,5 +1,6 @@
 // Pages the relay serves to a browser itself, without touching the tunnel: the offline page a dead
-// tunnel gets, the pairing code a signing-in owner carries to their cockpit, and the 403/404 pair.
+// tunnel gets, the pairing code a signing-in owner carries to their cockpit, the "Pair this device"
+// page every unpaired browser gets on a pair-code install (#1086), its 429 twin, and the 403/404 pair.
 
 const SHELL = (title, main) => `<!doctype html>
 <html lang="en">
@@ -82,4 +83,40 @@ export function pairingPage(code, next) {
     ),
     200,
   );
+}
+
+/** The page a browser gets on a pair-code install (#1086) when it carries no invite and no credential,
+ * or a credential the mothership turned down: how to pair it, from the mothership's own screen. Nothing
+ * here came from the tunnel, and nothing about the install is said beyond that it exists. 401, so a
+ * script reads it as "not signed in"; no-store, so pairing and reloading shows the cockpit. */
+export function pairDevicePage({ expired = false } = {}) {
+  return respond(
+    SHELL(
+      'Colonizer — pair this device',
+      `<h1>Pair this device</h1>
+      ${expired ? '<p>That sign-in has ended or the link was already used, so this device has to be paired again.</p>' : ''}
+      <p>On the computer running Colonizer, open the cockpit and go to <strong>Settings → Remote access →
+      Sign in on another device</strong>. Open the one-time link it shows on this device (or scan its QR
+      code), then type the six digits this device shows into the cockpit there.</p>
+      <p>The link works once, for five minutes. Nothing reaches the cockpit until the code is confirmed on
+      that computer.</p>`,
+    ),
+    401,
+  );
+}
+
+/** 429 from the relay's own throttle (src/throttle.js): too many invite opens or rejected credentials
+ * from this client or for this install. Nothing was forwarded. */
+export function tooManyAttemptsPage(retryAfterSeconds) {
+  const page = respond(
+    SHELL(
+      'Colonizer — slow down',
+      `<h1>Too many attempts</h1>
+      <p>This device, or this link, has tried to pair or sign in too many times. Wait a few minutes, then
+      open a fresh one-time link from Settings → Remote access on the computer running Colonizer.</p>`,
+    ),
+    429,
+  );
+  page.headers.set('retry-after', String(retryAfterSeconds));
+  return page;
 }

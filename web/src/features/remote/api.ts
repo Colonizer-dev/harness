@@ -24,6 +24,8 @@ export interface RemoteApi {
   setRemote(enabled: boolean): Promise<RemoteStatus>;
   /** POST /api/remote/reset: a fresh key and host; the old link stops working. */
   resetRemote(): Promise<RemoteStatus>;
+  /** PUT /api/remote/require-github: whether the relay asks for GitHub sign-in before the pair code (#1086). Local-only (403 through the link); 502 when the relay refused or predates the setting — nothing changes then. */
+  setRemoteRequireGithub(requireGithub: boolean): Promise<RemoteStatus>;
   /** GET /api/remote/pairing: the relay's owner binding and pending codes, fetched with the install's signed call (issue #599). 409 while remote access has never been on (no link), 502 when the relay is unreachable or no longer knows this install. */
   remotePairing(): Promise<RemotePairing>;
   /** POST /api/remote/pairing/confirm: binds that code's GitHub account as the owner. 400 bad code, 404 unknown/expired/used, 409 owner already bound; 403 through the remote link — confirming is local-only. */
@@ -69,6 +71,7 @@ export const remoteHttp: RemoteApi = {
   remote: () => request("/api/remote"),
   setRemote: (enabled) => put("/api/remote", { enabled }),
   resetRemote: () => post("/api/remote/reset"),
+  setRemoteRequireGithub: (requireGithub) => put("/api/remote/require-github", { require_github: requireGithub }),
   remotePairing: () => request("/api/remote/pairing"),
   confirmRemotePairing: (code) => post("/api/remote/pairing/confirm", { code }),
   rejectRemotePairing: (code) => post("/api/remote/pairing/reject", { code }),

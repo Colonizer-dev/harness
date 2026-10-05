@@ -616,15 +616,22 @@ mothership then dials out an encrypted tunnel to the Colonizer relay (`wss://my.
 Turning it off closes the tunnel and drops every request in flight.
 
 - **Your link** appears once the relay has answered. Copy it, or show a QR code for a phone camera.
-- The link asks for a GitHub sign-in. The first sign-in shows a six-digit code that expires after
-  10 minutes. It appears under **Pairing** with the GitHub account that asked. **Confirm** it if
-  your phone shows the same code; after that, only that GitHub account can sign in. **Reject** it
-  if you did not just sign in. The cockpit behind the link still asks for its own token, as for
-  any new browser.
-- Once paired, **Pairing** names the owner. **Unbind** (asked twice) removes it: the owner's
-  sign-in stops working at once, and the next sign-in shows a new code.
-- Confirm, Reject and Unbind work only in the cockpit on this machine. Through the link they are
-  refused, so nobody who reaches the link can pair themselves.
+- **Sign in on another device** pairs a phone or another computer with the link. Open the one-time
+  link it shows on that device (or scan its QR code): the device shows six digits. Type them here
+  and **Confirm**; the device is signed in with a credential of its own, listed here with **Sign
+  out**. The link works once, for five minutes. A device that is not paired gets a "Pair this
+  device" page from the relay and never reaches the cockpit; the relay also limits how often a
+  device, or the link, may try. This machine's own access token is never accepted through the link.
+- **Ask for GitHub sign-in first** (optional) makes the relay send every device through a GitHub
+  sign-in before the pair code. It is off for a new link and stays on for a link made before the
+  setting existed, until you switch it. With it on, the first sign-in shows a six-digit code that
+  expires after 10 minutes. It appears under **Pairing** with the GitHub account that asked.
+  **Confirm** it if your phone shows the same code; after that, only that GitHub account can sign
+  in. **Reject** it if you did not just sign in. Once paired, **Pairing** names the owner. **Unbind**
+  (asked twice) removes it: the owner's sign-in stops working at once, and the next sign-in shows a
+  new code.
+- Confirming a device, the switch, and Confirm, Reject and Unbind work only in the cockpit on this
+  machine. Through the link they are refused, so nobody who reaches the link can pair themselves.
 - **Reset link** makes a new identity and link. The old link stops working, and its owner is
   unbound. Use it if a link leaks.
 

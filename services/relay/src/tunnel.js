@@ -7,6 +7,8 @@
 import { b64decode, b64encode, randomToken, verifyEd25519 } from './crypto.js';
 import { CHUNK_DECODED_MAX, CHUNK_RAW, MAX_PENDING, MAX_STREAMS, PING_MS, TS_SKEW, WS_MSG_MAX, helloMessage, pathTemplate, responseHeaders, stripHopByHop } from './protocol.js';
 import { offlinePage } from './pages.js';
+import { REJECTED_CLOSE } from './passthrough.js';
+import { count } from './throttle.js';
 import { runtime } from './runtime.js';
 
 const DEFAULTS = {
@@ -226,6 +228,7 @@ export class InstallTunnel {
     if (frame.t === 'ws_close') {
       // workerd throws on 1005, 1006 and out-of-range codes, which would leave the browser socket open.
       const code = frame.code;
+      if (code === REJECTED_CLOSE) this.#countRejected(s);
       this.#close(s.server, code === 1000 || (code >= 3000 && code <= 4999) ? code : 1000, '');
       return this.#releaseWs(s);
     }
@@ -246,6 +249,15 @@ export class InstallTunnel {
     if (typeof frame.data !== 'string') return this.#closeWsPassthrough(s);
     s.bytesOut += byteLength(frame.data);
     this.#trySendRaw(s.server, frame.data);
+  }
+
+  // A tunnelled websocket the mothership closed because its credential did not authenticate (#1086):
+  // the worker never sees how a passthrough ends, so the DO counts it toward the same throttle the
+  // worker counts rejected HTTP requests in. Only for a pass-through socket (one the worker tagged with
+  // a client key) and only where D1 is bound; a failure to count never disturbs the socket.
+  #countRejected(s) {
+    if (!s.client || !s.installId || !this.env?.DB) return;
+    count(this.env, 'fail', s.installId, s.client, Math.floor(Date.now() / 1000)).catch(() => {});
   }
 
   #closeWsPassthrough(s) {
@@ -324,6 +336,9 @@ export class InstallTunnel {
       start: Date.now(),
       done: false,
       server,
+      // Only for the throttle (#countRejected): the install, and the worker's HMAC key for the client.
+      installId: request.headers.get('x-relay-install-id'),
+      client: request.headers.get('x-relay-client'),
     };
     this.sockets.set(id, s);
     this.#send({ t: 'ws_open', id, path, headers: stripHopByHop(request.headers, { ws: true }) });
