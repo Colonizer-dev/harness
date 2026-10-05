@@ -17,7 +17,8 @@
 //! - `cursor` and `state` tail a jsonl file safely across rotation and truncation (#842), and
 //!   [`sources`] lists which files are tailed for which signal; [`tailer`] reads them all fairly,
 //!   within a budget, with gap records for every hole (#843).
-//! - [`map`] turns ledger lines into log records and [`metrics`] folds them into metric series.
+//! - [`map`] turns ledger lines into log records and [`metrics`] folds them into metric series;
+//!   `traces` rebuilds each colony's trace from its events (#846).
 //! - [`transport`] is OTLP/HTTP, and [`exporter`] is the loop: read, map, send, commit on ack.
 //!
 //! No OpenTelemetry SDK runs here: the OTLP messages are built and encoded directly.
@@ -37,6 +38,7 @@ pub(crate) mod state;
 pub(crate) mod tailer;
 #[cfg(test)]
 pub(crate) mod testkit;
+pub(crate) mod traces;
 pub mod transport;
 
 /// The generated OTLP message types, for the readers and mappers that fill them.

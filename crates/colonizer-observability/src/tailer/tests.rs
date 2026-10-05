@@ -81,6 +81,7 @@ fn tick(
 
 fn logs_only() -> Settings {
     Settings {
+        stream_traces: false,
         stream_metrics: false,
         max_backlog_days: 0,
         ..Settings::default()

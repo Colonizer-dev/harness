@@ -38,6 +38,7 @@ use crate::proto::collector::metrics::v1::ExportMetricsServiceRequest;
 use crate::sources;
 use crate::state::{CursorKey, Signal, State};
 use crate::tailer::{Inputs, Tailer};
+use crate::traces::{Builder, Traces};
 use crate::transport::{Outcome, Transport};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -68,6 +69,8 @@ struct Outbox {
     /// Colonies found deleted, recorded on commit so they are never stat'ed again.
     gone: Vec<String>,
     aggregates: Aggregates,
+    /// The trace state these spans leave behind, committed with the cursors.
+    traces: Traces,
 }
 
 /// Why a flush stopped short: the outbox is kept for the next try.
@@ -93,6 +96,8 @@ pub struct Exporter {
     transport: Transport,
     state: State,
     aggregates: Aggregates,
+    /// The committed trace state: open spans, turn counters, roots sent (#846).
+    traces: Traces,
     destination: String,
     outbox: Option<Outbox>,
     backoff: Option<(Instant, Duration)>,
@@ -191,7 +196,26 @@ fn halves(request: &Request) -> Option<(Request, Request)> {
             b.resource_metrics[0].scope_metrics[0].metrics = tail;
             Some((Request::Metrics(a), Request::Metrics(b)))
         }
-        Request::Traces(_) => None,
+        Request::Traces(r) => {
+            let mut a = r.clone();
+            let spans = &mut a.resource_spans.first_mut()?.scope_spans.first_mut()?.spans;
+            if spans.len() < 2 {
+                return None;
+            }
+            let tail = spans.split_off(spans.len() / 2);
+            let mut b = a.clone();
+            b.resource_spans[0].scope_spans[0].spans = tail;
+            Some((Request::Traces(a), Request::Traces(b)))
+        }
+    }
+}
+
+/// The health entry a request's outcome is reported under.
+fn signal_name(request: &Request) -> &'static str {
+    match request {
+        Request::Logs(_) => "logs",
+        Request::Traces(_) => "traces",
+        Request::Metrics(_) => "metrics",
     }
 }
 
@@ -234,8 +258,11 @@ impl Exporter {
             aggregates.drop_count("state_reset", 1);
         }
         let endpoint = colonizer_redact::redact_text(&contract.settings.endpoint).into_owned();
+        let destination = destination_hash(&contract);
+        let traces = Traces::load(&state.extra, &destination);
         let mut exporter = Exporter {
-            destination: destination_hash(&contract),
+            destination,
+            traces,
             contract_mtime: std::fs::metadata(contract_path).and_then(|m| m.modified()).ok(),
             contract_path: contract_path.to_path_buf(),
             contract,
@@ -304,7 +331,11 @@ impl Exporter {
     fn init_signals(&mut self) {
         let s = &self.contract.settings;
         let logs_on = s.stream_operational || s.stream_activity;
-        for (name, path, on) in [("logs", "/v1/logs", logs_on), ("metrics", "/v1/metrics", s.stream_metrics)] {
+        for (name, path, on) in [
+            ("logs", "/v1/logs", logs_on),
+            ("traces", "/v1/traces", s.stream_traces),
+            ("metrics", "/v1/metrics", s.stream_metrics),
+        ] {
             let endpoint = colonizer_redact::redact_text(&s.url(path)).into_owned();
             let entry = self.status.signal(name);
             entry.endpoint = endpoint;
@@ -382,6 +413,13 @@ impl Exporter {
             colonies: &self.contract.policy,
             now_unix_nanos: now,
         };
+        let builder = Builder {
+            policy: &self.policy,
+            host_id: &self.contract.host_id,
+            colonies: &self.contract.policy,
+            sample_ratio: self.contract.settings.trace_sample_ratio,
+        };
+        let mut traces = self.traces.clone();
         let mut items = Vec::new();
         // Gap records are their own `meta` stream: sent only while a log stream is on.
         let gaps = if sources::logs_enabled(&self.contract.settings, crate::policy::Source::ExportGap) {
@@ -392,13 +430,32 @@ impl Exporter {
         for record in gaps.iter().chain(&tailed.records) {
             match record.signal {
                 Signal::Metrics => aggregates.fold(record.source, &record.line),
-                _ => {
+                Signal::Traces => builder.feed(&mut traces, record.source, record.colony.as_deref(), &record.line, &mut items),
+                Signal::Logs => {
                     if let Some(item) = mapper.log(record.source, record.colony.as_deref(), &record.line, &record.digest) {
                         items.push(item);
                     }
                 }
             }
         }
+        // A root goes out once its colony's events are read to their end, so no span of it is
+        // closed as incomplete while its real end is still on disk.
+        let caught_up = |colony: &str| {
+            let relative = format!("sessions/{colony}/events.jsonl");
+            let key = CursorKey {
+                destination_hash: self.destination.clone(),
+                signal: Signal::Traces,
+                relative_path: relative.clone(),
+            };
+            let offset = tailed
+                .cursors
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, c)| c.offset)
+                .unwrap_or_else(|| self.state.cursor(&key).offset);
+            std::fs::metadata(self.data_dir.join(&relative)).map_or(true, |m| offset >= m.len())
+        };
+        builder.settle(&mut traces, &caught_up, &tailed.gone, now, &mut items);
         self.last_gaps = tailed.gaps.iter().map(|g| g.line.clone()).collect();
         let records = items.len() as u64;
         let mut batcher = Batcher::new(
@@ -420,6 +477,7 @@ impl Exporter {
             removed: tailed.removed,
             gone: tailed.gone,
             aggregates,
+            traces,
         }
     }
 
@@ -440,13 +498,13 @@ impl Exporter {
                     if rejected > 0 || message.is_some() {
                         self.status.last_partial_success = Some(PartialSuccess {
                             at_unix: now,
-                            signal: "logs",
+                            signal: signal_name(&request),
                             rejected,
                             message,
                         });
                     }
                     let accepted = (request.len() as u64).saturating_sub(rejected);
-                    self.status.success("logs", now, accepted, bytes);
+                    self.status.success(signal_name(&request), now, accepted, bytes);
                 }
                 Outcome::Refused { message, .. } => {
                     outbox.requests.remove(0);
@@ -465,7 +523,7 @@ impl Exporter {
                 Outcome::Unauthorized { message, .. } => {
                     self.aggregates.export_failures += 1;
                     outbox.aggregates.export_failures = self.aggregates.export_failures;
-                    self.status.failure("logs", "auth_failed", message);
+                    self.status.failure(signal_name(&request), "auth_failed", message);
                     self.status.state = "auth_failed";
                     self.outbox = Some(outbox);
                     return Some(Held::Auth);
@@ -473,7 +531,7 @@ impl Exporter {
                 Outcome::Retry { message, after } => {
                     self.aggregates.export_failures += 1;
                     outbox.aggregates.export_failures = self.aggregates.export_failures;
-                    self.status.failure("logs", "backing_off", message);
+                    self.status.failure(signal_name(&request), "backing_off", message);
                     self.status.state = "retrying";
                     self.outbox = Some(outbox);
                     return Some(Held::Retry(after));
@@ -484,7 +542,8 @@ impl Exporter {
         let changed = !outbox.cursors.is_empty()
             || !outbox.removed.is_empty()
             || !outbox.gone.is_empty()
-            || outbox.aggregates != self.aggregates;
+            || outbox.aggregates != self.aggregates
+            || outbox.traces != self.traces;
         outbox.aggregates.exported += outbox.records;
         for (key, cursor) in outbox.cursors {
             self.state.set_cursor(key, cursor);
@@ -503,6 +562,9 @@ impl Exporter {
                 .insert(crate::tailer::GONE_KEY.to_string(), serde_json::json!(gone));
         }
         self.aggregates = outbox.aggregates;
+        // The open spans land in the same write as the cursors that read them.
+        self.traces = outbox.traces;
+        self.traces.store(&mut self.state.extra, &self.destination);
         self.state.extra.insert(
             METRICS_KEY.to_string(),
             serde_json::to_value(&self.aggregates).unwrap_or_default(),

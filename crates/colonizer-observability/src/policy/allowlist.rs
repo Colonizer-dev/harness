@@ -200,6 +200,18 @@ const SPAN_COMMON: &[Rule] = &[
     s("gen_ai.tool.name"),
     s("gen_ai.tool.call.id"),
     s("gen_ai.conversation.id"),
+    // The cache halves of a turn's token delta, under the semantic conventions' names.
+    s("gen_ai.usage.cache_read.input_tokens"),
+    s("gen_ai.usage.cache_creation.input_tokens"),
+    // A failure's class from a fixed set (`tool_error`, `turn_error`, `failed`), never its text.
+    s("error.type"),
+    // Who started a turn or launched the colony (`user`, `watchdog`, `autonomy`, `burn_down`, …).
+    s("colonizer.origin"),
+    s("colonizer.cost_usd"),
+    // A span closed without its end event (#846): a tool call with no result at its turn's end, a
+    // span evicted past the open-span cap.
+    s("colonizer.unmatched"),
+    s("colonizer.evicted"),
 ];
 
 const EVENTS: &[Rule] = &[
@@ -355,6 +367,8 @@ const MOTHERSHIP: &[Rule] = &[s("level"), s("target")];
 const INVOKE_AGENT: &[Rule] = &[
     s("colonizer.colony.id"),
     h("colonizer.repo"),
+    h("colonizer.org"),
+    d("colonizer.pr.url"),
     s("colonizer.outcome"),
     s("colonizer.trace.dropped_spans"),
 ];
@@ -365,6 +379,7 @@ const EXECUTE_TOOL: &[Rule] = &[
     s("tool.name"),
     s("is_error"),
     s("denial.class"),
+    s("colonizer.denial.class"),
     s("colonizer.tool.output_bytes"),
 ];
 const CHAT: &[Rule] = &[

@@ -80,7 +80,8 @@ pub(crate) fn colony_of(relative: &str) -> Option<&str> {
 
 /// Every file to tail under `data_dir` for these colonies, with these settings. A stream that is
 /// off is not listed, so it is never read (P1). Metrics read the gateway and spend ledgers on
-/// cursors of their own.
+/// cursors of their own, and traces (#846) read each colony's events and the activity ledger (for
+/// the outcomes that close a colony's root span) on theirs.
 pub fn discover(data_dir: &Path, settings: &Settings, colonies: &[String]) -> Vec<SourceFile> {
     let mut out = Vec::new();
     let mut add = |source: Source, signal: Signal, colony: Option<&str>, relative: String, rolled: Option<String>| {
@@ -101,6 +102,9 @@ pub fn discover(data_dir: &Path, settings: &Settings, colonies: &[String]) -> Ve
         if source == Source::Spend && settings.stream_metrics {
             add(source, Signal::Metrics, None, file.into(), None);
         }
+        if source == Source::Activity && settings.stream_traces {
+            add(source, Signal::Traces, None, file.into(), rolled.map(str::to_string));
+        }
     }
 
     let mut colonies: Vec<&String> = colonies.iter().filter(|id| is_colony_id(id)).collect();
@@ -113,7 +117,10 @@ pub fn discover(data_dir: &Path, settings: &Settings, colonies: &[String]) -> Ve
                 add(source, Signal::Logs, Some(colony), relative.clone(), None);
             }
             if source == Source::Gateway && settings.stream_metrics {
-                add(source, Signal::Metrics, Some(colony), relative, None);
+                add(source, Signal::Metrics, Some(colony), relative.clone(), None);
+            }
+            if source == Source::Events && settings.stream_traces {
+                add(source, Signal::Traces, Some(colony), relative, None);
             }
         }
     }
@@ -153,6 +160,8 @@ mod tests {
         }
         assert!(rel.contains(&("sessions/abc123/gateway.jsonl", Signal::Metrics)));
         assert!(rel.contains(&("spend.jsonl", Signal::Metrics)));
+        assert!(rel.contains(&("sessions/abc123/events.jsonl", Signal::Traces)));
+        assert!(rel.contains(&("activity.jsonl", Signal::Traces)));
         assert_eq!(
             all.iter().filter(|s| s.relative == "sessions/abc123/harness.jsonl").count(),
             1,
@@ -163,7 +172,7 @@ mod tests {
             .filter_map(|s| s.rolled.as_ref())
             .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(rolled, ["activity.jsonl.1", "logs/mothership.jsonl.1"]);
+        assert_eq!(rolled, ["activity.jsonl.1", "activity.jsonl.1", "logs/mothership.jsonl.1"]);
         assert!(
             all.iter()
                 .all(|s| !s.relative.contains("transcripts") && !s.relative.contains("chats"))
@@ -173,6 +182,7 @@ mod tests {
         let quiet = Settings {
             stream_operational: false,
             stream_activity: false,
+            stream_traces: false,
             stream_metrics: false,
             ..Settings::default()
         };
@@ -183,6 +193,7 @@ mod tests {
 
         let ops_only = Settings {
             stream_activity: false,
+            stream_traces: false,
             stream_metrics: false,
             ..Settings::default()
         };
@@ -194,6 +205,7 @@ mod tests {
 
         let activity_only = Settings {
             stream_operational: false,
+            stream_traces: false,
             stream_metrics: false,
             ..Settings::default()
         };
@@ -212,6 +224,24 @@ mod tests {
                 Source::JevFocus,
                 Source::Events,
                 Source::Findings,
+            ]
+        );
+
+        let traces_only = Settings {
+            stream_operational: false,
+            stream_activity: false,
+            stream_metrics: false,
+            ..Settings::default()
+        };
+        let traced: Vec<_> = discover(&root, &traces_only, &ids(&["abc123"]))
+            .into_iter()
+            .map(|s| (s.relative, s.signal))
+            .collect();
+        assert_eq!(
+            traced,
+            vec![
+                ("activity.jsonl".to_string(), Signal::Traces),
+                ("sessions/abc123/events.jsonl".to_string(), Signal::Traces),
             ]
         );
         let _ = std::fs::remove_dir_all(&root);

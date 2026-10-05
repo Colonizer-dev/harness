@@ -58,7 +58,8 @@ fn status_path(data_dir: &Path) -> PathBuf {
 }
 
 /// The contract for `settings`: install ids, the data dir, and every colony's org, repo,
-/// sensitivity and status. Content and thinking are false for every colony: per-colony content
+/// sensitivity and status, and the agent, creation time, origin and pull request its trace's root
+/// span carries. Content and thinking are false for every colony: per-colony content
 /// export (#848) is not built, and the add-on's content gate stays closed regardless.
 pub(crate) async fn contract(app: &App, settings: &Map<String, Value>) -> Value {
     let sessions = app.sessions.read().await;
@@ -74,6 +75,11 @@ pub(crate) async fn contract(app: &App, settings: &Map<String, Value>) -> Value 
                     "content": false,
                     "thinking": false,
                     "status": serde_json::to_value(s.status).unwrap_or(Value::Null),
+                    // The colony's trace (#846): its root span's agent, start, launcher and PR.
+                    "agent": s.agent,
+                    "created_at": s.created_at.to_rfc3339(),
+                    "origin": s.origin,
+                    "pr_url": s.pr_url,
                 }),
             )
         })

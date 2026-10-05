@@ -161,6 +161,7 @@ pub fn resolve(module: Option<&ModuleChoice>, env: &dyn Fn(&str) -> Option<Strin
     field("service_name", json!("colonizer"), Some("OTEL_SERVICE_NAME"), &mut s);
     for (key, var_name) in [
         ("logs_endpoint", "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"),
+        ("traces_endpoint", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
         ("metrics_endpoint", "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"),
     ] {
         if let Some(v) = var(var_name) {
@@ -193,6 +194,7 @@ pub fn resolve(module: Option<&ModuleChoice>, env: &dyn Fn(&str) -> Option<Strin
         ("stream_metrics", json!(cfg.stream_metrics)),
         ("max_attribute_bytes", json!(cfg.max_attribute_bytes)),
         ("max_content_bytes", json!(cfg.max_content_bytes)),
+        ("trace_sample_ratio", json!(cfg.trace_sample_ratio)),
         ("repo_names", json!(cfg.repo_names)),
         ("max_backlog_days", json!(cfg.max_backlog_days)),
         ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
@@ -210,7 +212,7 @@ pub fn resolve(module: Option<&ModuleChoice>, env: &dyn Fn(&str) -> Option<Strin
             "protocol {protocol} is not supported by this build; use http/protobuf or http/json"
         ));
     }
-    let signal_endpoints: Vec<String> = ["logs_endpoint", "metrics_endpoint"]
+    let signal_endpoints: Vec<String> = ["logs_endpoint", "traces_endpoint", "metrics_endpoint"]
         .iter()
         .filter_map(|k| s.get(*k).and_then(Value::as_str).map(str::to_string))
         .collect();
@@ -330,6 +332,19 @@ mod tests {
         assert_eq!(e.provenance["protocol"], "module");
         assert_eq!(e.headers, "x-honeycomb-team=from-env");
         assert_eq!(e.headers_source, "env");
+
+        let traced = module(
+            true,
+            json!({"endpoint": "https://saved.example.com", "trace_sample_ratio": 0.25}),
+        );
+        let e = on(resolve(
+            Some(&traced),
+            &env_of(&[("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://traces.example.com/v1/traces")]),
+            None,
+        ));
+        assert_eq!(e.settings["trace_sample_ratio"], json!(0.25));
+        assert_eq!(e.str("traces_endpoint"), "https://traces.example.com/v1/traces");
+        assert_eq!(e.provenance["traces_endpoint"], "env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
 
         let e = on(resolve(Some(&saved), &env_of(&[]), Some("api-key=from-secret".into())));
         assert_eq!(e.headers_source, "secret");
