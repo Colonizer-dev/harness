@@ -124,6 +124,41 @@ HMAC-SHA256 with the secret over the exact bytes `"{timestamp}.{body}"`, where `
 time, and refuse a timestamp more than a few minutes old. The body includes `id`, so the signature
 covers it. Without a secret the request is sent unsigned.
 
+## Subscriptions
+
+Besides the notify module's one `webhook_url`, any number of receivers can subscribe through the
+API (issue [#899](https://github.com/Colonizer-dev/harness/issues/899)): the owner, or a scoped API
+token at `operate` or `launch` scope for its own automation. A subscription gets the same payload,
+id and headers as the owner's webhook, signed with its own secret, through the same retries and
+dead letter (below).
+
+| Method & path | Purpose |
+| --- | --- |
+| `POST /api/webhooks` | `{url, events, secret}` registers one for the caller: `{id, url, events, has_secret, token, created_at}`. `events` is a list of event names (empty or absent: every event the caller may see); `secret` is optional and write-only. **400** for a bad address, an unknown event or a bad secret; **409** past 20 per token or 200 in all |
+| `GET /api/webhooks` | The caller's subscriptions: a scoped token sees its own, the owner sees all. Never a secret |
+| `DELETE /api/webhooks/{id}` | Removes one. A scoped token removes only its own; any other id is **404** |
+
+What a subscription receives:
+
+- **Scope.** A subscription made by a scoped token receives only events about a colony inside the
+  token's org and repo limits. The token is read when each event is delivered, so revoking it ends
+  its subscriptions at once, and a token below `operate` gets nothing. Host-level events (a
+  provider, the judge, an account, a loop's line, the digest) name no colony and belong to no
+  token's scope, so a token cannot subscribe to them (**400**). The owner's subscriptions receive
+  every event.
+- **Events.** Colony transitions come from the lifecycle stream: each status change once, whatever
+  the owner's switches say, with `on_lifecycle` on or off. The watchdog's `attention` and
+  `needs_rebase` come as they happen. Subscriptions skip the anti-spam rate limiter, like the
+  lifecycle stream, but the notify module must be on: with it off, nothing is announced at all.
+- **Addresses.** `http://` or `https://`, at most 2,048 characters, no credentials in the address
+  (use `secret`). A scoped token's address must be public: `localhost`, single-label names,
+  `.local`, `.internal`, and loopback, private, link-local and carrier-grade NAT (`100.64.0.0/10`)
+  addresses are refused, so a token cannot make the mothership POST to what only it can reach. The
+  check is on the address as written; a public name that resolves to a private address is not
+  caught. The owner may use any address.
+- **Secrets.** Stored in `config/webhook-subscriptions.json` (mode 0600), never answered, never in
+  a payload. A delivery waiting for a retry to a subscription deleted since is dropped.
+
 ## Delivery, retries and the dead letter
 
 A 2xx answer is a delivery. A non-2xx answer or a transport error (including a 15-second timeout)
