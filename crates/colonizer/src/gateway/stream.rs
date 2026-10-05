@@ -363,6 +363,23 @@ pub(super) fn upstream_url(base_url: &str, rest: &str, query: Option<&str>) -> O
     Some(format!("{base}{rest}{query}"))
 }
 
+/// Where a request went, safe to log and to show the operator: scheme, host, port and path. The
+/// userinfo, query and fragment are dropped, so no credential a base URL or query might carry leaks.
+pub(super) fn redacted_url(url: &reqwest::Url) -> String {
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.set_query(None);
+    shown.set_fragment(None);
+    shown.to_string()
+}
+
+/// The words a 404/405 from upstream adds: those statuses mean the provider has no such route, which
+/// is almost always a base URL that does not match the provider's documented API root (issue #1018).
+pub(super) fn wrong_route_hint(status: u16, url: &str) -> Option<String> {
+    matches!(status, 404 | 405).then(|| format!("upstream answered {status} at {url}; check the provider's base URL"))
+}
+
 /// Whether the last path segment of `base` (no trailing `/`) is `v<digits>`: `/v1`, `/v3`,
 /// `/api/coding/v3`. Only the path counts, so a host that happens to be named `v1` does not.
 fn ends_in_version_segment(base: &str) -> bool {

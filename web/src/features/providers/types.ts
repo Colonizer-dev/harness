@@ -240,6 +240,19 @@ export interface ProviderHealth {
   checked_at: string;
 }
 
+/** `POST /api/providers/{id}/test`: a one-token request through the colony's own route (issue #1018). */
+export interface ProviderTestResult {
+  ok: boolean;
+  /** The URL the request hit, redacted (no userinfo, no query); null when none was sent. */
+  url: string | null;
+  /** The upstream's HTTP status; null when no response arrived. */
+  status: number | null;
+  /** The model it tested with: the provider's first listed one. */
+  model: string | null;
+  latency_ms: number | null;
+  error: string | null;
+}
+
 export interface ModelOption {
   id: string;
   label: string;

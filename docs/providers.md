@@ -100,6 +100,11 @@ provider documents as its API root:
   `…/anthropic/v1/messages`, and `http://host:8000` to `http://host:8000/v1/chat/completions`.
 - An `anthropic`-wire base that ends in `/v1` is refused on save; enter it without the `/v1`.
 
+Saving a new provider, or changing its base URL, wire or key, in Settings → Providers sends a
+one-token test request through the colony's route and shows the URL it hit and the status. An
+upstream `404` or `405` during a colony's turn is logged with that URL too (no userinfo or query), and
+names the base URL as the likely cause.
+
 ## Plans, quotas and trust
 
 A connection carries a few more settings. `pricing` and `quota` are edited in Settings → Providers,
