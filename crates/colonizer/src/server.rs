@@ -182,10 +182,15 @@ pub(crate) async fn host_guard(State(app): State<Shared>, mut req: Request, next
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
-        // The fleet pairing's two open doors (fleet_members.rs): their whole authentication is
+        // The fleet pairing's three open doors (fleet_members.rs): their whole authentication is
         // what the body carries — a single-use invite code, a pairing id plus the nonce only its
-        // joiner holds — so a request with no token is admitted to exactly those two.
-        if req.method() == Method::POST && (path == "/api/fleet/peer/redeem" || path.starts_with("/api/fleet/peer/pairings/")) {
+        // joiner holds, a member id plus the refresh credential approval minted (#762) — so a
+        // request with no token is admitted to exactly those three.
+        if req.method() == Method::POST
+            && (path == "/api/fleet/peer/redeem"
+                || path == "/api/fleet/peer/refresh"
+                || path.starts_with("/api/fleet/peer/pairings/"))
+        {
             req.extensions_mut().insert(auth::Authenticated(false));
             return next.run(req).await;
         }
@@ -1228,6 +1233,7 @@ mod tests {
                 owner_url: "http://owner.example:7878".into(),
                 member_id: "mem_1".into(),
                 token: "col_secret_member_token".into(),
+                refresh: None,
             }))
             .await;
         let member = auth_router(&app)

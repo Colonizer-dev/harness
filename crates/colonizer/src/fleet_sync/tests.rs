@@ -20,6 +20,9 @@ impl Drop for TempRoot {
 }
 
 const TOKEN: &str = "col_member_token";
+/// The refresh credential the fake owner accepts, and the token a refresh hands back (#762).
+const REFRESH: &str = "refresh_credential";
+const FRESH: &str = "col_fresh_token";
 
 /// What the fake owner saw, and how it is told to misbehave.
 #[derive(Default)]
@@ -44,6 +47,14 @@ struct Owner {
     /// The Nth accepted rows batch is stored, then never answered.
     hang_on_batch: Option<usize>,
     batches: usize,
+    /// The owner stopped accepting [`TOKEN`]: only [`FRESH`] authenticates (#762).
+    rotated: bool,
+    /// Token refreshes asked for.
+    refreshes: usize,
+    /// A forced answer to every refresh: its status.
+    refuse_refresh: Option<u16>,
+    /// What a refresh hands back instead of [`FRESH`].
+    refresh_gives: Option<&'static str>,
 }
 
 #[derive(Clone)]
@@ -71,7 +82,7 @@ fn gate(o: &mut Owner, headers: &HeaderMap) -> Option<Response> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if bearer != Some(TOKEN) {
+    if bearer != Some(if o.rotated { FRESH } else { TOKEN }) {
         return Some(StatusCode::UNAUTHORIZED.into_response());
     }
     if o.forbid {
@@ -141,8 +152,24 @@ async fn fake_rows(State(f): State<Fake>, headers: HeaderMap, body: Bytes) -> Re
     std::future::pending::<Response>().await
 }
 
+/// The owner's refresh door: the member id and credential in the body are the whole
+/// authentication; a good pair rotates the owner onto [`FRESH`].
+async fn fake_refresh(State(f): State<Fake>, Json(body): Json<Value>) -> Response {
+    let mut o = f.owner.lock().unwrap();
+    o.refreshes += 1;
+    if let Some(status) = o.refuse_refresh {
+        return (StatusCode::from_u16(status).unwrap(), Json(json!({"error": "refused"}))).into_response();
+    }
+    if body["member_id"] != "mem_1" || body["refresh"] != REFRESH {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"error": "no match"}))).into_response();
+    }
+    o.rotated = true;
+    Json(json!({"token": o.refresh_gives.unwrap_or(FRESH)})).into_response()
+}
+
 async fn serve(fake: &Fake) -> String {
     let router = Router::new()
+        .route("/api/fleet/peer/refresh", axum::routing::post(fake_refresh))
         .route("/api/fleet/peer/payloads/{sha256}", axum::routing::put(fake_payload))
         .route("/api/fleet/peer/rows", axum::routing::post(fake_rows))
         .with_state(fake.clone());
@@ -195,6 +222,15 @@ fn target(url: &str) -> Target {
         owner_url: url.to_string(),
         member_id: "mem_1".into(),
         token: TOKEN.into(),
+        refresh: None,
+    }
+}
+
+/// [`target`], holding the refresh credential approval minted.
+fn refreshable(url: &str) -> Target {
+    Target {
+        refresh: Some(REFRESH.into()),
+        ..target(url)
     }
 }
 
@@ -333,6 +369,165 @@ async fn a_401_stops_the_drain_and_asks_for_attention() {
         (0, None),
         "a drained queue has no backlog"
     );
+}
+
+/// Issue #762: a 401 trades the refresh credential for a fresh token once, the drain retries on it
+/// and goes on to the end, and the report hands the new token back to be stored.
+#[tokio::test]
+async fn a_401_refreshes_the_token_and_the_drain_succeeds() {
+    let fake = Fake::new();
+    fake.with(|o| o.rotated = true);
+    let url = serve(&fake).await;
+    let (_root, data) = member(4, plain);
+
+    let report = drain(&data, &origin(), &refreshable(&url), &cfg(2), &SystemClock, false)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Synced, "{report:?}");
+    assert_eq!(report.sent, 4);
+    assert_eq!(report.refreshed_token.as_deref(), Some(FRESH));
+    assert_eq!(
+        fake.with(|o| o.refreshes),
+        1,
+        "one refresh, then every request carries the new token"
+    );
+    assert_eq!(fake.with(|o| o.rows.len()), 4);
+    assert!(
+        !serde_json::to_string(&report).unwrap().contains(FRESH),
+        "the token never travels in a report"
+    );
+}
+
+/// Issue #762: a refresh the owner refuses stops the drain as unauthorized; so does a second 401
+/// on the refreshed token — one refresh per drain, never a loop.
+#[tokio::test]
+async fn a_401_whose_refresh_fails_stops_as_unauthorized() {
+    let fake = Fake::new();
+    fake.with(|o| {
+        o.rotated = true;
+        o.refuse_refresh = Some(401);
+    });
+    let url = serve(&fake).await;
+    let (_root, data) = member(3, plain);
+    let report = drain(&data, &origin(), &refreshable(&url), &cfg(10), &SystemClock, false)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Unauthorized);
+    assert!(report.detail.unwrap().contains("re-join"));
+    assert_eq!(report.refreshed_token, None);
+    assert_eq!(fake.with(|o| (o.refreshes, o.requests)), (1, 1));
+    assert_eq!(DrainState::load(&data).status, SyncStatus::Unauthorized);
+
+    // The refresh answers, but with a token the owner refuses as well: the second 401 stops.
+    let fake = Fake::new();
+    fake.with(|o| {
+        o.rotated = true;
+        o.refresh_gives = Some("col_still_refused");
+    });
+    let url = serve(&fake).await;
+    let (_root, data) = member(3, plain);
+    let report = drain(&data, &origin(), &refreshable(&url), &cfg(10), &SystemClock, false)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Unauthorized);
+    assert_eq!(fake.with(|o| (o.refreshes, o.requests)), (1, 2), "one refresh per drain");
+    assert_eq!(fake.with(|o| o.rows.len()), 0);
+}
+
+/// Issue #762: a 403 is a removal, and a removed member never refreshes.
+#[tokio::test]
+async fn a_403_never_refreshes() {
+    let fake = Fake::new();
+    fake.with(|o| o.forbid = true);
+    let url = serve(&fake).await;
+    let (_root, data) = member(2, plain);
+    let report = drain(&data, &origin(), &refreshable(&url), &cfg(10), &SystemClock, true)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Removed);
+    assert_eq!(fake.with(|o| o.refreshes), 0);
+
+    // A refresh the owner answers 403 (its tombstone for a removed member) is a removal too.
+    let fake = Fake::new();
+    fake.with(|o| {
+        o.rotated = true;
+        o.refuse_refresh = Some(403);
+    });
+    let url = serve(&fake).await;
+    let (_root, data) = member(2, plain);
+    let report = drain(&data, &origin(), &refreshable(&url), &cfg(10), &SystemClock, false)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Removed);
+}
+
+/// Issue #762 against the real owner: the owner revokes a member's fleet token; the member's next
+/// drain refreshes it through `POST /api/fleet/peer/refresh`, the old token is gone for good, and
+/// the new one is stored in the membership. Once the owner removes the member, its refresh is a
+/// 403 — a tombstoned member is never refreshable — and a wrong credential is a 401.
+#[tokio::test]
+async fn the_real_owner_rotates_a_revoked_token_and_never_refreshes_a_removed_member() {
+    let owner_root = TempRoot(std::env::temp_dir().join(format!("colonizer-fleet-owner-{}", util::short_id())));
+    std::fs::create_dir_all(owner_root.0.join("config")).unwrap();
+    let owner = crate::tests::test_app(&owner_root.0);
+    let (member_id, token, refresh) = crate::fleet_members::FleetStore::add_refreshable_member_for_tests(&owner, "worker").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let served = owner.clone();
+    tokio::spawn(async move { axum::serve(listener, crate::server::router(&served)).await.unwrap() });
+
+    // The owner revokes the member's token in its token list; the member is still a member.
+    let old_id = owner.fleet_members.token_id_for_tests(&member_id).await.unwrap();
+    owner.api_tokens.revoke(&old_id).await.unwrap();
+
+    // The member's app, consented, drains through the background path that stores the new token.
+    let member_root = TempRoot(std::env::temp_dir().join(format!("colonizer-fleet-member-{}", util::short_id())));
+    std::fs::create_dir_all(member_root.0.join("config")).unwrap();
+    let app = crate::tests::test_app(&member_root.0);
+    write_colonies(&app.cfg.data_dir, 3, &plain);
+    let to = Target {
+        owner_url: url.clone(),
+        member_id: member_id.clone(),
+        token: token.clone(),
+        refresh: Some(refresh.clone()),
+    };
+    app.fleet_members.set_membership_for_tests(Some(to.clone())).await;
+    app.fleet_members.set_history_sync(true).await;
+    let report = trigger(State(app.clone())).await.unwrap().0;
+    assert_eq!((report.status, report.sent), (SyncStatus::Synced, 3), "{report:?}");
+    let stored = app.fleet_members.membership().await.unwrap();
+    assert_ne!(stored.token, token, "the membership holds the rotated token");
+    assert_ne!(
+        owner.fleet_members.token_id_for_tests(&member_id).await.unwrap(),
+        old_id,
+        "the owner rotated the member's token"
+    );
+    let refresh_url = format!("{url}/api/fleet/peer/refresh");
+    let ask = |member: &str, secret: &str| {
+        reqwest::Client::new()
+            .post(&refresh_url)
+            .json(&json!({"member_id": member, "refresh": secret}))
+            .send()
+    };
+    assert_eq!(
+        ask(&member_id, "wrong").await.unwrap().status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a wrong credential refreshes nothing"
+    );
+
+    // Removed: the tombstone answers the old token and the refresh alike with 403.
+    crate::fleet_members::FleetStore::remove_member_for_tests(&owner, &member_id).await;
+    assert_eq!(
+        ask(&member_id, &refresh).await.unwrap().status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "a removed member is never refreshable"
+    );
+    write_colonies(&app.cfg.data_dir, 4, &plain);
+    let report = drain(&app.cfg.data_dir, &origin(), &stored, &cfg(2), &SystemClock, true)
+        .await
+        .unwrap();
+    assert_eq!(report.status, SyncStatus::Removed, "{report:?}");
+    assert_eq!(report.refreshed_token, None);
 }
 
 /// Issue #764: what a member reports to its owner — state, backlog, error class and consent —
@@ -601,6 +796,7 @@ async fn a_member_drains_into_a_real_owner() {
         owner_url: url.clone(),
         member_id: member_id.clone(),
         token: token.clone(),
+        refresh: None,
     };
     let report = drain(&data, &origin(), &to, &cfg(2), &SystemClock, false).await.unwrap();
     assert_eq!(report.status, SyncStatus::Synced, "{report:?}");
