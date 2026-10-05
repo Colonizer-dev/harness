@@ -26,6 +26,12 @@ pub struct WatchdogSettings {
 #[derive(Clone, Debug)]
 pub struct Activity {
     pub last: DateTime<Utc>,
+    /// When this colony's Runtime was materialised — its admission instant, stamped once at
+    /// [`Activity::new`] and *never moved*, not by progress and not by
+    /// [`Activity::note_gateway_busy`] (issue #760). In memory like the rest of `Activity`, so a
+    /// restart re-stamps it and the window starts over — the safe direction. See
+    /// [`starting_reference`].
+    pub admitted_at: DateTime<Utc>,
     pub nudges: u64,
     pub last_nudge: Option<DateTime<Utc>>,
     pub question_since: Option<DateTime<Utc>>,
@@ -65,6 +71,7 @@ impl Activity {
     pub fn new(now: DateTime<Utc>) -> Self {
         Self {
             last: now,
+            admitted_at: now,
             nudges: 0,
             last_nudge: None,
             question_since: None,
@@ -364,10 +371,68 @@ pub(crate) async fn flag_control_defeat(app: &Shared, id: &str, defeat: Defeat) 
     app.session_log_as(Origin::Watchdog, id, "error", message).await;
 }
 
+/// How long a colony may sit in `starting` after its boot has *finished* and its agent still has
+/// not linked (issue #760). Sized off what is left once `start_link` has run (`boot.rs:2132`): a
+/// websocket to an agentd that answered `/v1/health` moments earlier (`boot.rs:2118`), retried with
+/// a backoff capped at 10 s (`events.rs:159`) — a transport that connects in seconds or not at all.
+const BOOT_LINK_DEADLINE_MINUTES: i64 = 15;
+
+/// How long a colony may sit in `starting` when its boot has not finished — the other half of the
+/// same question, and a much larger one. The bounded phases alone come to 810 s: the mesh join's
+/// 120 s (`boot.rs:2099`), the agentd health wait's 90 s and up to `MAX_RESTORE_WAIT_SECS = 600`
+/// (`boot.rs:2116`, `boot.rs:717`). The image pre-pull (`boot.rs:2075`) is explicitly unbounded
+/// ("can take a while"), as is `msb run --detach` (`sandbox.rs:63`). This floor is deliberately far
+/// above the bounded total: it catches a boot that is *wedged*, not one that is slow.
+const BOOT_DEADLINE_MINUTES: i64 = 45;
+
+/// The instant a `starting` colony's agent link was given its chance to come up, and how long it
+/// has had it.
+///
+/// Deliberately not `stall_minutes`, which measures time without progress in an *already-running*
+/// colony and is clamped as low as 1 minute (`orgs.rs:699`), so keying this off it would flag
+/// nearly every boot.
+///
+/// `Activity::admitted_at` is stamped when the Runtime is materialised (`sessions/runtime.rs:296`),
+/// which the queue does *before* it spawns the boot — the admission log line at `queue.rs:672`
+/// (through `sessions/persist.rs:216`), then `tokio::spawn(boot(…))` at `queue.rs:688` — so it is at
+/// or a moment before the boot's own start, the right origin for both cases below, and the one
+/// clock here gateway traffic cannot move. A colony whose agent is permanently retrying against
+/// the gateway — the case issue #760 names — would otherwise have this window restarted on every
+/// tick and never be flagged at all.
+///
+/// `boot_timing` is what makes the boot itself separable: cleared on every claim
+/// (`queue.rs:375`, `lifecycle.rs:1138`) and published phase by phase *without* `total_ms` while
+/// the boot runs (`boot.rs:788`), it gains `total_ms` at exactly one place — `boot.rs:2129`, right
+/// after the agentd health wait and right before `start_link` (`boot.rs:2132`) — the boot's own
+/// wall clock from where the boot began. So:
+///
+/// - `Some(ms)` — the boot finished. Reference `admitted_at + ms`, the instant it handed over to
+///   the link, which then gets [`BOOT_LINK_DEADLINE_MINUTES`].
+/// - `None` — the boot is still running or stopped part way, and so has no link to wait on.
+///   Reference `admitted_at` with the whole [`BOOT_DEADLINE_MINUTES`].
+///
+/// One clock for both, so the pair cannot disagree. Were `admitted_at` ever *after* the boot's
+/// start, a boot-end reference would sit slightly early — lengthening the window, the safe way.
+fn starting_reference(activity: &Activity, boot_total_ms: Option<u64>) -> (DateTime<Utc>, i64) {
+    match boot_total_ms {
+        Some(ms) => (
+            activity.admitted_at + Duration::milliseconds(ms as i64),
+            BOOT_LINK_DEADLINE_MINUTES,
+        ),
+        None => (activity.admitted_at, BOOT_DEADLINE_MINUTES),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Observed {
     Working,
     WaitingForAnswer,
+    /// Admitted and booting, but the agent has not linked yet (issue #760): nobody to nudge, so
+    /// this state can only end in a flag or nothing. `boot_total_ms` is the session's
+    /// `boot_timing.total_ms`; see [`starting_reference`].
+    Starting {
+        boot_total_ms: Option<u64>,
+    },
     Other,
 }
 
@@ -418,6 +483,24 @@ pub fn decide(
                 Decision::Nudge
             } else if attention != Some("nudges_exhausted") {
                 Decision::Flag("nudges_exhausted")
+            } else {
+                Decision::Nothing
+            }
+        }
+        Observed::Starting { boot_total_ms } => {
+            // A colony still `starting` past its deadline never got a turn out of its agent
+            // (issue #760): its event stream has not linked, so nothing about it can be seen, and
+            // a nudge would be a message to nobody. Straight to the flag, on the window
+            // [`starting_reference`] measures.
+            let (since, minutes) = starting_reference(activity, boot_total_ms);
+            if now - since < Duration::minutes(minutes) {
+                Decision::Nothing
+            } else if attention.is_some_and(|reason| !WATCHDOG_REASONS.contains(&reason)) {
+                // Someone else's flag is on the record — a quota card, an autopilot hold. It is
+                // the more specific story, and rewriting it as a stall would drop the card.
+                Decision::Nothing
+            } else if attention != Some("stalled") {
+                Decision::Flag("stalled")
             } else {
                 Decision::Nothing
             }
@@ -600,9 +683,14 @@ async fn check_all(app: &Shared) {
     // A suspended colony is skipped (issue #562): its microVM was removed on purpose and its link
     // with it, so there is nothing to nudge and the question is already a person's to answer — the
     // restore pass, not a nudge, brings it back.
-    for s in sessions.into_iter().filter(|s| {
-        s.status.is_live() && s.status != SessionStatus::Starting && s.suspended.is_none() && !blocked.contains(&s.id)
-    }) {
+    // `starting` colonies are no longer skipped outright (issue #760): one whose agent never linked
+    // used to sit in `starting` forever, with nothing watching it. It is never nudged — there is no
+    // agent to nudge — so all it can do here is take the boot flag, decided in `decide`. A
+    // quota-blocked one is still left out: it already carries the quota reason and card.
+    for s in sessions
+        .into_iter()
+        .filter(|s| s.status.is_live() && s.suspended.is_none() && !blocked.contains(&s.id))
+    {
         let Some(rt) = app.runtimes.lock().await.get(&s.id).cloned() else {
             continue;
         };
@@ -634,6 +722,11 @@ async fn check_all(app: &Shared) {
         // is done, so it must not also be nudged as though it had stalled.
         maybe_finish_turn(app, &s, &rt, &settings, now).await;
         let state = match s.status {
+            // The evidence that separates "the agent has not linked" from "the boot is still
+            // pulling an image" — see `starting_reference`.
+            SessionStatus::Starting => Observed::Starting {
+                boot_total_ms: s.boot_timing.as_ref().and_then(|t| t.get("total_ms")).and_then(Value::as_u64),
+            },
             SessionStatus::Running => Observed::Working,
             SessionStatus::WaitingForAnswer => Observed::WaitingForAnswer,
             _ => Observed::Other,
@@ -651,10 +744,16 @@ async fn check_all(app: &Shared) {
             // retrying into a failing provider keeps the gateway busy without making progress, and
             // clearing the flag here left "this colony needs you" in the log with nothing in the
             // cockpit. Only a real agent event (events.rs) clears `nudges_exhausted`.
-            if attention
-                .as_deref()
-                .is_some_and(|reason| reason != "waiting_for_answer" && reason != "nudges_exhausted")
-            {
+            // A stuck boot is in the same position (issue #760): the agent is evidently working —
+            // it is what is making the requests — but its event stream never linked, so the colony
+            // is still `starting` and still needs a person. `note_gateway_busy` above has already
+            // restarted its clock; the flag stands. Deliberately narrow: a wider exemption would
+            // also keep some *other* reason alive, a behaviour change nothing here asks for.
+            if attention.as_deref().is_some_and(|reason| {
+                reason != "waiting_for_answer"
+                    && reason != "nudges_exhausted"
+                    && !(s.status == SessionStatus::Starting && reason == "stalled")
+            }) {
                 app.update_session(&s.id, |x| x.attention = None).await;
                 continue;
             }
@@ -751,10 +850,23 @@ async fn check_all(app: &Shared) {
                 }
             }
             Decision::Flag(reason) => {
-                let message = match reason {
-                    "waiting_for_answer" => format!(
+                // Matched on the pair so only the two *starting* states get the boot wording: a
+                // `stalled` from the nudge path, or from a state that does not exist yet, keeps the
+                // mid-run line and cannot silently inherit starting-only meaning (issue #760).
+                let message = match (reason, state) {
+                    ("waiting_for_answer", _) => format!(
                         "watchdog: a question has been waiting for over {} min",
                         settings.waiting_minutes
+                    ),
+                    // The two `starting` cases say which half of the boot failed, so a slow image
+                    // pull is never reported as a dead agent.
+                    ("stalled", Observed::Starting { boot_total_ms: Some(_) }) => format!(
+                        "watchdog: its boot finished more than {BOOT_LINK_DEADLINE_MINUTES} min ago and its agent \
+                         still has not linked; this colony needs you — nothing it is doing can be seen"
+                    ),
+                    ("stalled", Observed::Starting { boot_total_ms: None }) => format!(
+                        "watchdog: still `starting` {BOOT_DEADLINE_MINUTES} min after its slot came free with its \
+                         boot unfinished; this colony needs you"
                     ),
                     _ => format!(
                         "watchdog: still no progress after {} nudges; this colony needs you",
@@ -763,6 +875,11 @@ async fn check_all(app: &Shared) {
                 };
                 let since = if reason == "waiting_for_answer" {
                     activity.question_since.unwrap_or(now)
+                } else if let Observed::Starting { boot_total_ms } = state {
+                    // The clock `decide` measured, not `progress_reference` (for a `starting` colony
+                    // that is `Activity::last`, moved by gateway traffic): the UI should say the
+                    // colony has needed you since the flag became due.
+                    starting_reference(&activity, boot_total_ms).0
                 } else {
                     activity.progress_reference()
                 };
@@ -847,6 +964,7 @@ mod tests {
     fn progress_after_a_nudge_restarts_the_clock() {
         let activity = Activity {
             last: at(20),
+            admitted_at: at(20),
             nudges: 1,
             last_nudge: Some(at(15)),
             question_since: None,
@@ -870,6 +988,7 @@ mod tests {
     fn unanswered_questions_are_flagged_not_nudged() {
         let activity = Activity {
             last: at(0),
+            admitted_at: at(0),
             nudges: 0,
             last_nudge: None,
             question_since: Some(at(0)),
@@ -906,6 +1025,78 @@ mod tests {
         );
     }
 
+    /// A colony whose agent never linked goes straight to the flag, never to a nudge (issue #760).
+    /// The boot's own length is *not* charged against it; a boot that never finished gets the far
+    /// longer floor. See [`starting_reference`].
+    #[test]
+    fn a_starting_colony_is_flagged_never_nudged() {
+        // A boot that took 40 minutes (a cold image pull) and then finished: the link has had five
+        // minutes, not forty — the false positive the deadline exists to prevent.
+        let activity = Activity::new(at(0));
+        let slow_boot = Observed::Starting {
+            boot_total_ms: Some(40 * 60 * 1000),
+        };
+        assert_eq!(decide(&SETTINGS, at(45), slow_boot, &activity, None), Decision::Nothing);
+        // The boot finished at minute 40, so the link's own 15-minute deadline falls at minute 55 —
+        // not at minute 15, and not measured from the admission the cold pull was charging.
+        assert_eq!(decide(&SETTINGS, at(54), slow_boot, &activity, None), Decision::Nothing);
+        assert_eq!(
+            decide(&SETTINGS, at(55), slow_boot, &activity, None),
+            Decision::Flag("stalled"),
+            "15 min after the boot finished the link has had its deadline"
+        );
+        // A boot still running — no `total_ms` yet — gets the whole floor: the pull in it is never
+        // mistaken for a stalled agent, and a wedged boot still gets flagged.
+        let booting = Observed::Starting { boot_total_ms: None };
+        assert_eq!(decide(&SETTINGS, at(44), booting, &activity, None), Decision::Nothing);
+        assert_eq!(decide(&SETTINGS, at(45), booting, &activity, None), Decision::Flag("stalled"));
+        assert_eq!(
+            decide(&SETTINGS, at(90), booting, &activity, Some("stalled")),
+            Decision::Nothing,
+            "the flag stands rather than repeating"
+        );
+        // No nudge is ever returned for this state, whatever the budget.
+        for minutes in [15, 30, 600] {
+            assert!(
+                !matches!(decide(&SETTINGS, at(minutes), booting, &activity, None), Decision::Nudge),
+                "a `starting` colony is never nudged, at {minutes} min"
+            );
+        }
+        // Somebody else's flag is the more specific story and is left on the record.
+        assert_eq!(
+            decide(
+                &SETTINGS,
+                at(30),
+                Observed::Starting { boot_total_ms: None },
+                &activity,
+                Some(crate::provider_quota::QUOTA_EXHAUSTED_REASON)
+            ),
+            Decision::Nothing
+        );
+        // A colony admitted only a few minutes ago is inside its window whatever happened after.
+        let recent = Activity::new(at(20));
+        assert_eq!(
+            decide(
+                &SETTINGS,
+                at(34),
+                Observed::Starting { boot_total_ms: Some(0) },
+                &recent,
+                None
+            ),
+            Decision::Nothing
+        );
+        // The point of `admitted_at`: the retrying colony in issue #760 reset `since` to now on
+        // every tick before this.
+        let mut busy = Activity::new(at(0));
+        busy.note_gateway_busy(at(60));
+        assert_eq!(
+            busy.admitted_at,
+            at(0),
+            "gateway traffic moves the progress clock, not this one"
+        );
+        assert_eq!(decide(&SETTINGS, at(60), booting, &busy, None), Decision::Flag("stalled"));
+    }
+
     /// A colony with a stalled runtime and its nudges spent, under a watchdog of 15 min / 2 nudges.
     async fn stalled_app(name: &str, status: SessionStatus) -> (Shared, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("colonizer-watchdog-{name}-{}", uuid::Uuid::new_v4()));
@@ -929,6 +1120,24 @@ mod tests {
             activity.last_nudge = Some(Utc::now() - Duration::hours(1));
         }
         (app, root)
+    }
+
+    /// The fixture's colony admitted two hours ago with no nudges spent — overdue on the boot clock
+    /// whatever its `last` says. Returns the admission stamp so a test can say what it expects the
+    /// flag to be dated from.
+    async fn stale_starting(app: &Shared) -> DateTime<Utc> {
+        let rt = app.runtime("w1").await;
+        let mut a = rt.activity.lock().await;
+        a.nudges = 0;
+        a.last_nudge = None;
+        a.admitted_at = Utc::now() - Duration::hours(2);
+        a.admitted_at
+    }
+
+    /// The `since` an attention record carries, read back off the JSON the cockpit reads.
+    fn since_of(attention: &Value) -> DateTime<Utc> {
+        let s = attention["since"].as_str().expect("since is stamped");
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
     /// The final "this colony needs you" raises the attention flag the cockpit reads, not only a
@@ -1059,6 +1268,206 @@ mod tests {
         assert_eq!(attention["reason"], crate::provider_quota::QUOTA_EXHAUSTED_REASON);
         assert_eq!(attention["provider"], "bailian");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A colony whose boot finished but whose agent never linked is flagged, not nudged, and the
+    /// log line is the one that says the agent never linked, not the one that blames an unfinished
+    /// boot (issue #760).
+    #[tokio::test]
+    async fn a_starting_colony_with_no_agent_turn_is_flagged_not_nudged() {
+        let (app, root) = stalled_app("boot", SessionStatus::Starting).await;
+        stale_starting(&app).await;
+        // The boot ran for ten minutes and finished: the link has then had the fixture's two hours
+        // to come up.
+        app.update_session("w1", |s| {
+            s.boot_timing = Some(json!({ "total_ms": 600_000, "phases": [] }));
+            true
+        })
+        .await;
+        check_all(&app).await;
+        let s = app.session("w1").await.unwrap();
+        let attention = s.attention.expect("flagged");
+        assert_eq!(s.status, SessionStatus::Starting, "the watchdog does not move the status");
+        assert_eq!(attention["reason"], "stalled");
+        assert_eq!(attention["nudges"], 0, "and it did not nudge");
+        let logs = app.runtime("w1").await.logs.lock().await.clone();
+        assert!(
+            logs.iter().any(|l| l["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("its agent still has not linked"))),
+            "the log names the link that never came, not a boot still running: {logs:?}"
+        );
+        assert!(
+            logs.iter()
+                .any(|l| l["message"].as_str().is_some_and(|m| m.contains("this colony needs you"))),
+            "and says the colony needs you: {logs:?}"
+        );
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.unwrap()["reason"],
+            "stalled",
+            "the flag stands rather than repeating"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A boot still inside its deadline is left alone: the long boot must not be charged against the
+    /// link (issue #760).
+    #[tokio::test]
+    async fn a_starting_colony_inside_the_boot_window_is_left_alone() {
+        let (app, root) = stalled_app("boot-grace", SessionStatus::Starting).await;
+        {
+            let rt = app.runtime("w1").await;
+            let mut activity = rt.activity.lock().await;
+            activity.nudges = 0;
+            // A cold image pull: forty minutes into a boot that has not finished yet, and well past
+            // the fixture's `stall_minutes` of 15 — under the old clock that was the false positive,
+            // an agent reported dead while it was still downloading gigabytes. `last` is set
+            // alongside so nothing else sees a stale clock either.
+            activity.admitted_at = Utc::now() - Duration::minutes(40);
+            activity.last = activity.admitted_at;
+        }
+        check_all(&app).await;
+        assert!(
+            app.session("w1").await.unwrap().attention.is_none(),
+            "forty minutes into a cold boot, that boot is still a boot"
+        );
+        // The same colony once the boot has finished and the link is overdue: now it is a flag.
+        app.update_session("w1", |s| {
+            s.boot_timing = Some(json!({ "total_ms": 600_000, "phases": [] }));
+            true
+        })
+        .await;
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.expect("flagged")["reason"],
+            "stalled"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Gateway traffic must not take down the boot flag (issue #760): a `starting` colony whose
+    /// agent is evidently making requests but never linked still needs a person, and
+    /// `note_gateway_busy` has already restarted its clock.
+    #[tokio::test]
+    async fn gateway_traffic_does_not_clear_a_starting_colonys_stall_flag() {
+        let (app, root) = stalled_app("busy-boot", SessionStatus::Starting).await;
+        stale_starting(&app).await;
+        app.update_session("w1", |s| {
+            s.boot_timing = Some(json!({ "total_ms": 600_000, "phases": [] }));
+            true
+        })
+        .await;
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.expect("flagged")["reason"],
+            "stalled"
+        );
+        // An in-flight request, the same shape `gateway/tests.rs` uses via `Counted`.
+        let counter = app.gateway.colony_counter("w1");
+        counter.fetch_add(1, Ordering::SeqCst);
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.expect("the flag stands")["reason"],
+            "stalled",
+            "gateway traffic must not clear a stuck boot's flag"
+        );
+        counter.fetch_sub(1, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The narrowness of that exemption: a *different* reason's flag on a `starting` colony is
+    /// still cleared under gateway traffic, as it was before the boot arm existed.
+    #[tokio::test]
+    async fn gateway_traffic_still_clears_another_reason_on_a_starting_colony() {
+        let (app, root) = stalled_app("busy-other", SessionStatus::Starting).await;
+        app.update_session("w1", |s| {
+            s.attention = Some(json!({ "reason": "agent_failed" }));
+            true
+        })
+        .await;
+        let counter = app.gateway.colony_counter("w1");
+        counter.fetch_add(1, Ordering::SeqCst);
+        check_all(&app).await;
+        assert!(
+            app.session("w1").await.unwrap().attention.is_none(),
+            "only this watchdog's own boot flag is exempt"
+        );
+        counter.fetch_sub(1, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The regression for the clock the exemption could not create (issue #760): this is the colony
+    /// the issue describes — an agent that keeps issuing requests and keeps getting refused, whose
+    /// status never leaves `starting` and whose event stream never links. `note_gateway_busy` runs
+    /// before `decide` on every tick and moves `Activity::last` to now, so a `starting` window read
+    /// off `last` restarts every tick and the flag can never be raised. It reads
+    /// `Activity::admitted_at` instead.
+    #[tokio::test]
+    async fn sustained_gateway_traffic_does_not_hide_a_stuck_boot_forever() {
+        // No `boot_timing` at all: the boot never finished, so the wider `BOOT_DEADLINE_MINUTES`
+        // floor applies, and two hours is well past it.
+        let (app, root) = stalled_app("busy-forever", SessionStatus::Starting).await;
+        stale_starting(&app).await;
+        // The request in flight, held across every tick below — the shape `gateway/tests.rs` uses
+        // via `Counted`, which is private to the gateway module.
+        let counter = app.gateway.colony_counter("w1");
+        counter.fetch_add(1, Ordering::SeqCst);
+        check_all(&app).await;
+        let attention = app
+            .session("w1")
+            .await
+            .unwrap()
+            .attention
+            .expect("flagged despite the traffic");
+        assert_eq!(attention["reason"], "stalled");
+        assert!(
+            app.runtime("w1").await.activity.lock().await.last > Utc::now() - Duration::minutes(1),
+            "the gateway clock really did move, so the flag cannot have come off it"
+        );
+        // The next tick, with the request *still* in flight, must not take it down.
+        check_all(&app).await;
+        assert_eq!(
+            app.session("w1").await.unwrap().attention.expect("the flag stands")["reason"],
+            "stalled",
+            "sustained traffic must not postpone the flag a second time"
+        );
+        counter.fetch_sub(1, Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The `since` on the record is the clock the decision was made on (issue #760), so the cockpit
+    /// says the colony has needed someone since the flag became due rather than since the last thing
+    /// the gateway happened to see.
+    #[tokio::test]
+    async fn a_starting_colonys_since_is_the_window_the_flag_was_decided_on() {
+        let (app, root) = stalled_app("since", SessionStatus::Starting).await;
+        let admitted = stale_starting(&app).await;
+        // A progress clock at a *different*, much later instant, so the assertions can tell the two
+        // apart: `progress_reference` would report this one.
+        app.runtime("w1").await.activity.lock().await.last = Utc::now() - Duration::minutes(30);
+        // A ten-minute boot: the link's window opened at `admitted_at + 600_000`.
+        app.update_session("w1", |s| {
+            s.boot_timing = Some(json!({ "total_ms": 600_000, "phases": [] }));
+            true
+        })
+        .await;
+        check_all(&app).await;
+        let attention = app.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(attention["reason"], "stalled");
+        assert_eq!(
+            since_of(&attention),
+            admitted + Duration::milliseconds(600_000),
+            "the boot-end reference, not the admission instant and not the progress clock"
+        );
+        // And the same for the boot-unfinished case, where the window opens at admission itself.
+        let (app2, root2) = stalled_app("since-boot", SessionStatus::Starting).await;
+        let admitted2 = stale_starting(&app2).await;
+        check_all(&app2).await;
+        let attention = app2.session("w1").await.unwrap().attention.expect("flagged");
+        assert_eq!(since_of(&attention), admitted2);
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root2);
     }
 
     #[test]
@@ -1318,6 +1727,7 @@ mod tests {
     fn a_hint_loop_is_nudged_on_the_progress_before_the_loop() {
         let activity = Activity {
             last: at(20),
+            admitted_at: at(20),
             nudges: 0,
             last_nudge: None,
             question_since: None,
@@ -1343,6 +1753,7 @@ mod tests {
     fn one_denial_or_a_cleared_streak_keeps_the_normal_clock() {
         let one = Activity {
             last: at(10),
+            admitted_at: at(10),
             nudges: 0,
             last_nudge: None,
             question_since: None,
@@ -1391,6 +1802,7 @@ mod tests {
     fn a_hint_loop_flags_nudges_exhausted_after_the_cap() {
         let activity = Activity {
             last: at(60),
+            admitted_at: at(60),
             nudges: 2,
             last_nudge: Some(at(30)),
             question_since: None,
@@ -1484,6 +1896,7 @@ mod tests {
     fn a_busy_gateway_holds_off_the_hint_loop_nudge() {
         let mut activity = Activity {
             last: at(0),
+            admitted_at: at(0),
             nudges: 0,
             last_nudge: None,
             question_since: None,
