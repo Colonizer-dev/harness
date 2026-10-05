@@ -5,9 +5,23 @@
 //! an `INDEX.md`. Folders are allowlisted like colony secrets (each with a
 //! [`crate::colony_secrets::Scope`]) and every note is scrubbed with the [`crate::deja::scrub`] the
 //! transcript index uses; base64- or percent-encoded secrets are not caught.
+//!
+//! Write-back goes the other way only through review. A colony's `vault_propose` tool emits a
+//! `vault_proposal` event; [`propose`] queues it on the mothership (never in the snapshot, never in
+//! the vault), with its provenance (colony, repository, commit). The operator lists the queue and
+//! accepts or rejects each proposal through [`routes`]; accepting writes one new note into the
+//! vault's inbox folder (`[vault] inbox`, `Inbox/colonizer` by default), refusing to overwrite a
+//! file, to follow a symlink or to leave the vault root.
 
-use crate::{App, deja::scrub};
-use serde::Deserialize;
+use crate::{ApiResult, App, Shared, client_error, deja::scrub, protocol::Origin};
+use axum::{
+    Json,
+    extract::{Path as UrlPath, State},
+    http::StatusCode,
+};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::HashSet,
     io,
@@ -27,6 +41,8 @@ const MAX_FILES: usize = 2000;
 pub struct VaultConfig {
     pub path: Option<String>,
     pub folders: Vec<VaultFolder>,
+    /// Where an accepted `vault_propose` note lands, relative to the vault; [`DEFAULT_INBOX`] when unset.
+    pub inbox: Option<String>,
 }
 
 impl VaultConfig {
@@ -34,6 +50,20 @@ impl VaultConfig {
     fn root(&self) -> Option<PathBuf> {
         let path = self.path.as_deref()?.trim();
         (!path.is_empty()).then(|| PathBuf::from(path))
+    }
+
+    /// The inbox folder as written, before it is checked to be relative.
+    fn inbox(&self) -> &str {
+        self.inbox
+            .as_deref()
+            .map(str::trim)
+            .filter(|inbox| !inbox.is_empty())
+            .unwrap_or(DEFAULT_INBOX)
+    }
+
+    /// Whether any allowlisted folder reaches colonies on `repo`, i.e. whether one could have a vault.
+    fn reaches(&self, repo: &str) -> bool {
+        self.root().is_some() && self.folders.iter().any(|folder| folder.scope.admits(repo))
     }
 }
 
@@ -419,6 +449,392 @@ fn remove_stale(dest: &Path) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Write-back: vault_propose and the review queue (issue #777)
+// ---------------------------------------------------------------------------
+
+/// The inbox folder, relative to the vault, when `[vault] inbox` is unset.
+pub const DEFAULT_INBOX: &str = "Inbox/colonizer";
+/// Caps on one proposal: what a person reviews must fit on a screen, and the queue on a disk.
+const MAX_PATH_CHARS: usize = 200;
+const MAX_PATH_DEPTH: usize = 4;
+const MAX_TITLE_CHARS: usize = 200;
+const MAX_REASON_CHARS: usize = 2000;
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+const MAX_PENDING: usize = 200;
+
+/// One pending proposal. Everything but `id`, `source` and `created_at` came from a colony and is
+/// untrusted text: the cockpit shows it escaped, and only [`accept`] ever writes it, as a new file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Proposal {
+    pub id: String,
+    /// The note's path under the inbox folder, already cleaned ([`note_path`]).
+    pub path: String,
+    pub title: String,
+    pub body: String,
+    pub reason: String,
+    /// Provenance: `session_id` (the colony), `repo`, `commit` (read on the mothership) and `origin`.
+    pub source: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A proposal as the event carries it, before it is checked.
+pub struct Draft<'a> {
+    pub path: &'a str,
+    pub title: &'a str,
+    pub body: &'a str,
+    pub reason: &'a str,
+}
+
+/// A proposal path cleaned to `dir/name.md`: relative, at most [`MAX_PATH_DEPTH`] parts, none of them
+/// empty, `.`/`..`, dot-named or carrying a separator or control character; `.md` is added when the
+/// name has no such suffix. `None` refuses it, so a traversal never reaches the queue.
+pub fn note_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || path.chars().count() > MAX_PATH_CHARS {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        let bad = |c: char| c.is_control() || matches!(c, '\\' | ':' | '\u{2028}' | '\u{2029}');
+        if part.is_empty() || part.starts_with('.') || part.trim() != part || part.chars().any(bad) {
+            return None;
+        }
+        parts.push(part.to_string());
+    }
+    if parts.len() > MAX_PATH_DEPTH {
+        return None;
+    }
+    let last = parts.last_mut()?;
+    if !last.to_ascii_lowercase().ends_with(".md") {
+        last.push_str(".md");
+    }
+    Some(parts.join("/"))
+}
+
+/// Checks and normalises a proposal; the error names what to fix, for the colony's log.
+pub fn draft(draft: Draft<'_>, source: Value) -> Result<Proposal, String> {
+    let path = note_path(draft.path).ok_or_else(|| {
+        format!(
+            "path must be a relative note path under the inbox folder (at most {MAX_PATH_DEPTH} parts and {MAX_PATH_CHARS} characters, no `..`, no dot-named parts)"
+        )
+    })?;
+    let title = one_line(draft.title);
+    if title.is_empty() || title.chars().count() > MAX_TITLE_CHARS {
+        return Err(format!("title must be 1-{MAX_TITLE_CHARS} characters"));
+    }
+    let body = draft.body.trim();
+    if body.is_empty() || body.len() > MAX_BODY_BYTES {
+        return Err(format!("body must be 1-{MAX_BODY_BYTES} bytes"));
+    }
+    let reason = one_line(draft.reason);
+    if reason.is_empty() || reason.chars().count() > MAX_REASON_CHARS {
+        return Err(format!("reason must be 1-{MAX_REASON_CHARS} characters"));
+    }
+    Ok(Proposal {
+        id: crate::util::short_id(),
+        path,
+        title,
+        body: body.to_string(),
+        reason,
+        source,
+        created_at: Utc::now(),
+    })
+}
+
+/// The queue lives beside the other mothership state, outside every colony's mount and the vault.
+fn queue_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("vault").join("proposals.json")
+}
+
+/// One writer at a time; the queue is small, so a process-wide lock is enough.
+static QUEUE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn read_queue(data_dir: &Path) -> Vec<Proposal> {
+    std::fs::read(queue_file(data_dir))
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn write_queue(data_dir: &Path, proposals: &[Proposal]) -> io::Result<()> {
+    let path = queue_file(data_dir);
+    std::fs::create_dir_all(path.parent().unwrap_or(data_dir))?;
+    let tmp = path.with_extension(format!("json.{}.tmp", crate::util::short_id()));
+    std::fs::write(&tmp, serde_json::to_vec_pretty(proposals)?)?;
+    std::fs::rename(&tmp, &path)
+}
+
+/// Pending proposals, newest first.
+pub async fn proposals(data_dir: &Path) -> Vec<Proposal> {
+    let _guard = QUEUE.lock().await;
+    let mut proposals = read_queue(data_dir);
+    proposals.sort_by_key(|p| std::cmp::Reverse(p.created_at));
+    proposals
+}
+
+/// Queues a proposal; refused once [`MAX_PENDING`] wait for review.
+pub async fn add_proposal(data_dir: &Path, proposal: Proposal) -> io::Result<()> {
+    let _guard = QUEUE.lock().await;
+    let mut proposals = read_queue(data_dir);
+    if proposals.len() >= MAX_PENDING {
+        return Err(io::Error::other(format!(
+            "{MAX_PENDING} vault proposals are already waiting for review"
+        )));
+    }
+    proposals.push(proposal);
+    write_queue(data_dir, &proposals)
+}
+
+/// Removes and returns one proposal.
+pub async fn take_proposal(data_dir: &Path, id: &str) -> io::Result<Option<Proposal>> {
+    let _guard = QUEUE.lock().await;
+    let mut proposals = read_queue(data_dir);
+    let Some(index) = proposals.iter().position(|p| p.id == id) else {
+        return Ok(None);
+    };
+    let proposal = proposals.remove(index);
+    write_queue(data_dir, &proposals)?;
+    Ok(Some(proposal))
+}
+
+/// A colony proposed a note for the operator vault: refuse a subagent's, ignore one from a colony
+/// that had no vault, scrub the secret values the mothership knows, and queue the rest for review.
+/// Nothing reaches the vault until the operator accepts it.
+pub(crate) async fn propose(app: &Shared, id: &str, origin: Origin, draft_in: Draft<'_>) {
+    let Some(s) = app.session(id).await else { return };
+    // As with shared memory, only the orchestrator proposes; a subagent's event carries the agent ref.
+    if origin == Origin::Subagent {
+        app.session_log(
+            id,
+            "warn",
+            "vault_read_only: refused a vault proposal from a subagent: only the orchestrator proposes to the operator vault"
+                .into(),
+        )
+        .await;
+        return;
+    }
+    let cfg = crate::config::FileConfig::load(&app.cfg.config_dir).vault;
+    if !cfg.reaches(&s.repo) {
+        app.session_log(
+            id,
+            "info",
+            "ignored a vault proposal: no operator vault folder is in scope for this colony".into(),
+        )
+        .await;
+        return;
+    }
+    let mut secrets = crate::secrets::saved_values(app);
+    secrets.extend(
+        crate::colony_secrets::for_colony(&app.cfg.config_dir, &s.repo)
+            .into_iter()
+            .map(|(_, value)| value),
+    );
+    let (path, title, body, reason) = (
+        scrub(draft_in.path, &secrets),
+        scrub(draft_in.title, &secrets),
+        scrub(draft_in.body, &secrets),
+        scrub(draft_in.reason, &secrets),
+    );
+    let commit = crate::memory::colony_commit(app, &s).await;
+    let source = json!({"session_id": s.id, "repo": s.repo, "commit": commit, "origin": "orchestrator"});
+    let scrubbed = Draft {
+        path: &path,
+        title: &title,
+        body: &body,
+        reason: &reason,
+    };
+    let proposal = match draft(scrubbed, source) {
+        Ok(proposal) => proposal,
+        Err(e) => {
+            app.session_log(id, "error", format!("rejected a vault proposal: {e}")).await;
+            return;
+        }
+    };
+    let (title, path) = (proposal.title.clone(), proposal.path.clone());
+    match add_proposal(&app.cfg.data_dir, proposal).await {
+        Ok(()) => {
+            app.session_log(
+                id,
+                "info",
+                format!("vault: the agent proposed \"{title}\" ({path}) for the operator vault, waiting for your review"),
+            )
+            .await
+        }
+        Err(e) => {
+            app.session_log(id, "error", format!("could not queue a vault proposal: {e}"))
+                .await
+        }
+    }
+}
+
+/// Why an accepted proposal could not be written.
+#[derive(Debug)]
+pub enum WriteError {
+    /// No `[vault] path` is configured.
+    Off,
+    /// The inbox or the note path would leave the vault, or a part of it is a symlink or a file.
+    Refused(String),
+    /// A file already exists there; the vault is left as it was.
+    Exists(String),
+    Io(io::Error),
+}
+
+impl From<io::Error> for WriteError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// The inbox folder relative to the vault, or why it is refused.
+fn inbox_folder(cfg: &VaultConfig) -> Result<PathBuf, WriteError> {
+    relative_folder(cfg.inbox())
+        .filter(|rel| rel.components().next().is_some())
+        .filter(|rel| {
+            rel.components()
+                .all(|part| !part.as_os_str().to_string_lossy().starts_with('.'))
+        })
+        .ok_or_else(|| {
+            WriteError::Refused(format!(
+                "the vault inbox {:?} must be a relative folder inside the vault",
+                cfg.inbox()
+            ))
+        })
+}
+
+/// Writes an accepted proposal into the vault's inbox as a new note and returns its path relative
+/// to the vault. Every directory on the way is created one part at a time and must be a real
+/// directory, never a symlink; the parent is checked to resolve inside the vault root; and the file
+/// is created with `create_new`, so an existing file — or a symlink planted at the name — is never
+/// overwritten or followed. Pure over paths, so it tests without an [`App`].
+pub fn write_note(cfg: &VaultConfig, proposal: &Proposal) -> Result<String, WriteError> {
+    let root = cfg.root().ok_or(WriteError::Off)?;
+    let root = std::fs::canonicalize(&root)?;
+    let inbox = inbox_folder(cfg)?;
+    let note = note_path(&proposal.path)
+        .ok_or_else(|| WriteError::Refused(format!("{:?} is not a note path under the inbox", proposal.path)))?;
+    let rel = inbox.join(&note);
+    let mut dir = root.clone();
+    for part in rel.parent().map(Path::components).into_iter().flatten() {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(WriteError::Refused(format!("{} is a symlink", dir.display())));
+            }
+            Ok(meta) if !meta.is_dir() => {
+                return Err(WriteError::Refused(format!("{} is not a folder", dir.display())));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if !std::fs::canonicalize(&dir)?.starts_with(&root) {
+        return Err(WriteError::Refused("the inbox resolves outside the vault".into()));
+    }
+    let shown = rel.to_string_lossy().replace('\\', "/");
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(root.join(&rel));
+    let mut file = match file {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(WriteError::Exists(shown)),
+        Err(e) => return Err(e.into()),
+    };
+    io::Write::write_all(&mut file, note_text(proposal).as_bytes())?;
+    Ok(shown)
+}
+
+/// The note as it lands in the vault: frontmatter with its provenance — every value a JSON string,
+/// which YAML reads as a quoted scalar, so no proposal text can add a key — then the title and body.
+fn note_text(p: &Proposal) -> String {
+    let field = |key: &str| p.source.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    let quoted = |value: &str| serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+    format!(
+        "---\ntitle: {}\nsource: colonizer\ncolony: {}\nrepo: {}\ncommit: {}\nreason: {}\nproposed_at: {}\n---\n\n# {}\n\n{}\n",
+        quoted(&p.title),
+        quoted(&field("session_id")),
+        quoted(&field("repo")),
+        quoted(&field("commit")),
+        quoted(&p.reason),
+        quoted(&p.created_at.to_rfc3339()),
+        p.title,
+        p.body,
+    )
+}
+
+/// `GET /api/vault/proposals`: whether a vault is configured, its inbox folder, and the queue.
+async fn list(State(app): State<Shared>) -> Json<Value> {
+    let cfg = crate::config::FileConfig::load(&app.cfg.config_dir).vault;
+    Json(json!({
+        "configured": cfg.root().is_some(),
+        "inbox": cfg.inbox(),
+        "proposals": proposals(&app.cfg.data_dir).await,
+    }))
+}
+
+/// `POST /api/vault/proposals/{id}/accept`: writes the note into the inbox and drops the proposal.
+/// A proposal that cannot be written goes back in the queue, so a refusal never loses it.
+async fn accept(State(app): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiResult<Value> {
+    let proposal = take_proposal(&app.cfg.data_dir, &id)
+        .await?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such vault proposal"))?;
+    let cfg = crate::config::FileConfig::load(&app.cfg.config_dir).vault;
+    let written = write_note(&cfg, &proposal);
+    let (status, message) = match written {
+        Ok(path) => return Ok(Json(json!({"ok": true, "path": path}))),
+        Err(WriteError::Off) => (StatusCode::CONFLICT, "no operator vault is configured".to_string()),
+        Err(WriteError::Refused(why)) => (StatusCode::BAD_REQUEST, format!("refused: {why}")),
+        Err(WriteError::Exists(path)) => (
+            StatusCode::CONFLICT,
+            format!("{path} already exists in the vault; nothing was overwritten"),
+        ),
+        Err(WriteError::Io(e)) => (StatusCode::INTERNAL_SERVER_ERROR, format!("could not write the note: {e}")),
+    };
+    let _ = add_proposal(&app.cfg.data_dir, proposal).await;
+    Err(client_error(status, &message))
+}
+
+/// `POST /api/vault/proposals/{id}/reject`: drops the proposal; the vault is never touched.
+async fn reject(State(app): State<Shared>, UrlPath(id): UrlPath<String>) -> ApiResult<Value> {
+    take_proposal(&app.cfg.data_dir, &id)
+        .await?
+        .ok_or_else(|| client_error(StatusCode::NOT_FOUND, "no such vault proposal"))?;
+    Ok(Json(json!({"ok": true})))
+}
+
+fn routes() -> axum::Router<Shared> {
+    use axum::routing;
+    axum::Router::new()
+        .route("/api/vault/proposals", routing::get(list))
+        .route("/api/vault/proposals/{id}/accept", routing::post(accept))
+        .route("/api/vault/proposals/{id}/reject", routing::post(reject))
+}
+
+/// The vault review queue as a migrated feature (`features.rs`): owner-only routes and their
+/// activity lines.
+pub(crate) const FEATURE: crate::features::Feature = crate::features::Feature {
+    name: "vault",
+    routes,
+    token_scope: None,
+    activity: ACTIVITY,
+    kinds: &["vault.review"],
+    start_tasks: None,
+};
+
+const ACTIVITY: &[crate::activity::Rule] = &[
+    crate::activity::rule(
+        "POST",
+        "/api/vault/proposals/{id}/accept",
+        "vault.review",
+        crate::activity::Target::Fixed("accepted a vault proposal", "memory"),
+    ),
+    crate::activity::rule(
+        "POST",
+        "/api/vault/proposals/{id}/reject",
+        "vault.review",
+        crate::activity::Target::Fixed("rejected a vault proposal", "memory"),
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,5 +986,203 @@ mod tests {
         let stats = stage(&VaultConfig::default(), "acme/web", &[], &dest.0).unwrap();
         assert_eq!(stats, Stats::default());
         assert!(!dest.0.exists());
+    }
+
+    fn proposal(path: &str) -> Proposal {
+        let source = json!({"session_id": "c-1", "repo": "acme/web", "commit": "abc1234", "origin": "orchestrator"});
+        let mut p = draft(
+            Draft {
+                path: "x",
+                title: "Deploy order",
+                body: "Run migrations first.\n\n---\ncolonizer: false\n",
+                reason: "Learned while fixing #12",
+            },
+            source,
+        )
+        .unwrap();
+        p.path = path.to_string();
+        p
+    }
+
+    fn vault_cfg(root: &Path, extra: &str) -> VaultConfig {
+        toml::from_str(&format!("path = {:?}\n{extra}", root.display())).unwrap()
+    }
+
+    /// A proposal path stays a relative note path: traversal, absolute paths, dot-named parts,
+    /// separators and over-deep or over-long paths are refused; `.md` is added when missing.
+    #[test]
+    fn proposal_paths_are_relative_note_paths_only() {
+        assert_eq!(note_path("deploy-order").as_deref(), Some("deploy-order.md"));
+        assert_eq!(note_path("web/Deploy order.MD").as_deref(), Some("web/Deploy order.MD"));
+        for bad in [
+            "",
+            "../x.md",
+            "a/../../x.md",
+            "/etc/passwd",
+            "./x.md",
+            ".obsidian/x.md",
+            "a//b.md",
+            "a\\b.md",
+            "C:x.md",
+            "a/b/c/d/e.md",
+            "x\n.md",
+            "a/ b.md",
+        ] {
+            assert_eq!(note_path(bad), None, "{bad:?}");
+        }
+        assert_eq!(note_path(&"a".repeat(MAX_PATH_CHARS + 1)), None);
+    }
+
+    /// The caps: title, body and reason must be present and within their limits; a title is one line.
+    #[test]
+    fn a_draft_is_capped_and_flattened() {
+        let ok = |title: &str, body: &str, reason: &str| {
+            draft(
+                Draft {
+                    path: "n",
+                    title,
+                    body,
+                    reason,
+                },
+                Value::Null,
+            )
+        };
+        assert_eq!(ok("a\nb", "body", "why").unwrap().title, "a b");
+        assert!(ok("", "body", "why").is_err());
+        assert!(ok("t", " ", "why").is_err());
+        assert!(ok("t", "body", "").is_err());
+        assert!(ok(&"t".repeat(MAX_TITLE_CHARS + 1), "body", "why").is_err());
+        assert!(ok("t", &"b".repeat(MAX_BODY_BYTES + 1), "why").is_err());
+        assert!(ok("t", "body", &"r".repeat(MAX_REASON_CHARS + 1)).is_err());
+        assert!(
+            draft(
+                Draft {
+                    path: "../escape",
+                    title: "t",
+                    body: "b",
+                    reason: "r"
+                },
+                Value::Null
+            )
+            .is_err()
+        );
+    }
+
+    /// Accepting writes one new note under the inbox folder, with provenance in quoted frontmatter,
+    /// and nothing anywhere else; a second accept of the same path never overwrites the first.
+    #[test]
+    fn accept_writes_only_into_the_inbox_and_never_overwrites() {
+        let vault = temp("inbox");
+        put(&vault.0.join("Notes/a.md"), "# A\n");
+        let cfg = vault_cfg(&vault.0, NOTES);
+        let written = write_note(&cfg, &proposal("web/deploy-order.md")).unwrap();
+        assert_eq!(written, "Inbox/colonizer/web/deploy-order.md");
+        let text = read(&vault.0.join(&written));
+        assert!(text.starts_with("---\ntitle: \"Deploy order\"\nsource: colonizer\ncolony: \"c-1\"\nrepo: \"acme/web\"\ncommit: \"abc1234\"\nreason: \"Learned while fixing #12\"\n"), "{text}");
+        assert!(text.contains("# Deploy order\n\nRun migrations first."));
+        assert_eq!(read(&vault.0.join("Notes/a.md")), "# A\n");
+        let mut other = proposal("web/deploy-order.md");
+        other.body = "Replaced".into();
+        assert!(matches!(write_note(&cfg, &other), Err(WriteError::Exists(_))));
+        assert!(read(&vault.0.join(&written)).contains("Run migrations first."));
+        // A configured inbox is honoured; one that climbs out of the vault is refused.
+        let custom = vault_cfg(&vault.0, "inbox = \"Review/From colonies\"\n");
+        assert_eq!(write_note(&custom, &proposal("n.md")).unwrap(), "Review/From colonies/n.md");
+        for inbox in ["../outside", "/tmp", ".", ".hidden"] {
+            let cfg = vault_cfg(&vault.0, &format!("inbox = {inbox:?}\n"));
+            assert!(
+                matches!(write_note(&cfg, &proposal("n.md")), Err(WriteError::Refused(_))),
+                "{inbox}"
+            );
+        }
+        assert!(matches!(
+            write_note(&VaultConfig::default(), &proposal("n.md")),
+            Err(WriteError::Off)
+        ));
+    }
+
+    /// A traversal smuggled into a queued proposal is refused at accept time too, and a symlink on
+    /// the way into the inbox — or planted at the note's own name — is never followed.
+    #[test]
+    fn accept_refuses_traversal_and_symlinks() {
+        let vault = temp("traverse");
+        let outside = temp("traverse-outside");
+        let cfg = vault_cfg(&vault.0, "");
+        for path in ["../../escape.md", "/etc/escape.md", "a/../../escape.md"] {
+            assert!(
+                matches!(write_note(&cfg, &proposal(path)), Err(WriteError::Refused(_))),
+                "{path}"
+            );
+        }
+        assert!(std::fs::read_dir(&outside.0).unwrap().next().is_none());
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(vault.0.join("Inbox")).unwrap();
+            std::os::unix::fs::symlink(&outside.0, vault.0.join("Inbox/colonizer")).unwrap();
+            assert!(matches!(write_note(&cfg, &proposal("n.md")), Err(WriteError::Refused(_))));
+            std::fs::remove_file(vault.0.join("Inbox/colonizer")).unwrap();
+            std::fs::create_dir_all(vault.0.join("Inbox/colonizer")).unwrap();
+            std::os::unix::fs::symlink(outside.0.join("planted.md"), vault.0.join("Inbox/colonizer/n.md")).unwrap();
+            assert!(matches!(write_note(&cfg, &proposal("n.md")), Err(WriteError::Exists(_))));
+            assert!(
+                std::fs::read_dir(&outside.0).unwrap().next().is_none(),
+                "nothing written outside the vault"
+            );
+        }
+    }
+
+    /// The colony's proposal is queued with its provenance and never touches the staged snapshot or
+    /// the vault; a subagent's is refused, as is one from a colony no vault folder reaches. Reject
+    /// drops a proposal; accept writes it into the inbox and drops it.
+    #[tokio::test]
+    async fn propose_queues_for_review_and_reject_or_accept_resolve_it() {
+        use crate::sessions::SessionStatus;
+        let (app, root) = crate::sessions::tests::app_with_colony("abc", SessionStatus::Running).await;
+        let repo = app.session("abc").await.unwrap().repo;
+        let vault = temp("propose");
+        put(&vault.0.join("Notes/a.md"), "# A\n");
+        let snapshot = app.session_dir("abc").join("vault");
+        stage(&vault_cfg(&vault.0, NOTES), &repo, &[], &snapshot).unwrap();
+        let before = read(&snapshot.join("Notes/a.md"));
+        let d = || Draft {
+            path: "notes/deploy",
+            title: "Deploy order",
+            body: "Run migrations first.",
+            reason: "It broke twice",
+        };
+        // No vault configured: ignored.
+        propose(&app, "abc", Origin::Agent, d()).await;
+        assert!(proposals(&app.cfg.data_dir).await.is_empty());
+        std::fs::create_dir_all(&app.cfg.config_dir).unwrap();
+        std::fs::write(
+            app.cfg.config_dir.join("colonizer.toml"),
+            format!(
+                "[vault]\npath = {:?}\n[[vault.folders]]\npath = \"Notes\"\nscope = {{ kind = \"all\" }}\n",
+                vault.0.display()
+            ),
+        )
+        .unwrap();
+        propose(&app, "abc", Origin::Subagent, d()).await;
+        assert!(proposals(&app.cfg.data_dir).await.is_empty(), "a subagent never proposes");
+        propose(&app, "abc", Origin::Agent, d()).await;
+        propose(&app, "abc", Origin::Agent, d()).await;
+        let queued = proposals(&app.cfg.data_dir).await;
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0].path, "notes/deploy.md");
+        assert_eq!(queued[0].source["session_id"], json!("abc"));
+        assert_eq!(queued[0].source["repo"], json!(repo));
+        assert_eq!(read(&snapshot.join("Notes/a.md")), before, "the snapshot is untouched");
+        assert!(!vault.0.join("Inbox").exists(), "nothing reaches the vault before review");
+
+        let res = reject(State(app.clone()), UrlPath(queued[0].id.clone())).await.unwrap();
+        assert_eq!(res.0["ok"], json!(true));
+        assert_eq!(proposals(&app.cfg.data_dir).await.len(), 1);
+        assert!(!vault.0.join("Inbox").exists(), "reject never touches the vault");
+        let res = accept(State(app.clone()), UrlPath(queued[1].id.clone())).await.unwrap();
+        assert_eq!(res.0["path"], json!("Inbox/colonizer/notes/deploy.md"));
+        assert!(read(&vault.0.join("Inbox/colonizer/notes/deploy.md")).contains("Run migrations first."));
+        assert!(proposals(&app.cfg.data_dir).await.is_empty());
+        assert!(reject(State(app.clone()), UrlPath("nope".into())).await.is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

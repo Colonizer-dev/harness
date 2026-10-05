@@ -1,0 +1,3 @@
+/api/vault/proposals                                 GET    unauth=401    token=owner            activity=-
+/api/vault/proposals/{id}/accept                     POST   unauth=401    token=owner            activity=vault.review
+/api/vault/proposals/{id}/reject                     POST   unauth=401    token=owner            activity=vault.review

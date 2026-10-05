@@ -14,6 +14,8 @@ import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
+import { PROPOSED_VAULT_REPLY, vaultProposalEvent } from './vault.mjs';
+
 export const OPENCODE_VERSION = '1.18.32';
 export const MAX_TOOL_OUTPUT = 20_000;
 export const FIRST_OUTPUT_MS = 120_000; // a stalled first run is SIGINTed and retried once
@@ -120,9 +122,9 @@ export function instructionsText(env = process.env) {
 }
 
 /** The colonizer MCP server's OpenCode config: mcp.mjs on the bridge, with the loop switches and
- * the mounted memory dir in its environment so it can gate its tool list. */
+ * the mounted memory and vault dirs in its environment so it can gate its tool list. */
 export function colonizerMcp({ moduleDir, bridge, env = process.env }) {
-  const environment = { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token, ...loopEnv(env), ...(env.COLONIZER_MEMORY_DIR ? { COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR } : {}) };
+  const environment = { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token, ...loopEnv(env), ...(env.COLONIZER_MEMORY_DIR ? { COLONIZER_MEMORY_DIR: env.COLONIZER_MEMORY_DIR } : {}), ...(env.COLONIZER_VAULT_DIR ? { COLONIZER_VAULT_DIR: env.COLONIZER_VAULT_DIR } : {}) };
   return { type: 'local', command: [process.execPath, join(moduleDir, 'mcp.mjs')], environment, timeout: MCP_TIMEOUT_MS };
 }
 
@@ -244,6 +246,15 @@ export async function createBridge({ emit, setStatus, isWorking, findings = fals
           // re-checks the origin before it touches a store.
           emit({ type: 'memory_proposal', origin: 'orchestrator', scope, title: msg.title, content: msg.content, tags: Array.isArray(msg.tags) ? msg.tags.map(String) : [], ...(typeof msg.kind === 'string' ? { kind: msg.kind } : {}), ...(Number.isFinite(msg.confidence) ? { confidence: msg.confidence } : {}) });
           reply(200, { ok: true });
+        }
+      } else if (req.url === '/vault') {
+        // The operator vault (issue #777): checked here so the agent hears about a bad call at
+        // once; the mothership checks it again and queues it for the operator's review.
+        const { event, error } = vaultProposalEvent(msg);
+        if (error) reply(200, { error });
+        else {
+          emit(event);
+          reply(200, { ok: true, message: PROPOSED_VAULT_REPLY });
         }
       } else if (req.url === '/loop_next') {
         // A self-paced loop names its next run; the delay is clamped to 15 min–24 h here, as the

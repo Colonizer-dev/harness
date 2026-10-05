@@ -48,6 +48,7 @@ pub(crate) const ALL: &[&Feature] = &[
     &crate::quota_cards::FEATURE,
     &crate::supply_chain_loop::FEATURE,
     &crate::switch_agent::FEATURE,
+    &crate::vault::FEATURE,
 ];
 
 /// Every migrated feature's routes, merged into the one router `server::api_routes` assembles.

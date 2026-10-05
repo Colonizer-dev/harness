@@ -11,13 +11,13 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import colonizerMemory, { memoryTools } from '../memory-extension.mjs';
+import colonizerMemory, { memoryTools, vaultTools } from '../memory-extension.mjs';
 import { MEMORY_PROMPT_APPEND } from '../memory-mcp.mjs';
 import { buildModelsConfig, commandQueue, MEMORY_EXTENSION, parseRoutes, piArgs, piEnv, runAgent, SYSTEM_PROMPT_APPEND } from '../runner.mjs';
 
 const moduleDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-for (const [file, origin] of [['memory.mjs', 'claude-code'], ['memory-mcp.mjs', 'acp']]) {
+for (const [file, origin] of [['memory.mjs', 'claude-code'], ['memory-mcp.mjs', 'acp'], ['vault.mjs', 'claude-code']]) {
   test(`pi/${file} is byte-identical to the ${origin} original it is copied from`, () => {
     const copy = readFileSync(join(moduleDir, file));
     const original = readFileSync(join(moduleDir, '..', origin, file));
@@ -143,4 +143,30 @@ test('the real Pi gets the tools, calls them for sourced entries, never sees not
 
   commands.push({ type: 'shutdown' });
   await done;
+});
+
+test('operator vault (issue #777): the extension registers vault_search only with a staged vault, and piArgs loads it for the vault alone', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'pi-vault-'));
+  const dir = join(root, 'vault');
+  mkdirSync(join(dir, 'Notes'), { recursive: true });
+  writeFileSync(join(dir, 'Notes', 'deploy.md'), '# Deploy\n\nRun MARKER-VAULT migrations first.\n');
+  const saved = { memory: process.env.COLONIZER_MEMORY_DIR, vault: process.env.COLONIZER_VAULT_DIR };
+  t.after(() => {
+    for (const [key, value] of [['COLONIZER_MEMORY_DIR', saved.memory], ['COLONIZER_VAULT_DIR', saved.vault]]) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  delete process.env.COLONIZER_MEMORY_DIR;
+  process.env.COLONIZER_VAULT_DIR = dir;
+  const registered = [];
+  colonizerMemory({ registerTool: (tool) => registered.push(tool) });
+  assert.deepEqual(registered.map((tool) => tool.name), ['vault_search']);
+  const [search] = vaultTools(dir);
+  const answer = (await search.execute('call-1', { query: 'marker-vault' })).content[0].text;
+  assert.match(answer, /^<operator-vault>\n/);
+  assert.match(answer, /\/colonizer\/vault\/Notes\/deploy\.md:3/);
+  const args = piArgs({ provider: 'p', modelId: 'm', vault: true });
+  assert.ok(args.includes(MEMORY_EXTENSION), 'the extension loads for the vault alone');
+  assert.ok(!args.includes(MEMORY_PROMPT_APPEND), 'and no memory line names tools that are not there');
 });

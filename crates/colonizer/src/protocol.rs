@@ -283,6 +283,15 @@ pub(crate) enum AgentEvent {
         #[serde(default)]
         confidence: Option<f64>,
     },
+    /// A note proposed for the operator vault (issue #777): a relative `path` under the vault's
+    /// inbox folder, a `title`, the Markdown `body` and the `reason` it is worth keeping. Nothing is
+    /// written inside the colony or the vault; `vault.rs` queues it for the operator's review.
+    VaultProposal {
+        path: String,
+        title: String,
+        body: String,
+        reason: String,
+    },
     /// A confirmed problem outside the task (§6.6). The harness files it on the host; validation
     /// and every outcome's log line stay in `findings.rs`, which still reads the raw event.
     Finding { title: String, body: String, evidence: String },
@@ -423,6 +432,7 @@ mod tests {
             "agent_session",
             "turn_end",
             "memory_proposal",
+            "vault_proposal",
             "finding",
             "github_action",
             "loop_next",

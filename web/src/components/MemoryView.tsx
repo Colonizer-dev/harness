@@ -3,6 +3,7 @@ import { errorMessage, useApi, useToast } from "../context";
 import type { MemoryNote, MemoryProposal, MemoryScope, OrgInfo, Repo } from "../types";
 import { IconCheck, IconMemory, IconMenu, IconOrg, IconPencil, IconPlus, IconTrash } from "./icons";
 import { InlineCode, MarkdownBlock } from "./Markdown";
+import { VaultProposals } from "./VaultProposals";
 import { Badge, Button, Spinner, cx, inputClass, sameOrg, store, stored, timeAgo } from "./ui";
 
 /** The org a proposal or note belongs to; null for global notes written by you. */
@@ -127,6 +128,7 @@ export function MemoryView({
           readable width; in a narrower window they stack in one column, as before. */}
       <div className="scroll-thin @container min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-3xl space-y-8 px-4 py-6 @min-[1400px]:grid @min-[1400px]:max-w-[1920px] @min-[1400px]:grid-cols-2 @min-[1400px]:items-start @min-[1400px]:gap-x-12 @min-[1400px]:space-y-0 @min-[1400px]:px-[var(--page-gutter,1rem)]">
+          <div className="space-y-8">
           <section aria-labelledby="proposals-title" className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="proposals-title" className="text-[14.5px] font-semibold">
@@ -154,6 +156,8 @@ export function MemoryView({
               </p>
             )}
           </section>
+          <VaultProposals selectedOrg={selectedOrg} />
+          </div>
 
           <NotesSection selectedOrg={selectedOrg} orgs={orgs} version={notesVersion} />
         </div>
