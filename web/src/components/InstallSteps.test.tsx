@@ -22,14 +22,16 @@ describe("InstallSteps", () => {
     const html = steps("ios-other");
     expect(html).toContain("Open in Safari");
     expect(html).toContain("x-safari-https://h4xk.my.colonizer.dev");
-    expect(html).toContain("Copy address");
+    expect(html).toContain("Open this page in Safari to add Colonizer to your Home Screen");
+    expect(html).toContain("Copy link");
+    expect(html).not.toContain("<ol");
   });
 
   it("offers no Safari link for a plain-http address, only Copy and a paste hint", () => {
     const html = steps("ios-other", { address: "http://192.168.1.20:7878" });
     expect(html).not.toContain("Open in Safari");
     expect(html).not.toContain("x-safari-");
-    expect(html).toContain("Copy address");
+    expect(html).toContain("Copy link");
     expect(html).toContain("paste it into Safari");
   });
 

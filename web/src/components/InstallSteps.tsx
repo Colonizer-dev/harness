@@ -72,15 +72,17 @@ export function InstallSteps({
     );
   }
 
-  // The other browsers on iOS cannot add a web app to the Home Screen themselves, but iOS hands an
-  // `x-safari-https://…` link straight to Safari, so that is the way across when the address is
-  // https. A plain-http address gets no link (it would just reload this webview; see safariLink) —
+  // The other browsers on iOS — Brave, Chrome, Firefox, Edge, Opera, in-app webviews — cannot add a
+  // web app to the Home Screen (issue #1083), and only a Home-Screen web app gets web push there. iOS
+  // hands an `x-safari-https://…` link straight to Safari, so that is the way across when the address
+  // is https. A plain-http address gets no link (it would just reload this webview; see safariLink) —
   // Copy and "paste it into Safari" carry it across instead. Android offers Copy too.
   if (platform === "ios-other") {
     const safari = address ? safariLink(address) : null;
     return (
       <div role="note" aria-label="Open Colonizer in Safari to install it" className={note}>
-        <p className="m-0">This browser can&rsquo;t add Colonizer to the Home Screen. Open it in Safari instead:</p>
+        <p className="m-0 text-text">Open this page in Safari to add Colonizer to your Home Screen.</p>
+        <p className="m-0 mt-1">This browser has no &ldquo;Add to Home Screen&rdquo;, and on iPhone and iPad web push only reaches the app added from Safari.</p>
         {address && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {safari && (
@@ -92,7 +94,7 @@ export function InstallSteps({
               </a>
             )}
             <Button size="sm" className="min-h-11" onClick={() => void copy()}>
-              {copied ? "Copied" : "Copy address"}
+              {copied ? "Copied" : "Copy link"}
             </Button>
             {!safari && <span className="text-[12.5px] text-muted">then paste it into Safari</span>}
           </div>

@@ -187,6 +187,8 @@ describe("installPlatform", () => {
     expect(installPlatform(iphoneSafari, false, 5)).toBe("ios-safari");
     expect(installPlatform(iphoneChrome, false, 5)).toBe("ios-other");
     expect(installPlatform(instagram, false, 5)).toBe("ios-other");
+    expect(installPlatform(iphoneSafari, false, 5, true)).toBe("ios-other"); // Brave: Safari's agent + navigator.brave
+    expect(installPlatform(iphoneSafari, false, 5, false)).toBe("ios-safari");
     expect(installPlatform(androidChrome, false, 0)).toBe("android-chrome");
     expect(installPlatform(androidSamsung, false, 0)).toBe("android-other");
     expect(installPlatform(desktopChrome, false, 0)).toBe("desktop");
@@ -194,6 +196,7 @@ describe("installPlatform", () => {
 
   it("reports installed first, whatever the browser", () => {
     expect(installPlatform(iphoneSafari, true, 5)).toBe("installed");
+    expect(installPlatform(iphoneChrome, true, 5, true)).toBe("installed");
     expect(installPlatform(desktopChrome, true, 0)).toBe("installed");
   });
 
