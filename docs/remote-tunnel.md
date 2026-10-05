@@ -14,9 +14,13 @@ Both halves now exist on `main`: the relay (`services/relay`, #532/#534, PR #555
 tunnel client and `/api/remote` (`crates/colonizer/src/remote.rs`, #533, PR #558), the cockpit
 switch, link and badge (#535, PR #575), the mothership's pairing routes (#599, described in
 [Pairing and the owner](#pairing-and-the-owner)), and the security review
-([remote-access-review.md](remote-access-review.md), #536). The relay is not deployed, and the
-feature does not work end to end yet: the two halves do not follow this contract in several
-places, listed in [Where the code differs today](#where-the-code-differs-today). The client as
+([remote-access-review.md](remote-access-review.md), #536). The relay is deployed at
+my.colonizer.dev with per-install TLS, and the tunnel client dials it by default. Review finding R1
+(the relay throwing on the client's `[name, value]` response headers) is fixed (#659); R2 is only
+narrowed (a reset drops the old install's owner, but the relay cannot delete an install), and
+R3–R5 are open. The feature is off by default and not verified end to end: the two halves do not
+follow this contract in several places, listed in
+[Where the code differs today](#where-the-code-differs-today). The client as
 built is described in [protocol.md §6.10](protocol.md#610-remote-access-tunnel). Where this
 document pins something the issue text did not have — the `ready` frame, the `cancel` frame, the
 close codes, the header pair format, the 101 accept — it says so.
