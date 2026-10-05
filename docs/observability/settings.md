@@ -53,6 +53,7 @@ Both providers share the second table.
 | Expose Prometheus metrics | off | Serve the metrics for scraping on the harness's own endpoint, too. |
 | Max backlog (days) | `7` | Older events are dropped rather than exported late; `0` keeps everything. |
 | Max read rate (MiB/s) | `8` | A ceiling so the exporter never crowds a running colony. |
+| Start from | `now` | Where a new endpoint starts: `now` sends only what is written from then on; `backlog` also sends what the ledgers hold, back to Max backlog. Settled once per endpoint. |
 
 ## What is sent, and what is never sent
 

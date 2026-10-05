@@ -30,6 +30,15 @@ Nothing in a colony's path waits on it: the ledgers are the spool. Lines older t
 resumes from the committed offsets, and every record carries a deterministic `colonizer.record.id`,
 so a replay can be deduplicated.
 
+**Start from** settles where a new endpoint starts: `now` (the default) sends only what is written
+from the moment it is configured; `backlog` also sends what the ledgers already hold, back to the
+backlog limit. It is settled once per endpoint, so a restart never skips anything, and a colony
+that appears later is always read from its first line. Each tick shares the read budget (**Max read
+rate**) equally among the files with something new, so one busy colony cannot hold back the rest.
+A colony that is finished (merged, no changes, stopped or failed) and fully read is not looked at
+again until its status or its directory changes. [The tailer](observability/tailer.md) has the
+details.
+
 ### When the backend says no
 
 The exporter holds at most one tick's batch in memory and reads nothing new while that batch waits.
@@ -132,8 +141,20 @@ never read.
 | `activity.jsonl` | activity | `colonizer.activity` | the kind | `kind`, `actor`, `colony`, `repo`, `target` |
 | `spend.jsonl` | activity | `colonizer.spend` | `spend` | `kind`, `org`, `session`, `agent`, `model`, token counts, `cost_usd`, `scoring_ms` |
 
-Streaming text deltas are skipped. Findings, decisions, routing and the Jev ledgers are not mapped
-yet ([#845](https://github.com/Colonizer-dev/harness/issues/845)).
+Streaming text deltas are skipped. These sources are read too, but not mapped to records yet
+([#845](https://github.com/Colonizer-dev/harness/issues/845)):
+
+| Source | Stream | Rotates |
+| :--- | :--- | :--- |
+| `sessions/<id>/findings.jsonl` | activity | no |
+| `decisions.jsonl`, `routing.jsonl` | activity | no |
+| `jev_ladder.jsonl`, `jev_focus.jsonl` | activity | no |
+| `logs/mothership.jsonl` | operational | to `logs/mothership.jsonl.1` |
+| `export_gap` (the exporter's own) | meta (on when either log stream is) | — |
+
+An `export_gap` record marks a hole in what the exporter could read: `reason` (`backlog`,
+`rotated_past`, `truncated`, `deleted`, `oversized_line`), `file`, `colony`, and, where known,
+`bytes` and `lines` skipped, and for a deleted colony whether `archived` holds a bundle of it.
 
 ### Metrics
 
@@ -152,7 +173,7 @@ committed with the read offsets that produced them.
 | `colonizer.spend.cost` | counter | `USD` | `org`, `model`, `kind` |
 | `colonizer.spend.input_tokens`, `colonizer.spend.output_tokens` | counter | `{token}` | `org`, `model`, `kind` |
 | `colonizer.observability.exported` | counter | `{record}` | — |
-| `colonizer.observability.dropped` | counter | `{record}` | `colonizer.drop.reason`: `backlog`, `refused`, `rejected`, `oversized`, `malformed`, `series_limit`, `state_reset`, `gap_*` |
+| `colonizer.observability.dropped` | counter | `{record}` | `colonizer.drop.reason`: `backlog`, `refused`, `rejected`, `oversized`, `malformed`, `series_limit`, `state_reset`, `gap_*` (`gap_deleted` once per deleted colony or file) |
 | `colonizer.observability.export_failures` | counter | `{request}` | — |
 
 ### Traces

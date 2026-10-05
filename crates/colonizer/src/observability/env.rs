@@ -196,6 +196,7 @@ pub fn resolve(module: Option<&ModuleChoice>, env: &dyn Fn(&str) -> Option<Strin
         ("repo_names", json!(cfg.repo_names)),
         ("max_backlog_days", json!(cfg.max_backlog_days)),
         ("max_read_mib_per_sec", json!(cfg.max_read_mib_per_sec)),
+        ("start_from", json!(cfg.start_from)),
     ] {
         provenance.insert(key.into(), origin(key));
         s.insert(key.into(), value);

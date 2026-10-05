@@ -43,3 +43,5 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "
 axum = "0.8.9"
 # The secret-canary test kit looks for a canary's base64 forms too.
 base64 = "0.23"
+# A paused clock for the tailer's rate-limit test.
+tokio = { version = "1.53.1", features = ["test-util"] }

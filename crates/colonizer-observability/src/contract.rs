@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 pub const CONTRACT: u32 = 1;
 /// The exit code of a refused contract or version: the mothership never restarts on it.
 pub const EXIT_REFUSED: i32 = 78;
+/// `start_from = now`: a new destination skips what the ledgers already hold.
+pub const START_NOW: &str = "now";
+/// `start_from = backlog`: a new destination gets everything within `max_backlog_days`.
+pub const START_BACKLOG: &str = "backlog";
 /// The contract file's name, under `<data>/observability/`.
 pub const FILE: &str = "exporter.json";
 
@@ -54,6 +58,10 @@ pub struct Settings {
     pub repo_names: String,
     pub max_backlog_days: u64,
     pub max_read_mib_per_sec: u64,
+    /// Where a destination with no read position yet starts: `now` (the end of every file that
+    /// exists when it is first configured) or `backlog` (the start of every file, within
+    /// `max_backlog_days`).
+    pub start_from: String,
     /// How often metrics are pushed.
     pub metrics_interval_secs: u64,
 }
@@ -79,6 +87,7 @@ impl Default for Settings {
             repo_names: "plain".into(),
             max_backlog_days: 7,
             max_read_mib_per_sec: 8,
+            start_from: START_NOW.into(),
             metrics_interval_secs: 30,
         }
     }
