@@ -152,17 +152,20 @@ advisories, visible to maintainers only, and are not described here until they a
 | F03 | High | Withheld until fixed. |
 | F04 | Medium | Withheld until fixed. |
 
-The public ones, each with its issue:
+The public ones, each with its issue and where it stands. Every issue below is closed; the column
+records what the code actually does now, which is not the same as the issue being closed, and
+whether a row closes its finding is the gate's own bar, not the issue's. That judgement is still
+open:
 
-| Finding | Issue |
-| :--- | :--- |
-| **F05.** No fail-closed gate for pushes, PRs and issues | [#84](https://github.com/Colonizer-dev/harness/issues/84) |
-| **F06.** A publish that fails after the commit can't be completed | [#85](https://github.com/Colonizer-dev/harness/issues/85) |
-| **F07.** The parallel limit isn't atomic, and costs aren't a budget | [#86](https://github.com/Colonizer-dev/harness/issues/86) |
-| **F08.** Failed writes of state and events are ignored | [#87](https://github.com/Colonizer-dev/harness/issues/87) |
-| **F09.** Telemetry retention isn't guaranteed | [#88](https://github.com/Colonizer-dev/harness/issues/88) |
-| **F10.** Release provenance and pinned inputs | [#89](https://github.com/Colonizer-dev/harness/issues/89), with CI and real-colony tests in [#73](https://github.com/Colonizer-dev/harness/issues/73) and [#368](https://github.com/Colonizer-dev/harness/issues/368) |
-| The installer's app swap isn't atomic | [#90](https://github.com/Colonizer-dev/harness/issues/90) |
+| Finding | Issue | Where it stands |
+| :--- | :--- | :--- |
+| **F05.** No fail-closed gate for pushes, PRs and issues | [#84](https://github.com/Colonizer-dev/harness/issues/84) | Wired and tested. Per-effect grants in `authority.rs`, the no-write kill-switch, and a re-check before each commit, push and PR in `github.rs`. The refusal tests run against fakes and tempdirs, not a real colony. |
+| **F06.** A publish that fails after the commit can't be completed | [#85](https://github.com/Colonizer-dev/harness/issues/85) | Wired and tested. The publish stage is checkpointed on the session, and publishing twice in a row leaves one commit, one push and one PR. |
+| **F07.** The parallel limit isn't atomic, and costs aren't a budget | [#86](https://github.com/Colonizer-dev/harness/issues/86) | Wired and tested. The daily cost budget is enforced per token, and the parallel cap is checked and claimed under one write lock, so the check and the insert are a single step. |
+| **F08.** Failed writes of state and events are ignored | [#87](https://github.com/Colonizer-dev/harness/issues/87) | Wired as reporting, tested by fault injection. A failed write raises a storage alert and is surfaced rather than passed over; a claim-ledger write in `coordination.rs` is still best effort. |
+| **F09.** Telemetry retention isn't guaranteed | [#88](https://github.com/Colonizer-dev/harness/issues/88) | Still open. The prune is request-driven and no scheduled trigger runs it, so a row's lifetime is bounded only while requests arrive. The issue closed without one. |
+| **F10.** Release provenance and pinned inputs | [#89](https://github.com/Colonizer-dev/harness/issues/89), with CI and real-colony tests in [#73](https://github.com/Colonizer-dev/harness/issues/73) and [#368](https://github.com/Colonizer-dev/harness/issues/368) | Wired and tested. Builds carry a provenance attestation and SBOMs, and inputs are pinned by digest, but nothing fails on a stale pin: `scripts/update-runtime-pins.mjs --check` is the mode meant for CI and no workflow runs it — the daily `runtime-pin-updates` job runs the script with `--write` and opens a pull request instead. |
+| The installer's app swap isn't atomic | [#90](https://github.com/Colonizer-dev/harness/issues/90) | Wired and tested. The swap is staged and recovers from an interrupt, against the installer's own functions. |
 
 Classify a finding on arrival: [boundaries.md](boundaries.md) splits what the harness enforces
 from what it only suggests. "Hit a wall" — a denial the colony could not cross — is a guidance gap,
@@ -193,18 +196,24 @@ Four gates have to pass before unattended work is on the table.
 
 ## Where this stands
 
-Nothing is checked off yet, and no gate is cleared. The roadmap is the issue tracker, and this page
+Every finding above that has a public issue has that issue closed, and what each one asked for is in
+the tree or plainly not; the table above says which. No gate is cleared, because each gate's bar is
+stricter than its issues being closed. G1 asks for negative tests on a real colony; the negative
+tests that exist run against fakes and tempdirs. G3 asks for failures injected into storage, VM
+stop, commit, push, PR, concurrency and updates; storage, commit, push, PR and updates are
+covered, VM stop and concurrency are not. G4 asks for native end-to-end tests on a pinned runtime;
+`colony-e2e` reaches neither a real model nor a real GitHub write. Which findings that evidence
+clears is the owner's call, not this page's; the page records the state and leaves the judgement
+open. The roadmap is the issue tracker, and this page
 is the audit's view of it. Since the audit, `.github/workflows/ci.yml` runs on every pull request and
 push to `main`: `cargo test --workspace` (including agentd's no-KVM smoke test), `cargo clippy` with
 warnings denied and `cargo fmt --check`; the Claude Code runner's tests; the web UI's `tsc`, build and
 tests; the tests of the telemetry receiver, the remote-access relay and the scripts; a macOS compile and
 lint (`rust-macos`); and the UHP conformance check (`conformance`). `supply-chain.yml` adds dependency audits
 and SBOMs. CI gates merges on `main` since
-[#367](https://github.com/Colonizer-dev/harness/issues/367) (below). The limit that keeps this short of
-what G4 asks for: a real colony is booted in CI since #368, but without a real model or a real GitHub write: the
-`colony-e2e` job runs a whole colony — mothership, microVM, agentd and the Claude Code runner against a
-scratch repository and a stub model server — on every pull request, so the negative tests on real
-colonies that G1 asks for are not what it runs.
+[#367](https://github.com/Colonizer-dev/harness/issues/367) (below). The `colony-e2e` job runs a
+whole colony — mothership, microVM, agentd and the Claude Code runner against a scratch repository
+and a stub model server — on every pull request.
 
 ## Authority controls, issue #98 (partial G2)
 
@@ -213,8 +222,9 @@ colonies that G1 asks for are not what it runs.
 denies expired, ungranted, candidate-mismatched, non-independent, or unbound approvals, all
 fail-closed. `publish.rs` splits the single publish gate into ordered `commit_allowed` →
 `push_allowed` → `pr_allowed` checks plus a PR-body binding helper, and `lifecycle.rs`
-`recover` fences restarted colonies behind fresh re-authorization. Wiring only — no gate is
-checked off until real-colony negative tests exercise these paths.
+`recover` fences restarted colonies behind fresh re-authorization.
+Wiring only, and issue #98 is closed — no gate is checked off until real-colony negative tests
+exercise these paths.
 
 ## No-write policy, issue #84 (partial G2)
 
@@ -228,30 +238,31 @@ refuses to open or reuse a PR when the local branch head moved after the push st
 
 Not done: the PR body's SHA-256 is only logged, never checked against an approval — per-effect grants
 stay with #98. Running the repository's tests on the host before a push is still the operator's
-responsibility. As above, F05 is not checked off and G2 is not cleared.
+responsibility. Issue #84 is closed, but on the page's own bar F05 is not checked off and G2 is not
+cleared.
 
 ## Required checks, issue #367 (partial G4)
 
-CI gates merges on the default branch. What is live today is the branch protection on `main`, not
-the script's ruleset: it requires the six jobs that always run on a pull request (`rust`, `runner`,
-`scripts`, `telemetry`, `web`, `colony-report`) plus the supply-chain `vulnerabilities` job, each
-pinned to the GitHub Actions app, so a status another app posted under the same name does not
-count, and it applies to administrators too. The script describes the same gate as a repository
-ruleset (`CI required on main`), which has not been applied; the only ruleset on the repository
-blocks force-pushes and deletion of `main`. `scripts/require-ci-checks.mjs` prints the ruleset (a dry run, the default) and
-`--apply` sends it through `gh api`, idempotently; applying it needs a repository admin, which is why
-it is a script and not a pull request. The update replaces the ruleset wholesale, so a rule, ref
-condition or bypass actor added to it by hand in the UI is lost on the next run — change it in the
-script, not in the UI. Not required: `colony-e2e`, on purpose, since a KVM-dependent job can
-flake on a runner difference and a retry is cheaper than a blocked pull request; `relay`,
-`rust-macos` and `conformance`, which run on every pull request but are not in the script's list
-(`REQUIRED_CHECKS` in `scripts/require-ci-checks.mjs`); the `sbom` job, which is evidence, not a
-gate; and the release jobs, which paths and tags keep away from an
-ordinary pull request. Two settings travel with it and are flipped by hand in the repository's
-settings: "Allow auto-merge" on, because a colony pull request held for required checks is queued
-with `gh pr merge --squash --auto` and GitHub refuses that queue without it, and no merge queue,
-because no workflow here has a `merge_group` trigger and a queued pull request would never leave it.
-The script keeps `vulnerabilities` out of its list on purpose, because it can go red on a newly
+Issue #367 is closed. CI gates merges on the default branch. What is live today is the branch
+protection on `main`, not the script's ruleset: it requires the six jobs that always run on a pull
+request (`rust`, `runner`, `scripts`, `telemetry`, `web`, `colony-report`) plus the supply-chain
+`vulnerabilities` job, each pinned to the GitHub Actions app, so a status another app posted under
+the same name does not count, and it applies to administrators too. The script describes the same
+gate as a repository ruleset (`CI required on main`), which has not been applied; the only ruleset
+on the repository blocks force-pushes and deletion of `main`. `scripts/require-ci-checks.mjs` prints
+the ruleset (a dry run, the default) and `--apply` sends it through `gh api`, idempotently; applying
+it needs a repository admin, which is why it is a script and not a pull request. The update replaces
+the ruleset wholesale, so a rule, ref condition or bypass actor added to it by hand in the UI is
+lost on the next run — change it in the script, not in the UI. Not required: `colony-e2e`, on
+purpose, since a KVM-dependent job can flake on a runner difference and a retry is cheaper than a
+blocked pull request; `relay`, `rust-macos` and `conformance`, which run on every pull request but
+are not in the script's list (`REQUIRED_CHECKS` in `scripts/require-ci-checks.mjs`); the `sbom` job,
+which is evidence, not a gate; and the release jobs, which paths and tags keep away from an ordinary
+pull request. Two settings travel with it and are flipped by hand in the repository's settings:
+"Allow auto-merge" on, because a colony pull request held for required checks is queued with
+`gh pr merge --squash --auto` and GitHub refuses that queue without it, and no merge queue, because
+no workflow here has a `merge_group` trigger and a queued pull request would never leave it. The
+script keeps `vulnerabilities` out of its list on purpose, because it can go red on a newly
 published advisory with no commit at all (the weekly run is the detection path); the live branch
 protection requires it anyway, so such an advisory blocks every merge until it is fixed
 ([#935](https://github.com/Colonizer-dev/harness/issues/935)).
