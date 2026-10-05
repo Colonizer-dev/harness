@@ -391,6 +391,56 @@ test('operator vault (issue #777): a staged vault alone registers the server, wh
   assert.equal((await mcp.call('tools/call', { name: 'memory_briefing', arguments: {} })).error.code, -32602, 'no memory tools without a memory mount');
 });
 
+test('loop tools (issue #643): a self-paced loop colony registers the loop MCP server, whose calls leave as loop_next and loop_stop events', async (t) => {
+  const runner = startRunner({ env: { COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'true' }, script: { turns: { '*': { updates: [] } } } });
+  t.after(() => runner.child.kill('SIGKILL'));
+  runner.send({ type: 'user_message', id: 'initial', text: 'loop run' });
+  await runner.waitUntil(count('turn_end', 1), 'the turn to finish');
+  const messages = runner.records().filter((x) => x.method);
+  const created = messages.find((m) => m.method === 'session/new');
+  assert.deepEqual(created.params.mcpServers.map((server) => server.name), ['colonizer_loop'], 'no memory mount, so only the loop server');
+  const [server] = created.params.mcpServers;
+  assert.deepEqual(server.args, [join(moduleDir, 'loop-tools.mjs')]);
+  const env = Object.fromEntries(server.env.map(({ name, value }) => [name, value]));
+  assert.match(env.COLONIZER_BRIDGE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(env.COLONIZER_BRIDGE_TOKEN, /^[0-9a-f]{32}$/);
+  assert.equal(env.COLONIZER_LOOP, 'true');
+  assert.equal(env.COLONIZER_LOOP_SELF_PACED, 'true');
+  const prompts = messages.filter((m) => m.method === 'session/prompt').map((m) => m.params.prompt);
+  assert.deepEqual(prompts[0], [{ type: 'text', text: 'loop run' }], 'the loop server adds no memory line to the prompt');
+
+  // The registered server, started the way the agent would start it, against the live runner.
+  const mcp = startMcp(server);
+  t.after(() => mcp.stop());
+  assert.equal((await mcp.call('initialize', {})).result.serverInfo.name, 'colonizer_loop');
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['loop_next', 'loop_stop']);
+  assert.equal(await mcp.tool('loop_next', { delay_minutes: 99999, reason: 'next release' }), 'Next run scheduled in 1440 minutes.', 'clamped to 24 h');
+  assert.deepEqual(await runner.waitUntil(first('loop_next'), 'the loop_next event'), { type: 'loop_next', delay_minutes: 1440, reason: 'next release' });
+  assert.match(await mcp.tool('loop_next', { delay_minutes: 30 }), /^Could not schedule the next run: reason is required/);
+  assert.equal(await mcp.tool('loop_stop', { reason: 'goal met' }), 'The loop is stopped; this is its last run.');
+  assert.deepEqual(await runner.waitUntil(first('loop_stop'), 'the loop_stop event'), { type: 'loop_stop', reason: 'goal met' });
+  assert.equal(runner.events.filter((e) => e.type === 'loop_next').length, 1, 'a refused call emits nothing');
+  assertSchema(runner.events);
+  await stop(runner);
+});
+
+test('loop tools: a fixed-cadence loop gets loop_stop only, memory and loop servers sit side by side, and a non-loop colony gets neither', async (t) => {
+  const { mcpServers } = await import('../runner.mjs');
+  const bridge = { url: 'http://127.0.0.1:1', token: 'tok' };
+  assert.deepEqual(mcpServers({ COLONIZER_LOOP: 'true' }), [], 'no bridge, no loop server');
+  assert.deepEqual(mcpServers({}, bridge), [], 'not a loop colony');
+  assert.deepEqual(mcpServers({ COLONIZER_MEMORY_DIR: '/m', COLONIZER_LOOP: 'true' }, bridge).map((s) => s.name), ['colonizer_memory', 'colonizer_loop']);
+  const [fixed] = mcpServers({ COLONIZER_LOOP: 'true', COLONIZER_LOOP_SELF_PACED: 'false' }, bridge);
+  const mcp = startMcp(fixed);
+  t.after(() => mcp.stop());
+  await mcp.call('initialize', {});
+  assert.deepEqual((await mcp.call('tools/list', {})).result.tools.map((tool) => tool.name), ['loop_stop']);
+  assert.equal((await mcp.call('tools/call', { name: 'loop_next', arguments: { delay_minutes: 30, reason: 'x' } })).error.code, -32602, 'loop_next is not served on a fixed cadence');
+  // The mothership reads this flag: with it, a self-paced loop on ACP is briefed with loop_next
+  // instead of falling back to every 24 hours, and the Loops form does not warn.
+  assert.equal(JSON.parse(readFileSync(join(moduleDir, 'module.json'), 'utf8')).loop_tools, true);
+});
+
 test('handshake and prompt turns: initialize, session/new in the workspace, mapped events, queued messages', async (t) => {
   const runner = startRunner({
     script: { turns: { '*': { updates: [{ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Hi' } }] } } },

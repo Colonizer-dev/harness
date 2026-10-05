@@ -64,10 +64,14 @@ orchestrator may call:
   The value is clamped to 15 minutes – 24 hours and shown in the loop's note.
 - `loop_stop(reason)` — ends the loop ("stopped by the colony: …"). Re-enable it on the Loops page.
 
-The Claude Code, Codex, Grok Build and OpenCode agent modules serve these two tools. A loop whose
-colonies run on a module without them — Pi, Hermes and ACP today — still runs on its schedule, but
-its brief never mentions the tools, the loop form warns when you pick self-paced, and a self-paced
-one simply runs again every 24 hours: its colonies can neither pace the loop nor stop it.
+Every shipped agent module serves these two tools: Claude Code, Codex, Grok Build and OpenCode in
+their colonizer MCP servers, Hermes through the same vendored `mcp.mjs`, Pi through a loop extension
+(`modules/agents/pi/loop-extension.mjs`) and ACP through a loop MCP server it registers on the
+session (`modules/agents/acp/loop-tools.mjs`). A module declares them with `"loop_tools": true` in
+its `module.json`. A loop whose colonies run on a module without the flag — a third-party module,
+say — still runs on its schedule, but its brief never mentions the tools, the loop form warns when
+you pick self-paced, and a self-paced one simply runs again every 24 hours: its colonies can neither
+pace the loop nor stop it.
 
 **Loops that need GitHub.** Triaging issues, fixing CI flakes and writing changelog entries all read
 GitHub, and a colony has no GitHub token. Turn on **Needs GitHub** on a colony loop (the templates

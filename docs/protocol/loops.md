@@ -44,8 +44,9 @@ fixed loop only notes it. `loop_stop` disables the loop and records `ended_reaso
 colony: <reason>"`. Which runner offers the tools is the module's `loop_tools` manifest flag
 ([loops.md](../loops.md)): Claude Code serves them as `mcp__colonizer_loop__loop_stop` when the
 mothership sets `COLONIZER_LOOP=true`, and `mcp__colonizer_loop__loop_next` only when it also sets
-`COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build and OpenCode runners
-gate the same two tools on the same env under their own names. A self-paced loop whose colony never
+`COLONIZER_LOOP_SELF_PACED=true` (subagents are refused); the Codex, Grok Build, OpenCode, Hermes,
+Pi and ACP runners gate the same two tools on the same env under their own names (Pi as extension
+tools, ACP as the `colonizer_loop` MCP server on the session). A self-paced loop whose colony never
 calls `loop_next` runs again a day later.
 
 ## Docs & README loop

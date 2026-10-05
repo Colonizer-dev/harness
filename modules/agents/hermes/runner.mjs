@@ -5,7 +5,8 @@
 // One `hermes chat -q <text> --format stream-json` process per turn, later turns --resume the
 // session id the first one reported. Questions go through the colonizer MCP server's ask_user tool
 // (mcp.mjs, registered under `mcp_servers.colonizer` in the written config.yaml) and a loopback
-// bridge below, the same wire the codex and grok-build modules speak.
+// bridge below, the same wire the codex and grok-build modules speak. A loop colony also gets
+// loop_stop, and loop_next when it is self-paced (issue #643): the same server and bridge.
 
 import { execFile, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -143,8 +144,18 @@ export function hermesConfig(routes, resolved = null, mcpServers = null, env = {
 /** Loopback HTTP bridge to mcp.mjs: an ask waits for the matching `answer` command, the same wire
  * the codex and grok-build modules speak (the vendored mcp.mjs copies are byte-identical on
  * purpose). Interrupt, turn end and shutdown cancel the parked calls; `answer` on an unknown id is
- * a warn. Only `/ask` is served: the runner passes no findings/memory/loop switches into the
- * server's env block, so mcp.mjs's own gating never offers those tools here. */
+ * a warn. `/loop_next` and `/loop_stop` leave the colony as protocol events, validated as the
+ * codex bridge validates them (mcp.mjs already clamped the delay). The runner passes no
+ * findings/memory switches into the server's env block, so mcp.mjs never offers those tools here;
+ * the loop switches ride through (`loopEnv`). */
+/** COLONIZER_LOOP* gate mcp.mjs's loop tools, so they flow into the server's env block — but only
+ * when the mothership set them, for a loop colony (docs/loops.md). */
+export function loopEnv(env = process.env) {
+  const out = {};
+  for (const key of ['COLONIZER_LOOP', 'COLONIZER_LOOP_SELF_PACED']) if (env[key] !== undefined) out[key] = env[key];
+  return out;
+}
+
 export async function createBridge({ emit, setStatus = () => {}, isWorking = () => false, token = randomBytes(16).toString('hex') }) {
   let count = 0;
   const pending = new Map();
@@ -169,6 +180,24 @@ export async function createBridge({ emit, setStatus = () => {}, isWorking = () 
         msg = JSON.parse(body || '{}');
       } catch {
         reply(400, {});
+        return;
+      }
+      if (req.url === '/loop_next') {
+        const minutes = Number(msg.delay_minutes);
+        if (!Number.isFinite(minutes) || minutes < 1) reply(200, { error: 'loop_next needs delay_minutes: a number of minutes from now' });
+        else if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_next needs a reason: what the next run should find or do' });
+        else {
+          emit({ type: 'loop_next', delay_minutes: Math.round(minutes), reason: msg.reason });
+          reply(200, { ok: true });
+        }
+        return;
+      }
+      if (req.url === '/loop_stop') {
+        if (typeof msg.reason !== 'string' || !msg.reason.trim()) reply(200, { error: 'loop_stop needs a reason: why the loop should stop' });
+        else {
+          emit({ type: 'loop_stop', reason: msg.reason });
+          reply(200, { ok: true });
+        }
         return;
       }
       if (req.url !== '/ask') {
@@ -317,15 +346,16 @@ export async function runAgent({ hermes = ['hermes'], commands, emit, env = proc
   let markKilled = () => {};
   // The model asks the user through the colonizer MCP server (mcp.mjs, registered in config.yaml
   // below); its asks park on this runner's loopback bridge until the matching `answer` command.
-  // The server env carries only the bridge coordinates — mcp.mjs's own gating then hides the
-  // findings, memory and loop tools, leaving ask_user (and its self-contained `wait`).
+  // The server env carries the bridge coordinates and, for a loop colony, the loop switches —
+  // mcp.mjs's own gating then hides the findings and memory tools, leaving ask_user, its
+  // self-contained `wait` and, in a loop, loop_stop (plus loop_next when self-paced).
   const bridge = await createBridge({ emit, setStatus, isWorking: () => Boolean(child) });
   onReady?.(bridge);
   const mcpServers = {
     colonizer: {
       command: process.execPath,
       args: [join(dirname(fileURLToPath(import.meta.url)), 'mcp.mjs')],
-      env: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token },
+      env: { COLONIZER_BRIDGE_URL: bridge.url, COLONIZER_BRIDGE_TOKEN: bridge.token, ...loopEnv(env) },
       timeout: MCP_TIMEOUT_SECS,
     },
   };

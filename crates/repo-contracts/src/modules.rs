@@ -22,7 +22,7 @@ fn the_pi_manifest_is_discovered_as_an_agent_that_needs_no_claude() {
     assert!(problems.is_empty(), "{problems:?}");
     let pi = modules.iter().find(|m| m.id == "pi").expect("the pi manifest is discovered");
     assert!(!pi.needs_claude, "pi holds no claude binary and no Claude credential");
-    assert!(!pi.loop_tools, "pi serves no colonizer MCP server, so no loop tools");
+    assert!(pi.loop_tools, "pi serves the loop tools through its loop extension (#643)");
     assert_eq!(pi.vm_command(), ["node", "/opt/colonizer/agent/runner.mjs"]);
     assert_eq!(pi.schema["properties"]["model"]["env"], "COLONIZER_MODEL");
     std::fs::remove_dir_all(&root).ok();
@@ -48,6 +48,22 @@ fn the_loop_tools_flag_is_parsed_from_the_manifest() {
     write(r#"{"id": "x", "entry": ["node", "runner.mjs"]}"#);
     assert!(!read_agent(&path).unwrap().loop_tools);
     std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn every_shipped_agent_module_serves_the_loop_tools() {
+    // Issue #643: Pi (a loop extension), Hermes (its vendored mcp.mjs) and ACP (a loop MCP server
+    // on the session) joined Claude Code, Codex, Grok Build and OpenCode, so a self-paced loop is
+    // briefed with `loop_next` on every shipped module and never falls back to every 24 hours.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (modules, problems) = discover_agents(Some(&root));
+    assert!(problems.is_empty(), "{problems:?}");
+    let mut ids: Vec<&str> = modules.iter().map(|m| m.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["acp", "claude-code", "codex", "grok-build", "hermes", "opencode", "pi"]);
+    for m in &modules {
+        assert!(m.loop_tools, "{} must declare \"loop_tools\": true", m.id);
+    }
 }
 
 #[test]

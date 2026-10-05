@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { createLoopBridge, loopSwitches } from './loop-tools.mjs';
 import { MEMORY_PROMPT_APPEND } from './memory-mcp.mjs';
 
 export const MAX_TOOL_OUTPUT = 20_000;
@@ -21,7 +22,7 @@ export const SYSTEM_PROMPT_APPEND = [
   'You are running inside a Colonizer colony: a disposable microVM whose work is published as a pull request. The user follows along in a web UI.',
   '- You are running unattended: nobody can answer a question mid-turn, so when a decision is yours to make, choose the reasonable option and say in your reply that you chose it.',
   '- Follow the brief you were given, including writing the pull request description to /harness/out/pr.md.',
-  '- You have your built-in tools (read, bash, edit, write) and, when the next line names them, shared memory\'s read tools — no subagents and no other Colonizer tools. Where the brief names a tool you do not have, such as filing a finding, do the work yourself (run the command, note it in your reply) instead of trying to call it.',
+  '- You have your built-in tools (read, bash, edit, write) and, when the next line names them, shared memory\'s read tools and, in a loop colony, loop_next and loop_stop — no subagents and no other Colonizer tools. Where the brief names a tool you do not have, such as filing a finding, do the work yourself (run the command, note it in your reply) instead of trying to call it.',
 ].join('\n');
 
 const AUTH_MODES = new Set(['x-api-key', 'bearer', 'none']);
@@ -119,13 +120,17 @@ export function buildModelsConfig(routes, model, effort = '') {
 /** The shared-memory extension (issue #766), loaded by explicit path: --no-extensions stops only discovery. */
 export const MEMORY_EXTENSION = fileURLToPath(new URL('./memory-extension.mjs', import.meta.url));
 
+/** The loop-tools extension (issue #643), loaded by explicit path for a loop colony only. */
+export const LOOP_EXTENSION = fileURLToPath(new URL('./loop-extension.mjs', import.meta.url));
+
 /** The Pi command line: RPC mode, no session or loadable extras, the gateway model, the colony note
  * and, when the harness switched tools off, an --exclude-tools denylist on top of Pi's default
  * read, bash, edit, write set. With shared memory mounted (`memory`), the memory extension is
  * loaded and the prompt gains one fixed line naming its tools — never any note text. With the operator
- * vault staged (`vault`, issue #777) the same extension is loaded for its vault_search tool. */
-export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false, vault = false }) {
-  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory || vault ? ['--extension', MEMORY_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
+ * vault staged (`vault`, issue #777) the same extension is loaded for its vault_search tool. A loop
+ * colony (`loop`) also loads the loop-tools extension; the mothership's brief names those tools. */
+export function piArgs({ provider, modelId, effort = '', disabledTools = [], memory = false, vault = false, loop = false }) {
+  return ['--no-session', '--no-extensions', '--no-skills', '--no-prompt-templates', ...(memory || vault ? ['--extension', MEMORY_EXTENSION] : []), ...(loop ? ['--extension', LOOP_EXTENSION] : []), '--provider', provider, '--model', modelId, ...(EFFORT_LEVELS.has(effort) ? ['--thinking', effort] : []), '--append-system-prompt', SYSTEM_PROMPT_APPEND, ...(memory ? ['--append-system-prompt', MEMORY_PROMPT_APPEND] : []), ...(disabledTools.length ? ['--exclude-tools', disabledTools.join(',')] : [])];
 }
 
 /**
@@ -225,7 +230,12 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
   const modelUsage = new Map(); // "provider/model" -> cumulative tokens
   const pendingResponses = new Map(); // request id → response handler
 
-  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR), vault: Boolean(env.COLONIZER_VAULT_DIR) }), env, cwd });
+  // A loop colony's loop_next / loop_stop cross this loopback bridge from the loop extension inside
+  // Pi, which reads the bridge coordinates from its env, and leave the colony as protocol events.
+  const loopColony = loopSwitches(env).loop;
+  const loopBridge = loopColony ? await createLoopBridge({ emit }) : null;
+  const childEnv = loopBridge ? { ...env, COLONIZER_BRIDGE_URL: loopBridge.url, COLONIZER_BRIDGE_TOKEN: loopBridge.token } : env;
+  const child = spawnPi({ args: piArgs({ ...selection, effort, disabledTools, memory: Boolean(env.COLONIZER_MEMORY_DIR), vault: Boolean(env.COLONIZER_VAULT_DIR), loop: loopColony }), env: childEnv, cwd });
   child.stdin.on('error', () => {}); // Pi gone: the exit path reports it, not a broken pipe
 
   /**
@@ -468,6 +478,7 @@ export async function runAgent({ spawnPi = spawnPiDefault, commands, emit, selec
     setStatus('exited');
   }
   await Promise.race([crashed, sleep(100)]); // let the exit bookkeeping settle before returning
+  await loopBridge?.close();
 }
 
 /**
