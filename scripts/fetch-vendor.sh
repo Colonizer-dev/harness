@@ -196,6 +196,57 @@ while read -r name version plat kind sha url; do
       [ ! -e "$dest/skills/archify/scripts/check-update.mjs" ] || { echo "archify staging kept the update check" >&2; exit 1; }
       rm -rf "$tmp"
       ;;
+    ponytail)
+      # Staged at dist/plugins/ponytail as a six-skill plugin. Upstream's skills/ is copied one directory at a
+      # time, never wholesale: that stages an explicit, reviewed allowlist of the six skills rather than
+      # whatever the archive happens to hold, and keeps the pack deterministic. Everything a colony must not
+      # run is left out — hooks/, ponytail-mcp/ (its MCP server and the instructions it feeds it), commands/
+      # and the per-agent copies (.codex-plugin, .cursor, .opencode, .clinerules, .kiro, .qoder, .windsurf,
+      # .openclaw, .devin-plugin, .grok-plugin, .agents). Both manifests are generated here, in Colonizer's
+      # shape: no $schema, no hooks, the skill list spelled out. Upstream's root plugin.json is a bare
+      # {"name": "ponytail"} — no version, no description, no skills, which validate-plugins.mjs rejects —
+      # and upstream's .claude-plugin/plugin.json declares a hooks path to a hooks/ nothing stages. What is
+      # left is six SKILL.md files, text an agent reads.
+      tmp=$(mktemp -d)
+      tar -xzf "$file" -C "$tmp"
+      src=$(echo "$tmp"/ponytail-*)
+      dest="$root/dist/plugins/ponytail"
+      skills_expected="ponytail ponytail-review ponytail-audit ponytail-debt ponytail-gain ponytail-help"
+      # The loop below copies an allowlist, so a new upstream skill would otherwise be dropped in silence
+      # while the count assertion still passed. Fail here instead: a human adds it to $skills_expected and
+      # to the vendor.lock comment, or writes down here why it is not staged.
+      [ -d "$src/skills" ] || { echo "ponytail $version has no skills/" >&2; exit 1; }
+      for present in $(ls "$src/skills"); do
+        case " $skills_expected " in
+          *" $present "*) ;;
+          *) echo "ponytail $version has an unexpected skills/$present — add it to the skill list in this arm of scripts/fetch-vendor.sh and to the vendor.lock comment, or say there why it is not staged" >&2; exit 1 ;;
+        esac
+      done
+      rm -rf "$dest"
+      mkdir -p "$dest/.claude-plugin" "$dest/skills"
+      for skill in $skills_expected; do
+        [ -f "$src/skills/$skill/SKILL.md" ] || { echo "ponytail $version has no skills/$skill/SKILL.md" >&2; exit 1; }
+        cp -R "$src/skills/$skill" "$dest/skills/$skill"
+      done
+      [ -f "$src/LICENSE" ] || { echo "ponytail $version has no LICENSE" >&2; exit 1; }
+      cp "$src/LICENSE" "$dest/LICENSE"
+      printf '{\n  "name": "ponytail",\n  "version": "%s",\n  "description": "Stop at the first rung that holds before writing code (github.com/DietrichGebert/ponytail); a six-skill over-engineering ruleset, with review, audit and debt passes",\n  "license": "MIT"\n}\n' "$version" > "$dest/.claude-plugin/plugin.json"
+      printf '{\n  "name": "ponytail",\n  "version": "%s",\n  "description": "Stop at the first rung that holds before writing code (github.com/DietrichGebert/ponytail); a six-skill over-engineering ruleset, with review, audit and debt passes",\n  "skills": ["ponytail", "ponytail-review", "ponytail-audit", "ponytail-debt", "ponytail-gain", "ponytail-help"]\n}\n' "$version" > "$dest/plugin.json"
+      if [ -n "$(find "$dest" \( -name hooks -o -name hooks.json -o -name .mcp.json -o -name mcp.json \) -print -quit)" ]; then
+        echo "ponytail staging leaked a hook or an MCP server configuration" >&2; exit 1
+      fi
+      # The grep above only catches hooks and MCP by name. This is what makes "nothing else is staged"
+      # true for ponytail-mcp/, commands/ and the per-agent folders too: the staged pack is an allowlist,
+      # and anything the staging did not plan for fails here.
+      for entry in $(ls -A "$dest"); do
+        case " .claude-plugin LICENSE plugin.json skills " in
+          *" $entry "*) ;;
+          *) echo "ponytail staging holds an unexpected top-level entry: $entry" >&2; exit 1 ;;
+        esac
+      done
+      [ "$(find "$dest/skills" -name SKILL.md | wc -l)" -eq 6 ] || { echo "ponytail staging has not exactly the six skills" >&2; exit 1; }
+      rm -rf "$tmp"
+      ;;
     google-skills)
       # Staged for on-demand loading at dist/plugins/google-skills. Preloading all
       # of google/skills would put ~17k tokens of skill descriptions into every

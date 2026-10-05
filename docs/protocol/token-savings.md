@@ -101,6 +101,15 @@ the machine". TypeSafe bills that traffic directly; it doesn't pass through the 
 so it's invisible to `model_usage` and colony cost. Org workspaces override only the models and skillsets,
 so it can't be switched on per org. Read TypeSafe's data terms before using it on private repos.
 
+**A skill pack is not a token setting.** The four settings above are switches the harness controls
+and the harness can turn off again. A vendored skill pack changes the agent's instructions, and the
+pack that would plausibly cut the most tokens — [ponytail](../skill-packs.md#ponytail), which makes
+an agent stop at the first rung that holds before writing code — is **off by default**, switched on
+one install at a time, for exactly that reason. Its cost-saving figures are upstream's own
+benchmark, published by the ponytail project; Colonizer has not reproduced them here, and nothing on
+this page should be read as a Colonizer measurement. What would, and has not been run yet, is the
+[bench protocol for a skill pack](../bench.md#measuring-a-skill-pack).
+
 **Jev visibility ladder.** Each applied compaction pass is also measured (#475): the runner reports
 every chunk's keep/drop decision with Jev's own relevance scores on a `jev_ladder` event (§2), and
 the harness logs one `decision` row per chunk to `<data>/jev_ladder.jsonl`. When the agent later
