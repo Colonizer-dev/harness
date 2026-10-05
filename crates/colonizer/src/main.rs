@@ -39,6 +39,7 @@ mod config;
 pub mod contract;
 mod coordination;
 mod decide;
+mod decisions;
 mod deja;
 mod deps;
 mod diagnosis;

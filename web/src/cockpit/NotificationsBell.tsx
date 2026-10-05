@@ -20,16 +20,18 @@ export interface InboxActions {
   onOpenColony: (id: string) => void;
   onOpenInbox: () => void;
   onOpenNotificationSettings: () => void;
+  /** Decision and pull-request cards (issue #1036) not already counted as a colony: one count. */
+  decisionCount?: number;
 }
 
-export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenNotificationSettings }: InboxActions): ReactElement {
+export function NotificationsBell({ sessions, onOpenColony, onOpenInbox, onOpenNotificationSettings, decisionCount = 0 }: InboxActions): ReactElement {
   const [open, setOpen] = useState(false);
   const [readAt, setReadAt] = useState<number>(() => Number(stored(READ_AT) ?? 0));
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
 
-  const waiting = sessions.filter(needsYou).length;
+  const waiting = sessions.filter(needsYou).length + decisionCount;
   const unread = feedEntries(sessions).filter((e) => Date.parse(e.at) > readAt).length;
 
   const close = (refocus: boolean) => {

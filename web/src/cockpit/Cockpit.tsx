@@ -33,6 +33,8 @@ import { focusTurn } from "./turnFocus";
 import { SecretsView } from "./SecretsView";
 import { InboxView } from "./InboxView";
 import { runQuotaAction } from "./ProviderQuotaCard";
+import { runDecisionAnswer, runPrAction } from "./DecisionCards";
+import { decisionsCount, useDecisions } from "./decisions";
 import { Inspector, pendingQuestionsOf, type InspectorTarget } from "./Inspector";
 import { LaunchView } from "./LaunchView";
 import { NestView } from "./NestView";
@@ -293,7 +295,10 @@ export function Cockpit({
   // workspace where nothing does. `needAnywhere` belongs to the rail's inbox badge and the inbox
   // itself, which are deliberately cross-workspace; `needHere` sits beside the live count and the
   // spend, which are this workspace's.
-  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0), [needByOrg]);
+  // The decisions inbox (issue #1036) joins the same count: one number for everything that needs you.
+  const decisions = useDecisions(api);
+  const decisionCount = useMemo(() => decisionsCount(decisions.view, sessions), [decisions.view, sessions]);
+  const needAnywhere = useMemo(() => Object.values(needByOrg).reduce((a, b) => a + b, 0) + decisionCount, [needByOrg, decisionCount]);
   const needHere = useMemo(() => inOrg.filter(needsYou).length, [inOrg]);
   const liveCount = inOrg.filter((s) => isLive(s.status)).length;
   const queuedCount = inOrg.filter((s) => s.status === "queued").length;
@@ -636,6 +641,13 @@ export function Cockpit({
             onQuotaAction={(provider, body) =>
               runQuotaAction(api.quotaAction, (message, tone) => toast(message, tone), provider, body)
             }
+            decisions={decisions.view}
+            onAnswerDecision={(body) =>
+              runDecisionAnswer(api.answerDecision, (message, tone) => toast(message, tone), body).finally(() => void decisions.refresh())
+            }
+            onDecisionPrAction={(card, action) =>
+              runPrAction(api.decisionPrAction, (message, tone) => toast(message, tone), card, action).finally(() => void decisions.refresh())
+            }
           />
         );
       case "history":
@@ -742,6 +754,7 @@ export function Cockpit({
           onOpenColony: openColonyById,
           onOpenInbox: () => navigate("inbox"),
           onOpenNotificationSettings: () => onOpenSettings("notifications"),
+          decisionCount,
         }}
       />
       {/* The mobile tab bar (below `sm`) covers the foot of the screen, so the content it overlays
